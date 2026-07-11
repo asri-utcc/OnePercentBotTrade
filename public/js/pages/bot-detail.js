@@ -135,7 +135,9 @@ function setupButtons() {
 /* ── Fetch ────────────────────────────────────────────── */
 async function refresh() {
   try {
-    detail = await API.get(`/api/bots/${BOT_ID}/details?limit=50`);
+    // limit=200 → fetch up to 200 trades/signals so chart has enough
+    // BUY/SELL history to draw across all 300 candles.
+    detail = await API.get(`/api/bots/${BOT_ID}/details?limit=200`);
     renderAll();
   } catch (err) {
     console.error('refresh failed', err);
@@ -585,7 +587,7 @@ async function renderPriceChart() {
   const { symbol, timeframe } = detail.bot;
   const loading = document.getElementById('price-chart-loading');
   try {
-    const resp = await API.get(`/api/chart/klines?symbol=${symbol}&timeframe=${timeframe}&limit=100`);
+    const resp = await API.get(`/api/chart/klines?symbol=${symbol}&timeframe=${timeframe}&limit=300`);
     if (!resp.klines || resp.klines.length === 0) {
       if (loading) loading.textContent = 'ไม่มีข้อมูลแท่งเทียน';
       return;
@@ -629,21 +631,47 @@ async function renderPriceChart() {
     }));
     candleSeries.setMarkers(sigMarkers);
 
-    // overlays: trade entry/exit from detail.trades (ถ้ามี)
+    // overlays: historical BUY/SELL markers from detail.trades
+    //   BUY  → green circle below bar (เปิดไม้)
+    //   SELL → green/red circle above bar (ปิดไม้ — แยกสีตาม PnL)
+    // Open trades (ยังไม่ปิด) จะมีแค่ BUY marker
     const overlayMarkers = [];
+    const findCandleIdx = (epochSec) => candleData.findIndex((c) => c.time >= epochSec);
+
     for (const t of detail.trades || []) {
-      if (!t.buyPlacedAt) continue;
-      const buyT = Math.floor(new Date(t.buyPlacedAt).getTime() / 1000);
-      // match to nearest candle
-      const idx = candleData.findIndex((c) => c.time >= buyT);
-      if (idx >= 0) {
-        overlayMarkers.push({
-          time: candleData[idx].time,
-          position: 'belowBar',
-          color: t.state === 'sold' || t.realizedPnl != null ? (t.realizedPnl >= 0 ? '#00e5b8' : '#ff4d6d') : '#ffb547',
-          shape: 'circle',
-          text: t.state === 'sold' ? `+${(t.realizedPnl || 0).toFixed(2)}` : (t.state || 'open'),
-        });
+      // ── BUY marker ──────────────────────────────
+      const buyAt = t.buyFilledAt || t.buyPlacedAt;
+      if (buyAt) {
+        const buyT = Math.floor(new Date(buyAt).getTime() / 1000);
+        const idx = findCandleIdx(buyT);
+        if (idx >= 0) {
+          overlayMarkers.push({
+            time: candleData[idx].time,
+            position: 'belowBar',
+            color: '#00e5b8',
+            shape: 'circle',
+            text: t.buyPrice != null ? `B ${t.buyPrice.toFixed(4)}` : 'B',
+          });
+        }
+      }
+
+      // ── SELL marker (เฉพาะไม้ที่ปิดแล้ว) ─────────
+      if (t.realizedPnl != null) {
+        const sellAt = t.sellFilledAt || t.sellPlacedAt;
+        if (sellAt) {
+          const sellT = Math.floor(new Date(sellAt).getTime() / 1000);
+          const idx = findCandleIdx(sellT);
+          if (idx >= 0) {
+            const win = t.realizedPnl >= 0;
+            overlayMarkers.push({
+              time: candleData[idx].time,
+              position: 'aboveBar',
+              color: win ? '#00e5b8' : '#ff4d6d',
+              shape: 'circle',
+              text: `S ${win ? '+' : ''}${t.realizedPnl.toFixed(2)}`,
+            });
+          }
+        }
       }
     }
     candleSeries.setMarkers([...sigMarkers, ...overlayMarkers]);
