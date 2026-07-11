@@ -20,7 +20,9 @@ function renderTradesPage() {
   tbody.innerHTML = slice.map((t) => `
     <tr>
       <td>${new Date(t.signalTime).toLocaleString()}</td>
+      <td>${t.buyFilledAt ? new Date(t.buyFilledAt).toLocaleString() : '<span class="text-muted">—</span>'}</td>
       <td>${(t.buyPrice || 0).toFixed(4)}</td>
+      <td>${t.sellFilledAt ? new Date(t.sellFilledAt).toLocaleString() : '<span class="text-muted">—</span>'}</td>
       <td>${(t.targetSellPrice || 0).toFixed(4)}</td>
       <td>${t.sellPrice ? t.sellPrice.toFixed(4) : '-'}</td>
       <td>${t.buyFilled ? '✅' : '❌'}</td>
@@ -162,7 +164,9 @@ function renderResult(resp, params) {
               <thead>
                 <tr>
                   <th>Signal Time</th>
+                  <th>Buy Time</th>
                   <th>Buy</th>
+                  <th>Sell Time</th>
                   <th>Target</th>
                   <th>Sell</th>
                   <th>Buy</th>
@@ -183,6 +187,7 @@ function renderResult(resp, params) {
             <li><strong>BUY price</strong>: ใช้ <code>candle close</code> เป็น proxy สำหรับ <em>best bid</em> (บอทจริงใช้ bid จาก bookTicker WS ตอนปิดแท่ง → ต่ำกว่า close 1–10 bps ในตลาดผันผวน)</li>
             <li><strong>Buy Fill</strong>: นับเป็น fill เมื่อ <code>low ≤ P AND close ≥ P AND volume &gt; 0</code> (post-only bid ที่ wick ลงเด้งกลับจะไม่ถูกนับ fill) ภายใน 6 แท่ง — ถ้าไม่ fill คือยกเลิก → ไม่มี PnL</li>
             <li><strong>Buy timestamp</strong>: <code>openTime + stepMs/2</code> (กลางแท่ง) — สะท้อนว่า maker order มัก fill ระหว่างแท่ง ไม่ใช่ตอนปิด</li>
+            <li><strong>Sell timestamp</strong>: <code>openTime + stepMs/2</code> (กลางแท่ง) เช่นเดียวกับ BUY</li>
             <li><strong>Sell Fill</strong>: ต้องรอให้ราคาขึ้นไปแตะ target (future candle high ≥ target) — <strong>ไม่มี stop loss</strong> ถ้าไม่ fill → ถือต่อจนกว่าข้อมูลจะหมด (ยังไม่นับ PnL)</li>
             <li><strong>Slot Limit</strong>: ถ้าเปิดไม้ครบ ${params.maxConcurrentTrades || 10} → skip signal ใหม่ (ไม่เปิดเกิน)</li>
             <li><strong>Qty</strong>: floor ตาม stepSize ของ symbol (เช่น BNBUSDT = 0.01) — ถ้า notional &lt; minNotional จะ skip</li>

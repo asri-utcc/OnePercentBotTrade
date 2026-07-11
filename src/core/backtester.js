@@ -242,9 +242,10 @@ function simulateTrades({ klines, signals, opts }) {
         feeRate,
       });
       activeExits.push({ buyCandleIdx, exitIdx: sellCandleIdx });
-      // BUY fill timestamp = กลางแท่ง (openTime + stepMs/2)
+      // BUY/SELL fill timestamp = กลางแท่ง (openTime + stepMs/2)
       // สะท้อนว่า maker order มัก fill ระหว่างแท่ง ไม่ใช่ตอนปิดพอดี
       const buyFilledAtMs = stepMs > 0 ? klines[buyCandleIdx].openTime + Math.floor(stepMs / 2) : klines[buyCandleIdx].closeTime;
+      const sellFilledAtMs = stepMs > 0 ? klines[sellCandleIdx].openTime + Math.floor(stepMs / 2) : klines[sellCandleIdx].closeTime;
       trades.push({
         signalTime: new Date(sig.openTime),
         candleCloseTime: new Date(sig.closeTime),
@@ -254,7 +255,7 @@ function simulateTrades({ klines, signals, opts }) {
         buyFilled: true,
         sellFilled: true,
         buyFilledAt: new Date(buyFilledAtMs),
-        sellFilledAt: new Date(klines[sellCandleIdx].closeTime),
+        sellFilledAt: new Date(sellFilledAtMs),
         qty: qty.toNumber(),
         notional: notional.toNumber(),
         grossPnl: pnlResult.gross,
