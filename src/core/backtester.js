@@ -131,9 +131,15 @@ function simulateTrades({ klines, signals, opts }) {
     const notional = qty.mul(new Decimal(buyPrice));
 
     // ─── Clean up active trades ที่ปิดก่อน candle idx ───
-    while (activeExits.length > 0 && activeExits[0].exitIdx < idx) {
-      activeExits.shift();
-    }
+    // ⚠️ ใช้ filter ทั้ง array ไม่ใช่ shift() ที่หัว เพราะ array ไม่เรียงตาม exitIdx:
+    //   - tp_hit       → exitIdx = sellCandleIdx (อาจน้อย)
+    //   - still_holding → exitIdx = klines.length (มากสุด)
+    // ถ้า shift() แค่หัว จะ block entries ที่อยู่หลัง still_holding และ exit ไปแล้ว
+    // → activeExits.length มากเกินจริง → max_concurrent_skip ทั้ง ๆ ที่ slot ว่าง
+    // in-place filter (activeExits is const):
+    const remaining = activeExits.filter((e) => e.exitIdx >= idx);
+    activeExits.length = 0;
+    activeExits.push(...remaining);
 
     // ─── Check concurrent slot ────────────────────────
     if (activeExits.length >= maxConcurrentTrades) {
