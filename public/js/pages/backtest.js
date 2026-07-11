@@ -1,5 +1,53 @@
 'use strict';
 
+// ─── State สำหรับ pagination ของ trades table ────
+let tradesState = { all: [], page: 0, pageSize: 20 };
+
+function setTradesState(all) {
+  tradesState = { all: all || [], page: 0, pageSize: 20 };
+}
+
+function renderTradesPage() {
+  const { all, page, pageSize } = tradesState;
+  const totalPages = Math.max(1, Math.ceil(all.length / pageSize));
+  const safePage = Math.min(page, totalPages - 1);
+  const start = safePage * pageSize;
+  const end = Math.min(start + pageSize, all.length);
+  const slice = all.slice(start, end);
+
+  const tbody = document.getElementById('trades-tbody');
+  if (!tbody) return;
+  tbody.innerHTML = slice.map((t) => `
+    <tr>
+      <td>${new Date(t.signalTime).toLocaleString()}</td>
+      <td>${(t.buyPrice || 0).toFixed(4)}</td>
+      <td>${(t.targetSellPrice || 0).toFixed(4)}</td>
+      <td>${t.sellPrice ? t.sellPrice.toFixed(4) : '-'}</td>
+      <td>${t.buyFilled ? '✅' : '❌'}</td>
+      <td>${t.sellFilled ? '✅' : (t.buyFilled ? '⏱' : '—')}</td>
+      <td class="${(t.realizedPnl || 0) >= 0 ? 'pnl-positive' : 'pnl-negative'}">${(t.realizedPnl || 0).toFixed(4)}</td>
+      <td class="${(t.pnlPercent || 0) >= 0 ? 'pnl-positive' : 'pnl-negative'}">${(t.pnlPercent || 0).toFixed(3)}%</td>
+      <td><small class="text-muted">${t.exitReason || '-'}</small></td>
+    </tr>
+  `).join('');
+
+  const label = document.getElementById('trades-page-label');
+  if (label) label.textContent = `หน้า ${safePage + 1} / ${totalPages} · แสดง ${start + 1}–${end} จาก ${all.length}`;
+
+  const prev = document.getElementById('trades-prev');
+  const next = document.getElementById('trades-next');
+  if (prev) prev.disabled = safePage === 0;
+  if (next) next.disabled = safePage >= totalPages - 1;
+}
+
+window.tradesPageGo = (delta) => {
+  const totalPages = Math.max(1, Math.ceil(tradesState.all.length / tradesState.pageSize));
+  tradesState.page = Math.min(Math.max(0, tradesState.page + delta), totalPages - 1);
+  renderTradesPage();
+  const tbl = document.getElementById('trades-table-wrap');
+  if (tbl) tbl.scrollIntoView({ behavior: 'smooth', block: 'start' });
+};
+
 async function init() {
   const me = await API.get('/api/auth/me').catch(() => null);
   if (!me || !me.authenticated) {
@@ -68,6 +116,9 @@ function renderResult(resp, params) {
   const fillClass = s.fillRate >= 70 ? 'pnl-positive' : (s.fillRate >= 40 ? 'pnl-warning' : 'pnl-negative');
   const exitClass = s.exitRate >= 70 ? 'pnl-positive' : (s.exitRate >= 40 ? 'pnl-warning' : 'pnl-negative');
 
+  // เก็บ trades ทั้งหมด + reset หน้า
+  setTradesState(resp.trades || []);
+
   document.getElementById('result').innerHTML = `
     <div class="card">
       <div class="card-header"><strong>📊 ผล Backtest</strong> — ${params.symbol} ${params.timeframe} (${params.from} → ${params.to})</div>
@@ -97,37 +148,34 @@ function renderResult(resp, params) {
           <div class="col-md-3">Max DD: <strong class="pnl-negative">${s.maxDrawdown.toFixed(4)}</strong> USDT (${(s.maxDrawdownPercent || 0).toFixed(1)}%)</div>
         </div>
 
-        <h6>ตัวอย่าง 20 ไม้แรก</h6>
-        <table class="table table-sm table-striped">
-          <thead>
-            <tr>
-              <th>Signal Time</th>
-              <th>Buy</th>
-              <th>Target</th>
-              <th>Sell</th>
-              <th>Buy</th>
-              <th>Exit</th>
-              <th>PnL</th>
-              <th>%</th>
-              <th>Reason</th>
-            </tr>
-          </thead>
-          <tbody>
-            ${resp.sample.map((t) => `
-              <tr>
-                <td>${new Date(t.signalTime).toLocaleString()}</td>
-                <td>${t.buyPrice.toFixed(4)}</td>
-                <td>${t.targetSellPrice.toFixed(4)}</td>
-                <td>${t.sellPrice ? t.sellPrice.toFixed(4) : '-'}</td>
-                <td>${t.buyFilled ? '✅' : '❌'}</td>
-                <td>${t.sellFilled ? '✅' : '⏱'}</td>
-                <td class="${(t.realizedPnl || 0) >= 0 ? 'pnl-positive' : 'pnl-negative'}">${(t.realizedPnl || 0).toFixed(4)}</td>
-                <td class="${(t.pnlPercent || 0) >= 0 ? 'pnl-positive' : 'pnl-negative'}">${(t.pnlPercent || 0).toFixed(3)}%</td>
-                <td><small class="text-muted">${t.exitReason || '-'}</small></td>
-              </tr>
-            `).join('')}
-          </tbody>
-        </table>
+        <div id="trades-table-wrap">
+          <div class="d-flex justify-content-between align-items-center mb-2">
+            <h6 class="mb-0">📋 รายการเทรดทั้งหมด (${(resp.trades || []).length} ไม้)</h6>
+            <div class="d-flex align-items-center gap-2">
+              <button id="trades-prev" class="btn btn-sm btn-outline-secondary" onclick="tradesPageGo(-1)">◀ ก่อนหน้า</button>
+              <span id="trades-page-label" class="text-muted small"></span>
+              <button id="trades-next" class="btn btn-sm btn-outline-secondary" onclick="tradesPageGo(1)">ถัดไป ▶</button>
+            </div>
+          </div>
+          <div class="table-responsive">
+            <table class="table table-sm table-striped">
+              <thead>
+                <tr>
+                  <th>Signal Time</th>
+                  <th>Buy</th>
+                  <th>Target</th>
+                  <th>Sell</th>
+                  <th>Buy</th>
+                  <th>Exit</th>
+                  <th>PnL</th>
+                  <th>%</th>
+                  <th>Reason</th>
+                </tr>
+              </thead>
+              <tbody id="trades-tbody"></tbody>
+            </table>
+          </div>
+        </div>
 
         <div class="alert alert-light small mt-2">
           <strong>ℹ️ Execution Model: <code>${resp.executionModel || 'unknown'}</code></strong> (No Stop Loss, max ${params.maxConcurrentTrades || 10} ไม้พร้อมกัน)
@@ -144,6 +192,8 @@ function renderResult(resp, params) {
       </div>
     </div>
   `;
+
+  renderTradesPage();
 }
 
 async function loadHistory() {

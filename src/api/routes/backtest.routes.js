@@ -48,7 +48,9 @@ router.post('/', requireAuth, async (req, res) => {
       stats: result.stats,
       signalsCount: result.signals.length,
       tradesCount: result.trades.length,
-      sample: result.trades.slice(0, 20),
+      // ส่ง trades ทั้งหมดที่เก็บไว้ (ถ้า > 500 trades จะถูกตัดเป็น head+tail 250+250 ฝั่ง server)
+      // ฝั่ง client จะแบ่งหน้าเอง 20/page
+      trades: result.trades,
     });
   } catch (err) {
     logger.error({ err: err.message }, 'backtest failed');
