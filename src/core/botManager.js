@@ -142,59 +142,120 @@ class BotManager {
 
   /**
    * Reconcile pending trades จาก crash ก่อนหน้า
+   * FIX 5: ตอนนี้จับ orphan ได้ทุก state (placed/filled/holding/cancelled/selling)
+   * - BUY filled แต่ trade state ไม่ใช่ selling → handleBuyFilled
+   * - BUY placed แต่ state stuck (cancelled/holding) + order FILLED → handleBuyFilled
+   * - SELL placed + state=selling + order FILLED → handleSellFilled
    */
   async reconcilePendingTrades() {
     const pending = await Trade.find({
-      state: { $in: ['placed', 'filled', 'selling'] },
+      state: { $in: ['placed', 'filled', 'holding', 'cancelled', 'selling'] },
     });
 
     for (const trade of pending) {
       try {
         const bot = await Bot.findById(trade.botId);
         if (!bot) continue;
+        const Signal = require('../db/models/Signal');
 
-        // ตรวจ BUY order
-        if (trade.buyOrderId && ['placed'].includes(trade.state)) {
+        // ตรวจ BUY order (กรณี state=placed หรือ cancelled ที่ BUY อาจ fill จริง)
+        if (trade.buyOrderId) {
           const order = await binanceRest.getOrder({
             symbol: trade.symbol,
             orderId: trade.buyOrderId,
           }).catch(() => null);
           if (order) {
+            // BUY filled จริง — ไม่ว่า trade.state จะเป็นอะไร ต้อง proceed SELL
             if (order.status === 'FILLED' || order.status === 'PARTIALLY_FILLED') {
-              logger.info({ tradeId: trade._id.toString() }, 'reconcile: BUY filled but missed');
-              // ปล่อยให้ user แก้เอง หรือจะ trigger handleBuyFilled ก็ได้
-              // ที่นี่เราจะ mark เป็น filled และพยายามวาง SELL
-              const sig = await require('../db/models/Signal').findById(trade.signalId);
-              if (sig) {
+              // skip ถ้า trade เป็น selling/sold อยู่แล้ว (normal path)
+              if (['selling', 'sold'].includes(trade.state)) {
+                logger.debug({ tradeId: trade._id.toString(), dbState: trade.state }, 'reconcile: BUY filled, trade already in selling/sold — skip');
+              } else {
+                logger.warn({
+                  tradeId: trade._id.toString(),
+                  dbState: trade.state,
+                  orderStatus: order.status,
+                  botId: trade.botId.toString(),
+                }, 'reconcile: ORPHAN detected — BUY filled but DB state stuck');
+
+                const sig = trade.signalId ? await Signal.findById(trade.signalId).catch(() => null) : null;
                 const trader = this.traders.get(bot._id.toString());
                 if (trader) {
                   trader.currentTrade = trade;
                   await trader.handleBuyFilled(trade, order, sig);
+                } else {
+                  // ไม่มี trader (บอท disabled) → mark filled + ปล่อยให้ user/manual reconcile
+                  logger.warn({
+                    tradeId: trade._id.toString(),
+                    botId: trade.botId.toString(),
+                  }, 'reconcile: BUY filled but no live trader — DB updated to filled, manual SELL needed');
+                  await Trade.updateOne(
+                    { _id: trade._id },
+                    {
+                      state: 'filled',
+                      buyStatus: order.status,
+                      buyFilledAt: new Date(order.updateTime || Date.now()),
+                      buyPrice: parseFloat(order.price) || parseFloat(order.cummulativeQuoteQty) / parseFloat(order.executedQty),
+                      buyQty: parseFloat(order.executedQty),
+                      buyQuoteQty: parseFloat(order.cummulativeQuoteQty),
+                    }
+                  );
                 }
               }
-            } else if (order.status === 'CANCELED' || order.status === 'EXPIRED') {
+            } else if ((order.status === 'CANCELED' || order.status === 'EXPIRED') && trade.state === 'placed') {
+              // BUY ถูก cancel จริง — sync DB
+              logger.info({ tradeId: trade._id.toString() }, 'reconcile: BUY cancelled/expired, marking DB');
               await Trade.updateOne({ _id: trade._id }, { state: 'cancelled', buyStatus: order.status });
             }
           }
         }
 
-        // ตรวจ SELL order
-        if (trade.sellOrderId && trade.state === 'selling') {
+        // ตรวจ SELL order (กรณี state=selling หรือ holding ที่ SELL อาจ fill จริง)
+        if (trade.sellOrderId) {
           const order = await binanceRest.getOrder({
             symbol: trade.symbol,
             orderId: trade.sellOrderId,
           }).catch(() => null);
-          if (order && order.status === 'FILLED') {
-            logger.info({ tradeId: trade._id.toString() }, 'reconcile: SELL filled but missed');
-            const trader = this.traders.get(bot._id.toString());
-            if (trader) {
-              trader.currentTrade = trade;
-              await trader.handleSellFilled({
-                executedQty: order.executedQty,
-                avgPrice: order.price,
-                cumulativeQuoteQty: order.cummulativeQuoteQty,
-                ts: order.updateTime,
-              });
+          if (order) {
+            if (order.status === 'FILLED' && trade.state !== 'sold') {
+              logger.warn({
+                tradeId: trade._id.toString(),
+                dbState: trade.state,
+                botId: trade.botId.toString(),
+              }, 'reconcile: ORPHAN — SELL filled but DB state not sold');
+              const trader = this.traders.get(bot._id.toString());
+              if (trader) {
+                trader.currentTrade = trade;
+                await trader.handleSellFilled({
+                  executedQty: order.executedQty,
+                  avgPrice: order.price || order.avgPrice,
+                  cumulativeQuoteQty: order.cummulativeQuoteQty,
+                  ts: order.updateTime,
+                }, trade);
+              } else {
+                // ไม่มี trader → mark sold + คำนวณ PnL inline
+                const feeRate = require('../binance/fees').getMakerRate();
+                const sellPrice = parseFloat(order.price || order.avgPrice) || (parseFloat(order.cummulativeQuoteQty) / parseFloat(order.executedQty));
+                const pnl = require('../binance/fees').calcPnl({
+                  buyPrice: trade.buyPrice,
+                  sellPrice,
+                  qty: parseFloat(order.executedQty),
+                  feeRate,
+                });
+                await Trade.updateOne(
+                  { _id: trade._id },
+                  {
+                    state: 'sold',
+                    sellStatus: 'FILLED',
+                    sellPrice,
+                    sellQty: parseFloat(order.executedQty),
+                    sellQuoteQty: parseFloat(order.cummulativeQuoteQty),
+                    sellFilledAt: new Date(order.updateTime || Date.now()),
+                    realizedPnl: pnl.net,
+                    pnlPercent: pnl.pnlPercent,
+                  }
+                );
+              }
             }
           }
         }

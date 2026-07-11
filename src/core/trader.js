@@ -21,6 +21,16 @@ const Signal = require('../db/models/Signal');
  *  - holding: มี base asset แล้ว กำลังจะวาง/วาง SELL แล้ว
  *  - waiting_sell_fill: วาง SELL แล้ว รอ fill
  *  - error: เกิดข้อผิดพลาด หยุดชั่วคราว
+ *
+ * Robustness patches:
+ *  - FIX 1: SELL reject → MARKET fallback + holding retry (กัน stranded position)
+ *  - FIX 2: cancelAndRecheck คืนค่า + checkBuyOrder handle PARTIALLY_FILLED + defer
+ *    เมื่อ cancel/getOrder ไม่แน่ใจ (กัน mark cancelled ทั้งที่ order ยังมีชีวิต)
+ *  - FIX 3: WS handler ใช้ Map<clientOrderId, trade> + DB fallback (กัน drop event
+ *    ของ trade เก่าหลัง rePlaceBuy)
+ *  - FIX 4: Mutex handleBuyFilled (กัน double-SELL จาก WS+retryTimer race)
+ *  - FIX 6: makeClientOrderId เพิ่ม random suffix (กัน -2010 Duplicate)
+ *  - FIX 7: WS update handle PARTIALLY_FILLED/CANCELED/EXPIRED (กัน silent drop)
  */
 class Trader {
   constructor(bot) {
@@ -28,8 +38,16 @@ class Trader {
     this.running = false;
     this.currentTrade = null;
     this.retryCheckTimer = null;
+    this.holdingRetryTimer = null;
     this.currentBookTicker = null;
     this.lastSignalIndex = -1; // index ของแท่งที่ S1 ล่าสุดที่เคย trigger แล้ว (กันยิงซ้ำ)
+
+    // FIX 3: Map clientOrderId → trade เพื่อให้ WS update หา trade ที่ถูกต้อง
+    // แม้ currentTrade จะถูก replace ไปแล้ว (เช่น หลัง cancel-and-replace)
+    this.tradesByClientOrderId = new Map();
+
+    // FIX 4: Mutex per tradeId กัน handleBuyFilled ถูกเรียก 2 ครั้งพร้อมกัน
+    this.handleBuyFilledLocks = new Map();
   }
 
   // ─── Lifecycle ─────────────────────────────────────
@@ -53,15 +71,34 @@ class Trader {
     };
     eventBus.on('kline:closed', this._klineHandler);
 
-    // order update handler
-    this._orderHandler = (update) => {
+    // FIX 3: order update handler ใช้ Map lookup + DB fallback
+    this._orderHandler = async (update) => {
       if (update.symbol !== this.bot.symbol) return;
-      if (!this.currentTrade) return;
       const c = update.clientOrderId || '';
-      if (this.currentTrade.buyClientOrderId && c === this.currentTrade.buyClientOrderId) {
-        this.onBuyOrderUpdate(update);
-      } else if (this.currentTrade.sellClientOrderId && c === this.currentTrade.sellClientOrderId) {
-        this.onSellOrderUpdate(update);
+      if (!c) return;
+
+      // Fast path: in-memory map
+      let trade = this.tradesByClientOrderId.get(c);
+
+      // Fallback: DB lookup (กรณี restart หรือ trade จาก round ก่อนหน้า)
+      if (!trade) {
+        try {
+          trade = await Trade.findOne({
+            botId: this.bot._id,
+            $or: [{ buyClientOrderId: c }, { sellClientOrderId: c }],
+          }).lean();
+        } catch (err) {
+          logger.warn({ err: err.message, c }, 'trader: order handler DB lookup failed');
+          return;
+        }
+      }
+      if (!trade) return;
+
+      // Dispatch ตาม clientOrderId — ไม่พึ่ง currentTrade
+      if (trade.buyClientOrderId === c) {
+        await this.onBuyOrderUpdate(update, trade);
+      } else if (trade.sellClientOrderId === c) {
+        await this.onSellOrderUpdate(update, trade);
       }
     };
     eventBus.on('order:update', this._orderHandler);
@@ -73,11 +110,30 @@ class Trader {
       clearTimeout(this.retryCheckTimer);
       this.retryCheckTimer = null;
     }
+    if (this.holdingRetryTimer) {
+      clearTimeout(this.holdingRetryTimer);
+      this.holdingRetryTimer = null;
+    }
     if (this._bookTickerHandler) eventBus.off('bookTicker', this._bookTickerHandler);
     if (this._klineHandler) eventBus.off('kline:closed', this._klineHandler);
     if (this._orderHandler) eventBus.off('order:update', this._orderHandler);
+    this.tradesByClientOrderId.clear();
+    this.handleBuyFilledLocks.clear();
     logger.info({ botId: this.bot._id.toString() }, 'trader stopped');
     eventBus.emit('bot:status', { botId: this.bot._id, status: 'idle' });
+  }
+
+  // ─── FIX 3 helpers: register/unregister trade ใน Map ────
+  _registerTrade(trade) {
+    if (!trade) return;
+    if (trade.buyClientOrderId) this.tradesByClientOrderId.set(trade.buyClientOrderId, trade);
+    if (trade.sellClientOrderId) this.tradesByClientOrderId.set(trade.sellClientOrderId, trade);
+  }
+
+  _unregisterTrade(trade) {
+    if (!trade) return;
+    if (trade.buyClientOrderId) this.tradesByClientOrderId.delete(trade.buyClientOrderId);
+    if (trade.sellClientOrderId) this.tradesByClientOrderId.delete(trade.sellClientOrderId);
   }
 
   // ─── Signal Detection ─────────────────────────────
@@ -224,6 +280,7 @@ class Trader {
         targetSellPrice: null,
       });
       this.currentTrade = trade;
+      this._registerTrade(trade); // FIX 3
 
       // 8. วาง LIMIT_MAKER BUY (post-only) — ถ้า price จะ match ทันที = reject ทันที
       const orderResp = await binanceRest.newOrder({
@@ -243,6 +300,7 @@ class Trader {
           { state: 'failed', error: `${orderResp.error.code}: ${orderResp.error.msg}` }
         );
         await Signal.updateOne({ _id: signalDoc._id }, { outcome: 'failed', note: 'BUY order rejected' });
+        this._unregisterTrade(trade); // FIX 3
         this.currentTrade = null;
         eventBus.emit('trade:update', { tradeId: trade._id, state: 'failed' });
         return;
@@ -350,23 +408,60 @@ class Trader {
           retryMax,
         }, 'trader: best bid moved → cancel & re-place');
 
-        await this.cancelAndRecheck(trade);
+        // FIX 2: cancelAndRecheck คืนค่า — เราตัดสินใจตามสถานะจริงเท่านั้น
+        const cancelResult = await this.cancelAndRecheck(trade);
         const reCheck = await binanceRest.getOrder({
           symbol: this.bot.symbol,
           orderId: trade.buyOrderId,
         }).catch(() => null);
 
+        // Case A: order FILLED ระหว่าง cancel → handle normally
         if (reCheck && reCheck.status === 'FILLED') {
           await this.handleBuyFilled(trade, reCheck, signalDoc);
           return;
         }
 
-        await Trade.updateOne(
-          { _id: trade._id },
-          { state: 'cancelled', buyStatus: 'CANCELED' }
-        );
-        // re-place
-        await this.rePlaceBuy(trade, signalDoc, candle, newBid);
+        // Case B: PARTIALLY_FILLED → handle partial
+        if (reCheck && reCheck.status === 'PARTIALLY_FILLED') {
+          logger.info({ botId: this.bot._id.toString(), executedQty: reCheck.executedQty }, 'trader: partial fill during retry');
+          await this.handlePartialBuyFill(trade, reCheck, signalDoc, candle);
+          return;
+        }
+
+        // FIX 2 Case C: cancel REST call fail + order NEW → อย่า mark cancelled
+        // (order อาจยังมีชีวิตอยู่ เราจะเสีย asset ถ้า mark cancelled แล้ว replace)
+        if (reCheck && reCheck.status === 'NEW' && !cancelResult.ok) {
+          logger.warn({
+            botId: this.bot._id.toString(),
+            cancelError: cancelResult.error,
+          }, 'trader: cancel failed + order still NEW → defer retry, do NOT mark cancelled');
+          this.scheduleRetryCheck(candle, signalDoc);
+          return;
+        }
+
+        // FIX 2 Case D: getOrder fail + cancel ไม่ได้ confirmed -2011 → อย่า mark cancelled
+        if (!reCheck && !cancelResult.wasUnknown) {
+          logger.warn({ botId: this.bot._id.toString() }, 'trader: cannot determine order state, deferring');
+          this.scheduleRetryCheck(candle, signalDoc);
+          return;
+        }
+
+        // Case E: confirmed CANCELLED / EXPIRED → ปลอดภัย re-place
+        if (reCheck && (reCheck.status === 'CANCELED' || reCheck.status === 'EXPIRED')) {
+          await Trade.updateOne(
+            { _id: trade._id },
+            { state: 'cancelled', buyStatus: reCheck.status }
+          );
+          await this.rePlaceBuy(trade, signalDoc, candle, newBid);
+          return;
+        }
+
+        // Fallback (ไม่ควรมาถึง) — defer ไว้ก่อน
+        logger.error({
+          botId: this.bot._id.toString(),
+          reCheck, cancelResult,
+        }, 'trader: unexpected state in cancel-and-replace, deferring');
+        this.scheduleRetryCheck(candle, signalDoc);
         return;
       }
 
@@ -380,7 +475,7 @@ class Trader {
           retryMax,
         }, 'trader: bid moved but retryMax reached → cancel & expire signal');
 
-        await this.cancelAndRecheck(trade);
+        const cancelResult = await this.cancelAndRecheck(trade);
         const reCheck = await binanceRest.getOrder({
           symbol: this.bot.symbol,
           orderId: trade.buyOrderId,
@@ -392,14 +487,31 @@ class Trader {
           return;
         }
 
-        await Trade.updateOne(
-          { _id: trade._id },
-          { state: 'cancelled', buyStatus: 'CANCELED', error: `retryMax (${retryMax}) reached` }
-        );
-        await Signal.updateOne({ _id: signalDoc._id }, { outcome: 'expired', note: `retryMax ${retryMax} reached, bid moved` });
-        await Bot.updateOne({ _id: this.bot._id }, { status: 'idle', lastError: `signal expired: retryMax ${retryMax} reached` });
-        this.currentTrade = null;
-        eventBus.emit('bot:status', { botId: this.bot._id, status: 'idle' });
+        if (reCheck && reCheck.status === 'PARTIALLY_FILLED') {
+          await this.handlePartialBuyFill(trade, reCheck, signalDoc, candle);
+          return;
+        }
+
+        // ยืนยัน cancelled แล้วเท่านั้น → expire
+        if (reCheck && (reCheck.status === 'CANCELED' || reCheck.status === 'EXPIRED')) {
+          await Trade.updateOne(
+            { _id: trade._id },
+            { state: 'cancelled', buyStatus: reCheck.status, error: `retryMax (${retryMax}) reached` }
+          );
+          await Signal.updateOne({ _id: signalDoc._id }, { outcome: 'expired', note: `retryMax ${retryMax} reached, bid moved` });
+          await Bot.updateOne({ _id: this.bot._id }, { status: 'idle', lastError: `signal expired: retryMax ${retryMax} reached` });
+          this._unregisterTrade(trade); // FIX 3
+          this.currentTrade = null;
+          eventBus.emit('bot:status', { botId: this.bot._id, status: 'idle' });
+          return;
+        }
+
+        // ไม่แน่ใจ → defer แทน expire
+        logger.warn({
+          botId: this.bot._id.toString(),
+          reCheck, cancelResult,
+        }, 'trader: retryMax reached but order state unclear, deferring');
+        this.scheduleRetryCheck(candle, signalDoc);
         return;
       }
 
@@ -417,15 +529,25 @@ class Trader {
     }
   }
 
-  // helper: cancel order พร้อม swallow -2011 (Unknown order) ที่อาจเกิดจาก match ไปแล้ว
+  // FIX 2: cancel order + คืนค่าให้ caller ตัดสินใจ
+  // -2011 = Unknown order (อาจ fill ไปแล้ว) → ถือว่า ok, wasUnknown=true
+  // error อื่น ๆ → ok=false, error=...
   async cancelAndRecheck(trade) {
     const cancelResp = await binanceRest.cancelOrder({
       symbol: this.bot.symbol,
       orderId: trade.buyOrderId,
     }).catch((err) => ({ error: binanceRest.formatBinanceError(err) }));
-    if (cancelResp.error && cancelResp.error.code !== -2011) {
-      logger.warn({ botId: this.bot._id.toString(), err: cancelResp.error }, 'trader: cancel failed');
+
+    if (cancelResp.error && cancelResp.error.code === -2011) {
+      // Order already filled/cancelled/expired — this is informational, not a failure
+      logger.debug({ botId: this.bot._id.toString(), orderId: trade.buyOrderId }, 'trader: cancel got -2011 (order already gone)');
+      return { ok: true, wasUnknown: true, error: cancelResp.error };
     }
+    if (cancelResp.error) {
+      logger.warn({ botId: this.bot._id.toString(), err: cancelResp.error }, 'trader: cancel failed (non -2011)');
+      return { ok: false, wasUnknown: false, error: cancelResp.error };
+    }
+    return { ok: true, wasUnknown: false };
   }
 
   async rePlaceBuy(prevTrade, signalDoc, candle, newBid) {
@@ -438,6 +560,7 @@ class Trader {
         logger.warn({ botId: this.bot._id.toString(), reason: validation.reason }, 'trader: rePlace validation failed');
         await Signal.updateOne({ _id: signalDoc._id }, { outcome: 'expired', note: validation.reason });
         await Bot.updateOne({ _id: this.bot._id }, { status: 'idle' });
+        this._unregisterTrade(prevTrade); // FIX 3
         this.currentTrade = null;
         eventBus.emit('bot:status', { botId: this.bot._id, status: 'idle' });
         return;
@@ -458,10 +581,15 @@ class Trader {
         logger.warn({ botId: this.bot._id.toString(), err: orderResp.error }, 'trader: rePlace rejected');
         await Signal.updateOne({ _id: signalDoc._id }, { outcome: 'expired', note: 'rePlace rejected' });
         await Bot.updateOne({ _id: this.bot._id }, { status: 'idle' });
+        this._unregisterTrade(prevTrade); // FIX 3
         this.currentTrade = null;
         eventBus.emit('bot:status', { botId: this.bot._id, status: 'idle' });
         return;
       }
+
+      // FIX 3: unregister trade เก่า (BUY clientOrderId เปลี่ยน) — แต่ SELL (ถ้ามี) ยังคงอยู่
+      // prevTrade มีแค่ buyClientOrderId (ยังไม่มี sell) เลย unregister ได้ตรง ๆ
+      this._unregisterTrade(prevTrade);
 
       const newTrade = await Trade.create({
         botId: this.bot._id,
@@ -478,6 +606,7 @@ class Trader {
         state: 'placed',
       });
       this.currentTrade = newTrade;
+      this._registerTrade(newTrade); // FIX 3
 
       eventBus.emit('trade:update', { tradeId: newTrade._id, state: 'placed' });
       this.scheduleRetryCheck(candle, signalDoc);
@@ -486,13 +615,34 @@ class Trader {
     }
   }
 
+  // FIX 4: handleBuyFilled mutex ป้องกัน double-SELL จาก WS+retryTimer race
   async handleBuyFilled(trade, order, signalDoc) {
+    const tradeId = trade._id.toString();
+    if (this.handleBuyFilledLocks.has(tradeId)) {
+      logger.debug({ tradeId }, 'trader: handleBuyFilled already running, skip duplicate');
+      return this.handleBuyFilledLocks.get(tradeId);
+    }
+    const promise = this._handleBuyFilledImpl(trade, order, signalDoc);
+    this.handleBuyFilledLocks.set(tradeId, promise);
+    try {
+      return await promise;
+    } finally {
+      this.handleBuyFilledLocks.delete(tradeId);
+    }
+  }
+
+  async _handleBuyFilledImpl(trade, order, signalDoc) {
     try {
       const filledQty = parseFloat(order.executedQty);
       const avgPrice = parseFloat(order.price) || parseFloat(order.cummulativeQuoteQty) / filledQty;
 
-      await Trade.updateOne(
-        { _id: trade._id },
+      // FIX 1: idempotent state update — ใช้ guard { state: 'placed' | 'filled' | 'retrying' }
+      // กัน double-update ถ้า 2 path (WS + retry) มาถึงพร้อมกัน
+      const upd = await Trade.updateOne(
+        {
+          _id: trade._id,
+          state: { $in: ['placed', 'filled', 'retrying', 'holding'] },
+        },
         {
           state: 'filled',
           buyStatus: 'FILLED',
@@ -502,6 +652,11 @@ class Trader {
           buyFilledAt: new Date(order.updateTime || Date.now()),
         }
       );
+      if (upd.modifiedCount === 0) {
+        // ถูก process ไปแล้ว (state เปลี่ยนเป็น selling/sold/cancelled)
+        logger.debug({ tradeId: trade._id.toString() }, 'trader: handleBuyFilled skipped — trade already in terminal state');
+        return;
+      }
 
       // คำนวณ sell price
       const feeRate = fees.getMakerRate();
@@ -513,16 +668,24 @@ class Trader {
       const info = symbolInfo.getCached(this.bot.symbol);
       const sellPrice = symbolInfo.roundPrice(sellPriceRaw, info.priceFilter.tickSize).toString();
 
+      // FIX 1: ถ้า validation fail (เช่น tick size / min notional) → MARKET fallback
       const validation = symbolInfo.validateOrder({ symbol: this.bot.symbol, price: sellPrice, qty: filledQty });
       if (!validation.ok) {
-        logger.warn({ reason: validation.reason }, 'trader: SELL validation failed (will hold asset)');
-        await Trade.updateOne({ _id: trade._id }, { state: 'holding', targetSellPrice: parseFloat(sellPrice), error: validation.reason });
-        await Bot.updateOne({ _id: this.bot._id }, { status: 'holding' });
-        eventBus.emit('bot:status', { botId: this.bot._id, status: 'holding' });
-        eventBus.emit('trade:update', { tradeId: trade._id, state: 'holding' });
+        logger.warn({ reason: validation.reason }, 'trader: SELL validation failed → MARKET fallback');
+        const ok = await this._emergencyMarketSell(trade, filledQty, avgPrice, sellPrice, `validation: ${validation.reason}`);
+        if (!ok) {
+          // FIX 1: schedule retry แทนการค้างเฉย ๆ
+          await Trade.updateOne({ _id: trade._id }, { state: 'holding', targetSellPrice: parseFloat(sellPrice), error: validation.reason });
+          await Bot.updateOne({ _id: this.bot._id }, { status: 'holding' });
+          eventBus.emit('bot:status', { botId: this.bot._id, status: 'holding' });
+          eventBus.emit('trade:update', { tradeId: trade._id, state: 'holding' });
+          this.scheduleHoldingRetry(trade, filledQty, avgPrice, sellPrice);
+        }
         return;
       }
 
+      // FIX 1: ลอง LIMIT_MAKER ก่อน — ถ้า reject (-2010 Duplicate, MIN_NOTIONAL ฯลฯ)
+      // → fallback เป็น MARKET ทันที (emergency exit)
       const sellClientOrderId = this.makeClientOrderId('sell', order.updateTime || Date.now(), trade.retryCount || 0);
       const sellResp = await binanceRest.newOrder({
         symbol: this.bot.symbol,
@@ -535,11 +698,24 @@ class Trader {
       }).catch((err) => ({ error: binanceRest.formatBinanceError(err) }));
 
       if (sellResp.error) {
-        logger.warn({ err: sellResp.error }, 'trader: SELL order rejected (will hold asset)');
-        await Trade.updateOne({ _id: trade._id }, { state: 'holding', targetSellPrice: parseFloat(sellPrice), error: `${sellResp.error.code}: ${sellResp.error.msg}` });
-        await Bot.updateOne({ _id: this.bot._id }, { status: 'holding' });
-        eventBus.emit('bot:status', { botId: this.bot._id, status: 'holding' });
-        eventBus.emit('trade:update', { tradeId: trade._id, state: 'holding' });
+        logger.warn({
+          err: sellResp.error,
+          tradeId: trade._id.toString(),
+        }, 'trader: SELL LIMIT_MAKER rejected → trying MARKET fallback');
+
+        const ok = await this._emergencyMarketSell(trade, filledQty, avgPrice, sellPrice,
+          `${sellResp.error.code}: ${sellResp.error.msg}`);
+        if (!ok) {
+          // ทั้ง LIMIT และ MARKET fail → mark holding + schedule retry
+          await Trade.updateOne({
+            _id: trade._id,
+            state: { $in: ['filled', 'holding'] },
+          }, { state: 'holding', targetSellPrice: parseFloat(sellPrice), error: `${sellResp.error.code}: ${sellResp.error.msg}` });
+          await Bot.updateOne({ _id: this.bot._id }, { status: 'holding' });
+          eventBus.emit('bot:status', { botId: this.bot._id, status: 'holding' });
+          eventBus.emit('trade:update', { tradeId: trade._id, state: 'holding' });
+          this.scheduleHoldingRetry(trade, filledQty, avgPrice, sellPrice);
+        }
         return;
       }
 
@@ -559,6 +735,8 @@ class Trader {
       this.currentTrade.sellOrderId = sellResp.orderId;
       this.currentTrade.sellClientOrderId = sellClientOrderId;
       this.currentTrade.state = 'selling';
+      // FIX 3: register sell clientOrderId ใน Map (กรณี currentTrade เปลี่ยนทีหลัง)
+      this._registerTrade({ buyClientOrderId: trade.buyClientOrderId, sellClientOrderId });
 
       logger.info({
         botId: this.bot._id.toString(),
@@ -574,6 +752,214 @@ class Trader {
     } catch (err) {
       logger.error({ err: err.message, stack: err.stack }, 'trader: handleBuyFilled error');
     }
+  }
+
+  // FIX 1: emergency MARKET SELL — ป้องกัน asset stranded
+  // return true ถ้าสำเร็จ (state → selling), false ถ้า fail (ต้อง schedule retry)
+  async _emergencyMarketSell(trade, qty, buyPrice, targetSellPrice, reasonNote) {
+    try {
+      const marketSellId = this.makeClientOrderId('em-sell', Date.now(), 0);
+      const resp = await binanceRest.newOrder({
+        symbol: this.bot.symbol,
+        side: 'SELL',
+        type: 'MARKET',
+        quantity: qty.toString(),
+        newClientOrderId: marketSellId,
+        recvWindow: config_recvWindow(),
+      }).catch((err) => ({ error: binanceRest.formatBinanceError(err) }));
+
+      if (resp.error) {
+        logger.error({
+          err: resp.error,
+          tradeId: trade._id.toString(),
+        }, 'trader: EMERGENCY MARKET SELL also failed');
+        return false;
+      }
+
+      // MARKET fill ทันที → คำนวณ avgPrice จาก fills หรือใช้ cummulativeQuoteQty/executedQty
+      const avgSell = parseFloat(resp.price)
+        || parseFloat(resp.avgPrice)
+        || (parseFloat(resp.cummulativeQuoteQty) / parseFloat(resp.executedQty));
+      const executed = parseFloat(resp.executedQty);
+
+      // คำนวณ PnL ทันที (เพราะ market fill)
+      const feeRate = fees.getMakerRate();
+      const pnl = fees.calcPnl({
+        buyPrice,
+        sellPrice: avgSell,
+        qty: executed,
+        feeRate,
+      });
+
+      await Trade.updateOne(
+        {
+          _id: trade._id,
+          state: { $in: ['filled', 'holding'] },
+        },
+        {
+          state: 'sold',
+          sellOrderId: resp.orderId,
+          sellClientOrderId: marketSellId,
+          sellPrice: avgSell,
+          sellQty: executed,
+          sellQuoteQty: parseFloat(resp.cummulativeQuoteQty),
+          sellStatus: resp.status,
+          sellFilledAt: new Date(resp.updateTime || Date.now()),
+          sellPlacedAt: new Date(),
+          targetSellPrice: parseFloat(targetSellPrice),
+          realizedPnl: pnl.net,
+          pnlPercent: pnl.pnlPercent,
+          error: `${reasonNote} → MARKET fallback used`,
+        }
+      );
+
+      // update bot stats — MARKET fallback ปิดรอบทันที
+      const newTotal = (this.bot.totalPnl || 0) + pnl.net;
+      const newCount = (this.bot.totalTrades || 0) + 1;
+      const newWin = (this.bot.winTrades || 0) + (pnl.net > 0 ? 1 : 0);
+      await Bot.updateOne(
+        { _id: this.bot._id },
+        {
+          totalPnl: newTotal,
+          totalTrades: newCount,
+          winTrades: newWin,
+          status: 'idle',
+        }
+      );
+
+      this._unregisterTrade(trade);
+      this.currentTrade = null;
+      eventBus.emit('bot:status', { botId: this.bot._id, status: 'idle' });
+      eventBus.emit('trade:update', { tradeId: trade._id, state: 'sold' });
+      logger.warn({
+        tradeId: trade._id.toString(),
+        pnl: pnl.net,
+        avgSell,
+      }, 'trader: EMERGENCY MARKET SELL succeeded');
+      return true;
+    } catch (err) {
+      logger.error({ err: err.message, stack: err.stack }, 'trader: _emergencyMarketSell error');
+      return false;
+    }
+  }
+
+  // FIX 1: schedule holding retry — พยายาม SELL ใหม่ทุก 30s สำหรับ stranded positions
+  scheduleHoldingRetry(trade, qty, buyPrice, targetSellPrice) {
+    if (this.holdingRetryTimer) clearTimeout(this.holdingRetryTimer);
+    if (!this.running) return;
+
+    this.holdingRetryTimer = setTimeout(async () => {
+      if (!this.running) return;
+      try {
+        // เช็คว่า trade ยังเป็น holding + มี asset จริง
+        const fresh = await Trade.findById(trade._id);
+        if (!fresh || fresh.state !== 'holding') {
+          logger.info({ tradeId: trade._id.toString(), state: fresh?.state }, 'trader: holding retry — trade no longer holding, abort');
+          return;
+        }
+
+        // ตรวจ base asset balance จริง
+        const baseAsset = this.bot.symbol.replace(/USDT$|USDC$|BUSD$/, '');
+        const account = await binanceRest.getAccount();
+        const bal = (account.balances || []).find((b) => b.asset === baseAsset);
+        const freeQty = bal ? parseFloat(bal.free) : 0;
+
+        if (freeQty < qty * 0.95) {
+          logger.warn({
+            tradeId: trade._id.toString(),
+            freeQty, expected: qty, baseAsset,
+          }, 'trader: holding retry — asset balance mismatch, will retry in 60s');
+          this.scheduleHoldingRetry(trade, qty, buyPrice, targetSellPrice);
+          return;
+        }
+
+        logger.warn({
+          tradeId: trade._id.toString(),
+          freeQty, qty,
+        }, 'trader: holding retry — found asset, attempting MARKET SELL');
+
+        // ลอง MARKET ก่อน (LIMIT_MAKER มัก reject ซ้ำด้วยสาเหตุเดิม)
+        const retrySellId = this.makeClientOrderId('retry-sell', Date.now(), 0);
+        const resp = await binanceRest.newOrder({
+          symbol: this.bot.symbol,
+          side: 'SELL',
+          type: 'MARKET',
+          quantity: freeQty.toString(),
+          newClientOrderId: retrySellId,
+          recvWindow: config_recvWindow(),
+        }).catch((err) => ({ error: binanceRest.formatBinanceError(err) }));
+
+        if (resp.error) {
+          logger.error({ err: resp.error, tradeId: trade._id.toString() }, 'trader: holding retry MARKET SELL failed');
+          // schedule อีก 60s
+          if (this.running) {
+            this.holdingRetryTimer = setTimeout(() => this.scheduleHoldingRetry(trade, qty, buyPrice, targetSellPrice), 60 * 1000);
+          }
+          return;
+        }
+
+        const avgSell = parseFloat(resp.price)
+          || parseFloat(resp.avgPrice)
+          || (parseFloat(resp.cummulativeQuoteQty) / parseFloat(resp.executedQty));
+        const executed = parseFloat(resp.executedQty);
+        const feeRate = fees.getMakerRate();
+        const pnl = fees.calcPnl({
+          buyPrice,
+          sellPrice: avgSell,
+          qty: executed,
+          feeRate,
+        });
+
+        await Trade.updateOne(
+          { _id: trade._id, state: 'holding' },
+          {
+            state: 'sold',
+            sellOrderId: resp.orderId,
+            sellClientOrderId: retrySellId,
+            sellPrice: avgSell,
+            sellQty: executed,
+            sellQuoteQty: parseFloat(resp.cummulativeQuoteQty),
+            sellStatus: resp.status,
+            sellFilledAt: new Date(resp.updateTime || Date.now()),
+            sellPlacedAt: new Date(),
+            realizedPnl: pnl.net,
+            pnlPercent: pnl.pnlPercent,
+            targetSellPrice: parseFloat(targetSellPrice),
+          }
+        );
+
+        const newTotal = (this.bot.totalPnl || 0) + pnl.net;
+        const newCount = (this.bot.totalTrades || 0) + 1;
+        const newWin = (this.bot.winTrades || 0) + (pnl.net > 0 ? 1 : 0);
+        await Bot.updateOne(
+          { _id: this.bot._id },
+          {
+            totalPnl: newTotal,
+            totalTrades: newCount,
+            winTrades: newWin,
+            status: 'idle',
+          }
+        );
+
+        this._unregisterTrade(trade);
+        if (this.currentTrade && this.currentTrade._id.toString() === trade._id.toString()) {
+          this.currentTrade = null;
+        }
+        eventBus.emit('bot:status', { botId: this.bot._id, status: 'idle' });
+        eventBus.emit('trade:update', { tradeId: trade._id, state: 'sold' });
+        logger.warn({
+          tradeId: trade._id.toString(),
+          pnl: pnl.net,
+          avgSell,
+        }, 'trader: holding retry — RECOVERED stranded position via MARKET SELL');
+      } catch (err) {
+        logger.error({ err: err.message, tradeId: trade._id.toString() }, 'trader: holding retry failed');
+        // schedule อีก 60s
+        if (this.running) {
+          this.holdingRetryTimer = setTimeout(() => this.scheduleHoldingRetry(trade, qty, buyPrice, targetSellPrice), 60 * 1000);
+        }
+      }
+    }, 30 * 1000);
   }
 
   async handlePartialBuyFill(trade, order, signalDoc, candle) {
@@ -625,9 +1011,15 @@ class Trader {
       }).catch((err) => ({ error: binanceRest.formatBinanceError(err) }));
 
       if (sellResp.error) {
-        await Trade.updateOne({ _id: trade._id }, { state: 'holding', targetSellPrice: parseFloat(sellPrice), error: `${sellResp.error.code}: ${sellResp.error.msg}` });
-        await Bot.updateOne({ _id: this.bot._id }, { status: 'holding' });
-        eventBus.emit('bot:status', { botId: this.bot._id, status: 'holding' });
+        // FIX 1: MARKET fallback ก่อน mark holding
+        const ok = await this._emergencyMarketSell(trade, filledQty, avgPrice, sellPrice,
+          `partial-fill SELL rejected: ${sellResp.error.code}`);
+        if (!ok) {
+          await Trade.updateOne({ _id: trade._id }, { state: 'holding', targetSellPrice: parseFloat(sellPrice), error: `${sellResp.error.code}: ${sellResp.error.msg}` });
+          await Bot.updateOne({ _id: this.bot._id }, { status: 'holding' });
+          eventBus.emit('bot:status', { botId: this.bot._id, status: 'holding' });
+          this.scheduleHoldingRetry(trade, filledQty, avgPrice, sellPrice);
+        }
         return;
       }
 
@@ -646,6 +1038,7 @@ class Trader {
       this.currentTrade.state = 'selling';
       this.currentTrade.sellOrderId = sellResp.orderId;
       this.currentTrade.sellClientOrderId = sellClientOrderId;
+      this._registerTrade({ buyClientOrderId: trade.buyClientOrderId, sellClientOrderId });
 
       await Bot.updateOne({ _id: this.bot._id }, { status: 'selling' });
       eventBus.emit('bot:status', { botId: this.bot._id, status: 'selling' });
@@ -656,34 +1049,94 @@ class Trader {
   }
 
   // ─── Order update handler (จาก User Data Stream) ─
-  onBuyOrderUpdate(update) {
-    if (!this.currentTrade) return;
+  // FIX 3: รับ trade parameter (จาก Map/DB lookup) ไม่พึ่ง currentTrade
+  // FIX 7: handle ทุก status (FILLED/PARTIALLY_FILLED/CANCELED/EXPIRED)
+  async onBuyOrderUpdate(update, trade) {
+    if (!trade) return;
     if (update.status === 'FILLED') {
       logger.info({ botId: this.bot._id.toString(), orderId: update.orderId, avgPrice: update.avgPrice }, 'trader: BUY FILLED (via WS)');
-      // ดึง order เต็มเพื่อให้แน่ใจ
       binanceRest.getOrder({
         symbol: this.bot.symbol,
         orderId: update.orderId,
       }).then(async (order) => {
-        if (this.currentTrade) {
-          const sig = await Signal.findById(this.currentTrade.signalId);
-          await this.handleBuyFilled(this.currentTrade, order, sig);
-        }
+        if (!order) return;
+        // ดึง signal doc จาก trade
+        const sig = trade.signalId ? await Signal.findById(trade.signalId).catch(() => null) : null;
+        await this.handleBuyFilled(trade, order, sig);
       }).catch((err) => logger.error({ err: err.message }, 'trader: onBuyOrderUpdate getOrder failed'));
+      return;
+    }
+    if (update.status === 'PARTIALLY_FILLED') {
+      logger.info({ botId: this.bot._id.toString(), orderId: update.orderId, executedQty: update.executedQty }, 'trader: BUY PARTIALLY_FILLED (via WS)');
+      binanceRest.getOrder({
+        symbol: this.bot.symbol,
+        orderId: update.orderId,
+      }).then(async (order) => {
+        if (!order) return;
+        const sig = trade.signalId ? await Signal.findById(trade.signalId).catch(() => null) : null;
+        // ส่ง candle หลอก ๆ (cancel ที่เหลือทำใน handlePartialBuyFill)
+        const candle = { closeTime: Date.now(), close: parseFloat(update.avgPrice || order.price) };
+        await this.handlePartialBuyFill(trade, order, sig, candle);
+      }).catch((err) => logger.error({ err: err.message }, 'trader: onBuyOrderUpdate partial getOrder failed'));
+      return;
+    }
+    if (update.status === 'CANCELED' || update.status === 'EXPIRED') {
+      // FIX 7: handle WS cancel/expire สำหรับ BUY ที่ state='placed'
+      if (trade.state === 'placed') {
+        logger.info({ botId: this.bot._id.toString(), orderId: update.orderId, status: update.status }, 'trader: BUY cancelled externally');
+        await Trade.updateOne(
+          { _id: trade._id, state: 'placed' },
+          { state: 'cancelled', buyStatus: update.status }
+        );
+        if (this.currentTrade && this.currentTrade._id.toString() === trade._id.toString()) {
+          this._unregisterTrade(trade);
+          this.currentTrade = null;
+          await Bot.updateOne({ _id: this.bot._id }, { status: 'idle' });
+          eventBus.emit('bot:status', { botId: this.bot._id, status: 'idle' });
+        }
+      }
     }
   }
 
-  onSellOrderUpdate(update) {
-    if (!this.currentTrade) return;
+  async onSellOrderUpdate(update, trade) {
+    if (!trade) return;
     if (update.status === 'FILLED') {
       logger.info({ botId: this.bot._id.toString(), orderId: update.orderId, avgPrice: update.avgPrice }, 'trader: SELL FILLED (via WS)');
-      this.handleSellFilled(update);
+      // FIX 3: ส่ง trade ไปด้วยเพื่อให้ handleSellFilled ใช้ trade ที่ถูกต้อง (ไม่ใช่ currentTrade)
+      await this.handleSellFilled(update, trade);
+      return;
+    }
+    if (update.status === 'PARTIALLY_FILLED') {
+      logger.info({ botId: this.bot._id.toString(), orderId: update.orderId, executedQty: update.executedQty }, 'trader: SELL PARTIALLY_FILLED (via WS)');
+      // ส่งไป handleSellFilled ตามปกติ (ส่วนใหญ่จะ fill ที่เหลือใน tick ถัดไป)
+      await this.handleSellFilled(update, trade);
+      return;
+    }
+    if (update.status === 'CANCELED' || update.status === 'EXPIRED') {
+      if (trade.state === 'selling') {
+        logger.warn({ botId: this.bot._id.toString(), orderId: update.orderId, status: update.status }, 'trader: SELL cancelled externally');
+        // ยังถือ asset → schedule holding retry แทนการทิ้ง
+        await Trade.updateOne(
+          { _id: trade._id, state: 'selling' },
+          { state: 'holding', sellStatus: update.status, error: `SELL ${update.status.toLowerCase()}` }
+        );
+        await Bot.updateOne({ _id: this.bot._id }, { status: 'holding' });
+        eventBus.emit('bot:status', { botId: this.bot._id, status: 'holding' });
+        eventBus.emit('trade:update', { tradeId: trade._id, state: 'holding' });
+        // retry MARKET ทุก 30s
+        this.scheduleHoldingRetry(trade, trade.sellQty, trade.buyPrice, trade.targetSellPrice);
+      }
     }
   }
 
-  async handleSellFilled(update) {
+  // FIX 3: รับ trade parameter — ไม่ใช้ this.currentTrade โดยตรง (กัน stale reference)
+  async handleSellFilled(update, tradeParam) {
     try {
-      const trade = this.currentTrade;
+      const trade = tradeParam || this.currentTrade;
+      if (!trade) {
+        logger.warn({ update }, 'trader: handleSellFilled called without trade context');
+        return;
+      }
       const sellQty = parseFloat(update.executedQty);
       const sellPrice = parseFloat(update.avgPrice) || (parseFloat(update.cumulativeQuoteQty) / sellQty);
       const feeRate = fees.getMakerRate();
@@ -694,8 +1147,12 @@ class Trader {
         feeRate,
       });
 
-      await Trade.updateOne(
-        { _id: trade._id },
+      // Idempotent guard: กัน double-update ถ้า WS มาซ้ำ
+      const upd = await Trade.updateOne(
+        {
+          _id: trade._id,
+          state: { $in: ['selling', 'holding'] },
+        },
         {
           state: 'sold',
           sellStatus: 'FILLED',
@@ -707,6 +1164,10 @@ class Trader {
           pnlPercent: pnl.pnlPercent,
         }
       );
+      if (upd.modifiedCount === 0) {
+        logger.debug({ tradeId: trade._id.toString() }, 'trader: handleSellFilled skipped — already sold');
+        return;
+      }
 
       // update bot stats
       const newTotal = (this.bot.totalPnl || 0) + pnl.net;
@@ -722,7 +1183,10 @@ class Trader {
         }
       );
 
-      this.currentTrade = null;
+      this._unregisterTrade(trade);
+      if (this.currentTrade && this.currentTrade._id.toString() === trade._id.toString()) {
+        this.currentTrade = null;
+      }
       eventBus.emit('bot:status', { botId: this.bot._id, status: 'idle' });
       eventBus.emit('trade:update', { tradeId: trade._id, state: 'sold' });
       logger.info({
@@ -736,11 +1200,13 @@ class Trader {
   }
 
   // ─── Helpers ───────────────────────────────────────
+  // FIX 6: เพิ่ม random suffix กัน -2010 Duplicate order sent
+  // (กรณี retry ที่ ts+retry+side ตรงกัน)
   makeClientOrderId(side, refTs, retry) {
-    // botId-time-retry-side (deterministic, idempotent)
     const ts = typeof refTs === 'number' ? refTs : new Date(refTs).getTime();
     const shortBot = this.bot._id.toString().slice(-6);
-    return `b${shortBot}-${ts}-${retry}-${side}`.slice(0, 36); // Binance limit 36 chars
+    const rand = Math.random().toString(36).slice(2, 8); // 6-char random
+    return `b${shortBot}-${ts}-${retry}-${side}-${rand}`.slice(0, 36); // Binance limit 36 chars
   }
 }
 
