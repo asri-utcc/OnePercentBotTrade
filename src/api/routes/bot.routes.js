@@ -12,6 +12,33 @@ const logger = require('../../utils/logger');
 const router = express.Router();
 
 /**
+ * Middleware: ต้องใส่ password สำหรับ action อันตราย (สร้าง/ลบ/เปิด/ปิดบอท)
+ * ป้องกันคนเปิด browser ที่ login ค้างไว้แล้วเผลอกด หรือ CSRF
+ * รับ password จาก body.password, header X-Bot-Action-Password, หรือ query ?password=
+ * ถ้า config.botActionPassword ว่าง → reject ทุก action (force secure by default)
+ */
+function requireBotActionPassword(req, res, next) {
+  const expected = (config.botActionPassword || '').trim();
+  if (!expected) {
+    logger.warn({ path: req.path, ip: req.ip }, 'bot action blocked: BOT_ACTION_PASSWORD not configured');
+    return res.status(503).json({
+      error: 'Bot actions are disabled because BOT_ACTION_PASSWORD is not set. Set it in .env to enable create/delete/enable/disable.',
+    });
+  }
+  const provided = (
+    (req.body && req.body.password)
+    || req.get('X-Bot-Action-Password')
+    || req.query.password
+    || ''
+  ).toString().trim();
+  if (!provided || provided !== expected) {
+    logger.warn({ path: req.path, ip: req.ip, hasPassword: !!provided }, 'bot action blocked: invalid/missing password');
+    return res.status(403).json({ error: 'Invalid or missing password for bot action' });
+  }
+  next();
+}
+
+/**
  * Start of "today" in server local timezone (00:00:00 local).
  * Used to compute todayTrades / todayPnl aggregates.
  */
@@ -122,7 +149,7 @@ router.get('/:id', requireAuth, async (req, res) => {
 });
 
 // ─── POST /api/bots ───────────────────────────────────
-router.post('/', requireAuth, async (req, res) => {
+router.post('/', requireAuth, requireBotActionPassword, async (req, res) => {
   try {
     const data = req.body || {};
     const defaults = config.defaults;
@@ -231,7 +258,7 @@ router.put('/:id', requireAuth, async (req, res) => {
 });
 
 // ─── DELETE /api/bots/:id ─────────────────────────────
-router.delete('/:id', requireAuth, async (req, res) => {
+router.delete('/:id', requireAuth, requireBotActionPassword, async (req, res) => {
   try {
     const bot = await Bot.findById(req.params.id);
     if (!bot) return res.status(404).json({ error: 'Bot not found' });
@@ -247,7 +274,7 @@ router.delete('/:id', requireAuth, async (req, res) => {
 });
 
 // ─── POST /api/bots/:id/enable ────────────────────────
-router.post('/:id/enable', requireAuth, async (req, res) => {
+router.post('/:id/enable', requireAuth, requireBotActionPassword, async (req, res) => {
   try {
     const bot = await botManager.enableBot(req.params.id);
     res.json({ bot });
@@ -257,7 +284,7 @@ router.post('/:id/enable', requireAuth, async (req, res) => {
 });
 
 // ─── POST /api/bots/:id/disable ───────────────────────
-router.post('/:id/disable', requireAuth, async (req, res) => {
+router.post('/:id/disable', requireAuth, requireBotActionPassword, async (req, res) => {
   try {
     const bot = await botManager.disableBot(req.params.id);
     res.json({ bot });

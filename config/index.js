@@ -29,6 +29,10 @@ const config = {
   // Auth / session
   sessionSecret: required('SESSION_SECRET'),
   dashboardPassword: optional('DASHBOARD_PASSWORD', ''),
+  // Password ที่ต้องใส่เพื่อทำ action อันตราย (สร้าง/ลบ/เปิด/ปิดบอท)
+  // ถ้าไม่ตั้ง จะ fallback ไปใช้ dashboardPassword (เพื่อไม่ให้ใช้งานเดิม break)
+  // ถ้าไม่ตั้งทั้งคู่ → middleware จะ reject ทุก action อันตราย (force secure)
+  botActionPassword: optional('BOT_ACTION_PASSWORD', optional('DASHBOARD_PASSWORD', '')),
 
   // DB
   mongoUri: optional('MONGODB_URI', 'mongodb://127.0.0.1:27017/onepercentbottrade'),

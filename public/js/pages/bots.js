@@ -234,6 +234,33 @@ function renderStats() {
   }
 }
 
+// ─── Password prompt helper สำหรับ sensitive bot actions ────
+// ถ้า backend ตอบ 403/503 เกี่ยวกับ password → ถาม user แล้ว retry 1 ครั้ง
+function promptBotPassword(actionLabel) {
+  return new Promise((resolve) => {
+    const pw = window.prompt(`ใส่รหัสยืนยันเพื่อ${actionLabel}:`);
+    resolve(pw || null); // null = cancel
+  });
+}
+
+async function callBotWithPassword(method, url, data, actionLabel) {
+  // ลองก่อน 1 ครั้ง (กรณี user ตั้ง password ใน .env แต่ UI ยังไม่ถาม)
+  let payload = { ...(data || {}) };
+  try {
+    return method === 'POST' ? await API.post(url, payload) : await API.del(url, payload);
+  } catch (err) {
+    if (err && (err.status === 403 || err.status === 503)) {
+      const pw = await promptBotPassword(actionLabel);
+      if (!pw) throw new Error('ยกเลิก (ไม่ได้ใส่รหัส)');
+      payload.password = pw;
+      return method === 'POST'
+        ? await API.post(url, payload)
+        : await API.del(url, payload);
+    }
+    throw err;
+  }
+}
+
 async function createBot() {
   const data = {
     name: document.getElementById('nb-name').value || undefined,
@@ -246,7 +273,7 @@ async function createBot() {
     retryMax: parseInt(document.getElementById('nb-retry-max').value, 10),
   };
   try {
-    await API.post('/api/bots', data);
+    await callBotWithPassword('POST', '/api/bots', data, 'สร้างบอท');
     bootstrap.Modal.getInstance(document.getElementById('newBotModal')).hide();
     await loadBots();
   } catch (err) {
@@ -255,8 +282,9 @@ async function createBot() {
 }
 
 window.toggleBot = async (id, enable) => {
+  if (!confirm(`${enable ? 'เปิด' : 'ปิด'}บอทนี้?`)) return;
   try {
-    await API.post(`/api/bots/${id}/${enable ? 'enable' : 'disable'}`, {});
+    await callBotWithPassword('POST', `/api/bots/${id}/${enable ? 'enable' : 'disable'}`, {}, `${enable ? 'เปิด' : 'ปิด'}บอท`);
     await loadBots();
   } catch (err) {
     alert(err.message);
@@ -266,7 +294,7 @@ window.toggleBot = async (id, enable) => {
 window.deleteBot = async (id) => {
   if (!confirm('ลบบอทนี้?')) return;
   try {
-    await API.del(`/api/bots/${id}`);
+    await callBotWithPassword('DELETE', `/api/bots/${id}`, {}, 'ลบบอท');
     await loadBots();
   } catch (err) {
     alert(err.message);
