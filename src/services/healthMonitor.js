@@ -15,7 +15,7 @@ const logger = require('../utils/logger');
  *  - mongodb: mongoose.connection.readyState (0/1/2/3)
  *  - binanceRest: ping() success/failure
  *  - marketWs: connected + subscribed streams count
- *  - userDataWs: ws != null + listenKey alive
+ *  - userDataWs: ws != null + subscriptionId set (subscribe confirmed)
  *  - activeBots: จำนวน Trader ที่กำลังทำงาน
  *
  * Broadcast ผ่าน eventBus 'health:update' ทุก HEALTH_INTERVAL_MS
@@ -92,7 +92,8 @@ class HealthMonitor {
     const marketWsOk = marketWs.connected === true;
     const marketWsReconnect = marketWs.reconnectAttempts || 0;
 
-    const userDataWsOk = !!userDataWs.ws && userDataWs.ws.readyState === 1; // OPEN
+    const userDataWsOk = !!userDataWs.ws && userDataWs.ws.readyState === 1 // OPEN
+      && userDataWs.subscriptionId !== null; // subscribe confirmed
 
     const activeTraders = botManager.traders.size;
 
@@ -134,7 +135,8 @@ class HealthMonitor {
         userDataWs: {
           ok: userDataWsOk,
           connected: userDataWsOk,
-          hasListenKey: !!userDataWs.listenKey,
+          subscriptionId: userDataWs.subscriptionId,
+          reconnectAttempts: userDataWs.reconnectAttempts || 0,
         },
         botManager: {
           ok: true,

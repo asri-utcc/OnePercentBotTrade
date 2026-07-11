@@ -240,15 +240,29 @@ class MarketWsManager {
   }
 }
 
-// ─── User Data Stream Manager ──────────────────────────
+// ─── User Data Stream Manager (WebSocket API) ──────────
+// Replaces the legacy listenKey flow (POST/PUT/DELETE /api/v3/userDataStream)
+// which Binance discontinued in February 2026.
+//
+// New flow:
+//   1. Connect to WebSocket API endpoint (wss://ws-api.binance.com:9443/ws-api/v3)
+//   2. After open, send JSON-RPC: userDataStream.subscribe.signature
+//      params = { apiKey, timestamp, signature (HMAC SHA256 base64), recvWindow? }
+//   3. Receive subscriptionId in response
+//   4. Stream events arrive as { subscriptionId, event: { e, ... } }
+//      - event.e === "executionReport" → order update
+//      - event.e === "outboundAccountPosition" → account/balance update
+//   5. No keepalive needed — subscription lives as long as WS connection is alive.
+//      On reconnect, simply re-open WS and re-subscribe.
 class UserDataStreamManager {
   constructor() {
     this.ws = null;
-    this.listenKey = null;
-    this.keepaliveTimer = null;
+    this.subscriptionId = null;
     this.shouldRun = false;
     this.reconnectAttempts = 0;
     this.reconnectTimer = null;
+    this.requestId = 0;
+    this.pendingRequests = new Map(); // id → resolve/reject
   }
 
   async start() {
@@ -257,59 +271,37 @@ class UserDataStreamManager {
       return;
     }
     this.shouldRun = true;
-    try {
-      this.listenKey = await binanceRest.createListenKey();
-      this.connect();
-      // keepalive ทุก 30 นาที (listenKey expire 60 นาที)
-      this.keepaliveTimer = setInterval(() => {
-        this.keepalive();
-      }, 30 * 60 * 1000);
-    } catch (err) {
-      logger.error({ err: err.message }, 'user data stream start failed');
-    }
+    this.connect();
   }
 
   async stop() {
     this.shouldRun = false;
-    if (this.keepaliveTimer) {
-      clearInterval(this.keepaliveTimer);
-      this.keepaliveTimer = null;
-    }
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
-    }
-    if (this.listenKey) {
-      await binanceRest.closeListenKey(this.listenKey).catch(() => {});
-      this.listenKey = null;
     }
     if (this.ws) {
       try { this.ws.close(); } catch (e) { /* ignore */ }
       this.ws = null;
     }
-  }
-
-  async keepalive() {
-    if (!this.listenKey) return;
-    try {
-      await binanceRest.keepaliveListenKey(this.listenKey);
-      logger.debug('user data stream keepalive ok');
-    } catch (err) {
-      logger.warn({ err: err.message }, 'user data stream keepalive failed');
-    }
+    this.subscriptionId = null;
   }
 
   connect() {
-    if (!this.shouldRun || !this.listenKey) return;
-    const url = `${config.binanceApi.wsUserData}/${this.listenKey}`;
-    logger.info('user data stream connecting');
+    if (!this.shouldRun) return;
+    const url = config.binanceApi.wsApiBase;
+    logger.info({ url }, 'user data stream connecting');
 
     const ws = new WebSocket(url);
     this.ws = ws;
 
     ws.on('open', () => {
       this.reconnectAttempts = 0;
-      logger.info('user data stream connected');
+      logger.info('user data stream ws open, subscribing...');
+      this.sendSubscribe().catch((err) => {
+        logger.error({ err: err.message }, 'user data stream subscribe failed');
+        try { ws.close(); } catch (e) { /* ignore */ }
+      });
     });
 
     ws.on('message', (raw) => {
@@ -322,8 +314,13 @@ class UserDataStreamManager {
       this.handleMessage(msg);
     });
 
+    ws.on('ping', (data) => {
+      try { ws.pong(data); } catch (e) { /* ignore */ }
+    });
+
     ws.on('close', (code, reason) => {
       logger.warn({ code, reason: reason.toString() }, 'user data stream closed');
+      this.subscriptionId = null;
       this.scheduleReconnect();
     });
 
@@ -337,43 +334,94 @@ class UserDataStreamManager {
     if (this.reconnectTimer) return;
     this.reconnectAttempts += 1;
     const wait = Math.min(1000 * 2 ** (this.reconnectAttempts - 1), 30000);
-    this.reconnectTimer = setTimeout(async () => {
+    logger.info({ attempt: this.reconnectAttempts, waitMs: wait }, 'user data stream reconnecting');
+    this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
-      try {
-        // ขอ listenKey ใหม่
-        this.listenKey = await binanceRest.createListenKey();
-        this.connect();
-      } catch (err) {
-        logger.error({ err: err.message }, 'user data stream reconnect failed');
-        this.scheduleReconnect();
-      }
+      this.connect();
     }, wait);
   }
 
+  sendRpc(method, params) {
+    return new Promise((resolve, reject) => {
+      if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+        return reject(new Error('ws not open'));
+      }
+      this.requestId += 1;
+      const id = String(this.requestId);
+      this.pendingRequests.set(id, { resolve, reject, method });
+      const payload = { id, method, params };
+      try {
+        this.ws.send(JSON.stringify(payload));
+      } catch (err) {
+        this.pendingRequests.delete(id);
+        return reject(err);
+      }
+      // safety timeout: ถ้า 10 วินาทีไม่ตอบ ถือว่า fail
+      setTimeout(() => {
+        if (this.pendingRequests.has(id)) {
+          this.pendingRequests.delete(id);
+          reject(new Error('rpc timeout'));
+        }
+      }, 10000);
+    });
+  }
+
+  async sendSubscribe() {
+    const params = binanceRest.signUserStreamParams();
+    const resp = await this.sendRpc('userDataStream.subscribe.signature', params);
+    this.subscriptionId = resp.result && resp.result.subscriptionId;
+    logger.info({ subscriptionId: this.subscriptionId }, 'user data stream connected');
+  }
+
   handleMessage(msg) {
-    const e = msg.e;
+    // JSON-RPC response to our subscribe request
+    if (msg.id && this.pendingRequests.has(msg.id)) {
+      const { resolve, reject, method } = this.pendingRequests.get(msg.id);
+      this.pendingRequests.delete(msg.id);
+      if (msg.status === 200) {
+        resolve(msg);
+      } else {
+        const err = new Error(`${method} failed: ${msg.error?.msg || JSON.stringify(msg)}`);
+        err.code = msg.error?.code;
+        reject(err);
+      }
+      return;
+    }
+
+    // Event frame: { subscriptionId, event: { e, ... } }
+    const ev = msg.event;
+    if (!ev) return;
+    const e = ev.e;
     if (e === 'executionReport') {
-      // Order update
       eventBus.emit('order:update', {
-        symbol: msg.s,
-        clientOrderId: msg.c,
-        orderId: msg.i,
-        side: msg.S,
-        type: msg.o,
-        status: msg.X, // NEW/PARTIALLY_FILLED/FILLED/CANCELED/...
-        executedQty: parseFloat(msg.z),
-        cumulativeQuoteQty: parseFloat(msg.Z),
-        price: parseFloat(msg.p || msg.ap || 0),
-        avgPrice: parseFloat(msg.ap || msg.p || 0),
-        commission: parseFloat(msg.n || 0),
-        commissionAsset: msg.N || '',
-        tradeId: msg.t,
-        ts: msg.T || Date.now(),
-        raw: msg,
+        symbol: ev.s,
+        clientOrderId: ev.c,
+        orderId: ev.i,
+        side: ev.S,
+        type: ev.o,
+        status: ev.X, // NEW/PARTIALLY_FILLED/FILLED/CANCELED/...
+        executedQty: parseFloat(ev.z),
+        cumulativeQuoteQty: parseFloat(ev.Z),
+        price: parseFloat(ev.p || ev.ap || 0),
+        avgPrice: parseFloat(ev.ap || ev.p || 0),
+        commission: parseFloat(ev.n || 0),
+        commissionAsset: ev.N || '',
+        tradeId: ev.t,
+        ts: ev.T || Date.now(),
+        raw: ev,
       });
     } else if (e === 'outboundAccountPosition') {
-      eventBus.emit('account:update', msg);
+      eventBus.emit('account:update', ev);
+    } else if (e === 'balanceUpdate') {
+      eventBus.emit('balance:update', ev);
+    } else if (e === 'listStatus') {
+      // OCO list status (we don't use OCO yet, but log)
+      eventBus.emit('listStatus', ev);
     }
+  }
+
+  isConnected() {
+    return this.subscriptionId !== null && this.ws && this.ws.readyState === WebSocket.OPEN;
   }
 }
 

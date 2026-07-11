@@ -158,6 +158,36 @@ async function cancelAllOpenOrders({ symbol }) {
   return signedRequest('DELETE', '/api/v3/openOrders', { symbol }, 1);
 }
 
+// ─── User Data Stream via WebSocket API (new, post Feb 2026) ─────
+// Replaces the legacy listenKey flow (POST/PUT/DELETE /api/v3/userDataStream)
+// which was discontinued by Binance in February 2026.
+// Per Binance WebSocket API docs (HMAC signing section):
+//   "Take all request params EXCEPT signature, sort alphabetically by name,
+//    format as key=value joined by &, then HMAC-SHA-256 with secretKey → hex."
+// For userDataStream.subscribe.signature, params = { apiKey, recvWindow, timestamp }.
+// After sorting alphabetically: apiKey < recvWindow < timestamp.
+// So the signed string is: apiKey=<key>&recvWindow=<rw>&timestamp=<ms>
+function signUserStreamParams() {
+  if (!config.binance.apiKey || !config.binance.apiSecret) {
+    throw new Error('Binance API keys not configured');
+  }
+  const timestamp = nowMs();
+  const recvWindow = config.binance.recvWindow;
+  // IMPORTANT: must include ALL params except signature in the signed string,
+  // sorted alphabetically (apiKey, recvWindow, timestamp).
+  const qs = `apiKey=${config.binance.apiKey}&recvWindow=${recvWindow}&timestamp=${timestamp}`;
+  const signature = crypto
+    .createHmac('sha256', config.binance.apiSecret)
+    .update(qs)
+    .digest('hex');
+  return {
+    apiKey: config.binance.apiKey,
+    timestamp,
+    signature,
+    recvWindow,
+  };
+}
+
 // ─── User Data Stream (listenKey) ───────────────────────
 async function createListenKey() {
   if (!config.binance.apiKey) throw new Error('API key required');
@@ -212,6 +242,7 @@ module.exports = {
   createListenKey,
   keepaliveListenKey,
   closeListenKey,
+  signUserStreamParams,
   formatBinanceError,
   signQuery,
   nowMs,

@@ -72,7 +72,9 @@ const config = {
   binanceApi: {
     base: 'https://api.binance.com',
     wsBase: 'wss://stream.binance.com:9443',
-    wsUserData: 'wss://stream.binance.com:9443/ws',
+    wsUserData: 'wss://stream.binance.com:9443/ws', // legacy listenKey WS (deprecated Feb 2026)
+    // WebSocket API (new) — used for user data stream via userDataStream.subscribe.signature
+    wsApiBase: 'wss://ws-api.binance.com:9443/ws-api/v3',
   },
 
   // Binance intervals supported (subset we use; user can extend)
