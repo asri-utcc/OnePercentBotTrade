@@ -128,6 +128,9 @@ function renderBots() {
     const statusBadge = statusPillHtml(b.status);
     const pnl = b.totalPnl || 0;
     const pnlClass = pnl > 0 ? 'pnl-bull' : pnl < 0 ? 'pnl-bear' : '';
+    const todayPnl = b.todayPnl || 0;
+    const todayTrades = b.todayTrades || 0;
+    const todayClass = todayPnl > 0 ? 'pnl-bull' : todayPnl < 0 ? 'pnl-bear' : '';
     return `
       <div class="bot-card ${statusClass}" data-bot-id="${b._id}">
         <div class="row1">
@@ -153,6 +156,10 @@ function renderBots() {
           <span class="pair"><span>PnL:</span><strong class="${pnlClass}">${pnl.toFixed(4)} USDT</strong></span>
           <span class="pair"><span>Trades:</span><strong>${b.totalTrades || 0} (W ${b.winTrades || 0})</strong></span>
         </div>
+        <div class="row2" style="margin-top: 0.25rem; padding-top: 0.45rem; border-top: 1px dashed var(--border-soft);">
+          <span class="pair"><span>📅 Today:</span><strong class="${todayClass}">${todayPnl >= 0 ? '+' : ''}${todayPnl.toFixed(4)} USDT</strong></span>
+          <span class="pair"><span>🗓️ ไม้วันนี้:</span><strong>${todayTrades}</strong></span>
+        </div>
         ${b.lastError ? `<div class="last-err">⚠️ ${escapeHtml(b.lastError)}</div>` : ''}
       </div>`;
   }).join('');
@@ -170,6 +177,8 @@ function renderStats() {
   const totalTrades = bots.reduce((s, b) => s + (b.totalTrades || 0), 0);
   const totalWins = bots.reduce((s, b) => s + (b.winTrades || 0), 0);
   const totalPnl = bots.reduce((s, b) => s + (b.totalPnl || 0), 0);
+  const todayTrades = bots.reduce((s, b) => s + (b.todayTrades || 0), 0);
+  const todayPnl = bots.reduce((s, b) => s + (b.todayPnl || 0), 0);
   const losses = Math.max(0, totalTrades - totalWins);
 
   document.getElementById('stat-trades').textContent = totalTrades;
@@ -186,6 +195,20 @@ function renderStats() {
   const pnlEl = document.getElementById('stat-pnl');
   pnlEl.textContent = totalPnl.toFixed(4);
   pnlEl.className = 'value ' + (totalPnl > 0 ? 'pnl-bull' : totalPnl < 0 ? 'pnl-bear' : '');
+
+  // Today stats
+  const tileToday = document.getElementById('tile-today-pnl');
+  tileToday.classList.remove('is-bull', 'is-bear', 'is-gold');
+  if (todayPnl > 0) tileToday.classList.add('is-bull');
+  else if (todayPnl < 0) tileToday.classList.add('is-bear');
+  else tileToday.classList.add('is-gold');
+
+  const todayEl = document.getElementById('stat-today-pnl');
+  todayEl.textContent = todayPnl.toFixed(4);
+  todayEl.className = 'value ' + (todayPnl > 0 ? 'pnl-bull' : todayPnl < 0 ? 'pnl-bear' : '');
+  document.getElementById('stat-today-pnl-sub').textContent = `${todayTrades} ไม้ · วันนี้`;
+
+  document.getElementById('stat-today-trades').textContent = todayTrades;
 }
 
 async function createBot() {

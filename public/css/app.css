@@ -739,7 +739,8 @@ a:hover { color: var(--gold-2); text-decoration: none; }
 
 /* summary cards */
 .summary-row { display: grid; grid-template-columns: repeat(2, 1fr); gap: 0.75rem; margin-bottom: 1rem; }
-@media (min-width: 768px) { .summary-row { grid-template-columns: repeat(4, 1fr); } }
+@media (min-width: 768px) { .summary-row { grid-template-columns: repeat(3, 1fr); } }
+@media (min-width: 992px) { .summary-row { grid-template-columns: repeat(6, 1fr); } }
 
 /* ============================================================
    MOBILE CARDS

@@ -205,6 +205,10 @@ function renderSummary() {
     ['placed', 'filled', 'holding', 'selling', 'retrying'].includes(t.state)
   ).length;
 
+  const today = detail.todayStats || { trades: 0, pnl: 0 };
+  const todayPnl = today.pnl || 0;
+  const todayTrades = today.trades || 0;
+
   const tilePnl = document.getElementById('tile-pnl');
   tilePnl.classList.remove('is-bull', 'is-bear', 'is-gold');
   if (totalPnl > 0) tilePnl.classList.add('is-bull');
@@ -226,6 +230,26 @@ function renderSummary() {
 
   document.getElementById('stat-active').textContent = `${activeCount} / ${b.maxTrades}`;
   document.getElementById('stat-active-sub').textContent = `ทุนรวม ${(b.capitalPerTrade * b.maxTrades).toFixed(2)} USDT`;
+
+  // Today PnL tile
+  const tileToday = document.getElementById('tile-today-pnl');
+  if (tileToday) {
+    tileToday.classList.remove('is-bull', 'is-bear', 'is-gold');
+    if (todayPnl > 0) tileToday.classList.add('is-bull');
+    else if (todayPnl < 0) tileToday.classList.add('is-bear');
+    else tileToday.classList.add('is-gold');
+    const todayEl = document.getElementById('stat-today-pnl');
+    todayEl.textContent = formatUsdt(todayPnl);
+    todayEl.className = 'value ' + (todayPnl > 0 ? 'pnl-bull' : todayPnl < 0 ? 'pnl-bear' : '');
+    document.getElementById('stat-today-pnl-sub').textContent = `USDT · ${todayTrades} ไม้`;
+  }
+  const tileTT = document.getElementById('tile-today-trades');
+  if (tileTT) {
+    document.getElementById('stat-today-trades').textContent = todayTrades;
+    document.getElementById('stat-today-trades-sub').textContent = todayPnl >= 0
+      ? `กำไร ${formatUsdt(todayPnl)} USDT`
+      : (todayPnl < 0 ? `ขาดทุน ${formatUsdt(Math.abs(todayPnl))} USDT` : 'ยังไม่มี');
+  }
 
   // sparkline for PnL (cumulative of last 20 closed trades)
   drawSpark('spark-pnl', buildPnlSeries(), totalPnl >= 0 ? 'bull' : 'bear');

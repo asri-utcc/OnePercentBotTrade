@@ -3,12 +3,42 @@
 const express = require('express');
 const { requireAuth } = require('../middleware/auth');
 const Bot = require('../../db/models/Bot');
+const Trade = require('../../db/models/Trade');
 const config = require('../../../config');
 const botManager = require('../../core/botManager');
 const symbolInfo = require('../../binance/symbolInfo');
 const logger = require('../../utils/logger');
 
 const router = express.Router();
+
+/**
+ * Start of "today" in server local timezone (00:00:00 local).
+ * Used to compute todayTrades / todayPnl aggregates.
+ */
+function startOfTodayLocal() {
+  const d = new Date();
+  d.setHours(0, 0, 0, 0);
+  return d;
+}
+
+/**
+ * Aggregate todayTrades + todayPnl grouped by botId.
+ * Returns Map<botIdString, { todayTrades, todayPnl }>.
+ */
+async function aggregateTodayPerBot() {
+  const since = startOfTodayLocal();
+  const rows = await Trade.aggregate([
+    { $match: { sellFilledAt: { $gte: since }, realizedPnl: { $ne: null } } },
+    { $group: {
+      _id: '$botId',
+      todayTrades: { $sum: 1 },
+      todayPnl: { $sum: '$realizedPnl' },
+    } },
+  ]);
+  const map = new Map();
+  for (const r of rows) map.set(String(r._id), { todayTrades: r.todayTrades, todayPnl: r.todayPnl });
+  return map;
+}
 
 // ดึง list symbols ที่ valid (สำหรับ dropdown)
 router.get('/symbols', requireAuth, async (req, res) => {
@@ -24,11 +54,17 @@ router.get('/symbols', requireAuth, async (req, res) => {
 router.get('/', requireAuth, async (req, res) => {
   try {
     const bots = await Bot.find().sort({ createdAt: -1 }).lean();
-    // เพิ่ม totalCapital virtual
-    const enriched = bots.map((b) => ({
-      ...b,
-      totalCapital: (b.capitalPerTrade || 0) * (b.maxTrades || 0),
-    }));
+    const todayMap = await aggregateTodayPerBot();
+    // เพิ่ม totalCapital virtual + today stats
+    const enriched = bots.map((b) => {
+      const t = todayMap.get(String(b._id)) || { todayTrades: 0, todayPnl: 0 };
+      return {
+        ...b,
+        totalCapital: (b.capitalPerTrade || 0) * (b.maxTrades || 0),
+        todayTrades: t.todayTrades,
+        todayPnl: t.todayPnl,
+      };
+    });
     res.json({ bots: enriched });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -200,7 +236,6 @@ router.post('/:id/disable', requireAuth, async (req, res) => {
 // รวม bot + recent trades + recent signals + active trade
 router.get('/:id/details', requireAuth, async (req, res) => {
   try {
-    const Trade = require('../../db/models/Trade');
     const Signal = require('../../db/models/Signal');
     const bot = await Bot.findById(req.params.id).lean();
     if (!bot) return res.status(404).json({ error: 'Bot not found' });
@@ -219,11 +254,21 @@ router.get('/:id/details', requireAuth, async (req, res) => {
       ['placed', 'filled', 'holding', 'selling', 'retrying'].includes(t.state)
     ) || null;
 
+    // today's stats for this bot (in server local time)
+    const since = startOfTodayLocal();
+    const todayStats = await Trade.aggregate([
+      { $match: { botId: bot._id, sellFilledAt: { $gte: since }, realizedPnl: { $ne: null } } },
+      { $group: { _id: null, todayTrades: { $sum: 1 }, todayPnl: { $sum: '$realizedPnl' } } },
+    ]);
+
+    const today = todayStats[0] || { todayTrades: 0, todayPnl: 0 };
+
     res.json({
       bot: { ...bot, totalCapital: (bot.capitalPerTrade || 0) * (bot.maxTrades || 0) },
       activeTrade,
       trades,
       signals,
+      todayStats: { trades: today.todayTrades || 0, pnl: today.todayPnl || 0 },
     });
   } catch (err) {
     logger.error({ err: err.message }, 'bot details failed');
