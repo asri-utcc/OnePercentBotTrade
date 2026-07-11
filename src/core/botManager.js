@@ -43,6 +43,10 @@ class BotManager {
 
     // Reconciliation: เช็ค Trade ที่ค้างจาก crash ก่อนหน้า
     await this.reconcilePendingTrades();
+
+    // ซ่อม Bot totals (totalPnl/totalTrades/winTrades) ให้ตรงกับ Trade collection
+    // (กัน drift จาก read-modify-write race ที่เคยทำให้ totalTrades ตกหล่น)
+    await this.recomputeBotStats();
   }
 
   async stop() {
@@ -233,7 +237,8 @@ class BotManager {
                   ts: order.updateTime,
                 }, trade);
               } else {
-                // ไม่มี trader → mark sold + คำนวณ PnL inline
+                // ไม่มี trader → mark sold + คำนวณ PnL inline + อัปเดต Bot totals
+                // (FIX: ก่อนหน้านี้ลืมอัปเดต Bot → totalTrades ตกหล่นทำให้ todayTrades > totalTrades)
                 const feeRate = require('../binance/fees').getMakerRate();
                 const sellPrice = parseFloat(order.price || order.avgPrice) || (parseFloat(order.cummulativeQuoteQty) / parseFloat(order.executedQty));
                 const pnl = require('../binance/fees').calcPnl({
@@ -255,6 +260,17 @@ class BotManager {
                     pnlPercent: pnl.pnlPercent,
                   }
                 );
+                // FIX: อัปเดต Bot totals ด้วย $inc (กัน lost update)
+                await Bot.updateOne(
+                  { _id: trade.botId },
+                  {
+                    $inc: {
+                      totalPnl: pnl.net,
+                      totalTrades: 1,
+                      winTrades: (pnl.net > 0 ? 1 : 0),
+                    },
+                  }
+                );
               }
             }
           }
@@ -262,6 +278,58 @@ class BotManager {
       } catch (err) {
         logger.error({ err: err.message, tradeId: trade._id.toString() }, 'reconcile error');
       }
+    }
+  }
+
+  /**
+   * Recompute Bot totals (totalPnl/totalTrades/winTrades) from Trade collection.
+   * ใช้ตอน startup เพื่อซ่อมค่าที่ตกหล่นจาก read-modify-write race ก่อนหน้านี้
+   * (idempotent — รันกี่ครั้งก็ได้ผลเดิม)
+   */
+  async recomputeBotStats() {
+    try {
+      const bots = await Bot.find().lean();
+      for (const bot of bots) {
+        const stats = await Trade.aggregate([
+          {
+            $match: {
+              botId: bot._id,
+              state: 'sold',
+              realizedPnl: { $ne: null },
+            },
+          },
+          {
+            $group: {
+              _id: null,
+              totalPnl: { $sum: '$realizedPnl' },
+              totalTrades: { $sum: 1 },
+              winTrades: { $sum: { $cond: [{ $gt: ['$realizedPnl', 0] }, 1, 0] } },
+            },
+          },
+        ]);
+        const s = stats[0] || { totalPnl: 0, totalTrades: 0, winTrades: 0 };
+        // ใช้ $set แทน (overwrite) เพราะ aggregate เป็น source of truth
+        await Bot.updateOne(
+          { _id: bot._id },
+          {
+            $set: {
+              totalPnl: s.totalPnl,
+              totalTrades: s.totalTrades,
+              winTrades: s.winTrades,
+            },
+          }
+        );
+        if (s.totalTrades !== (bot.totalTrades || 0)) {
+          logger.warn({
+            botId: bot._id.toString(),
+            symbol: bot.symbol,
+            old: { totalPnl: bot.totalPnl, totalTrades: bot.totalTrades, winTrades: bot.winTrades },
+            new: { totalPnl: s.totalPnl, totalTrades: s.totalTrades, winTrades: s.winTrades },
+          }, 'botManager: recomputed bot totals (fixed drift from lost updates)');
+        }
+      }
+    } catch (err) {
+      logger.error({ err: err.message }, 'botManager: recomputeBotStats failed');
     }
   }
 

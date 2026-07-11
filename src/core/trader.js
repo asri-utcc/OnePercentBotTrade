@@ -813,17 +813,16 @@ class Trader {
         }
       );
 
-      // update bot stats — MARKET fallback ปิดรอบทันที
-      const newTotal = (this.bot.totalPnl || 0) + pnl.net;
-      const newCount = (this.bot.totalTrades || 0) + 1;
-      const newWin = (this.bot.winTrades || 0) + (pnl.net > 0 ? 1 : 0);
+      // update bot stats — ใช้ $inc (atomic) กัน lost update
       await Bot.updateOne(
         { _id: this.bot._id },
         {
-          totalPnl: newTotal,
-          totalTrades: newCount,
-          winTrades: newWin,
-          status: 'idle',
+          $inc: {
+            totalPnl: pnl.net,
+            totalTrades: 1,
+            winTrades: (pnl.net > 0 ? 1 : 0),
+          },
+          $set: { status: 'idle' },
         }
       );
 
@@ -928,16 +927,15 @@ class Trader {
           }
         );
 
-        const newTotal = (this.bot.totalPnl || 0) + pnl.net;
-        const newCount = (this.bot.totalTrades || 0) + 1;
-        const newWin = (this.bot.winTrades || 0) + (pnl.net > 0 ? 1 : 0);
         await Bot.updateOne(
           { _id: this.bot._id },
           {
-            totalPnl: newTotal,
-            totalTrades: newCount,
-            winTrades: newWin,
-            status: 'idle',
+            $inc: {
+              totalPnl: pnl.net,
+              totalTrades: 1,
+              winTrades: (pnl.net > 0 ? 1 : 0),
+            },
+            $set: { status: 'idle' },
           }
         );
 
@@ -1169,17 +1167,18 @@ class Trader {
         return;
       }
 
-      // update bot stats
-      const newTotal = (this.bot.totalPnl || 0) + pnl.net;
-      const newCount = (this.bot.totalTrades || 0) + 1;
-      const newWin = (this.bot.winTrades || 0) + (pnl.net > 0 ? 1 : 0);
+      // update bot stats — ใช้ $inc (atomic) แทน read-modify-write เพื่อกัน
+      // lost update เวลา trader instance ถือ snapshot เก่า (เคยทำให้
+      // totalTrades ตกหล่นเมื่อ 2 trade ปิดใกล้กัน หรือระหว่าง restart)
       await Bot.updateOne(
         { _id: this.bot._id },
         {
-          totalPnl: newTotal,
-          totalTrades: newCount,
-          winTrades: newWin,
-          status: 'idle',
+          $inc: {
+            totalPnl: pnl.net,
+            totalTrades: 1,
+            winTrades: (pnl.net > 0 ? 1 : 0),
+          },
+          $set: { status: 'idle' },
         }
       );
 
