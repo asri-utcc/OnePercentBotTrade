@@ -46,6 +46,12 @@ function createApp() {
       res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
       res.setHeader('Pragma', 'no-cache');
     }
+    // Static JS/CSS — บังคับให้ browser revalidate ทุกครั้ง (กัน cache ของโค้ดใหม่
+    // ที่ user แก้แล้ว แต่ browser ยังโหลดไฟล์เก่า) — Express.static จะตั้ง ETag อยู่แล้ว
+    // ส่ง 304 ถ้าไฟล์ไม่เปลี่ยน เลยไม่เปลือง bandwidth
+    if (/\.(js|css|html)$/.test(req.path) || req.path === '/') {
+      res.setHeader('Cache-Control', 'no-cache, must-revalidate');
+    }
     next();
   });
 
