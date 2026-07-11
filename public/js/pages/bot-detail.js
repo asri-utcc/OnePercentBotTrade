@@ -16,9 +16,6 @@ let activeTab = 'overview';
 /* Charts */
 let priceChart = null;
 let candleSeries = null;
-let basisSeries = null;
-let upperSeries = null;
-let lowerSeries = null;
 let pnlChart = null;
 let pnlSeries = null;
 let pnlMarkers = null;
@@ -524,9 +521,7 @@ function setupCharts() {
     borderUpColor: '#00e5b8', borderDownColor: '#ff4d6d',
     wickUpColor: '#00e5b8', wickDownColor: '#ff4d6d',
   });
-  basisSeries = priceChart.addLineSeries({ color: '#a78bfa', lineWidth: 1, title: 'EMA' });
-  upperSeries = priceChart.addLineSeries({ color: '#5dc4ff', lineWidth: 1, lineStyle: 2, title: 'Upper KC' });
-  lowerSeries = priceChart.addLineSeries({ color: '#5dc4ff', lineWidth: 1, lineStyle: 2, title: 'Lower KC' });
+  // EMA + Keltner Channel lines intentionally not drawn — clean candle-only view
 
   // PnL chart
   pnlChart = LightweightCharts.createChart(pnlEl, chartBaseOptions(pnlEl.clientWidth, 180));
@@ -592,9 +587,7 @@ async function renderPriceChart() {
     }
 
     candleSeries.setData(candleData);
-    basisSeries.setData(basis);
-    upperSeries.setData(upper);
-    lowerSeries.setData(lower);
+    // EMA/KC series removed — skip setData
 
     // signal markers (S1)
     const sigMarkers = (resp.signals || []).map((s) => ({
