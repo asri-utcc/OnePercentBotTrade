@@ -26,8 +26,31 @@ function createApp() {
   const app = express();
 
   app.set('trust proxy', 1);
+
+  // ─── Security headers (lightweight — ไม่ใช้ helmet เพื่อลด dependencies) ─
+  app.use((req, res, next) => {
+    // ป้องกัน MIME sniffing
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    // ป้องกัน clickjacking
+    res.setHeader('X-Frame-Options', 'DENY');
+    // ปิด XSS filter ของ browser (แนะนำโดย OWASP — เพราะ buggy)
+    res.setHeader('X-XSS-Protection', '0');
+    // บอก browser ว่าเราไม่ควรถูก embed ที่อื่น (กัน referer leak)
+    res.setHeader('Referrer-Policy', 'no-referrer');
+    // ถ้าใช้ HTTPS (ผ่าน reverse proxy) — บอก browser ให้ upgrade
+    if (req.secure || req.headers['x-forwarded-proto'] === 'https') {
+      res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+    }
+    // API responses ไม่ควร cache
+    if (req.path.startsWith('/api/')) {
+      res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+      res.setHeader('Pragma', 'no-cache');
+    }
+    next();
+  });
+
   app.use(express.json({ limit: '1mb' }));
-  app.use(express.urlencoded({ extended: true }));
+  app.use(express.urlencoded({ extended: true, limit: '1mb' }));
 
   // Session
   app.use(session({
@@ -38,6 +61,8 @@ function createApp() {
       httpOnly: true,
       maxAge: 7 * 24 * 60 * 60 * 1000, // 7 วัน
       sameSite: 'lax',
+      // secure: true ถ้าใช้ HTTPS (ต้อง trust proxy ก่อน)
+      secure: false, // เปลี่ยนเป็น 'auto' ถ้ามี HTTPS reverse proxy
     },
     store: MongoStore.create({
       mongoUrl: config.mongoUri,

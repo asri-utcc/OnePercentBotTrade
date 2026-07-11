@@ -21,6 +21,9 @@ function optional(name, fallback) {
 const config = {
   env: optional('NODE_ENV', 'development'),
   port: parseInt(optional('PORT', '3000'), 10),
+  // Host to bind. '0.0.0.0' = all interfaces (ต้องการตอน forward port ผ่าน router)
+  // '127.0.0.1' = localhost only (default ปลอดภัยกว่า)
+  host: optional('HOST', '127.0.0.1'),
   logLevel: optional('LOG_LEVEL', 'info'),
 
   // Auth / session
@@ -49,6 +52,13 @@ const config = {
     retryTimeMin: parseInt(optional('DEFAULT_RETRY_TIME_MIN', '1'), 10),
     symbol: optional('DEFAULT_SYMBOL', 'BNBUSDT'),
     timeframe: optional('DEFAULT_TIMEFRAME', '5m'),
+  },
+
+  // Security: login brute-force protection (only matters if exposed to internet)
+  security: {
+    loginMaxAttempts: parseInt(optional('LOGIN_MAX_ATTEMPTS', '10'), 10),
+    loginWindowMs: parseInt(optional('LOGIN_WINDOW_MS', '900000'), 10), // 15 นาที
+    loginLockoutMs: parseInt(optional('LOGIN_LOCKOUT_MS', '900000'), 10), // 15 นาที
   },
 
   // Paths

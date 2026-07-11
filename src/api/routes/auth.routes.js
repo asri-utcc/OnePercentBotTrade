@@ -7,13 +7,35 @@ const AppConfig = require('../../db/models/AppConfig');
 const crypto = require('../../services/crypto');
 const binanceRest = require('../../binance/binanceRest');
 const logger = require('../../utils/logger');
+const { LoginGuard } = require('../../utils/loginGuard');
+
+// Brute-force protection สำหรับ /login (สำคัญมากถ้า expose port ออกเน็ต)
+const loginGuard = new LoginGuard({
+  maxAttempts: config.security.loginMaxAttempts,
+  windowMs: config.security.loginWindowMs,
+  lockoutMs: config.security.loginLockoutMs,
+});
+
+// Helper: extract client IP จาก request (รองรับ X-Forwarded-For ตอน reverse proxy)
+function clientIp(req) {
+  const xff = req.headers['x-forwarded-for'];
+  if (xff) return String(xff).split(',')[0].trim();
+  return req.ip || req.socket.remoteAddress || 'unknown';
+}
 
 const router = express.Router();
 
 // ─── POST /api/auth/setup ─────────────────────────────
 // Setup ครั้งแรก: ตั้ง password + Binance API keys (encrypted)
+// หลัง setup เสร็จแล้ว endpoint นี้จะถูกปิดถาวร (return 404)
 router.post('/setup', async (req, res) => {
   try {
+    // เช็คก่อนว่า setup เสร็จยัง — ถ้าใช่ ไม่ต้องเปิดเผยว่ามี route นี้อยู่
+    const existing = await AppConfig.findOne({ key: 'singleton' }).lean();
+    if (existing && existing.setupCompleted) {
+      return res.status(404).json({ error: 'Not found' });
+    }
+
     const { password, binanceApiKey, binanceApiSecret, useBnbForFees } = req.body || {};
 
     if (!password || password.length < 6) {
@@ -23,7 +45,7 @@ router.post('/setup', async (req, res) => {
     let configDoc = await AppConfig.findOne({ key: 'singleton' });
     if (!configDoc) configDoc = new AppConfig({ key: 'singleton' });
     if (configDoc.setupCompleted) {
-      return res.status(400).json({ error: 'Setup already completed' });
+      return res.status(404).json({ error: 'Not found' });
     }
 
     configDoc.passwordHash = await bcrypt.hash(password, 10);
@@ -69,6 +91,17 @@ router.get('/status', async (req, res) => {
 
 // ─── POST /api/auth/login ─────────────────────────────
 router.post('/login', async (req, res) => {
+  const ip = clientIp(req);
+
+  // Check lockout ก่อน — ถ้า IP ถูก lock ไม่ต้องทำ bcrypt เลย (กัน CPU burn)
+  const lockStatus = loginGuard.check(ip);
+  if (lockStatus.locked) {
+    res.set('Retry-After', String(lockStatus.retryAfterSec));
+    return res.status(429).json({
+      error: `Too many failed attempts. Try again in ${lockStatus.retryAfterSec}s`,
+    });
+  }
+
   try {
     const { password } = req.body || {};
     if (!password) return res.status(400).json({ error: 'password required' });
@@ -79,11 +112,24 @@ router.post('/login', async (req, res) => {
     }
 
     const ok = await bcrypt.compare(password, configDoc.passwordHash);
-    if (!ok) return res.status(401).json({ error: 'Invalid password' });
+    if (!ok) {
+      loginGuard.recordFail(ip);
+      const fails = loginGuard.check(ip);
+      if (fails.locked) {
+        res.set('Retry-After', String(fails.retryAfterSec));
+        logger.warn({ ip }, 'login: invalid password — IP locked');
+        return res.status(429).json({
+          error: `Too many failed attempts. Try again in ${fails.retryAfterSec}s`,
+        });
+      }
+      return res.status(401).json({ error: 'Invalid password' });
+    }
 
+    loginGuard.recordSuccess(ip);
     req.session.authenticated = true;
     res.json({ ok: true });
   } catch (err) {
+    logger.error({ err: err.message, ip }, 'login error');
     res.status(500).json({ error: err.message });
   }
 });

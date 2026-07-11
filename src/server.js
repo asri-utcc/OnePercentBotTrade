@@ -20,9 +20,14 @@ async function main() {
   dashboardWs.attach(server);
 
   // 3. Start listening immediately (so port 6015 is reachable even if MongoDB is down)
-  server.listen(config.port, () => {
-    logger.info(`🚀 listening on http://localhost:${config.port}`);
+  //    HOST=127.0.0.1 (default, ปลอดภัย) หรือ HOST=0.0.0.0 (forward port ได้)
+  server.listen(config.port, config.host, () => {
+    const displayHost = config.host === '0.0.0.0' ? '0.0.0.0 (all interfaces)' : config.host;
+    logger.info(`🚀 listening on http://${displayHost}:${config.port}`);
     logger.info(`📊 Dashboard: http://localhost:${config.port}/`);
+    if (config.host === '0.0.0.0') {
+      logger.warn('⚠️  Bound to 0.0.0.0 — server reachable from any network interface. Ensure firewall + login guard is configured.');
+    }
   });
 
   // 4. Connect MongoDB in background (retry forever, doesn't block listen)
