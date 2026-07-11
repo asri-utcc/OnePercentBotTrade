@@ -1,0 +1,75 @@
+'use strict';
+
+const http = require('http');
+const config = require('../config');
+const logger = require('./utils/logger');
+const db = require('./db/connection');
+const { createApp } = require('./app');
+const dashboardWs = require('./realtime/dashboardWs');
+const botManager = require('./core/botManager');
+const healthMonitor = require('./services/healthMonitor');
+
+async function main() {
+  logger.info({ env: config.env, port: config.port }, 'starting OnePercentBotTrade');
+
+  // 1. Create app
+  const app = createApp();
+  const server = http.createServer(app);
+
+  // 2. Attach dashboard WS (must happen before listen so upgrade handler is registered)
+  dashboardWs.attach(server);
+
+  // 3. Start listening immediately (so port 6015 is reachable even if MongoDB is down)
+  server.listen(config.port, () => {
+    logger.info(`🚀 listening on http://localhost:${config.port}`);
+    logger.info(`📊 Dashboard: http://localhost:${config.port}/`);
+  });
+
+  // 4. Connect MongoDB in background (retry forever, doesn't block listen)
+  db.connect().then(async () => {
+    // 5. Start bot manager (after DB ready)
+    try {
+      await botManager.start();
+    } catch (err) {
+      logger.error({ err: err.message }, 'botManager start failed');
+    }
+  }).catch((err) => {
+    logger.error({ err: err.message }, 'mongoDB connect ultimately failed');
+  });
+
+  // 6. Start health monitor immediately (so /api/health responds right away)
+  healthMonitor.start();
+
+  // Graceful shutdown
+  let shuttingDown = false;
+  const shutdown = async (signal) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    logger.info({ signal }, 'shutting down');
+    try { healthMonitor.stop(); } catch (e) { /* ignore */ }
+    try { await botManager.stop(); } catch (e) { /* ignore */ }
+    server.close(() => {
+      db.disconnect().finally(() => {
+        process.exit(0);
+      });
+    });
+    setTimeout(() => {
+      logger.warn('force exit after 10s');
+      process.exit(1);
+    }, 10000);
+  };
+  process.on('SIGINT', () => shutdown('SIGINT'));
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
+
+  process.on('uncaughtException', (err) => {
+    logger.error({ err: err.message, stack: err.stack }, 'uncaughtException');
+  });
+  process.on('unhandledRejection', (err) => {
+    logger.error({ err: err && err.message ? err.message : err }, 'unhandledRejection');
+  });
+}
+
+main().catch((err) => {
+  logger.error({ err: err.message, stack: err.stack }, 'fatal error during startup');
+  process.exit(1);
+});

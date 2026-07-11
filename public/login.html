@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="th">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Login - OnePercentBotTrade</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet" />
+  <link href="/css/app.css" rel="stylesheet" />
+</head>
+<body class="bg-light">
+  <div class="container" style="max-width: 480px; margin-top: 60px;">
+    <div class="card shadow">
+      <div class="card-body p-4">
+        <h3 class="mb-3">🤖 OnePercentBotTrade</h3>
+        <div id="setup-form" style="display:none;">
+          <h5>⚙️ ตั้งค่าครั้งแรก</h5>
+          <div class="mb-2">
+            <label class="form-label">Dashboard Password</label>
+            <input type="password" class="form-control" id="setup-password" />
+          </div>
+          <div class="mb-2">
+            <label class="form-label">Binance API Key</label>
+            <input type="text" class="form-control" id="setup-api-key" placeholder="(optional - ใส่ภายหลังได้)" />
+          </div>
+          <div class="mb-2">
+            <label class="form-label">Binance API Secret</label>
+            <input type="password" class="form-control" id="setup-api-secret" placeholder="(optional)" />
+          </div>
+          <div class="form-check mb-3">
+            <input type="checkbox" class="form-check-input" id="setup-bnb-fees" />
+            <label class="form-check-label" for="setup-bnb-fees">ใช้ BNB จ่าย fee (0.075% maker) — ต้องมี BNB ในบัญชี</label>
+          </div>
+          <button class="btn btn-primary w-100" id="setup-btn">Setup</button>
+        </div>
+
+        <div id="login-form">
+          <h5>🔐 Login</h5>
+          <div class="mb-2">
+            <label class="form-label">Password</label>
+            <input type="password" class="form-control" id="login-password" autofocus />
+          </div>
+          <button class="btn btn-primary w-100" id="login-btn">Login</button>
+        </div>
+
+        <div id="error" class="alert alert-danger mt-3" style="display:none;"></div>
+      </div>
+    </div>
+    <p class="text-center text-muted mt-3 small">
+      ⚠️ ตั้ง API key permission เป็น <strong>Spot trading only, ปิด withdraw</strong> และผูก IP whitelist
+    </p>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+  <script src="/js/api.js"></script>
+  <script>
+    async function init() {
+      const status = await API.get('/api/auth/status');
+      if (status.authenticated) {
+        location.href = '/bots.html';
+        return;
+      }
+      if (!status.setupCompleted) {
+        document.getElementById('setup-form').style.display = 'block';
+        document.getElementById('login-form').style.display = 'none';
+      }
+    }
+    function showError(msg) {
+      const el = document.getElementById('error');
+      el.textContent = msg;
+      el.style.display = 'block';
+      setTimeout(() => { el.style.display = 'none'; }, 5000);
+    }
+
+    document.getElementById('setup-btn').onclick = async () => {
+      const password = document.getElementById('setup-password').value;
+      const apiKey = document.getElementById('setup-api-key').value;
+      const apiSecret = document.getElementById('setup-api-secret').value;
+      const useBnb = document.getElementById('setup-bnb-fees').checked;
+      if (!password || password.length < 6) return showError('Password ต้องยาวอย่างน้อย 6 ตัวอักษร');
+      try {
+        await API.post('/api/auth/setup', { password, binanceApiKey: apiKey, binanceApiSecret: apiSecret, useBnbForFees: useBnb });
+        location.href = '/bots.html';
+      } catch (err) { showError(err.message); }
+    };
+
+    document.getElementById('login-btn').onclick = async () => {
+      const password = document.getElementById('login-password').value;
+      try {
+        await API.post('/api/auth/login', { password });
+        location.href = '/bots.html';
+      } catch (err) { showError(err.message); }
+    };
+
+    document.getElementById('login-password').addEventListener('keypress', (e) => {
+      if (e.key === 'Enter') document.getElementById('login-btn').click();
+    });
+
+    init();
+  </script>
+</body>
+</html>

@@ -1,0 +1,79 @@
+'use strict';
+
+require('dotenv').config();
+
+const path = require('path');
+
+// Validate required env
+function required(name) {
+  const v = process.env[name];
+  if (!v || v.trim() === '') {
+    throw new Error(`Missing required env: ${name}. Copy .env.example to .env and fill it in.`);
+  }
+  return v;
+}
+
+function optional(name, fallback) {
+  const v = process.env[name];
+  return (v === undefined || v === '') ? fallback : v;
+}
+
+const config = {
+  env: optional('NODE_ENV', 'development'),
+  port: parseInt(optional('PORT', '3000'), 10),
+  logLevel: optional('LOG_LEVEL', 'info'),
+
+  // Auth / session
+  sessionSecret: required('SESSION_SECRET'),
+  dashboardPassword: optional('DASHBOARD_PASSWORD', ''),
+
+  // DB
+  mongoUri: optional('MONGODB_URI', 'mongodb://127.0.0.1:27017/onepercentbottrade'),
+
+  // Encryption
+  encryptionKey: required('ENCRYPTION_KEY'),
+
+  // Binance
+  binance: {
+    apiKey: optional('BINANCE_API_KEY', ''),
+    apiSecret: optional('BINANCE_API_SECRET', ''),
+    useBnbForFees: optional('USE_BNB_FOR_FEES', 'false').toLowerCase() === 'true',
+    recvWindow: parseInt(optional('BINANCE_RECV_WINDOW', '5000'), 10),
+  },
+
+  // Trading defaults
+  defaults: {
+    capitalPerTrade: parseFloat(optional('DEFAULT_CAPITAL_PER_TRADE', '10')),
+    maxTrades: parseInt(optional('DEFAULT_MAX_TRADES', '10'), 10),
+    tpPercent: parseFloat(optional('DEFAULT_TP_PERCENT', '0.1')),
+    retryTimeMin: parseInt(optional('DEFAULT_RETRY_TIME_MIN', '1'), 10),
+    symbol: optional('DEFAULT_SYMBOL', 'BNBUSDT'),
+    timeframe: optional('DEFAULT_TIMEFRAME', '5m'),
+  },
+
+  // Paths
+  paths: {
+    root: path.resolve(__dirname, '..'),
+    public: path.resolve(__dirname, '..', 'public'),
+  },
+
+  // Binance endpoints
+  binanceApi: {
+    base: 'https://api.binance.com',
+    wsBase: 'wss://stream.binance.com:9443',
+    wsUserData: 'wss://stream.binance.com:9443/ws',
+  },
+
+  // Binance intervals supported (subset we use; user can extend)
+  binanceIntervals: ['1m', '3m', '5m', '15m', '30m', '1h', '2h', '4h', '6h', '8h', '12h', '1d', '3d', '1w', '1M'],
+
+  // Fee rates (default; ดึงจาก account จริงตอน runtime ได้)
+  fees: {
+    bnbMaker: 0.00075,   // 0.075%
+    bnbTaker: 0.00075,   // 0.075%
+    normalMaker: 0.001,  // 0.1%
+    normalTaker: 0.001,  // 0.1%
+  },
+};
+
+module.exports = config;
