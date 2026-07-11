@@ -448,25 +448,59 @@ async checkBuyOrder(signalDoc, candle) {
 
   // Status A: FILLED → handleBuyFilled (ไป step ขาย)
   // Status B: PARTIALLY_FILLED → handlePartialBuyFill (เอาส่วนที่ได้ไปขายเลย)
-  // Status C: NEW/PENDING → เช็คว่า best bid ขยับไหม
+  // Status C: NEW/PENDING → เช็คว่า best bid ขยับไหม + retryMax เหลือไหม
 
   const newBid = currentBookTicker?.bid;
   const priceDiff = Math.abs(newBid - originalPrice) / originalPrice;
+  const retryMax = this.bot.retryMax ?? 1;
+  const remaining = retryMax - (trade.retryCount || 0);
 
-  if (newBid && priceDiff > 0.000001) {  // 0.0001% threshold
-    // bid ขยับ → cancel + re-place @ newBid
+  if (newBid && priceDiff > 0.000001 && remaining > 0) {  // 0.0001% threshold + retry เหลือ
+    // bid ขยับ + retry เหลือ → cancel + re-place @ newBid
     await binanceRest.cancelOrder({ symbol, orderId: trade.buyOrderId });
     // re-query order อีกครั้ง กัน race (อาจ fill พอดีระหว่าง cancel)
     const reCheck = await binanceRest.getOrder({ symbol, orderId });
     if (reCheck.status === 'FILLED') return handleBuyFilled(reCheck);
     // สร้าง Trade doc ใหม่ (retryCount++)
     await rePlaceBuy(prevTrade, signalDoc, candle, newBid);
+  } else if (newBid && priceDiff > 0.000001 && remaining <= 0) {
+    // bid ขยับ แต่ retryMax หมดแล้ว → cancel + signal expired (จบรอบ)
+    await binanceRest.cancelOrder({ symbol, orderId: trade.buyOrderId });
+    await Trade.updateOne({ _id: trade._id }, { state: 'cancelled', error: `retryMax ${retryMax} reached` });
+    await Signal.updateOne({ _id: signalDoc._id }, { outcome: 'expired', note: `retryMax ${retryMax} reached, bid moved` });
+    this.currentTrade = null;
   } else {
-    // bid ยังเท่าเดิม → schedule retry รอบถัดไป
+    // bid ยังอยู่ที่เดิม (order ยังเป็น best bid) → schedule retry รอบถัดไป
     scheduleRetryCheck(candle, signalDoc);
   }
 }
 ```
+
+**retryMax** (ค่า default = 1) ควบคุมจำนวนครั้งที่อนุญาตให้วาง BUY ใหม่:
+- `retryMax=0` → วางครั้งเดียว ไม่ retry
+- `retryMax=1` → วางได้อีก 1 ครั้งถ้า bid ขยับ (ค่า default)
+- `retryMax=N` → วางใหม่ได้สูงสุด N ครั้ง
+- ถ้า bid ขยับเกิน retryMax → cancel order + signal `expired` (ไม่วาง SELL)
+
+### 5.3.1 Pre-flight USDT Balance Check
+
+ก่อน place BUY ทุกครั้ง จะตรวจ USDT balance:
+
+```javascript
+const requiredNotional = parseFloat(buyPrice) * parseFloat(qty);
+const requiredWithBuffer = requiredNotional * (1 + feeRate);  // fee buffer 1 ขา
+
+const account = await binanceRest.getAccount();
+const usdtBal = (account.balances || []).find((b) => b.asset === 'USDT');
+const freeUsdt = usdtBal ? parseFloat(usdtBal.free) : 0;
+
+if (freeUsdt < requiredWithBuffer) {
+  // skip signal, log lastError, ไม่ place order
+  return;
+}
+```
+
+ถ้า fetch balance fail (เช่น API key ไม่มี "Enable Reading") → log warning แต่ไม่ block (ไปต่อ)
 
 ### 5.4 SELL Logic — TP Calculation
 
