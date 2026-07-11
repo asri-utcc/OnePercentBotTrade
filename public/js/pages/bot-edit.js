@@ -71,6 +71,13 @@ function render() {
           <input type="number" class="form-control" id="f-retry" value="${bot.retryTimeMin}" step="1" min="1" max="60" />
         </div>
       </div>
+      <div class="row">
+        <div class="col-md-6 mb-3">
+          <label class="form-label">Retry max (ครั้งที่วางใหม่ได้)</label>
+          <input type="number" class="form-control" id="f-retry-max" value="${bot.retryMax ?? 1}" step="1" min="0" max="10" />
+          <small class="text-muted">0 = วางครั้งเดียว ไม่ retry; 1 = วางใหม่ได้ 1 ครั้งถ้า bid ขยับ</small>
+        </div>
+      </div>
       <div class="alert alert-info" id="f-total"></div>
       <div class="text-danger small mb-3" id="f-error"></div>
       <button type="submit" class="btn btn-primary">💾 บันทึก</button>
@@ -101,6 +108,7 @@ async function save(e) {
     maxTrades: parseInt(document.getElementById('f-maxtrades').value, 10),
     tpPercent: parseFloat(document.getElementById('f-tp').value),
     retryTimeMin: parseInt(document.getElementById('f-retry').value, 10),
+    retryMax: parseInt(document.getElementById('f-retry-max').value, 10),
   };
   try {
     await API.put(`/api/bots/${botId}`, data);

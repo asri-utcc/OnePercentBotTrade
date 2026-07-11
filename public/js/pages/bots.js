@@ -138,6 +138,7 @@ function renderBots() {
               ${statusBadge}
             </div>
             <div>
+              <a href="/bot-detail.html?id=${b._id}" class="btn btn-sm btn-outline-info">📊 รายละเอียด</a>
               <a href="/bot-edit.html?id=${b._id}" class="btn btn-sm btn-outline-primary">⚙️ แก้ไข</a>
               ${b.enabled
                 ? `<button class="btn btn-sm btn-warning" onclick="toggleBot('${b._id}', false)">⏸ หยุด</button>`
@@ -191,6 +192,7 @@ async function createBot() {
     maxTrades: parseInt(document.getElementById('nb-maxtrades').value, 10),
     tpPercent: parseFloat(document.getElementById('nb-tp').value),
     retryTimeMin: parseInt(document.getElementById('nb-retry').value, 10),
+    retryMax: parseInt(document.getElementById('nb-retry-max').value, 10),
   };
   try {
     await API.post('/api/bots', data);

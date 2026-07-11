@@ -50,6 +50,7 @@ const config = {
     maxTrades: parseInt(optional('DEFAULT_MAX_TRADES', '10'), 10),
     tpPercent: parseFloat(optional('DEFAULT_TP_PERCENT', '0.1')),
     retryTimeMin: parseInt(optional('DEFAULT_RETRY_TIME_MIN', '1'), 10),
+    retryMax: parseInt(optional('DEFAULT_RETRY_MAX', '1'), 10),
     symbol: optional('DEFAULT_SYMBOL', 'BNBUSDT'),
     timeframe: optional('DEFAULT_TIMEFRAME', '5m'),
   },

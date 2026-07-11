@@ -156,6 +156,11 @@
             <label class="form-label">Retry time (นาที)</label>
             <input type="number" class="form-control" id="nb-retry" value="1" step="1" min="1" max="60" />
           </div>
+          <div class="mb-2">
+            <label class="form-label">Retry max (ครั้งที่วางใหม่ได้)</label>
+            <input type="number" class="form-control" id="nb-retry-max" value="1" step="1" min="0" max="10" />
+            <small class="text-muted">0 = วางครั้งเดียว ไม่ retry; 1 = วางได้อีก 1 ครั้งถ้า bid ขยับ</small>
+          </div>
           <div class="alert alert-info small" id="nb-total"></div>
           <div class="text-danger small" id="nb-error"></div>
         </div>

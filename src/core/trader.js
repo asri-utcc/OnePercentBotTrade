@@ -181,10 +181,34 @@ class Trader {
       if (!validation.ok) {
         logger.warn({ botId: this.bot._id.toString(), reason: validation.reason }, 'trader: order validation failed');
         await Signal.updateOne({ _id: signalDoc._id }, { outcome: 'failed', note: validation.reason });
+        await this.failSignal(signalDoc, `validation: ${validation.reason}`);
         return;
       }
 
-      // 6. สร้าง Trade document
+      // 6. ── Pre-flight USDT balance check ──
+      // ตรวจว่ามี USDT พอจ่าย notional + fee buffer
+      const requiredNotional = parseFloat(buyPrice) * parseFloat(qty);
+      const feeBufferRate = fees.getMakerRate();
+      const requiredWithBuffer = requiredNotional * (1 + feeBufferRate);
+
+      try {
+        const account = await binanceRest.getAccount();
+        const usdtBal = (account.balances || []).find((b) => b.asset === 'USDT');
+        const freeUsdt = usdtBal ? parseFloat(usdtBal.free) : 0;
+        if (freeUsdt < requiredWithBuffer) {
+          const reason = `insufficient USDT balance: have ${freeUsdt.toFixed(4)}, need ${requiredWithBuffer.toFixed(4)} (notional ${requiredNotional.toFixed(4)} + fee buffer)`;
+          logger.warn({ botId: this.bot._id.toString(), freeUsdt, requiredWithBuffer }, 'trader: balance check failed');
+          await Signal.updateOne({ _id: signalDoc._id }, { outcome: 'skipped', note: reason });
+          await this.failSignal(signalDoc, reason);
+          return;
+        }
+        logger.debug({ botId: this.bot._id.toString(), freeUsdt, requiredWithBuffer }, 'trader: balance check ok');
+      } catch (balErr) {
+        // ถ้า fetch balance fail (เช่น API key ไม่มี permission) — log warning แต่ไม่ block
+        logger.warn({ err: balErr.message }, 'trader: balance pre-check failed (continuing)');
+      }
+
+      // 7. สร้าง Trade document
       const clientOrderId = this.makeClientOrderId('buy', candle.closeTime, 0);
       const trade = await Trade.create({
         botId: this.bot._id,
@@ -201,7 +225,7 @@ class Trader {
       });
       this.currentTrade = trade;
 
-      // 7. วาง LIMIT_MAKER BUY (post-only) — ถ้า price จะ match ทันที = reject ทันที
+      // 8. วาง LIMIT_MAKER BUY (post-only) — ถ้า price จะ match ทันที = reject ทันที
       const orderResp = await binanceRest.newOrder({
         symbol: this.bot.symbol,
         side: 'BUY',
@@ -247,7 +271,7 @@ class Trader {
       eventBus.emit('bot:status', { botId: this.bot._id, status: 'waiting_fill' });
       eventBus.emit('trade:update', { tradeId: trade._id, state: 'placed' });
 
-      // 8. Schedule retry check (เช็คสถานะทุก retryTimeMin นาที)
+      // 9. Schedule retry check (เช็คสถานะทุก retryTimeMin นาที)
       await Signal.updateOne({ _id: signalDoc._id }, { outcome: 'order_placed' });
       this.scheduleRetryCheck(candle, signalDoc);
     } catch (err) {
@@ -255,6 +279,13 @@ class Trader {
       await Bot.updateOne({ _id: this.bot._id }, { status: 'error', lastError: err.message });
       eventBus.emit('bot:status', { botId: this.bot._id, status: 'error' });
     }
+  }
+
+  // helper: บันทึก failure + reset state
+  async failSignal(signalDoc, note) {
+    await Bot.updateOne({ _id: this.bot._id }, { status: 'idle', lastError: note });
+    this.currentTrade = null;
+    eventBus.emit('bot:status', { botId: this.bot._id, status: 'idle' });
   }
 
   scheduleRetryCheck(candle, signalDoc) {
@@ -294,58 +325,106 @@ class Trader {
         return;
       }
 
-      // NEW / ACCEPTED — ยังไม่ fill
+      // 3. NEW / ACCEPTED — ยังไม่ fill → เช็ค best bid
       const newBid = this.currentBookTicker ? this.currentBookTicker.bid : null;
       const originalPrice = trade.buyPrice;
+      const retryMax = this.bot.retryMax ?? 1;
+      const priceThreshold = 0.000001; // 0.0001%
 
-      if (newBid && Math.abs(newBid - originalPrice) / originalPrice > 0.000001) {
-        // bid ขยับ → cancel + re-place
+      // ถ้าไม่มี bookTicker → รอรอบหน้า
+      if (!newBid) {
+        this.scheduleRetryCheck(candle, signalDoc);
+        return;
+      }
+
+      const movedEnough = Math.abs(newBid - originalPrice) / originalPrice > priceThreshold;
+      const remainingRetries = retryMax - (trade.retryCount || 0);
+
+      if (movedEnough && remainingRetries > 0) {
+        // bid ขยับเกิน threshold → cancel + re-place
         logger.info({
           botId: this.bot._id.toString(),
           originalPrice,
           newBid,
           retryCount: trade.retryCount + 1,
+          retryMax,
         }, 'trader: best bid moved → cancel & re-place');
 
-        const cancelResp = await binanceRest.cancelOrder({
+        await this.cancelAndRecheck(trade);
+        const reCheck = await binanceRest.getOrder({
           symbol: this.bot.symbol,
           orderId: trade.buyOrderId,
-        }).catch((err) => ({ error: binanceRest.formatBinanceError(err) }));
+        }).catch(() => null);
 
-        if (cancelResp.error && cancelResp.error.code !== -2011) {
-          // -2011 = "Unknown order" → อาจถูก fill หรือ cancel ไปแล้ว
-          logger.warn({ err: cancelResp.error }, 'trader: cancel failed');
-          this.scheduleRetryCheck(candle, signalDoc);
+        if (reCheck && reCheck.status === 'FILLED') {
+          await this.handleBuyFilled(trade, reCheck, signalDoc);
           return;
         }
 
-        // ถ้า cancel สำเร็จ → re-place ที่ราคา bid ใหม่
-        if (cancelResp.orderId || (!cancelResp.error || cancelResp.error.code === -2011)) {
-          // ตรวจสถานะอีกครั้ง กัน race (อาจ fill พอดีระหว่าง cancel)
-          const reCheck = await binanceRest.getOrder({
-            symbol: this.bot.symbol,
-            orderId: trade.buyOrderId,
-          }).catch(() => null);
-
-          if (reCheck && reCheck.status === 'FILLED') {
-            await this.handleBuyFilled(trade, reCheck, signalDoc);
-            return;
-          }
-
-          await Trade.updateOne(
-            { _id: trade._id },
-            { state: 'cancelled', buyStatus: 'CANCELED' }
-          );
-          // re-place
-          await this.rePlaceBuy(trade, signalDoc, candle, newBid);
-          return;
-        }
+        await Trade.updateOne(
+          { _id: trade._id },
+          { state: 'cancelled', buyStatus: 'CANCELED' }
+        );
+        // re-place
+        await this.rePlaceBuy(trade, signalDoc, candle, newBid);
+        return;
       }
 
-      // bid ยังเท่าเดิม → รอต่อ
+      if (movedEnough && remainingRetries <= 0) {
+        // bid ขยับ แต่ retry หมดแล้ว → cancel + จบรอบ (signal expired)
+        logger.info({
+          botId: this.bot._id.toString(),
+          originalPrice,
+          newBid,
+          retryCount: trade.retryCount,
+          retryMax,
+        }, 'trader: bid moved but retryMax reached → cancel & expire signal');
+
+        await this.cancelAndRecheck(trade);
+        const reCheck = await binanceRest.getOrder({
+          symbol: this.bot.symbol,
+          orderId: trade.buyOrderId,
+        }).catch(() => null);
+
+        if (reCheck && reCheck.status === 'FILLED') {
+          // match พอดีระหว่าง cancel → ดำเนินการขายตามปกติ
+          await this.handleBuyFilled(trade, reCheck, signalDoc);
+          return;
+        }
+
+        await Trade.updateOne(
+          { _id: trade._id },
+          { state: 'cancelled', buyStatus: 'CANCELED', error: `retryMax (${retryMax}) reached` }
+        );
+        await Signal.updateOne({ _id: signalDoc._id }, { outcome: 'expired', note: `retryMax ${retryMax} reached, bid moved` });
+        await Bot.updateOne({ _id: this.bot._id }, { status: 'idle', lastError: `signal expired: retryMax ${retryMax} reached` });
+        this.currentTrade = null;
+        eventBus.emit('bot:status', { botId: this.bot._id, status: 'idle' });
+        return;
+      }
+
+      // 4. bid ยังอยู่ที่เดิม (order ยังอยู่ใน best bid) → รอรอบถัดไป
+      logger.debug({
+        botId: this.bot._id.toString(),
+        orderPrice: originalPrice,
+        bestBid: newBid,
+        retryCount: trade.retryCount,
+        retryMax,
+      }, 'trader: order still at best bid → wait for next retry cycle');
       this.scheduleRetryCheck(candle, signalDoc);
     } catch (err) {
       logger.error({ err: err.message }, 'trader: checkBuyOrder error');
+    }
+  }
+
+  // helper: cancel order พร้อม swallow -2011 (Unknown order) ที่อาจเกิดจาก match ไปแล้ว
+  async cancelAndRecheck(trade) {
+    const cancelResp = await binanceRest.cancelOrder({
+      symbol: this.bot.symbol,
+      orderId: trade.buyOrderId,
+    }).catch((err) => ({ error: binanceRest.formatBinanceError(err) }));
+    if (cancelResp.error && cancelResp.error.code !== -2011) {
+      logger.warn({ botId: this.bot._id.toString(), err: cancelResp.error }, 'trader: cancel failed');
     }
   }
 

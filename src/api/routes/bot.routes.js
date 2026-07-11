@@ -91,6 +91,7 @@ router.post('/', requireAuth, async (req, res) => {
       maxTrades: parseInt(data.maxTrades ?? defaults.maxTrades, 10),
       tpPercent: parseFloat(data.tpPercent ?? defaults.tpPercent),
       retryTimeMin: parseInt(data.retryTimeMin ?? defaults.retryTimeMin, 10),
+      retryMax: parseInt(data.retryMax ?? 1, 10),
       enabled: false,
       status: 'idle',
     });
@@ -109,13 +110,13 @@ router.put('/:id', requireAuth, async (req, res) => {
     if (!bot) return res.status(404).json({ error: 'Bot not found' });
 
     const data = req.body || {};
-    const allowed = ['name', 'capitalPerTrade', 'maxTrades', 'tpPercent', 'retryTimeMin', 'timeframe'];
+    const allowed = ['name', 'capitalPerTrade', 'maxTrades', 'tpPercent', 'retryTimeMin', 'retryMax', 'timeframe'];
 
     for (const k of allowed) {
       if (data[k] !== undefined) {
         if (k === 'capitalPerTrade' || k === 'tpPercent') {
           bot[k] = parseFloat(data[k]);
-        } else if (k === 'maxTrades' || k === 'retryTimeMin') {
+        } else if (k === 'maxTrades' || k === 'retryTimeMin' || k === 'retryMax') {
           bot[k] = parseInt(data[k], 10);
         } else {
           bot[k] = data[k];
@@ -191,6 +192,41 @@ router.post('/:id/disable', requireAuth, async (req, res) => {
     const bot = await botManager.disableBot(req.params.id);
     res.json({ bot });
   } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── GET /api/bots/:id/details ────────────────────────
+// รวม bot + recent trades + recent signals + active trade
+router.get('/:id/details', requireAuth, async (req, res) => {
+  try {
+    const Trade = require('../../db/models/Trade');
+    const Signal = require('../../db/models/Signal');
+    const bot = await Bot.findById(req.params.id).lean();
+    if (!bot) return res.status(404).json({ error: 'Bot not found' });
+
+    const limit = Math.min(parseInt(req.query.limit || '50', 10), 200);
+    const trades = await Trade.find({ botId: bot._id })
+      .sort({ createdAt: -1 })
+      .limit(limit)
+      .lean();
+    const signals = await Signal.find({ botId: bot._id })
+      .sort({ createdAt: -1 })
+      .limit(limit)
+      .lean();
+
+    const activeTrade = trades.find((t) =>
+      ['placed', 'filled', 'holding', 'selling', 'retrying'].includes(t.state)
+    ) || null;
+
+    res.json({
+      bot: { ...bot, totalCapital: (bot.capitalPerTrade || 0) * (bot.maxTrades || 0) },
+      activeTrade,
+      trades,
+      signals,
+    });
+  } catch (err) {
+    logger.error({ err: err.message }, 'bot details failed');
     res.status(500).json({ error: err.message });
   }
 });

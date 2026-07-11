@@ -13,6 +13,7 @@ const botSchema = new mongoose.Schema(
     maxTrades: { type: Number, required: true, default: 10, min: 1, max: 1000 },
     tpPercent: { type: Number, required: true, default: 0.1, min: 0.001 },
     retryTimeMin: { type: Number, required: true, default: 1, min: 1, max: 60 },
+    retryMax: { type: Number, required: true, default: 1, min: 0, max: 10 },
     enabled: { type: Boolean, default: false },
     status: { type: String, enum: BOT_STATUSES, default: 'idle' },
     activeTrades: { type: Number, default: 0 },
