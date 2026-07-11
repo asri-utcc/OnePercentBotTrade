@@ -22,6 +22,17 @@ function startOfTodayLocal() {
 }
 
 /**
+ * Start of "this month" in server local timezone (day 1, 00:00:00 local).
+ * Used to compute monthTrades / monthPnl aggregates.
+ */
+function startOfMonthLocal() {
+  const d = new Date();
+  d.setDate(1);
+  d.setHours(0, 0, 0, 0);
+  return d;
+}
+
+/**
  * Aggregate todayTrades + todayPnl grouped by botId.
  * Returns Map<botIdString, { todayTrades, todayPnl }>.
  */
@@ -40,6 +51,25 @@ async function aggregateTodayPerBot() {
   return map;
 }
 
+/**
+ * Aggregate monthTrades + monthPnl grouped by botId (since day 1 of current month).
+ * Returns Map<botIdString, { monthTrades, monthPnl }>.
+ */
+async function aggregateMonthPerBot() {
+  const since = startOfMonthLocal();
+  const rows = await Trade.aggregate([
+    { $match: { sellFilledAt: { $gte: since }, realizedPnl: { $ne: null } } },
+    { $group: {
+      _id: '$botId',
+      monthTrades: { $sum: 1 },
+      monthPnl: { $sum: '$realizedPnl' },
+    } },
+  ]);
+  const map = new Map();
+  for (const r of rows) map.set(String(r._id), { monthTrades: r.monthTrades, monthPnl: r.monthPnl });
+  return map;
+}
+
 // ดึง list symbols ที่ valid (สำหรับ dropdown)
 router.get('/symbols', requireAuth, async (req, res) => {
   try {
@@ -55,14 +85,18 @@ router.get('/', requireAuth, async (req, res) => {
   try {
     const bots = await Bot.find().sort({ createdAt: -1 }).lean();
     const todayMap = await aggregateTodayPerBot();
-    // เพิ่ม totalCapital virtual + today stats
+    const monthMap = await aggregateMonthPerBot();
+    // เพิ่ม totalCapital virtual + today/month stats
     const enriched = bots.map((b) => {
       const t = todayMap.get(String(b._id)) || { todayTrades: 0, todayPnl: 0 };
+      const m = monthMap.get(String(b._id)) || { monthTrades: 0, monthPnl: 0 };
       return {
         ...b,
         totalCapital: (b.capitalPerTrade || 0) * (b.maxTrades || 0),
         todayTrades: t.todayTrades,
         todayPnl: t.todayPnl,
+        monthTrades: m.monthTrades,
+        monthPnl: m.monthPnl,
       };
     });
     res.json({ bots: enriched });
@@ -255,13 +289,20 @@ router.get('/:id/details', requireAuth, async (req, res) => {
     ) || null;
 
     // today's stats for this bot (in server local time)
-    const since = startOfTodayLocal();
+    const sinceToday = startOfTodayLocal();
     const todayStats = await Trade.aggregate([
-      { $match: { botId: bot._id, sellFilledAt: { $gte: since }, realizedPnl: { $ne: null } } },
+      { $match: { botId: bot._id, sellFilledAt: { $gte: sinceToday }, realizedPnl: { $ne: null } } },
       { $group: { _id: null, todayTrades: { $sum: 1 }, todayPnl: { $sum: '$realizedPnl' } } },
     ]);
-
     const today = todayStats[0] || { todayTrades: 0, todayPnl: 0 };
+
+    // this month's stats for this bot
+    const sinceMonth = startOfMonthLocal();
+    const monthStats = await Trade.aggregate([
+      { $match: { botId: bot._id, sellFilledAt: { $gte: sinceMonth }, realizedPnl: { $ne: null } } },
+      { $group: { _id: null, monthTrades: { $sum: 1 }, monthPnl: { $sum: '$realizedPnl' } } },
+    ]);
+    const month = monthStats[0] || { monthTrades: 0, monthPnl: 0 };
 
     res.json({
       bot: { ...bot, totalCapital: (bot.capitalPerTrade || 0) * (bot.maxTrades || 0) },
@@ -269,6 +310,7 @@ router.get('/:id/details', requireAuth, async (req, res) => {
       trades,
       signals,
       todayStats: { trades: today.todayTrades || 0, pnl: today.todayPnl || 0 },
+      monthStats: { trades: month.monthTrades || 0, pnl: month.monthPnl || 0 },
     });
   } catch (err) {
     logger.error({ err: err.message }, 'bot details failed');

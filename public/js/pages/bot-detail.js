@@ -193,6 +193,15 @@ function renderMetaChips() {
   document.getElementById('hero-tf').textContent = `⏱ ${b.timeframe}`;
   document.getElementById('hero-enabled').textContent = b.enabled ? '● ENABLED' : '○ DISABLED';
   document.getElementById('hero-enabled').className = 'chip ' + (b.enabled ? 'bull' : '');
+  const uptimeEl = document.getElementById('hero-uptime');
+  if (b.enabled && b.enabledAt) {
+    const sec = Math.floor((Date.now() - new Date(b.enabledAt).getTime()) / 1000);
+    uptimeEl.textContent = `⏱ uptime: ${formatUptime(sec)}`;
+    uptimeEl.style.color = 'var(--bull-1)';
+  } else {
+    uptimeEl.textContent = '⏱ uptime: -';
+    uptimeEl.style.color = 'var(--text-4)';
+  }
   document.getElementById('hero-id').textContent = `id: ${b._id.slice(-8)}`;
 }
 
@@ -210,6 +219,9 @@ function renderSummary() {
   const today = detail.todayStats || { trades: 0, pnl: 0 };
   const todayPnl = today.pnl || 0;
   const todayTrades = today.trades || 0;
+  const month = detail.monthStats || { trades: 0, pnl: 0 };
+  const monthPnl = month.pnl || 0;
+  const monthTrades = month.trades || 0;
 
   const tilePnl = document.getElementById('tile-pnl');
   tilePnl.classList.remove('is-bull', 'is-bear', 'is-gold');
@@ -251,6 +263,26 @@ function renderSummary() {
     document.getElementById('stat-today-trades-sub').textContent = todayPnl >= 0
       ? `กำไร ${formatUsdt(todayPnl)} USDT`
       : (todayPnl < 0 ? `ขาดทุน ${formatUsdt(Math.abs(todayPnl))} USDT` : 'ยังไม่มี');
+  }
+
+  // Month stats
+  const tileMonth = document.getElementById('tile-month-pnl');
+  if (tileMonth) {
+    tileMonth.classList.remove('is-bull', 'is-bear', 'is-gold');
+    if (monthPnl > 0) tileMonth.classList.add('is-bull');
+    else if (monthPnl < 0) tileMonth.classList.add('is-bear');
+    else tileMonth.classList.add('is-gold');
+    const monthEl = document.getElementById('stat-month-pnl');
+    monthEl.textContent = formatUsdt(monthPnl);
+    monthEl.className = 'value ' + (monthPnl > 0 ? 'pnl-bull' : monthPnl < 0 ? 'pnl-bear' : '');
+    document.getElementById('stat-month-pnl-sub').textContent = `${monthTrades} ไม้ · เดือนนี้`;
+  }
+  const tileMT = document.getElementById('tile-month-trades');
+  if (tileMT) {
+    document.getElementById('stat-month-trades').textContent = monthTrades;
+    document.getElementById('stat-month-trades-sub').textContent = monthPnl >= 0
+      ? `กำไร ${formatUsdt(monthPnl)} USDT`
+      : (monthPnl < 0 ? `ขาดทุน ${formatUsdt(Math.abs(monthPnl))} USDT` : 'ยังไม่มี');
   }
 
   // sparkline for PnL (cumulative of last 20 closed trades)

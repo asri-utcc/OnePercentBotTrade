@@ -209,6 +209,7 @@ class BotManager {
     const bot = await Bot.findById(botId);
     if (!bot) throw new Error('Bot not found');
     bot.enabled = true;
+    bot.enabledAt = new Date();
     bot.status = 'idle';
     await bot.save();
     await this.spawnTrader(bot);
@@ -220,6 +221,7 @@ class BotManager {
     const bot = await Bot.findById(botId);
     if (!bot) throw new Error('Bot not found');
     bot.enabled = false;
+    bot.enabledAt = null;
     bot.status = 'idle';
     await bot.save();
     await this.stopTrader(botId);

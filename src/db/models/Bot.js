@@ -15,6 +15,7 @@ const botSchema = new mongoose.Schema(
     retryTimeMin: { type: Number, required: true, default: 1, min: 1, max: 60 },
     retryMax: { type: Number, required: true, default: 1, min: 0, max: 10 },
     enabled: { type: Boolean, default: false },
+    enabledAt: { type: Date, default: null }, // เวลาที่ enable ล่าสุด (reset ทุกครั้งที่ disable→enable)
     status: { type: String, enum: BOT_STATUSES, default: 'idle' },
     activeTrades: { type: Number, default: 0 },
     lastSignalAt: { type: Date, default: null },

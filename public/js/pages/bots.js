@@ -131,6 +131,10 @@ function renderBots() {
     const todayPnl = b.todayPnl || 0;
     const todayTrades = b.todayTrades || 0;
     const todayClass = todayPnl > 0 ? 'pnl-bull' : todayPnl < 0 ? 'pnl-bear' : '';
+    const monthPnl = b.monthPnl || 0;
+    const monthTrades = b.monthTrades || 0;
+    const monthClass = monthPnl > 0 ? 'pnl-bull' : monthPnl < 0 ? 'pnl-bear' : '';
+    const uptime = b.enabled ? formatUptime((Date.now() - new Date(b.enabledAt).getTime()) / 1000) : '-';
     return `
       <div class="bot-card ${statusClass}" data-bot-id="${b._id}">
         <div class="row1">
@@ -153,12 +157,13 @@ function renderBots() {
           <span class="pair"><span>ทุน:</span><strong>$${b.capitalPerTrade} × ${b.maxTrades} = $${b.totalCapital.toFixed(2)}</strong></span>
           <span class="pair"><span>TP:</span><strong>${b.tpPercent}%</strong></span>
           <span class="pair"><span>Retry:</span><strong>${b.retryTimeMin}m · max ${b.retryMax ?? 1}</strong></span>
+          <span class="pair"><span>⏱ Uptime:</span><strong>${uptime}</strong></span>
           <span class="pair"><span>PnL:</span><strong class="${pnlClass}">${pnl.toFixed(4)} USDT</strong></span>
           <span class="pair"><span>Trades:</span><strong>${b.totalTrades || 0} (W ${b.winTrades || 0})</strong></span>
         </div>
         <div class="row2" style="margin-top: 0.25rem; padding-top: 0.45rem; border-top: 1px dashed var(--border-soft);">
-          <span class="pair"><span>📅 Today:</span><strong class="${todayClass}">${todayPnl >= 0 ? '+' : ''}${todayPnl.toFixed(4)} USDT</strong></span>
-          <span class="pair"><span>🗓️ ไม้วันนี้:</span><strong>${todayTrades}</strong></span>
+          <span class="pair"><span>📅 Today:</span><strong class="${todayClass}">${todayPnl >= 0 ? '+' : ''}${todayPnl.toFixed(4)} USDT · ${todayTrades} ไม้</strong></span>
+          <span class="pair"><span>📆 Month:</span><strong class="${monthClass}">${monthPnl >= 0 ? '+' : ''}${monthPnl.toFixed(4)} USDT · ${monthTrades} ไม้</strong></span>
         </div>
         ${b.lastError ? `<div class="last-err">⚠️ ${escapeHtml(b.lastError)}</div>` : ''}
       </div>`;
@@ -179,6 +184,8 @@ function renderStats() {
   const totalPnl = bots.reduce((s, b) => s + (b.totalPnl || 0), 0);
   const todayTrades = bots.reduce((s, b) => s + (b.todayTrades || 0), 0);
   const todayPnl = bots.reduce((s, b) => s + (b.todayPnl || 0), 0);
+  const monthTrades = bots.reduce((s, b) => s + (b.monthTrades || 0), 0);
+  const monthPnl = bots.reduce((s, b) => s + (b.monthPnl || 0), 0);
   const losses = Math.max(0, totalTrades - totalWins);
 
   document.getElementById('stat-trades').textContent = totalTrades;
@@ -209,6 +216,22 @@ function renderStats() {
   document.getElementById('stat-today-pnl-sub').textContent = `${todayTrades} ไม้ · วันนี้`;
 
   document.getElementById('stat-today-trades').textContent = todayTrades;
+
+  // Month stats
+  const tileMonth = document.getElementById('tile-month-pnl');
+  if (tileMonth) {
+    tileMonth.classList.remove('is-bull', 'is-bear', 'is-gold');
+    if (monthPnl > 0) tileMonth.classList.add('is-bull');
+    else if (monthPnl < 0) tileMonth.classList.add('is-bear');
+    else tileMonth.classList.add('is-gold');
+
+    const monthEl = document.getElementById('stat-month-pnl');
+    monthEl.textContent = monthPnl.toFixed(4);
+    monthEl.className = 'value ' + (monthPnl > 0 ? 'pnl-bull' : monthPnl < 0 ? 'pnl-bear' : '');
+    document.getElementById('stat-month-pnl-sub').textContent = `${monthTrades} ไม้ · เดือนนี้`;
+
+    document.getElementById('stat-month-trades').textContent = monthTrades;
+  }
 }
 
 async function createBot() {
