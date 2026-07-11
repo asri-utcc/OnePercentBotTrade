@@ -9,6 +9,28 @@ let markers = [];
 let currentData = null;
 let refreshTimer = null;
 
+// ─── Timezone helpers (force Asia/Bangkok +07:00) ──────
+const TZ = 'Asia/Bangkok';
+const _chartTickFmt = new Intl.DateTimeFormat('th-TH', {
+  timeZone: TZ,
+  hour: '2-digit',
+  minute: '2-digit',
+  day: '2-digit',
+  month: 'short',
+  hour12: false,
+});
+const _chartDtFmt = new Intl.DateTimeFormat('th-TH', {
+  timeZone: TZ,
+  year: 'numeric',
+  month: 'short',
+  day: '2-digit',
+  hour: '2-digit',
+  minute: '2-digit',
+  second: '2-digit',
+  hour12: false,
+});
+function fmtDateTime(d) { return d ? _chartDtFmt.format(new Date(d)) : '-'; }
+
 async function init() {
   const me = await API.get('/api/auth/me').catch(() => null);
   if (!me || !me.authenticated) {
@@ -75,6 +97,14 @@ function setupChart() {
     borderVisible: false,
     wickUpColor: '#26a69a',
     wickDownColor: '#ef5350',
+  });
+
+  // ให้แกนเวลาแสดงเป็น Asia/Bangkok (+07:00) — lightweight-charts รับ time เป็น Unix seconds
+  chart.timeScale().applyOptions({
+    tickMarkFormatter: (timeSec) => {
+      try { return _chartTickFmt.format(new Date(timeSec * 1000)); }
+      catch (e) { return ''; }
+    },
   });
 
   basisSeries = chart.addLineSeries({ color: '#2196f3', lineWidth: 1, title: 'EMA20' });
@@ -166,7 +196,7 @@ function renderSignalList(resp) {
     ${recent.length === 0 ? '<span class="text-muted">ไม่มีสัญญาณในช่วงที่เลือก</span>' :
       recent.map((s) => {
         const d = new Date(s.closeTime);
-        return `<span class="signal-marker" title="${d.toISOString()} price=${s.close.toFixed(4)} bg=${s.bgPrev}→${s.bgState}">S1 @ ${d.toLocaleString()} ($${s.close.toFixed(4)})</span> `;
+        return `<span class="signal-marker" title="${d.toISOString()} price=${s.close.toFixed(4)} bg=${s.bgPrev}→${s.bgState}">S1 @ ${fmtDateTime(d)} ($${s.close.toFixed(4)})</span> `;
       }).join('')
     }
   `;

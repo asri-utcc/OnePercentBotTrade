@@ -180,7 +180,7 @@ function renderHero() {
   else if (['idle', 'disabled'].includes(status)) light.classList.add('is-idle');
   lightLabel.textContent = status;
 
-  const ts = new Date().toLocaleTimeString();
+  const ts = fmtTime(new Date());
   document.getElementById('hero-updated').textContent = `อัปเดตล่าสุด: ${ts}`;
 
   document.getElementById('enable-btn').style.display = b.enabled ? 'none' : '';
@@ -330,7 +330,7 @@ function renderActiveTrade() {
     <div class="row"><span class="k">BUY Price</span><span class="v">${t.buyPrice != null ? t.buyPrice.toFixed(4) : '-'}</span></div>
     <div class="row"><span class="k">BUY Qty</span><span class="v">${t.buyQty != null ? t.buyQty.toFixed(6) : '-'}</span></div>
     <div class="row"><span class="k">BUY Status</span><span class="v"><span class="status-pill is-${buyStatusClass}">${t.buyStatus || '-'}</span></span></div>
-    <div class="row"><span class="k">BUY Placed</span><span class="v" style="font-size:0.78rem;">${t.buyPlacedAt ? new Date(t.buyPlacedAt).toLocaleTimeString() : '-'}</span></div>
+    <div class="row"><span class="k">BUY Placed</span><span class="v" style="font-size:0.78rem;">${t.buyPlacedAt ? fmtTime(t.buyPlacedAt) : '-'}</span></div>
     <div class="row"><span class="k">SELL OrderId</span><span class="v code" style="font-size:0.75rem;">${t.sellOrderId || '-'}</span></div>
     <div class="row"><span class="k">Target Sell</span><span class="v">${t.targetSellPrice != null ? t.targetSellPrice.toFixed(4) : '-'}</span></div>
     <div class="row"><span class="k">Retry</span><span class="v">${t.retryCount ?? 0} / ${detail.bot.retryMax ?? 1}</span></div>
@@ -351,7 +351,7 @@ function renderCfgGrid(id) {
     { k: 'Retry time',      v: `${b.retryTimeMin} นาที` },
     { k: 'Retry max',       v: `${b.retryMax ?? 1} ครั้ง` },
     { k: 'Enabled',         v: b.enabled ? '✅ เปิดใช้งาน' : '⏸ ปิดอยู่' },
-    { k: 'Last Signal',     v: b.lastSignalAt ? new Date(b.lastSignalAt).toLocaleString() : '-' },
+    { k: 'Last Signal',     v: b.lastSignalAt ? fmtDateTime(b.lastSignalAt) : '-' },
   ];
   document.getElementById(id).innerHTML = cells.map((c) => `
     <div class="detail-cell">
@@ -387,7 +387,7 @@ function renderTrades() {
     const pnlTxt = pnl != null ? `${pnl.toFixed(4)} (${(t.pnlPercent || 0).toFixed(2)}%)` : '-';
     return `
       <tr>
-        <td><span class="ts">${new Date(t.createdAt).toLocaleString()}</span></td>
+        <td><span class="ts">${fmtDateTime(t.createdAt)}</span></td>
         <td><span class="status-pill is-${sc}">${t.state}</span></td>
         <td>${t.buyPrice != null ? `BUY ${t.buyPrice.toFixed(4)}` : '-'}${t.sellPrice != null ? ` → SELL ${t.sellPrice.toFixed(4)}` : ''}</td>
         <td class="num">${t.buyPrice?.toFixed(4) ?? '-'}</td>
@@ -409,7 +409,7 @@ function renderTrades() {
       <div class="mob-card">
         <div class="top">
           <span class="status-pill is-${sc}">${t.state}</span>
-          <span class="ts" style="color:var(--text-3);font-size:0.72rem;">${new Date(t.createdAt).toLocaleString()}</span>
+          <span class="ts" style="color:var(--text-3);font-size:0.72rem;">${fmtDateTime(t.createdAt)}</span>
         </div>
         <div class="row"><span class="k">Side</span><span class="v">${t.buyPrice ? `BUY ${t.buyPrice.toFixed(4)}` : '-'}${t.sellPrice ? ` → SELL ${t.sellPrice.toFixed(4)}` : ''}</span></div>
         <div class="row"><span class="k">Qty</span><span class="v">${t.buyQty?.toFixed(6) ?? '-'}</span></div>
@@ -441,7 +441,7 @@ function renderSignals() {
       : 'neutral';
     return `
       <tr>
-        <td><span class="ts">${new Date(s.createdAt).toLocaleString()}</span></td>
+        <td><span class="ts">${fmtDateTime(s.createdAt)}</span></td>
         <td><span class="status-pill is-${dir === 'bull' ? 'success' : dir === 'bear' ? 'failed' : 'idle'}">${s.type}</span></td>
         <td class="num">${s.closePrice?.toFixed(4) ?? '-'}</td>
         <td style="font-size:0.78rem;">${s.bgPrev} → ${s.bgState}</td>
@@ -461,7 +461,7 @@ function renderSignals() {
       <div class="mob-card">
         <div class="top">
           <span class="status-pill is-${dir === 'bull' ? 'success' : dir === 'bear' ? 'failed' : 'idle'}">${s.type}</span>
-          <span class="ts" style="color:var(--text-3);font-size:0.72rem;">${new Date(s.createdAt).toLocaleString()}</span>
+          <span class="ts" style="color:var(--text-3);font-size:0.72rem;">${fmtDateTime(s.createdAt)}</span>
         </div>
         <div class="row"><span class="k">Close</span><span class="v">${s.closePrice?.toFixed(4) ?? '-'}</span></div>
         <div class="row"><span class="k">BG</span><span class="v">${s.bgPrev} → ${s.bgState}</span></div>
@@ -487,7 +487,7 @@ function renderRecentSignals() {
     return `
       <div class="signal-row">
         <span class="type-dot ${dir}"></span>
-        <span class="ts">${new Date(s.createdAt).toLocaleString()}</span>
+        <span class="ts">${fmtDateTime(s.createdAt)}</span>
         <span class="price">${s.closePrice?.toFixed(4) ?? '-'}</span>
         <span class="bg">bg ${s.bgPrev}→${s.bgState}</span>
         <span class="outcome"><span class="status-pill is-${oc}">${s.outcome}</span></span>
@@ -782,6 +782,14 @@ function formatUsdt(v) {
   if (abs >= 1) return `${sign}${abs.toFixed(3)}`;
   return `${sign}${abs.toFixed(4)}`;
 }
+// ─── Timezone helpers (force Asia/Bangkok +07:00) ──────
+const TZ = 'Asia/Bangkok';
+const _dttmFmt = new Intl.DateTimeFormat('th-TH', { timeZone: TZ, year: 'numeric', month: 'short', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
+const _dtFmt    = new Intl.DateTimeFormat('th-TH', { timeZone: TZ, year: 'numeric', month: 'short', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false });
+const _tmFmt    = new Intl.DateTimeFormat('th-TH', { timeZone: TZ, hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
+function fmtDateTime(d) { return d ? _dttmFmt.format(new Date(d)) : '-'; }
+function fmtDate(d)     { return d ? _dtFmt.format(new Date(d))    : '-'; }
+function fmtTime(d)     { return d ? _tmFmt.format(new Date(d))    : '-'; }
 function formatDuration(ms) {
   const s = Math.floor(ms / 1000);
   if (s < 60) return `${s}s`;

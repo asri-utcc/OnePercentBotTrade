@@ -1,5 +1,21 @@
 'use strict';
 
+// ─── Timezone helpers (force Asia/Bangkok +07:00) ──────
+const TZ = 'Asia/Bangkok';
+const _btDtFmt = new Intl.DateTimeFormat('th-TH', {
+  timeZone: TZ,
+  year: 'numeric', month: 'short', day: '2-digit',
+  hour: '2-digit', minute: '2-digit', second: '2-digit',
+  hour12: false,
+});
+const _btDateFmt = new Intl.DateTimeFormat('th-TH', {
+  timeZone: TZ,
+  year: 'numeric', month: 'short', day: '2-digit',
+  hour12: false,
+});
+function fmtDateTime(d) { return d ? _btDtFmt.format(new Date(d)) : '-'; }
+function fmtDate(d)     { return d ? _btDateFmt.format(new Date(d)) : '-'; }
+
 // ─── State สำหรับ pagination ของ trades table ────
 let tradesState = { all: [], page: 0, pageSize: 20 };
 
@@ -19,10 +35,10 @@ function renderTradesPage() {
   if (!tbody) return;
   tbody.innerHTML = slice.map((t) => `
     <tr>
-      <td>${new Date(t.signalTime).toLocaleString()}</td>
-      <td>${t.buyFilledAt ? new Date(t.buyFilledAt).toLocaleString() : '<span class="text-muted">—</span>'}</td>
+      <td>${fmtDateTime(t.signalTime)}</td>
+      <td>${t.buyFilledAt ? fmtDateTime(t.buyFilledAt) : '<span class="text-muted">—</span>'}</td>
       <td>${(t.buyPrice || 0).toFixed(4)}</td>
-      <td>${t.sellFilledAt ? new Date(t.sellFilledAt).toLocaleString() : '<span class="text-muted">—</span>'}</td>
+      <td>${t.sellFilledAt ? fmtDateTime(t.sellFilledAt) : '<span class="text-muted">—</span>'}</td>
       <td>${(t.targetSellPrice || 0).toFixed(4)}</td>
       <td>${t.sellPrice ? t.sellPrice.toFixed(4) : '-'}</td>
       <td>${t.buyFilled ? '✅' : '❌'}</td>
@@ -225,10 +241,10 @@ async function loadHistory() {
               : '<span class="text-muted small">unknown</span>';
             return `
               <tr>
-                <td>${new Date(r.createdAt).toLocaleString()}</td>
+                <td>${fmtDateTime(r.createdAt)}</td>
                 <td>${r.symbol}</td>
                 <td>${r.timeframe}</td>
-                <td>${new Date(r.from).toLocaleDateString()} - ${new Date(r.to).toLocaleDateString()}</td>
+                <td>${fmtDate(r.from)} - ${fmtDate(r.to)}</td>
                 <td>${modelBadge}</td>
                 <td>${r.signalsCount}</td>
                 <td>${(r.fillRate || 0).toFixed(0)}%</td>

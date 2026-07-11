@@ -369,7 +369,7 @@ function renderHeartbeat(status) {
 
   // Uptime + ts
   setText('hb-uptime', `Uptime: ${formatUptime(status.uptimeSec)}`);
-  setText('hb-ts', status.ts ? new Date(status.ts).toLocaleTimeString() : '-');
+  setText('hb-ts', status.ts ? new Date(status.ts).toLocaleTimeString('th-TH', { timeZone: 'Asia/Bangkok', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }) : '-');
 }
 
 init();
