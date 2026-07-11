@@ -804,3 +804,25 @@ a:hover { color: var(--gold-2); text-decoration: none; }
 
 /* Webfont: Inter + JetBrains Mono */
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap');
+
+/* ============================================================
+   CHART CONTAINERS (lightweight-charts themed dark)
+   ============================================================ */
+.price-chart-container {
+  position: relative;
+  width: 100%;
+  height: 340px;
+  padding: 0.25rem;
+}
+.pnl-chart-container { height: 180px; padding: 0.25rem; }
+@media (min-width: 992px) { .price-chart-container { height: 420px; } }
+.price-chart-container .loading-overlay {
+  position: absolute; inset: 0;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(7,11,20,0.55); color: var(--text-3);
+  font-family: var(--font-mono); font-size: 0.85rem;
+  backdrop-filter: blur(2px);
+}
+
+/* lightweight-charts tweaks (dark) */
+.tv-lightweight-charts { border-radius: 0 0 var(--radius-lg) var(--radius-lg); }

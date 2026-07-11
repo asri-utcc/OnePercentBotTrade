@@ -13,6 +13,16 @@ let detail = null;
 let refreshTimer = null;
 let activeTab = 'overview';
 
+/* Charts */
+let priceChart = null;
+let candleSeries = null;
+let basisSeries = null;
+let upperSeries = null;
+let lowerSeries = null;
+let pnlChart = null;
+let pnlSeries = null;
+let pnlMarkers = null;
+
 const STATE_COLORS = {
   placed: 'placed',
   filled: 'filled',
@@ -48,6 +58,7 @@ async function init() {
   WSClient.start();
   setupTabs();
   setupButtons();
+  setupCharts();
 
   await refresh();
 
@@ -65,8 +76,24 @@ async function init() {
     }
   });
   WSClient.on('bot:updated', () => refresh());
+  WSClient.on('kline:update', (p) => {
+    if (!detail || !p.kline || !candleSeries) return;
+    if (p.kline.symbol !== detail.bot.symbol || p.interval !== detail.bot.timeframe) return;
+    const lastCandle = lastKline;
+    if (lastCandle && p.kline.openTime === lastCandle.openTime) {
+      const updated = {
+        time: p.kline.openTime / 1000,
+        open: parseFloat(p.kline.open),
+        high: Math.max(lastCandle.high, parseFloat(p.kline.high)),
+        low: Math.min(lastCandle.low, parseFloat(p.kline.low)),
+        close: parseFloat(p.kline.close),
+      };
+      candleSeries.update(updated);
+      lastKline = updated;
+    }
+  });
 
-  refreshTimer = setInterval(refresh, 10000);
+  refreshTimer = setInterval(refresh, 15000);
 }
 
 /* ── Tabs ─────────────────────────────────────────────── */
@@ -132,6 +159,8 @@ function renderAll() {
   renderSignals();
   renderRecentSignals();
   renderMetaChips();
+  renderPnlChart();
+  renderPriceChart();
   document.title = `${detail.bot.name || detail.bot.symbol} · Bot Detail`;
 }
 
@@ -405,7 +434,7 @@ function renderRecentSignals() {
   }).join('');
 }
 
-/* ── Sparkline ────────────────────────────────────────── */
+/* ── Sparkline (kept as fallback / decoration) ───────── */
 function buildPnlSeries() {
   const closed = (detail.trades || [])
     .filter((t) => t.realizedPnl != null)
@@ -421,27 +450,216 @@ function buildPnlSeries() {
 }
 
 function drawSpark(targetId, series, kind) {
+  // No-op — PnL now rendered via proper area chart below
   const el = document.getElementById(targetId);
-  if (!el) return;
-  if (!series || series.length < 2) { el.innerHTML = ''; return; }
-  const w = 200, h = 36;
-  const min = Math.min(...series);
-  const max = Math.max(...series);
-  const range = max - min || 1;
-  const stepX = w / (series.length - 1);
-  const pts = series.map((v, i) => {
-    const x = i * stepX;
-    const y = h - ((v - min) / range) * h;
-    return [x, y];
+  if (el) el.innerHTML = '';
+}
+
+/* ── Charts (lightweight-charts) ──────────────────────── */
+let lastKline = null;
+
+function chartBaseOptions(width, height) {
+  return {
+    width,
+    height,
+    layout: {
+      background: { type: 'solid', color: 'transparent' },
+      textColor: '#94a3b8',
+      fontFamily: "'JetBrains Mono', monospace",
+      fontSize: 11,
+    },
+    grid: {
+      vertLines: { color: 'rgba(255,255,255,0.04)' },
+      horzLines: { color: 'rgba(255,255,255,0.04)' },
+    },
+    rightPriceScale: {
+      borderColor: 'rgba(255,255,255,0.06)',
+      scaleMargins: { top: 0.08, bottom: 0.08 },
+    },
+    timeScale: {
+      borderColor: 'rgba(255,255,255,0.06)',
+      timeVisible: true,
+      secondsVisible: false,
+    },
+    crosshair: {
+      vertLine: { color: 'rgba(245,184,0,0.4)', width: 1, style: 3, labelBackgroundColor: '#f5b800' },
+      horzLine: { color: 'rgba(245,184,0,0.4)', width: 1, style: 3, labelBackgroundColor: '#f5b800' },
+    },
+  };
+}
+
+function setupCharts() {
+  const pc = document.getElementById('price-chart');
+  const pnlEl = document.getElementById('pnl-chart');
+  if (!pc || !pnlEl || typeof LightweightCharts === 'undefined') return;
+
+  // Price chart
+  priceChart = LightweightCharts.createChart(pc, chartBaseOptions(pc.clientWidth, 340));
+  candleSeries = priceChart.addCandlestickSeries({
+    upColor: '#00e5b8', downColor: '#ff4d6d',
+    borderUpColor: '#00e5b8', borderDownColor: '#ff4d6d',
+    wickUpColor: '#00e5b8', wickDownColor: '#ff4d6d',
   });
-  const linePath = pts.map((p, i) => (i === 0 ? 'M' : 'L') + p[0].toFixed(2) + ',' + p[1].toFixed(2)).join(' ');
-  const areaPath = linePath + ` L${w},${h} L0,${h} Z`;
-  const color = kind === 'bull' ? '#00e5b8' : '#ff4d6d';
-  el.innerHTML = `
-    <svg viewBox="0 0 ${w} ${h}" preserveAspectRatio="none">
-      <path class="area" d="${areaPath}" fill="${color}" />
-      <path class="line" d="${linePath}" stroke="${color}" />
-    </svg>`;
+  basisSeries = priceChart.addLineSeries({ color: '#a78bfa', lineWidth: 1, title: 'EMA' });
+  upperSeries = priceChart.addLineSeries({ color: '#5dc4ff', lineWidth: 1, lineStyle: 2, title: 'Upper KC' });
+  lowerSeries = priceChart.addLineSeries({ color: '#5dc4ff', lineWidth: 1, lineStyle: 2, title: 'Lower KC' });
+
+  // PnL chart
+  pnlChart = LightweightCharts.createChart(pnlEl, chartBaseOptions(pnlEl.clientWidth, 180));
+  pnlSeries = pnlChart.addAreaSeries({
+    topColor: 'rgba(0,229,184,0.45)',
+    bottomColor: 'rgba(0,229,184,0.04)',
+    lineColor: '#00e5b8',
+    lineWidth: 2,
+    priceLineVisible: false,
+  });
+  pnlMarkers = pnlChart.addLineSeries({ color: 'rgba(245,184,0,0.0)', lineWidth: 0 });
+  // baseline ที่ 0
+  pnlSeries.applyOptions({ baseValue: { type: 'price', price: 0 } });
+  // price line ที่ 0
+  pnlChart.applyOptions({
+    timeScale: { borderColor: 'rgba(255,255,255,0.06)', timeVisible: true, secondsVisible: false },
+  });
+
+  // resize handling
+  const ro = new ResizeObserver((entries) => {
+    for (const e of entries) {
+      const w = Math.floor(e.contentRect.width);
+      if (e.target === pc) priceChart && priceChart.applyOptions({ width: w });
+      if (e.target === pnlEl) pnlChart && pnlChart.applyOptions({ width: w });
+    }
+  });
+  ro.observe(pc);
+  ro.observe(pnlEl);
+}
+
+async function renderPriceChart() {
+  if (!priceChart || !detail || !detail.bot) return;
+  const { symbol, timeframe } = detail.bot;
+  const loading = document.getElementById('price-chart-loading');
+  try {
+    const resp = await API.get(`/api/chart/klines?symbol=${symbol}&timeframe=${timeframe}&limit=100`);
+    if (!resp.klines || resp.klines.length === 0) {
+      if (loading) loading.textContent = 'ไม่มีข้อมูลแท่งเทียน';
+      return;
+    }
+
+    const candleData = resp.klines.map((k) => ({
+      time: Math.floor(k.openTime / 1000),
+      open: parseFloat(k.open),
+      high: parseFloat(k.high),
+      low: parseFloat(k.low),
+      close: parseFloat(k.close),
+    }));
+    lastKline = candleData[candleData.length - 1];
+
+    const basis = [];
+    const upper = [];
+    const lower = [];
+    if (resp.keltner) {
+      for (let i = 0; i < resp.klines.length; i += 1) {
+        const t = Math.floor(resp.klines[i].openTime / 1000);
+        if (resp.keltner.basis[i] != null) {
+          basis.push({ time: t, value: resp.keltner.basis[i] });
+          upper.push({ time: t, value: resp.keltner.upper[i] });
+          lower.push({ time: t, value: resp.keltner.lower[i] });
+        }
+      }
+    }
+
+    candleSeries.setData(candleData);
+    basisSeries.setData(basis);
+    upperSeries.setData(upper);
+    lowerSeries.setData(lower);
+
+    // signal markers (S1)
+    const sigMarkers = (resp.signals || []).map((s) => ({
+      time: Math.floor(s.openTime / 1000),
+      position: 'belowBar',
+      color: '#00e5b8',
+      shape: 'arrowUp',
+      text: 'S1',
+    }));
+    candleSeries.setMarkers(sigMarkers);
+
+    // overlays: trade entry/exit from detail.trades (ถ้ามี)
+    const overlayMarkers = [];
+    for (const t of detail.trades || []) {
+      if (!t.buyPlacedAt) continue;
+      const buyT = Math.floor(new Date(t.buyPlacedAt).getTime() / 1000);
+      // match to nearest candle
+      const idx = candleData.findIndex((c) => c.time >= buyT);
+      if (idx >= 0) {
+        overlayMarkers.push({
+          time: candleData[idx].time,
+          position: 'belowBar',
+          color: t.state === 'sold' || t.realizedPnl != null ? (t.realizedPnl >= 0 ? '#00e5b8' : '#ff4d6d') : '#ffb547',
+          shape: 'circle',
+          text: t.state === 'sold' ? `+${(t.realizedPnl || 0).toFixed(2)}` : (t.state || 'open'),
+        });
+      }
+    }
+    candleSeries.setMarkers([...sigMarkers, ...overlayMarkers]);
+
+    priceChart.timeScale().fitContent();
+    if (loading) loading.style.display = 'none';
+  } catch (err) {
+    console.error('renderPriceChart', err);
+    if (loading) loading.textContent = `❌ ${err.message}`;
+  }
+}
+
+function renderPnlChart() {
+  if (!pnlChart || !detail) return;
+  const closed = (detail.trades || [])
+    .filter((t) => t.realizedPnl != null && (t.sellFilledAt || t.createdAt));
+  const meta = document.getElementById('pnl-chart-meta');
+  const loading = document.getElementById('pnl-chart-loading');
+
+  if (closed.length === 0) {
+    pnlSeries.setData([]);
+    if (meta) meta.textContent = '0 ไม้ปิด';
+    if (loading) loading.style.display = '';
+    return;
+  }
+  if (loading) loading.style.display = 'none';
+
+  // sort ascending by close time
+  closed.sort((a, b) => new Date(a.sellFilledAt || a.createdAt) - new Date(b.sellFilledAt || b.createdAt));
+
+  let cum = 0;
+  const pts = [];
+  for (const t of closed) {
+    cum += t.realizedPnl;
+    const tms = new Date(t.sellFilledAt || t.createdAt).getTime();
+    pts.push({ time: Math.floor(tms / 1000), value: parseFloat(cum.toFixed(4)) });
+  }
+  // ensure strictly increasing times
+  const dedup = [];
+  for (const p of pts) {
+    if (dedup.length === 0 || dedup[dedup.length - 1].time < p.time) dedup.push(p);
+    else dedup[dedup.length - 1] = p;
+  }
+  if (dedup.length === 0) return;
+
+  // color = pick based on final value
+  const final = dedup[dedup.length - 1].value;
+  const bull = final >= 0;
+  pnlSeries.applyOptions({
+    topColor: bull ? 'rgba(0,229,184,0.45)' : 'rgba(255,77,109,0.45)',
+    bottomColor: bull ? 'rgba(0,229,184,0.04)' : 'rgba(255,77,109,0.04)',
+    lineColor: bull ? '#00e5b8' : '#ff4d6d',
+  });
+  pnlSeries.setData(dedup);
+
+  // baseline price line ที่ 0
+  try { pnlSeries.createPriceLine({ price: 0, color: 'rgba(255,255,255,0.18)', lineWidth: 1, lineStyle: 2, axisLabelVisible: true, title: 'break-even' }); } catch (_) {}
+
+  if (meta) {
+    meta.innerHTML = `${closed.length} ไม้ปิด · <span class="${bull ? 'pnl-bull' : 'pnl-bear'}">${final >= 0 ? '+' : ''}${final.toFixed(4)} USDT</span>`;
+  }
+
+  pnlChart.timeScale().fitContent();
 }
 
 /* ── Helpers ──────────────────────────────────────────── */
