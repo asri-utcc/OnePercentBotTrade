@@ -188,21 +188,25 @@ function renderHero() {
 }
 
 function renderMetaChips() {
-  const b = detail.bot;
-  document.getElementById('hero-symbol').textContent = `${b.symbol}`;
-  document.getElementById('hero-tf').textContent = `⏱ ${b.timeframe}`;
-  document.getElementById('hero-enabled').textContent = b.enabled ? '● ENABLED' : '○ DISABLED';
-  document.getElementById('hero-enabled').className = 'chip ' + (b.enabled ? 'bull' : '');
-  const uptimeEl = document.getElementById('hero-uptime');
-  if (b.enabled && b.enabledAt) {
-    const sec = Math.floor((Date.now() - new Date(b.enabledAt).getTime()) / 1000);
-    uptimeEl.textContent = `⏱ uptime: ${formatUptime(sec)}`;
-    uptimeEl.style.color = 'var(--bull-1)';
-  } else {
-    uptimeEl.textContent = '⏱ uptime: -';
-    uptimeEl.style.color = 'var(--text-4)';
+  try {
+    const b = detail.bot;
+    document.getElementById('hero-symbol').textContent = `${b.symbol}`;
+    document.getElementById('hero-tf').textContent = `⏱ ${b.timeframe}`;
+    document.getElementById('hero-enabled').textContent = b.enabled ? '● ENABLED' : '○ DISABLED';
+    document.getElementById('hero-enabled').className = 'chip ' + (b.enabled ? 'bull' : '');
+    const uptimeEl = document.getElementById('hero-uptime');
+    if (b.enabled && b.enabledAt) {
+      const sec = Math.floor((Date.now() - new Date(b.enabledAt).getTime()) / 1000);
+      uptimeEl.textContent = `⏱ uptime: ${formatUptime(sec)}`;
+      uptimeEl.style.color = 'var(--bull-1)';
+    } else {
+      uptimeEl.textContent = '⏱ uptime: -';
+      uptimeEl.style.color = 'var(--text-4)';
+    }
+    document.getElementById('hero-id').textContent = `id: ${b._id.slice(-8)}`;
+  } catch (err) {
+    console.error('renderMetaChips', err);
   }
-  document.getElementById('hero-id').textContent = `id: ${b._id.slice(-8)}`;
 }
 
 /* ── Summary KPIs ─────────────────────────────────────── */
@@ -785,6 +789,16 @@ function formatDuration(ms) {
   if (m < 60) return `${m}m ${s % 60}s`;
   const h = Math.floor(m / 60);
   return `${h}h ${m % 60}m`;
+}
+function formatUptime(sec) {
+  if (!sec && sec !== 0) return '-';
+  const d = Math.floor(sec / 86400);
+  const h = Math.floor((sec % 86400) / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  const s = sec % 60;
+  if (d > 0) return `${d}d ${h}h ${m}m`;
+  if (h > 0) return `${h}h ${m}m ${s}s`;
+  return `${m}m ${s}s`;
 }
 function escapeHtml(s) {
   if (!s) return '';
