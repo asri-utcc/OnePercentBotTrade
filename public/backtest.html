@@ -66,6 +66,13 @@
       </div>
     </div>
 
+    <div class="alert alert-info py-2 px-3 mb-3" style="font-size: 0.82rem;">
+      <strong>ℹ️ โมเดล Backtest:</strong>
+      BUY ใช้ <code>candle close</code> เป็น proxy สำหรับ <em>best bid</em> (บอทจริงใช้ bid จาก WS ตอนปิดแท่ง → ต่ำกว่า close 1–10 bps) ·
+      BUY fill เมื่อ <code>low ≤ P AND close ≥ P AND volume &gt; 0</code> (post-only bid ตามลง = ไม่นับ) ·
+      BUY timestamp = กลางแท่ง (openTime + stepMs/2)
+    </div>
+
     <div id="result"></div>
 
     <div class="page-title mt-4">

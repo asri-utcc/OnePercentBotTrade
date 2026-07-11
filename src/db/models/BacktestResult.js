@@ -27,6 +27,11 @@ const backtestResultSchema = new mongoose.Schema(
     timeframe: { type: String, required: true },
     from: { type: Date, required: true },
     to: { type: Date, required: true },
+    // executionModel: รหัสโมเดล backtest (เปลี่ยนเมื่อ fill logic / timestamp logic เปลี่ยน)
+    //   v3_simple_fill     — เงื่อนไขเดิม (low ≤ P อย่างเดียว)
+    //   v4_maker_fill      — เงื่อนไขใหม่ (low ≤ P AND close ≥ P AND volume > 0)
+    //                        + BUY timestamp = กลางแท่ง
+    executionModel: { type: String, default: 'unknown', index: true },
     params: {
       tpPercent: { type: Number, required: true },
       capitalPerTrade: { type: Number, required: true },

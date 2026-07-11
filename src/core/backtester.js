@@ -111,6 +111,9 @@ function simulateTrades({ klines, signals, opts }) {
   // Active trades: เรียงตาม exitIdx ascending (FIFO) เพื่อ clean up เร็ว
   const activeExits = []; // array of { buyCandleIdx, exitIdx }
 
+  // หา stepMs ของชุด klines (ใช้สำหรับ BUY fill timestamp = กลางแท่ง)
+  const stepMs = klines.length >= 2 ? (klines[1].openTime - klines[0].openTime) : 0;
+
   for (const sig of signals) {
     const idx = sig.index;
     const buyPrice = sig.close;
@@ -177,12 +180,19 @@ function simulateTrades({ klines, signals, opts }) {
     }
 
     // ─── Phase 1: BUY fill check ─────────────────────────
+    // Maker BUY ที่ราคา P จะ fill ก็ต่อเมื่อ:
+    //   - candle นั้น dip ลงไปถึง P (low ≤ P)  = "มี taker ขายทับ bid เรา"
+    //   - แล้วปิดเหนือ P (close ≥ P)          = "หลังจาก fill แล้ว price ไม่ลงต่อ"
+    //                                              (post-only bid ตามลง = ไม่นับ)
+    //   - และ volume > 0                       = กัน edge case candle ว่างเปล่า
+    // เงื่อนไขเดิม (low ≤ P อย่างเดียว) นับ wick ลงเด้งกลับเป็น fill ทั้งหมด → overcount
     let buyFilled = false;
     let buyCandleIdx = null;
     const buyEnd = Math.min(klines.length, idx + 1 + maxBuyWait);
 
     for (let j = idx + 1; j < buyEnd; j += 1) {
-      if (klines[j].low <= buyPrice) {
+      const c = klines[j];
+      if (c.low <= buyPrice && c.close >= buyPrice && c.volume > 0) {
         buyFilled = true;
         buyCandleIdx = j;
         break;
@@ -232,6 +242,9 @@ function simulateTrades({ klines, signals, opts }) {
         feeRate,
       });
       activeExits.push({ buyCandleIdx, exitIdx: sellCandleIdx });
+      // BUY fill timestamp = กลางแท่ง (openTime + stepMs/2)
+      // สะท้อนว่า maker order มัก fill ระหว่างแท่ง ไม่ใช่ตอนปิดพอดี
+      const buyFilledAtMs = stepMs > 0 ? klines[buyCandleIdx].openTime + Math.floor(stepMs / 2) : klines[buyCandleIdx].closeTime;
       trades.push({
         signalTime: new Date(sig.openTime),
         candleCloseTime: new Date(sig.closeTime),
@@ -240,7 +253,7 @@ function simulateTrades({ klines, signals, opts }) {
         sellPrice,
         buyFilled: true,
         sellFilled: true,
-        buyFilledAt: new Date(klines[buyCandleIdx].closeTime),
+        buyFilledAt: new Date(buyFilledAtMs),
         sellFilledAt: new Date(klines[sellCandleIdx].closeTime),
         qty: qty.toNumber(),
         notional: notional.toNumber(),
@@ -261,6 +274,7 @@ function simulateTrades({ klines, signals, opts }) {
         qty: qty.toNumber(),
         feeRate,
       });
+      const buyFilledAtMs = stepMs > 0 ? klines[buyCandleIdx].openTime + Math.floor(stepMs / 2) : klines[buyCandleIdx].closeTime;
       trades.push({
         signalTime: new Date(sig.openTime),
         candleCloseTime: new Date(sig.closeTime),
@@ -269,7 +283,7 @@ function simulateTrades({ klines, signals, opts }) {
         sellPrice: null,
         buyFilled: true,
         sellFilled: false,
-        buyFilledAt: new Date(klines[buyCandleIdx].closeTime),
+        buyFilledAt: new Date(buyFilledAtMs),
         sellFilledAt: null,
         qty: qty.toNumber(),
         notional: notional.toNumber(),
@@ -454,6 +468,12 @@ async function runBacktest(params) {
     timeframe,
     from: new Date(fromMs),
     to: new Date(toMs),
+    // executionModel: รหัสโมเดลที่ใช้ (สำหรับ audit/comparison ผล backtest ต่างรุ่น)
+    //  v4_maker_fill: BUY fill = (low ≤ P) AND (close ≥ P) AND (volume > 0)
+    //                 BUY price = candle close (proxy for best bid)
+    //                 BUY timestamp = mid-candle (openTime + stepMs/2)
+    //                 SELL fill = high ≥ target, no stop loss
+    executionModel: 'v4_maker_fill',
     params: {
       tpPercent,
       capitalPerTrade,

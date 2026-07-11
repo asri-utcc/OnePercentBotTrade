@@ -130,10 +130,12 @@ function renderResult(resp, params) {
         </table>
 
         <div class="alert alert-light small mt-2">
-          <strong>ℹ️ โมเดล Realistic v3 (No Stop Loss, max ${params.maxConcurrentTrades || 10} ไม้พร้อมกัน):</strong>
+          <strong>ℹ️ Execution Model: <code>${resp.executionModel || 'unknown'}</code></strong> (No Stop Loss, max ${params.maxConcurrentTrades || 10} ไม้พร้อมกัน)
           <ul class="mb-1">
-            <li><strong>Buy Fill</strong>: ต้องรอให้ราคาลงมาแตะ bid ของเรา (future candle low ≤ buyPrice) ภายใน 6 แท่ง — ถ้าไม่ fill คือยกเลิก → ไม่มี PnL</li>
-            <li><strong>Sell Fill</strong>: ต้องรอให้ราคาขึ้นไปแตะ ask (future candle high ≥ target) — <strong>ไม่มี stop loss</strong> ถ้าไม่ fill → ถือต่อจนกว่าข้อมูลจะหมด (ยังไม่นับ PnL)</li>
+            <li><strong>BUY price</strong>: ใช้ <code>candle close</code> เป็น proxy สำหรับ <em>best bid</em> (บอทจริงใช้ bid จาก bookTicker WS ตอนปิดแท่ง → ต่ำกว่า close 1–10 bps ในตลาดผันผวน)</li>
+            <li><strong>Buy Fill</strong>: นับเป็น fill เมื่อ <code>low ≤ P AND close ≥ P AND volume &gt; 0</code> (post-only bid ที่ wick ลงเด้งกลับจะไม่ถูกนับ fill) ภายใน 6 แท่ง — ถ้าไม่ fill คือยกเลิก → ไม่มี PnL</li>
+            <li><strong>Buy timestamp</strong>: <code>openTime + stepMs/2</code> (กลางแท่ง) — สะท้อนว่า maker order มัก fill ระหว่างแท่ง ไม่ใช่ตอนปิด</li>
+            <li><strong>Sell Fill</strong>: ต้องรอให้ราคาขึ้นไปแตะ target (future candle high ≥ target) — <strong>ไม่มี stop loss</strong> ถ้าไม่ fill → ถือต่อจนกว่าข้อมูลจะหมด (ยังไม่นับ PnL)</li>
             <li><strong>Slot Limit</strong>: ถ้าเปิดไม้ครบ ${params.maxConcurrentTrades || 10} → skip signal ใหม่ (ไม่เปิดเกิน)</li>
             <li><strong>Qty</strong>: floor ตาม stepSize ของ symbol (เช่น BNBUSDT = 0.01) — ถ้า notional &lt; minNotional จะ skip</li>
           </ul>
@@ -156,19 +158,23 @@ async function loadHistory() {
       <table class="table table-sm">
         <thead>
           <tr>
-            <th>เวลา</th><th>Symbol</th><th>TF</th><th>ช่วง</th>
+            <th>เวลา</th><th>Symbol</th><th>TF</th><th>ช่วง</th><th>Model</th>
             <th>Signals</th><th>Fill%</th><th>Exit%</th><th>Win%</th><th>W/L</th><th>PnL</th><th>PnL %</th><th></th>
           </tr>
         </thead>
         <tbody>
           ${resp.results.map((r) => {
             const pnlClass = (r.totalPnl || 0) >= 0 ? 'pnl-positive' : 'pnl-negative';
+            const modelBadge = r.executionModel
+              ? `<span class="badge bg-secondary" title="Execution model">${r.executionModel}</span>`
+              : '<span class="text-muted small">unknown</span>';
             return `
               <tr>
                 <td>${new Date(r.createdAt).toLocaleString()}</td>
                 <td>${r.symbol}</td>
                 <td>${r.timeframe}</td>
                 <td>${new Date(r.from).toLocaleDateString()} - ${new Date(r.to).toLocaleDateString()}</td>
+                <td>${modelBadge}</td>
                 <td>${r.signalsCount}</td>
                 <td>${(r.fillRate || 0).toFixed(0)}%</td>
                 <td>${(r.exitRate || 0).toFixed(0)}%</td>

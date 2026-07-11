@@ -44,6 +44,7 @@ router.post('/', requireAuth, async (req, res) => {
 
     res.json({
       id: result.result._id,
+      executionModel: result.result.executionModel,
       stats: result.stats,
       signalsCount: result.signals.length,
       tradesCount: result.trades.length,
