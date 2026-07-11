@@ -4,161 +4,205 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Bot Detail - OnePercentBotTrade</title>
-  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/bootstrap.min.css" rel="stylesheet" />
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet" />
   <link href="/css/app.css" rel="stylesheet" />
 </head>
 <body>
-  <nav class="navbar navbar-expand-lg navbar-dark bg-dark mb-3">
-    <div class="container-fluid">
-      <a class="navbar-brand" href="/bots.html">🤖 OnePercentBotTrade</a>
-      <div class="collapse navbar-collapse show">
-        <ul class="navbar-nav me-auto">
-          <li class="nav-item"><a class="nav-link" href="/bots.html">Bots</a></li>
-          <li class="nav-item"><a class="nav-link active" href="#" id="bot-name-link">Bot Detail</a></li>
-          <li class="nav-item"><a class="nav-link" href="/chart.html">Chart</a></li>
-          <li class="nav-item"><a class="nav-link" href="/backtest.html">Backtest</a></li>
-        </ul>
-        <ul class="navbar-nav">
-          <li class="nav-item"><span class="nav-link" id="ws-status">⚪ offline</span></li>
-          <li class="nav-item"><a class="nav-link" href="#" id="logout-btn">Logout</a></li>
-        </ul>
+  <!-- NAVBAR (filled by partial loader below) -->
+  <nav class="app-nav" id="app-nav"></nav>
+
+  <div class="container-fluid px-3 px-md-4 py-3 py-md-4">
+
+    <!-- Hero header -->
+    <div class="bot-hero">
+      <div>
+        <div class="d-flex align-items-center gap-2 mb-2 flex-wrap">
+          <span class="hero-light" id="hero-light"><span class="pulse"></span><span id="hero-light-label">idle</span></span>
+          <span class="meta-chip" style="font-family:var(--font-mono);font-size:0.72rem;color:var(--text-3);" id="hero-updated">อัปเดตล่าสุด: -</span>
+        </div>
+        <h1 class="bot-title" id="bot-name">⏳ Loading…</h1>
+        <div class="meta">
+          <span class="chip gold" id="hero-symbol">-</span>
+          <span class="chip violet" id="hero-tf">-</span>
+          <span class="chip bull" id="hero-enabled">-</span>
+          <span class="chip" id="hero-id" style="font-size:0.7rem;color:var(--text-4);">id: -</span>
+        </div>
+      </div>
+      <div class="actions">
+        <a href="#" id="edit-btn" class="btn-lux btn-gold">⚙️ แก้ไข</a>
+        <button class="btn-lux btn-bull" id="enable-btn" style="display:none">▶ เริ่ม</button>
+        <button class="btn-lux" id="disable-btn" style="display:none">⏸ หยุด</button>
+        <button class="btn-lux btn-info" id="refresh-btn">🔄 รีเฟรช</button>
       </div>
     </div>
-  </nav>
 
-  <div class="container-fluid">
-    <!-- Header -->
-    <div class="row mb-3">
-      <div class="col-12">
-        <div class="card">
-          <div class="card-body">
-            <div class="d-flex justify-content-between align-items-start">
-              <div>
-                <h4 class="mb-1">🤖 <span id="bot-name">Loading…</span></h4>
-                <div class="text-muted small">
-                  <span class="badge bg-secondary" id="bot-symbol">-</span>
-                  <span class="badge bg-info" id="bot-tf">-</span>
-                  <span id="bot-status-badge"></span>
-                </div>
-              </div>
-              <div class="d-flex gap-2">
-                <a href="/bot-edit.html?id=" id="edit-btn" class="btn btn-sm btn-outline-primary">⚙️ แก้ไข</a>
-                <button class="btn btn-sm btn-success" id="enable-btn" style="display:none">▶ เริ่ม</button>
-                <button class="btn btn-sm btn-warning" id="disable-btn" style="display:none">⏸ หยุด</button>
-                <button class="btn btn-sm btn-outline-secondary" id="refresh-btn">🔄 Refresh</button>
-              </div>
+    <!-- Summary KPIs -->
+    <div class="summary-row" id="summary-row">
+      <div class="stat-tile" id="tile-pnl">
+        <span class="glyph">💰</span>
+        <div class="label"><span>Total PnL</span></div>
+        <div class="value" id="stat-pnl">0.0000</div>
+        <div class="sub" id="stat-pnl-sub">USDT · 0 ไม้</div>
+        <div class="spark" id="spark-pnl"></div>
+      </div>
+      <div class="stat-tile" id="tile-trades">
+        <span class="glyph">📈</span>
+        <div class="label"><span>Trades</span></div>
+        <div class="value" id="stat-trades">0</div>
+        <div class="sub" id="stat-trades-sub">wins / losses</div>
+      </div>
+      <div class="stat-tile" id="tile-winrate">
+        <span class="glyph">🎯</span>
+        <div class="label"><span>Win Rate</span></div>
+        <div class="value" id="stat-winrate">0%</div>
+        <div class="sub" id="stat-winrate-sub">last 50</div>
+      </div>
+      <div class="stat-tile" id="tile-active">
+        <span class="glyph">⚡</span>
+        <div class="label"><span>Active</span></div>
+        <div class="value mono-sm" id="stat-active">0/0</div>
+        <div class="sub" id="stat-active-sub">ไม้ที่เปิดอยู่ / สูงสุด</div>
+      </div>
+    </div>
+
+    <!-- Tabs -->
+    <div class="lux-tabs">
+      <button class="lux-tab active" data-tab="overview">📊 Overview</button>
+      <button class="lux-tab" data-tab="trades">📋 Trades <span class="badge" id="tab-trades-badge">0</span></button>
+      <button class="lux-tab" data-tab="signals">📡 Signals <span class="badge" id="tab-signals-badge">0</span></button>
+      <button class="lux-tab" data-tab="config">⚙️ Config</button>
+    </div>
+
+    <!-- Tab: Overview -->
+    <section data-tab-panel="overview">
+      <div class="row g-3">
+        <!-- Active trade card -->
+        <div class="col-12 col-lg-6">
+          <div class="trade-panel" id="trade-panel">
+            <div class="panel-title">
+              <span class="title">🔥 Active Trade</span>
+              <span id="trade-age" class="text-mono" style="font-size:0.75rem;color:var(--text-3);">-</span>
+            </div>
+            <div id="trade-content">
+              <div class="text-muted-3 text-center py-4">ไม่มี active trade</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Config grid -->
+        <div class="col-12 col-lg-6">
+          <div class="lux-card">
+            <div class="lux-header"><span class="title">⚙️ Configuration</span></div>
+            <div class="lux-body">
+              <div class="detail-grid" id="cfg-grid"></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Recent signals (mini) -->
+        <div class="col-12">
+          <div class="lux-card">
+            <div class="lux-header">
+              <span class="title">📡 Recent Signals (5 ล่าสุด)</span>
+              <a href="#" data-tab-link="signals" class="text-muted-3" style="font-size:0.78rem;">ดูทั้งหมด →</a>
+            </div>
+            <div class="lux-body">
+              <div class="signal-timeline" id="recent-signals"></div>
             </div>
           </div>
         </div>
       </div>
-    </div>
+    </section>
 
-    <!-- Stats row -->
-    <div class="row mb-3">
-      <div class="col-md-3"><div class="stat-tile"><div class="value" id="stat-pnl">0.00</div><div class="label">Total PnL (USDT)</div></div></div>
-      <div class="col-md-3"><div class="stat-tile"><div class="value" id="stat-trades">0</div><div class="label">Total Trades</div></div></div>
-      <div class="col-md-3"><div class="stat-tile"><div class="value" id="stat-winrate">0%</div><div class="label">Win Rate</div></div></div>
-      <div class="col-md-3"><div class="stat-tile"><div class="value" id="stat-active">0</div><div class="label">Active Slots / Max</div></div></div>
-    </div>
-
-    <!-- Active trade + config -->
-    <div class="row mb-3">
-      <div class="col-md-6">
-        <div class="card h-100">
-          <div class="card-header">⚙️ Configuration</div>
-          <div class="card-body">
-            <table class="table table-sm mb-0">
-              <tbody>
-                <tr><th>Symbol</th><td id="cfg-symbol">-</td></tr>
-                <tr><th>Timeframe</th><td id="cfg-tf">-</td></tr>
-                <tr><th>ทุน/ไม้</th><td id="cfg-cap">-</td></tr>
-                <tr><th>จำนวนไม้ (max)</th><td id="cfg-max">-</td></tr>
-                <tr><th>ทุนรวม (virtual)</th><td id="cfg-total">-</td></tr>
-                <tr><th>TP %</th><td id="cfg-tp">-</td></tr>
-                <tr><th>Retry time (นาที)</th><td id="cfg-retry-time">-</td></tr>
-                <tr><th>Retry max (ครั้ง)</th><td id="cfg-retry-max">-</td></tr>
-                <tr><th>Enabled</th><td id="cfg-enabled">-</td></tr>
-                <tr><th>Last Signal</th><td id="cfg-last-signal">-</td></tr>
-                <tr><th>Last Error</th><td id="cfg-last-error" class="text-danger">-</td></tr>
-              </tbody>
-            </table>
-          </div>
+    <!-- Tab: Trades -->
+    <section data-tab-panel="trades" style="display:none;">
+      <div class="lux-card">
+        <div class="lux-header">
+          <span class="title">📋 Trades Log</span>
+          <span class="text-muted-3" style="font-size:0.78rem;" id="trades-count-label">0 รายการ</span>
         </div>
-      </div>
-      <div class="col-md-6">
-        <div class="card h-100">
-          <div class="card-header">🔥 Active Trade (ปัจจุบัน)</div>
-          <div class="card-body" id="active-trade-body">
-            <div class="text-muted">ไม่มี active trade</div>
-          </div>
-        </div>
-      </div>
-    </div>
-
-    <!-- Trades log -->
-    <div class="row mb-3">
-      <div class="col-12">
-        <div class="card">
-          <div class="card-header d-flex justify-content-between">
-            <span>📋 Trades Log <span class="badge bg-secondary" id="trades-count">0</span></span>
-            <span class="small text-muted">แสดง 50 รายการล่าสุด</span>
-          </div>
-          <div class="card-body p-0">
-            <div class="table-responsive">
-              <table class="table table-sm table-striped mb-0">
+        <div class="lux-body no-pad">
+          <!-- Desktop table -->
+          <div class="mob-card-table">
+            <div class="lux-table-wrap">
+              <table class="lux-table">
                 <thead>
                   <tr>
                     <th>เวลา</th>
                     <th>State</th>
                     <th>Side</th>
-                    <th>ราคา</th>
-                    <th>Qty</th>
+                    <th class="num">BUY Price</th>
+                    <th class="num">Qty</th>
                     <th>Status</th>
-                    <th>Retry</th>
-                    <th>PnL</th>
+                    <th class="num">Retry</th>
+                    <th class="num">SELL</th>
+                    <th class="num">PnL</th>
                     <th>Order ID</th>
                   </tr>
                 </thead>
-                <tbody id="trades-tbody"><tr><td colspan="9" class="text-center text-muted p-3">Loading…</td></tr></tbody>
+                <tbody id="trades-tbody"></tbody>
               </table>
             </div>
           </div>
+          <!-- Mobile cards -->
+          <div class="mob-card-list" style="padding: 0.85rem;">
+            <div id="trades-mob"></div>
+          </div>
         </div>
       </div>
-    </div>
+    </section>
 
-    <!-- Signals log -->
-    <div class="row mb-3">
-      <div class="col-12">
-        <div class="card">
-          <div class="card-header">📡 Signals Log <span class="badge bg-secondary" id="signals-count">0</span></div>
-          <div class="card-body p-0">
-            <div class="table-responsive">
-              <table class="table table-sm table-striped mb-0">
+    <!-- Tab: Signals -->
+    <section data-tab-panel="signals" style="display:none;">
+      <div class="lux-card">
+        <div class="lux-header">
+          <span class="title">📡 Signals Log</span>
+          <span class="text-muted-3" style="font-size:0.78rem;" id="signals-count-label">0 รายการ</span>
+        </div>
+        <div class="lux-body no-pad">
+          <div class="mob-card-table">
+            <div class="lux-table-wrap">
+              <table class="lux-table">
                 <thead>
                   <tr>
                     <th>เวลา</th>
                     <th>Type</th>
-                    <th>Close Price</th>
-                    <th>bg (prev→curr)</th>
-                    <th>Upper KC</th>
-                    <th>Lower KC</th>
+                    <th class="num">Close</th>
+                    <th>BG</th>
+                    <th class="num">Upper KC</th>
+                    <th class="num">Lower KC</th>
                     <th>Outcome</th>
                     <th>Note</th>
                   </tr>
                 </thead>
-                <tbody id="signals-tbody"><tr><td colspan="8" class="text-center text-muted p-3">Loading…</td></tr></tbody>
+                <tbody id="signals-tbody"></tbody>
               </table>
             </div>
           </div>
+          <div class="mob-card-list" style="padding: 0.85rem;">
+            <div id="signals-mob"></div>
+          </div>
         </div>
       </div>
-    </div>
+    </section>
+
+    <!-- Tab: Config -->
+    <section data-tab-panel="config" style="display:none;">
+      <div class="lux-card">
+        <div class="lux-header"><span class="title">⚙️ Configuration Detail</span></div>
+        <div class="lux-body">
+          <div class="detail-grid" id="cfg-grid-full"></div>
+          <div class="mt-3" id="cfg-extra"></div>
+        </div>
+      </div>
+    </section>
+
   </div>
 
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
   <script src="/js/api.js"></script>
   <script src="/js/ws-client.js"></script>
+  <script src="/js/partials/nav.js"></script>
   <script src="/js/pages/bot-detail.js"></script>
 </body>
 </html>

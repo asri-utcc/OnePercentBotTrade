@@ -31,7 +31,9 @@ async function loadBot() {
 function render() {
   const container = document.getElementById('bot-edit-content');
   container.innerHTML = `
-    <form id="edit-form" class="card card-body">
+    <div class="lux-header"><span class="title">⚙️ ${escapeHtml(bot.name || bot.symbol)}</span><span class="text-muted-3" style="font-size:0.78rem;">${bot.symbol} · ${bot.timeframe}</span></div>
+    <div class="lux-body">
+    <form id="edit-form">
       <div class="mb-3">
         <label class="form-label">ชื่อบอท</label>
         <input type="text" class="form-control" id="f-name" value="${bot.name || ''}" />
@@ -81,8 +83,9 @@ function render() {
       <div class="alert alert-info" id="f-total"></div>
       <div class="text-danger small mb-3" id="f-error"></div>
       <button type="submit" class="btn btn-primary">💾 บันทึก</button>
-      <a href="/bots.html" class="btn btn-secondary">กลับ</a>
+      <a href="/bots.html" class="btn btn-secondary ms-2">กลับ</a>
     </form>
+    </div>
   `;
 
   document.getElementById('edit-form').onsubmit = save;
@@ -120,3 +123,8 @@ async function save(e) {
 }
 
 init();
+
+function escapeHtml(s) {
+  if (s == null) return '';
+  return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}

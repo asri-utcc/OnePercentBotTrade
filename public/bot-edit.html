@@ -8,26 +8,20 @@
   <link href="/css/app.css" rel="stylesheet" />
 </head>
 <body>
-  <nav class="navbar navbar-expand-lg navbar-dark bg-dark mb-3">
-    <div class="container-fluid">
-      <a class="navbar-brand" href="/bots.html">🤖 OnePercentBotTrade</a>
-      <div class="collapse navbar-collapse show">
-        <ul class="navbar-nav me-auto">
-          <li class="nav-item"><a class="nav-link" href="/bots.html">Bots</a></li>
-          <li class="nav-item"><a class="nav-link" href="/chart.html">Chart</a></li>
-          <li class="nav-item"><a class="nav-link" href="/backtest.html">Backtest</a></li>
-        </ul>
-      </div>
-    </div>
-  </nav>
+  <nav class="app-nav" id="app-nav"></nav>
 
-  <div class="container">
-    <h3>⚙️ ตั้งค่าบอท</h3>
-    <div id="bot-edit-content">Loading...</div>
+  <div class="container px-3 px-md-4 py-3 py-md-4" style="max-width: 820px;">
+    <div class="page-title">
+      <h3>⚙️ ตั้งค่าบอท</h3>
+      <a href="/bots.html" class="btn-lux btn-sm">← กลับ</a>
+    </div>
+    <div id="bot-edit-content" class="lux-card"><div class="lux-body text-center py-5 text-muted-3">Loading…</div></div>
   </div>
 
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
   <script src="/js/api.js"></script>
+  <script>window.NAV_ACTIVE = 'bots';</script>
+  <script src="/js/partials/nav.js"></script>
   <script src="/js/pages/bot-edit.js"></script>
 </body>
 </html>

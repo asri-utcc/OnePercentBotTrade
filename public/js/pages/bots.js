@@ -120,67 +120,72 @@ async function loadApiKeysStatus() {
 function renderBots() {
   const container = document.getElementById('bots-list');
   if (bots.length === 0) {
-    container.innerHTML = '<div class="alert alert-light">ยังไม่มีบอท — คลิก "+ New Bot" เพื่อสร้าง</div>';
+    container.innerHTML = '<div class="alert alert-secondary">ยังไม่มีบอท — คลิก <strong>+ New Bot</strong> เพื่อเริ่มต้น</div>';
     return;
   }
   container.innerHTML = bots.map((b) => {
     const statusClass = b.enabled ? 'enabled' : '';
-    const statusBadge = statusBadgeHtml(b.status);
-    const pnlClass = (b.totalPnl || 0) >= 0 ? 'pnl-positive' : 'pnl-negative';
+    const statusBadge = statusPillHtml(b.status);
+    const pnl = b.totalPnl || 0;
+    const pnlClass = pnl > 0 ? 'pnl-bull' : pnl < 0 ? 'pnl-bear' : '';
     return `
-      <div class="card bot-card ${statusClass} mb-2" data-bot-id="${b._id}">
-        <div class="card-body py-2">
-          <div class="d-flex justify-content-between align-items-center">
-            <div>
-              <strong>${escapeHtml(b.name || b.symbol)}</strong>
-              <span class="badge bg-secondary">${b.symbol}</span>
-              <span class="badge bg-info">${b.timeframe}</span>
-              ${statusBadge}
-            </div>
-            <div>
-              <a href="/bot-detail.html?id=${b._id}" class="btn btn-sm btn-outline-info">📊 รายละเอียด</a>
-              <a href="/bot-edit.html?id=${b._id}" class="btn btn-sm btn-outline-primary">⚙️ แก้ไข</a>
-              ${b.enabled
-                ? `<button class="btn btn-sm btn-warning" onclick="toggleBot('${b._id}', false)">⏸ หยุด</button>`
-                : `<button class="btn btn-sm btn-success" onclick="toggleBot('${b._id}', true)">▶ เริ่ม</button>`}
-              <button class="btn btn-sm btn-outline-danger" onclick="deleteBot('${b._id}')">🗑</button>
-            </div>
+      <div class="bot-card ${statusClass}" data-bot-id="${b._id}">
+        <div class="row1">
+          <div class="left">
+            <span class="name">${escapeHtml(b.name || b.symbol)}</span>
+            <span class="sym-tag">${b.symbol}</span>
+            <span class="tf-tag">${b.timeframe}</span>
+            ${statusBadge}
           </div>
-          <div class="small text-muted mt-1">
-            ทุน: $${b.capitalPerTrade} × ${b.maxTrades} = <strong>$${b.totalCapital.toFixed(2)}</strong> |
-            TP: ${b.tpPercent}% |
-            Retry: ${b.retryTimeMin}m |
-            PnL: <span class="${pnlClass}">${(b.totalPnl || 0).toFixed(4)} USDT</span> |
-            Trades: ${b.totalTrades || 0} (Win: ${b.winTrades || 0})
+          <div class="right">
+            <a href="/bot-detail.html?id=${b._id}" class="btn-lux btn-info btn-sm">📊 Detail</a>
+            <a href="/bot-edit.html?id=${b._id}" class="btn-lux btn-gold btn-sm">⚙️ Edit</a>
+            ${b.enabled
+              ? `<button class="btn-lux btn-sm" onclick="toggleBot('${b._id}', false)">⏸ หยุด</button>`
+              : `<button class="btn-lux btn-bull btn-sm" onclick="toggleBot('${b._id}', true)">▶ เริ่ม</button>`}
+            <button class="btn-lux btn-bear btn-sm" onclick="deleteBot('${b._id}')">🗑</button>
           </div>
-          ${b.lastError ? `<div class="small text-danger mt-1">⚠️ ${escapeHtml(b.lastError)}</div>` : ''}
         </div>
+        <div class="row2">
+          <span class="pair"><span>ทุน:</span><strong>$${b.capitalPerTrade} × ${b.maxTrades} = $${b.totalCapital.toFixed(2)}</strong></span>
+          <span class="pair"><span>TP:</span><strong>${b.tpPercent}%</strong></span>
+          <span class="pair"><span>Retry:</span><strong>${b.retryTimeMin}m · max ${b.retryMax ?? 1}</strong></span>
+          <span class="pair"><span>PnL:</span><strong class="${pnlClass}">${pnl.toFixed(4)} USDT</strong></span>
+          <span class="pair"><span>Trades:</span><strong>${b.totalTrades || 0} (W ${b.winTrades || 0})</strong></span>
+        </div>
+        ${b.lastError ? `<div class="last-err">⚠️ ${escapeHtml(b.lastError)}</div>` : ''}
       </div>`;
   }).join('');
 }
 
-function statusBadgeHtml(status) {
-  const colors = {
-    idle: 'secondary',
-    waiting_fill: 'warning',
-    holding: 'info',
-    selling: 'info',
-    error: 'danger',
-    disabled: 'secondary',
-  };
-  return `<span class="badge bg-${colors[status] || 'secondary'} status-badge">${status}</span>`;
+function statusPillHtml(status) {
+  const cls = (status || 'idle').toLowerCase();
+  return `<span class="status-pill is-${cls}">${cls}</span>`;
 }
 
 function renderStats() {
-  document.getElementById('stat-active').textContent = bots.filter((b) => b.enabled).length;
+  const enabled = bots.filter((b) => b.enabled).length;
+  document.getElementById('stat-active').textContent = enabled;
+
   const totalTrades = bots.reduce((s, b) => s + (b.totalTrades || 0), 0);
   const totalWins = bots.reduce((s, b) => s + (b.winTrades || 0), 0);
   const totalPnl = bots.reduce((s, b) => s + (b.totalPnl || 0), 0);
+  const losses = Math.max(0, totalTrades - totalWins);
+
   document.getElementById('stat-trades').textContent = totalTrades;
-  document.getElementById('stat-winrate').textContent = totalTrades > 0 ? `${((totalWins / totalTrades) * 100).toFixed(1)}%` : '0%';
+  const wr = totalTrades > 0 ? ((totalWins / totalTrades) * 100) : 0;
+  document.getElementById('stat-winrate').textContent = `${wr.toFixed(1)}%`;
+  document.getElementById('stat-winrate-sub').textContent = `${totalWins} wins · ${losses} losses`;
+
+  const tile = document.getElementById('tile-pnl');
+  tile.classList.remove('is-bull', 'is-bear', 'is-gold');
+  if (totalPnl > 0) tile.classList.add('is-bull');
+  else if (totalPnl < 0) tile.classList.add('is-bear');
+  else tile.classList.add('is-gold');
+
   const pnlEl = document.getElementById('stat-pnl');
   pnlEl.textContent = totalPnl.toFixed(4);
-  pnlEl.className = `value ${totalPnl >= 0 ? 'pnl-positive' : 'pnl-negative'}`;
+  pnlEl.className = 'value ' + (totalPnl > 0 ? 'pnl-bull' : totalPnl < 0 ? 'pnl-bear' : '');
 }
 
 async function createBot() {

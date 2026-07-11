@@ -7,47 +7,50 @@
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet" />
   <link href="/css/app.css" rel="stylesheet" />
 </head>
-<body class="bg-light">
-  <div class="container" style="max-width: 480px; margin-top: 60px;">
-    <div class="card shadow">
-      <div class="card-body p-4">
-        <h3 class="mb-3">🤖 OnePercentBotTrade</h3>
-        <div id="setup-form" style="display:none;">
-          <h5>⚙️ ตั้งค่าครั้งแรก</h5>
-          <div class="mb-2">
-            <label class="form-label">Dashboard Password</label>
-            <input type="password" class="form-control" id="setup-password" />
-          </div>
-          <div class="mb-2">
-            <label class="form-label">Binance API Key</label>
-            <input type="text" class="form-control" id="setup-api-key" placeholder="(optional - ใส่ภายหลังได้)" />
-          </div>
-          <div class="mb-2">
-            <label class="form-label">Binance API Secret</label>
-            <input type="password" class="form-control" id="setup-api-secret" placeholder="(optional)" />
-          </div>
-          <div class="form-check mb-3">
-            <input type="checkbox" class="form-check-input" id="setup-bnb-fees" />
-            <label class="form-check-label" for="setup-bnb-fees">ใช้ BNB จ่าย fee (0.075% maker) — ต้องมี BNB ในบัญชี</label>
-          </div>
-          <button class="btn btn-primary w-100" id="setup-btn">Setup</button>
-        </div>
-
-        <div id="login-form">
-          <h5>🔐 Login</h5>
-          <div class="mb-2">
-            <label class="form-label">Password</label>
-            <input type="password" class="form-control" id="login-password" autofocus />
-          </div>
-          <button class="btn btn-primary w-100" id="login-btn">Login</button>
-        </div>
-
-        <div id="error" class="alert alert-danger mt-3" style="display:none;"></div>
-      </div>
+<body class="login-page">
+  <div class="login-card">
+    <div class="login-brand">
+      <span class="mark">%</span>
+      <span class="name">OnePercentBotTrade<small>Spot Trading Bot</small></span>
     </div>
-    <p class="text-center text-muted mt-3 small">
-      ⚠️ ตั้ง API key permission เป็น <strong>Spot trading only, ปิด withdraw</strong> และผูก IP whitelist
-    </p>
+
+    <div id="setup-form" style="display:none;">
+      <h5>⚙️ ตั้งค่าครั้งแรก</h5>
+      <div class="mb-3">
+        <label class="form-label">Dashboard Password</label>
+        <input type="password" class="form-control" id="setup-password" autocomplete="new-password" />
+        <div class="form-text">อย่างน้อย 6 ตัวอักษร — ใช้เข้าหน้า Dashboard</div>
+      </div>
+      <div class="mb-3">
+        <label class="form-label">Binance API Key</label>
+        <input type="text" class="form-control" id="setup-api-key" placeholder="(ใส่ภายหลังได้)" autocomplete="off" />
+      </div>
+      <div class="mb-3">
+        <label class="form-label">Binance API Secret</label>
+        <input type="password" class="form-control" id="setup-api-secret" placeholder="(optional)" autocomplete="new-password" />
+      </div>
+      <div class="form-check mb-4">
+        <input type="checkbox" class="form-check-input" id="setup-bnb-fees" />
+        <label class="form-check-label" for="setup-bnb-fees">ใช้ BNB จ่าย fee (0.075% maker) — ต้องมี BNB ในบัญชี</label>
+      </div>
+      <button class="btn btn-primary w-100" id="setup-btn">สร้างบัญชีผู้ดูแล</button>
+    </div>
+
+    <div id="login-form">
+      <h5>🔐 Login</h5>
+      <div class="mb-3">
+        <label class="form-label">Password</label>
+        <input type="password" class="form-control" id="login-password" autocomplete="current-password" autofocus />
+      </div>
+      <button class="btn btn-primary w-100" id="login-btn">เข้าสู่ระบบ</button>
+    </div>
+
+    <div id="error" class="alert alert-danger mt-3" style="display:none;"></div>
+
+    <div class="login-foot">
+      ⚠️ ใช้ API key ที่เปิดเฉพาะ <strong>Spot trading</strong>, ปิด withdraw, ตั้ง IP whitelist<br>
+      <span style="color:var(--text-4);">© OnePercentBotTrade</span>
+    </div>
   </div>
 
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>

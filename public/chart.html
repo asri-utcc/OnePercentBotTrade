@@ -6,60 +6,47 @@
   <title>Chart - OnePercentBotTrade</title>
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet" />
   <link href="/css/app.css" rel="stylesheet" />
-  <style>
-    #chart-container { width: 100%; height: 600px; }
-  </style>
+  <style>#chart-container { width: 100%; height: 600px; }</style>
 </head>
 <body>
-  <nav class="navbar navbar-expand-lg navbar-dark bg-dark mb-3">
-    <div class="container-fluid">
-      <a class="navbar-brand" href="/bots.html">🤖 OnePercentBotTrade</a>
-      <div class="collapse navbar-collapse show">
-        <ul class="navbar-nav me-auto">
-          <li class="nav-item"><a class="nav-link" href="/bots.html">Bots</a></li>
-          <li class="nav-item"><a class="nav-link active" href="/chart.html">Chart</a></li>
-          <li class="nav-item"><a class="nav-link" href="/backtest.html">Backtest</a></li>
-        </ul>
-        <ul class="navbar-nav">
-          <li class="nav-item"><span class="nav-link" id="ws-status">⚪ offline</span></li>
-        </ul>
+  <nav class="app-nav" id="app-nav"></nav>
+
+  <div class="container-fluid px-3 px-md-4 py-3 py-md-4">
+    <div class="page-title">
+      <h3>📈 Chart</h3>
+      <div class="d-flex gap-2 align-items-center flex-wrap">
+        <select id="c-symbol" class="form-select form-select-sm" style="min-width:130px;"></select>
+        <select id="c-timeframe" class="form-select form-select-sm" style="min-width:90px;">
+          <option value="1m">1m</option><option value="3m">3m</option>
+          <option value="5m" selected>5m</option><option value="15m">15m</option>
+          <option value="30m">30m</option><option value="1h">1h</option>
+          <option value="2h">2h</option><option value="4h">4h</option><option value="1d">1d</option>
+        </select>
+        <select id="c-limit" class="form-select form-select-sm" style="min-width:110px;">
+          <option value="100">100 แท่ง</option>
+          <option value="200" selected>200 แท่ง</option>
+          <option value="500">500 แท่ง</option>
+          <option value="1000">1000 แท่ง</option>
+        </select>
+        <button class="btn btn-primary btn-sm" id="c-load">🔄 โหลด</button>
       </div>
     </div>
-  </nav>
 
-  <div class="container-fluid">
-    <div class="row mb-2">
-      <div class="col-12">
-        <div class="d-flex gap-2 align-items-center flex-wrap">
-          <select id="c-symbol" class="form-select" style="width: 160px;"></select>
-          <select id="c-timeframe" class="form-select" style="width: 100px;">
-            <option value="1m">1m</option><option value="3m">3m</option>
-            <option value="5m" selected>5m</option><option value="15m">15m</option>
-            <option value="30m">30m</option><option value="1h">1h</option>
-            <option value="2h">2h</option><option value="4h">4h</option>
-            <option value="1d">1d</option>
-          </select>
-          <select id="c-limit" class="form-select" style="width: 120px;">
-            <option value="100">100 แท่ง</option>
-            <option value="200" selected>200 แท่ง</option>
-            <option value="500">500 แท่ง</option>
-            <option value="1000">1000 แท่ง</option>
-          </select>
-          <button class="btn btn-primary" id="c-load">🔄 โหลด</button>
-          <div class="ms-auto">
-            <span class="badge bg-success">⬆ S1 Buy signal</span>
-            <span class="badge bg-light text-dark">🟢 Strong Up</span>
-            <span class="badge bg-light text-dark" style="background:#a855f7 !important; color: white !important;">🟣 Weak</span>
-            <span class="badge bg-light text-dark" style="background:#dc3545 !important; color: white !important;">🔴 Strong Down</span>
-          </div>
+    <div class="lux-card mb-3">
+      <div class="lux-body py-2">
+        <div class="legend">
+          <span class="item"><span class="swatch" style="background:var(--bull-1);"></span>S1 Buy signal</span>
+          <span class="item"><span class="swatch" style="background:var(--bull-1);"></span>Strong Up</span>
+          <span class="item"><span class="swatch" style="background:var(--violet-1);"></span>Weak</span>
+          <span class="item"><span class="swatch" style="background:var(--bear-1);"></span>Strong Down</span>
         </div>
       </div>
     </div>
 
-    <div class="row">
-      <div class="col-12">
+    <div class="lux-card">
+      <div class="lux-body no-pad" style="padding:0.5rem;">
         <div id="chart-container"></div>
-        <div id="signal-list" class="mt-2 small"></div>
+        <div id="signal-list" class="mt-2 small" style="padding: 0.5rem 1rem 1rem;"></div>
       </div>
     </div>
   </div>
@@ -68,6 +55,8 @@
   <script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
   <script src="/js/api.js"></script>
   <script src="/js/ws-client.js"></script>
+  <script>window.NAV_ACTIVE = 'chart';</script>
+  <script src="/js/partials/nav.js"></script>
   <script src="/js/pages/chart.js"></script>
 </body>
 </html>
