@@ -89,6 +89,14 @@ function roundPrice(price, tickSize) {
   return new Decimal(price).div(tickSize).round().mul(tickSize);
 }
 
+// floor price ตาม tickSize (ปัดลงให้เป็น multiple ที่ valid)
+// ใช้สำหรับ LIMIT_MAKER BUY ที่ต้องการ price < ask (post-only safe)
+// เช่น ask=77.92, tickSize=0.01 → floor((77.92-0.01)/0.01)*0.01 = 77.91
+function floorPrice(price, tickSize) {
+  if (!tickSize || tickSize.isZero()) return new Decimal(price);
+  return new Decimal(price).div(tickSize).floor().mul(tickSize);
+}
+
 // ตรวจว่า order ผ่าน LOT_SIZE / PRICE_FILTER / NOTIONAL หรือไม่
 function validateOrder({ symbol, price, qty }) {
   const info = getCached(symbol);
@@ -177,6 +185,7 @@ module.exports = {
   getCached,
   roundQty,
   roundPrice,
+  floorPrice,
   validateOrder,
   calcQtyFromCapital,
   getPrecision,

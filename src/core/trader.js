@@ -218,19 +218,50 @@ class Trader {
         await symbolInfo.loadSymbol(this.bot.symbol);
       }
 
-      // 2. ใช้ bid price ล่าสุด (bookTicker) หรือ close ของแท่งถ้ายังไม่มี
-      const bid = this.currentBookTicker ? this.currentBookTicker.bid : candle.close;
+      // 2. กำหนด BUY price ที่ post-only safe (LIMIT_MAKER)
+      //    - ถ้ามี bookTicker: ใช้ bid ถ้า bid < ask (ปกติ)
+      //    - ถ้า bid >= ask (spread collapsed): ใช้ ask - 1 tick แล้ว floor ตาม tickSize
+      //      เพื่อให้ price < ask (Binance จะไม่ reject -2010 post-only)
+      //    - ถ้าไม่มี bookTicker: fallback candle.close (suboptimal — log warning)
+      const ticker = this.currentBookTicker;
+      const info = symbolInfo.getCached(this.bot.symbol);
+      const tickSize = info.priceFilter.tickSize;
+
+      let bid;
+      let ask;
+      let refPrice;
+      if (ticker && ticker.bid && ticker.ask) {
+        bid = ticker.bid;
+        ask = ticker.ask;
+        if (bid < ask) {
+          refPrice = bid;
+        } else {
+          // spread collapsed — place at ask - 1 tick (still post-only safe)
+          refPrice = new Decimal(ask).minus(tickSize);
+          logger.warn({
+            botId: this.bot._id.toString(),
+            symbol: this.bot.symbol,
+            bid, ask, refPrice: refPrice.toString(),
+          }, 'trader: spread collapsed (bid >= ask) — clamping BUY price to ask - tickSize');
+        }
+      } else {
+        // no fresh ticker — risky fallback
+        refPrice = candle.close;
+        logger.warn({
+          botId: this.bot._id.toString(),
+          symbol: this.bot.symbol,
+        }, 'trader: no bookTicker for BUY price selection, falling back to candle.close');
+      }
 
       // 3. คำนวณ qty
       const { qty } = symbolInfo.calcQtyFromCapital({
         symbol: this.bot.symbol,
         capitalUSDT: this.bot.capitalPerTrade,
-        price: bid,
+        price: parseFloat(refPrice.toString()),
       });
 
-      // 4. round price ตาม tickSize (ใช้ bid ตรงๆ สำหรับ maker)
-      const info = symbolInfo.getCached(this.bot.symbol);
-      const buyPrice = symbolInfo.roundPrice(bid, info.priceFilter.tickSize).toString();
+      // 4. floor price ตาม tickSize — รับประกันว่า price < ask (post-only safe)
+      const buyPrice = symbolInfo.floorPrice(refPrice, tickSize).toString();
 
       // 5. validate
       const validation = symbolInfo.validateOrder({ symbol: this.bot.symbol, price: buyPrice, qty });
@@ -294,12 +325,25 @@ class Trader {
       }).catch((err) => ({ error: binanceRest.formatBinanceError(err) }));
 
       if (orderResp.error) {
-        logger.warn({ botId: this.bot._id.toString(), err: orderResp.error }, 'trader: BUY order rejected');
+        const isPostOnly = orderResp.error.code === -2010;
+        const detail = isPostOnly
+          ? `BUY -2010 (post-only rejected): bid=${bid} ask=${ask} price=${buyPrice}`
+          : `${orderResp.error.code}: ${orderResp.error.msg}`;
+        logger.warn({
+          botId: this.bot._id.toString(),
+          err: orderResp.error,
+          bid, ask, buyPrice, detail,
+        }, 'trader: BUY order rejected');
         await Trade.updateOne(
           { _id: trade._id },
-          { state: 'failed', error: `${orderResp.error.code}: ${orderResp.error.msg}` }
+          { state: 'failed', error: detail }
         );
-        await Signal.updateOne({ _id: signalDoc._id }, { outcome: 'failed', note: 'BUY order rejected' });
+        await Signal.updateOne({ _id: signalDoc._id }, {
+          outcome: 'failed',
+          note: isPostOnly
+            ? `BUY -2010: bid ${bid} >= ask ${ask} (spread collapsed)`
+            : 'BUY order rejected',
+        });
         this._unregisterTrade(trade); // FIX 3
         this.currentTrade = null;
         eventBus.emit('trade:update', { tradeId: trade._id, state: 'failed' });
@@ -553,7 +597,44 @@ class Trader {
   async rePlaceBuy(prevTrade, signalDoc, candle, newBid) {
     try {
       const info = symbolInfo.getCached(this.bot.symbol);
-      const buyPrice = symbolInfo.roundPrice(newBid, info.priceFilter.tickSize).toString();
+      const tickSize = info.priceFilter.tickSize;
+      const ticker = this.currentBookTicker;
+
+      // เหมือน placeBuy: clamp BUY price ให้ < ask กัน -2010 post-only rejected
+      let refPrice;
+      let bidForLog;
+      let askForLog;
+      if (ticker && ticker.bid && ticker.ask && newBid) {
+        bidForLog = ticker.bid;
+        askForLog = ticker.ask;
+        if (newBid < ticker.ask) {
+          refPrice = newBid;
+        } else {
+          refPrice = new Decimal(ticker.ask).minus(tickSize);
+          logger.warn({
+            botId: this.bot._id.toString(),
+            bid: ticker.bid, ask: ticker.ask, newBid, refPrice: refPrice.toString(),
+          }, 'trader: rePlace — spread collapsed, clamping to ask - tickSize');
+        }
+      } else {
+        refPrice = newBid || candle.close;
+      }
+
+      const buyPrice = symbolInfo.floorPrice(refPrice, tickSize).toString();
+
+      // safety net — floor ยังให้ price >= ask (เช่น tickSize มากกว่า spread) → abort
+      if (bidForLog !== undefined && askForLog !== undefined && parseFloat(buyPrice) >= askForLog) {
+        logger.warn({
+          botId: this.bot._id.toString(),
+          bid: bidForLog, ask: askForLog, buyPrice,
+        }, 'trader: rePlaceBuy clamped price still >= ask, aborting');
+        await Signal.updateOne({ _id: signalDoc._id }, { outcome: 'expired', note: 'spread too tight to re-place' });
+        await Bot.updateOne({ _id: this.bot._id }, { status: 'idle' });
+        this._unregisterTrade(prevTrade); // FIX 3
+        this.currentTrade = null;
+        eventBus.emit('bot:status', { botId: this.bot._id, status: 'idle' });
+        return;
+      }
 
       const validation = symbolInfo.validateOrder({ symbol: this.bot.symbol, price: buyPrice, qty: prevTrade.buyQty });
       if (!validation.ok) {
@@ -578,7 +659,11 @@ class Trader {
       }).catch((err) => ({ error: binanceRest.formatBinanceError(err) }));
 
       if (orderResp.error) {
-        logger.warn({ botId: this.bot._id.toString(), err: orderResp.error }, 'trader: rePlace rejected');
+        logger.warn({
+          botId: this.bot._id.toString(),
+          err: orderResp.error,
+          bid: bidForLog, ask: askForLog, buyPrice,
+        }, 'trader: rePlace rejected');
         await Signal.updateOne({ _id: signalDoc._id }, { outcome: 'expired', note: 'rePlace rejected' });
         await Bot.updateOne({ _id: this.bot._id }, { status: 'idle' });
         this._unregisterTrade(prevTrade); // FIX 3
