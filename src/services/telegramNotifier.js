@@ -15,6 +15,7 @@ const Trade = require('../db/models/Trade');
 const Bot = require('../db/models/Bot');
 const { encrypt, decrypt } = require('./crypto');
 const fxService = require('./fxService'); // FIX-2026-07-26: USDT→THB สำหรับ sellFilled PnL THB
+const binanceRest = require('../binance/binanceRest'); // FIX-2026-07-27: USDT balance remain หลัง fill
 
 // ─── Defaults (mirror AppConfig schema) ───────────────
 const DEFAULT_EVENTS = {
@@ -35,6 +36,34 @@ const tradeNotifyState = new Map(); // tradeId -> { side, stuckNotified }
 
 // In-memory price cache (last bookTicker per symbol)
 const lastBookTicker = new Map(); // symbol -> { bid, ask, ts }
+
+// FIX-2026-07-27: USDT balance cache (free + locked) — กัน Binance hammering
+//   - cache TTL 10s (พอสำหรับ burst BUY/SELL ในรอบเดียว)
+//   - ถ้า fetch fail → return null (ไม่แสดง balance remain)
+let usdtBalanceCache = null; // { free, locked, total, ts }
+const USDT_BALANCE_CACHE_MS = 10 * 1000;
+
+async function fetchUsdtBalance() {
+  const now = Date.now();
+  if (usdtBalanceCache && (now - usdtBalanceCache.ts) < USDT_BALANCE_CACHE_MS) {
+    return usdtBalanceCache;
+  }
+  try {
+    const acc = await binanceRest.getAccount();
+    const row = (acc.balances || []).find((b) => b.asset === 'USDT');
+    if (!row) {
+      usdtBalanceCache = { free: 0, locked: 0, total: 0, ts: now };
+      return usdtBalanceCache;
+    }
+    const free = parseFloat(row.free) || 0;
+    const locked = parseFloat(row.locked) || 0;
+    usdtBalanceCache = { free, locked, total: free + locked, ts: now };
+    return usdtBalanceCache;
+  } catch (err) {
+    logger.warn({ err: err.message }, 'telegramNotifier: fetchUsdtBalance failed');
+    return null;
+  }
+}
 
 const PNL_SCAN_INTERVAL_MS = 30 * 1000;   // 30s
 const STUCK_SCAN_INTERVAL_MS = 60 * 1000; // 60s
@@ -113,7 +142,11 @@ function renderMessage(eventKey, p, cfg) {
         // FIX-2026-07-26: แสดง "รายการที่ N ของวันนี้" (นับ trades ที่ buyFilledAt อยู่ในวันเดียวกัน ตาม bot)
         const tradeNum = p.dailyTradeNumber || '?';
         const total = p.dailyTradeTotal || '?';
-        return `🟢 BUY filled #${tradeNum}/${total} (วันนี้)\nBot: ${p.botName}\nSymbol: ${p.symbol}\nQty: ${formatQty(p.qty)}\nPrice: ${formatPrice(p.price)}`;
+        // FIX-2026-07-27: USDT balance remain หลัง BUY fill
+        const balLine = p.usdtTotal != null
+          ? `\nUSDT remain: ${p.usdtTotal.toFixed(2)} (free ${p.usdtFree != null ? p.usdtFree.toFixed(2) : '?'} · locked ${p.usdtLocked != null ? p.usdtLocked.toFixed(2) : '?'})`
+          : '';
+        return `🟢 BUY filled #${tradeNum}/${total} (วันนี้)\nBot: ${p.botName}\nSymbol: ${p.symbol}\nQty: ${formatQty(p.qty)}\nPrice: ${formatPrice(p.price)}${balLine}`;
       }
       case 'sellFilled': {
         const pnl = Number(p.realizedPnl) || 0;
@@ -129,7 +162,11 @@ function renderMessage(eventKey, p, cfg) {
         const pctLine = pnlPct != null
           ? `\nP&L %: ${sign}${pnlPct.toFixed(2)}%`
           : '';
-        return `${emoji} SELL filled\nBot: ${p.botName}\nSymbol: ${p.symbol}\nQty: ${formatQty(p.qty)}\nPrice: ${formatPrice(p.price)}\nP&L: ${sign}${pnl.toFixed(4)} USDT${pctLine}${thbLine}`;
+        // FIX-2026-07-27: USDT balance remain หลัง SELL fill
+        const balLine = p.usdtTotal != null
+          ? `\nUSDT remain: ${p.usdtTotal.toFixed(2)} (free ${p.usdtFree != null ? p.usdtFree.toFixed(2) : '?'} · locked ${p.usdtLocked != null ? p.usdtLocked.toFixed(2) : '?'})`
+          : '';
+        return `${emoji} SELL filled\nBot: ${p.botName}\nSymbol: ${p.symbol}\nQty: ${formatQty(p.qty)}\nPrice: ${formatPrice(p.price)}\nP&L: ${sign}${pnl.toFixed(4)} USDT${pctLine}${thbLine}${balLine}`;
       }
       case 'insufficientBalance':
         return `⚠️ Insufficient USDT\nBot: ${p.botName}\nSymbol: ${p.symbol}\n${p.note || ''}`.trim();
@@ -298,6 +335,8 @@ function bindEventHandlers() {
             buyStatus: { $in: ['FILLED', 'PARTIALLY_FILLED'] },
             // นับเฉพาะที่ fill จริง (ไม่ใช่ placed/cancelled)
           });
+          // FIX-2026-07-27: USDT balance remain หลัง BUY fill (fail-safe — null ถ้า fetch ล้ม)
+          const bal = await fetchUsdtBalance();
           await dispatch('buyFilled', {
             botId: trade.botId,
             botName: bot ? bot.name : '?',
@@ -306,6 +345,9 @@ function bindEventHandlers() {
             price: trade.buyPrice,
             dailyTradeNumber: dailyTrades, // FIX-2026-07-26: รายการที่ N ของวันนี้ (ทุกบอท)
             dailyTradeTotal: dailyTrades, // ตอนนี้ใช้ตัวเดียวกัน (total filled วันนี้)
+            usdtFree: bal ? bal.free : null,   // FIX-2026-07-27: USDT free
+            usdtLocked: bal ? bal.locked : null, // FIX-2026-07-27: USDT locked (ถ้ามี SELL pending)
+            usdtTotal: bal ? bal.total : null,   // FIX-2026-07-27: USDT total (free+locked)
           });
           st.buyNotified = true;
           tradeNotifyState.set(id, st);
@@ -326,6 +368,8 @@ function bindEventHandlers() {
         } catch (err) {
           logger.warn({ err: err.message }, 'telegramNotifier: FX fetch failed — sellFilled will omit THB');
         }
+        // FIX-2026-07-27: USDT balance remain หลัง SELL fill (fail-safe)
+        const bal = await fetchUsdtBalance();
         await dispatch('sellFilled', {
           botId: trade.botId,
           botName: bot ? bot.name : '?',
@@ -336,6 +380,9 @@ function bindEventHandlers() {
           pnlPercent: trade.pnlPercent != null ? trade.pnlPercent : null, // FIX-2026-07-27: P&L % เทียบ buyQuoteQty
           pnlThb, // FIX-2026-07-26: P&L in THB (null ถ้า FX fetch ล้มเหลว)
           fxRate, // FIX-2026-07-26: rate ที่ใช้ (debug)
+          usdtFree: bal ? bal.free : null,   // FIX-2026-07-27
+          usdtLocked: bal ? bal.locked : null, // FIX-2026-07-27
+          usdtTotal: bal ? bal.total : null,   // FIX-2026-07-27
         });
         // Reset anti-spam state เมื่อ trade จบ
         tradeNotifyState.delete(String(trade._id));
@@ -669,6 +716,7 @@ function stop() {
   eventBus.removeAllListeners('insufficient:balance');
   eventBus.removeAllListeners('tp:low'); // FIX-2026-07-26
   eventBus.removeAllListeners('bookTicker');
+  usdtBalanceCache = null; // FIX-2026-07-27: reset balance cache
   bound = false;
   logger.info('telegramNotifier: stopped');
 }
