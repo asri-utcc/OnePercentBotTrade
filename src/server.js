@@ -52,6 +52,7 @@ async function main() {
     shuttingDown = true;
     logger.info({ signal }, 'shutting down');
     try { healthMonitor.stop(); } catch (e) { /* ignore */ }
+    try { await botManager.flushActiveTimeOnShutdown(); } catch (e) { /* ignore */ }
     try { await botManager.stop(); } catch (e) { /* ignore */ }
     server.close(() => {
       db.disconnect().finally(() => {

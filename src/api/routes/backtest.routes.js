@@ -48,6 +48,11 @@ router.post('/', requireAuth, async (req, res) => {
       stats: result.stats,
       signalsCount: result.signals.length,
       tradesCount: result.trades.length,
+      // FIX 2026-07-13: แจ้ง UI ว่าข้อมูลถูกตัดจาก SAFETY_LIMIT (ใช้กรณีขอช่วงยาวเกิน cap)
+      truncated: result.truncated,
+      candlesFetched: result.candlesFetched,
+      requestedDays: result.requestedDays,
+      actualDays: result.actualDays,
       // ส่ง trades ทั้งหมดที่เก็บไว้ (ถ้า > 500 trades จะถูกตัดเป็น head+tail 250+250 ฝั่ง server)
       // ฝั่ง client จะแบ่งหน้าเอง 20/page
       trades: result.trades,

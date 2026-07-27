@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="th">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Scan Volatility - OnePercentBotTrade</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet" />
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+  <link href="/css/app.css" rel="stylesheet" />
+</head>
+<body>
+  <nav class="app-nav" id="app-nav"></nav>
+
+  <div class="container-fluid px-3 px-md-4 py-3 py-md-4">
+    <div class="page-title">
+      <h3>🎰 Scan Volatility</h3>
+      <div class="page-sub text-muted-2">สแกนหาเหรียญที่ "เหวี่ยง" มากที่สุดในกรอบเวลาที่กำหนด · เรียงตาม multi-factor score</div>
+    </div>
+
+    <div class="lux-card mb-3">
+      <div class="lux-header"><span class="title">⚙️ ตั้งค่า Scan</span></div>
+      <div class="lux-body">
+        <div class="row g-2">
+          <div class="col-6 col-md-2">
+            <label class="form-label">Timeframe</label>
+            <select id="s-timeframe" class="form-select">
+              <option value="1m">1m</option>
+              <option value="3m" selected>3m</option>
+              <option value="5m">5m</option>
+              <option value="15m">15m</option>
+              <option value="30m">30m</option>
+              <option value="1h">1h</option>
+              <option value="2h">2h</option>
+              <option value="4h">4h</option>
+            </select>
+          </div>
+          <div class="col-6 col-md-2">
+            <label class="form-label">% Volatility threshold</label>
+            <input type="number" id="s-threshold" class="form-control" value="0.8" step="0.1" min="0.1" />
+            <small class="text-muted-2">แท่งที่ vol &gt; ค่านี้ถึงจะนับ</small>
+          </div>
+          <div class="col-6 col-md-2">
+            <label class="form-label">Window (bars) <span style="color:var(--gold-1);cursor:help;" title="Binance จำกัด 1000 แท่งต่อ request — window > 1000 จะถูกแบ่งเป็นหลาย batch อัตโนมัติ (pagination)">ⓘ</span></label>
+            <input type="number" id="s-window" class="form-control" value="1500" step="50" min="5" max="20000" />
+            <small class="text-muted-2">ย้อนหลังกี่แท่ง · &gt;1000 = paginated</small>
+          </div>
+          <div class="col-6 col-md-2">
+            <label class="form-label">TP Window (bars) <span style="color:var(--gold-1);cursor:help;" title="FIX-2026-07-23: bars สำหรับ Min %KC ในคอลัมน์ '%TP แนะนำ' (default 500) — ค่าแยกจาก Window เพราะ Min %KC ควรดู window ยาวกว่า เพื่อจับ squeeze ที่ลึก · ตรงกับปุ่ม Get TP% ในหน้าบอท">ⓘ</span></label>
+            <input type="number" id="s-tpwindow" class="form-control" value="500" step="50" min="20" max="20000" />
+            <small class="text-muted-2">สำหรับ Min %KC (%TP แนะนำ) — ตรงกับ Get TP%</small>
+          </div>
+          <div class="col-6 col-md-2">
+            <label class="form-label">Top N symbols</label>
+            <input type="number" id="s-topn" class="form-control" value="50" step="10" min="20" max="300" />
+            <small class="text-muted-2">ตาม 24h quote volume</small>
+          </div>
+          <div class="col-6 col-md-2">
+            <label class="form-label">Min 24h Vol (USDT)</label>
+            <input type="number" id="s-minvol" class="form-control" value="1000000" step="100000" min="0" />
+            <small class="text-muted-2">กรองเหรียญ volume ต่ำ</small>
+          </div>
+          <div class="col-6 col-md-2">
+            <label class="form-label" title="ความถี่ของแรงเหวี่ยง — ≥% ของแท่งใน window ที่ vol > threshold">
+              Min % bars &gt; thr <span style="color:var(--gold-1);cursor:help;">ⓘ</span>
+            </label>
+            <input type="number" id="s-minpct" class="form-control" value="50" step="5" min="0" max="100" />
+            <small class="text-muted-2">≥% แท่งที่เหวี่ยงเกินเกณฑ์ (กรอง spike-and-silence)</small>
+          </div>
+        </div>
+        <div class="row g-2 mt-1">
+          <div class="col-12">
+            <label class="form-label mb-1">Trend <span class="text-muted-2 small">(เลือกได้หลายอัน)</span></label>
+            <div class="d-flex gap-3 flex-wrap align-items-center">
+              <label class="trend-chip uptrend">
+                <input type="checkbox" id="s-trend-up" checked />
+                <span class="chip-glyph">📈</span>
+                <span class="chip-label">Uptrend</span>
+                <span class="chip-hint">+0.5%+ over window</span>
+              </label>
+              <label class="trend-chip downtrend">
+                <input type="checkbox" id="s-trend-down" checked />
+                <span class="chip-glyph">📉</span>
+                <span class="chip-label">Downtrend</span>
+                <span class="chip-hint">-0.5%+ over window</span>
+              </label>
+              <label class="trend-chip sideways">
+                <input type="checkbox" id="s-trend-side" checked />
+                <span class="chip-glyph">↔️</span>
+                <span class="chip-label">Sideways</span>
+                <span class="chip-hint">±0.5% within window</span>
+              </label>
+              <span class="text-muted-2 small ms-2">ใช้ SMA slope ของ window — ครึ่งแรกเทียบครึ่งหลัง</span>
+            </div>
+          </div>
+        </div>
+        <div class="d-flex justify-content-between align-items-center mt-3 gap-2 flex-wrap">
+          <div class="text-muted-2 small">
+            ⏱ ปกติใช้เวลา <strong>10-30 วิ</strong> ต่อการสแกน 100 symbols
+          </div>
+          <button class="btn btn-primary" id="s-run">
+            <span class="btn-glyph">🎰</span>
+            <span class="btn-label">สแกน</span>
+            <span class="btn-spinner" aria-hidden="true"></span>
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <div class="alert alert-info py-2 px-3 mb-3" style="font-size: 0.82rem;">
+      <strong>ℹ️ Score formula:</strong>
+      <code>0.4×(avg_vol/thr) + 0.3×(pct_bars&gt;thr) + 0.2×(ATR%/thr) + 0.1×(max_vol/thr)</code>
+      · <code>vol_pct</code> = (high-low)/low × 100 · <code>ATR%</code> = ATR(14)/close × 100 · <code>BBW</code> = (upper-lower)/basis
+    </div>
+
+    <div id="result"></div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+  <script src="/js/api.js"></script>
+  <script>window.NAV_ACTIVE = 'scan';</script>
+  <script src="/js/partials/nav.js"></script>
+  <script src="/js/pages/scan-volatility.js"></script>
+</body>
+</html>

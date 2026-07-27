@@ -20,7 +20,12 @@ const signalRoutes = require('./api/routes/signal.routes');
 const chartRoutes = require('./api/routes/chart.routes');
 const backtestRoutes = require('./api/routes/backtest.routes');
 const accountRoutes = require('./api/routes/account.routes');
+const fxRoutes = require('./api/routes/fx.routes');
 const healthRoutes = require('./api/routes/health.routes');
+const scanRoutes = require('./api/routes/scan.routes');
+// FIX-2026-07-24: Telegram + History (ใหม่)
+const telegramRoutes = require('./api/routes/telegram.routes');
+const historyRoutes = require('./api/routes/history.routes');
 
 function createApp() {
   const app = express();
@@ -95,7 +100,12 @@ function createApp() {
   app.use('/api/chart', chartRoutes);
   app.use('/api/backtest', backtestRoutes);
   app.use('/api/account', accountRoutes);
+  app.use('/api/fx', fxRoutes);
   app.use('/api/health', healthRoutes);
+  app.use('/api/scan', scanRoutes);
+  // FIX-2026-07-24: register telegram + history
+  app.use('/api/telegram', telegramRoutes);
+  app.use('/api/history', historyRoutes);
 
   // Health
   app.get('/health', (req, res) => {

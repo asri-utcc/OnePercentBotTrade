@@ -42,6 +42,7 @@ const backtestResultSchema = new mongoose.Schema(
       capitalPerTrade: { type: Number, required: true },
       feeRate: { type: Number, required: true },
       retryModel: { type: String, default: 'simple' },
+      maxConcurrentTrades: { type: Number, default: null },
     },
     signalsCount: { type: Number, default: 0 },
     tradesSimulated: { type: Number, default: 0 },
@@ -54,6 +55,9 @@ const backtestResultSchema = new mongoose.Schema(
     maxConcurrentSkipCount: { type: Number, default: 0 },
     belowMinNotionalCount: { type: Number, default: 0 },
     tpHitCount: { type: Number, default: 0 },
+    // จำนวนไม้ที่เปิดพร้อมกันสูงสุดตลอด simulation (peak concurrency)
+    // ใช้ดูว่า maxConcurrentTrades ต้องตั้ง ≥ เท่าไหร่ถึงจะรองรับช่วง downtrend ที่ไม่ TP
+    maxConcurrentTradesUsed: { type: Number, default: 0 },
     wins: { type: Number, default: 0 },
     losses: { type: Number, default: 0 },
     breakeven: { type: Number, default: 0 },

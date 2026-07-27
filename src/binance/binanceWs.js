@@ -18,6 +18,12 @@ const binanceRest = require('./binanceRest');
  *   <symbol>@bookTicker                 (สำหรับ bid price)
  */
 
+// ─── Heartbeat + Watchdog thresholds ──────────────────────
+const HEARTBEAT_INTERVAL_MS = 30_000;   // ping ทุก 30s
+const PONG_STALE_LIMIT_MS   = 60_000;   // ถ้า pong ไม่มา > 60s → force reconnect
+const WATCHDOG_INTERVAL_MS  = 60_000;   // เช็ค kline ทุก 60s
+const KLINE_STALE_LIMIT_MS  = 180_000;  // ถ้า kline stream ไม่มีข้อมูล > 3 นาที → force reconnect
+
 class MarketWsManager {
   constructor() {
     this.ws = null;
@@ -28,15 +34,25 @@ class MarketWsManager {
     this.shouldRun = false;
     this.reconnectTimer = null;
     this.pendingSends = []; // queue เมื่อยังไม่ connected
+
+    // Layer A: heartbeat — เช็คว่า TCP connection ยังมีชีวิต
+    this._heartbeatTimer = null;
+    this._lastPong = 0;
+
+    // Layer B: watchdog — เช็คว่า kline ยังมาจริง (กันเคส "ดู alive แต่ไม่มี data")
+    this._watchdogTimer = null;
+    this._lastKlineAt = Object.create(null); // streamName -> ms timestamp
   }
 
   start() {
     this.shouldRun = true;
+    this._lastPong = Date.now();
     this.connect();
   }
 
   stop() {
     this.shouldRun = false;
+    this._clearTimers();
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
@@ -48,6 +64,55 @@ class MarketWsManager {
     this.connected = false;
   }
 
+  _clearTimers() {
+    if (this._heartbeatTimer) {
+      clearInterval(this._heartbeatTimer);
+      this._heartbeatTimer = null;
+    }
+    if (this._watchdogTimer) {
+      clearInterval(this._watchdogTimer);
+      this._watchdogTimer = null;
+    }
+  }
+
+  _startHeartbeat() {
+    if (this._heartbeatTimer) clearInterval(this._heartbeatTimer);
+    this._heartbeatTimer = setInterval(() => {
+      if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+      const sinceLastPong = Date.now() - this._lastPong;
+      if (sinceLastPong > PONG_STALE_LIMIT_MS) {
+        logger.warn({ sinceLastPong }, 'market WS heartbeat: no pong > 60s, forcing reconnect');
+        try { this.ws.terminate(); } catch (e) { /* ignore */ }
+        return;
+      }
+      try { this.ws.ping(); } catch (e) { /* ignore */ }
+    }, HEARTBEAT_INTERVAL_MS);
+  }
+
+  _startWatchdog() {
+    if (this._watchdogTimer) clearInterval(this._watchdogTimer);
+    this._watchdogTimer = setInterval(() => {
+      if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+      const now = Date.now();
+      let staleStream = null;
+      let staleAge = 0;
+      for (const stream of this.subscriptions.keys()) {
+        if (!stream.includes('@kline_')) continue; // เช็คเฉพาะ kline stream
+        const last = this._lastKlineAt[stream];
+        if (!last) continue; // ยังไม่เคยได้รับ kline เลย → ข้าม (อยู่ใน grace period)
+        const age = now - last;
+        if (age > KLINE_STALE_LIMIT_MS && age > staleAge) {
+          staleStream = stream;
+          staleAge = age;
+        }
+      }
+      if (staleStream) {
+        logger.warn({ staleStream, staleAgeMs: staleAge }, 'market WS watchdog: kline stale > 3min, forcing reconnect');
+        try { this.ws.terminate(); } catch (e) { /* ignore */ }
+      }
+    }, WATCHDOG_INTERVAL_MS);
+  }
+
   connect() {
     if (!this.shouldRun) return;
     const url = `${config.binanceApi.wsBase}/stream`;
@@ -56,10 +121,24 @@ class MarketWsManager {
     const ws = new WebSocket(url);
     this.ws = ws;
 
+    // Reset heartbeat baseline ทุกครั้งที่ (re)connect
+    this._lastPong = Date.now();
+
     ws.on('open', () => {
       this.connected = true;
       this.reconnectAttempts = 0;
       logger.info('market WS connected');
+
+      // ให้ grace period กับ kline streams ที่เพิ่ง (re)subscribe
+      // (กัน watchdog ทำงานทันทีระหว่างรอ kline แรกหลังต่อใหม่)
+      for (const stream of this.subscriptions.keys()) {
+        if (stream.includes('@kline_')) this._lastKlineAt[stream] = Date.now();
+      }
+
+      // Layer A: heartbeat ping/pong (กัน TCP half-open)
+      this._startHeartbeat();
+      // Layer B: watchdog (กันเคส "ดู alive แต่ไม่มี data")
+      this._startWatchdog();
 
       // subscribe ทั้งหมดที่ค้างอยู่
       const all = [...this.subscriptions.keys()];
@@ -71,6 +150,13 @@ class MarketWsManager {
         try { ws.send(JSON.stringify(msg)); } catch (e) { /* ignore */ }
       }
       this.pendingSends = [];
+
+      // FIX-2026-07-15: แจ้ง trader ว่า market stream กลับมาแล้ว — ให้ reconcile missed kline closes
+      //   ปัญหาเดิม: WS disconnect/reconnect ระหว่างรอ candle close → kline:closed event หาย
+      //   → lastSignalIndex ไม่ advance → signal รอบถัดไปถูก skip ตลอด จนกว่าจะ restart
+      //   fix: emit 'market:reconnected' event → trader จะ fetch candle หลัง lastSignalCloseTime
+      //        จาก REST แล้ว replay onCandleClosed สำหรับ candle ที่ close ไปแล้ว
+      try { eventBus.emit('market:reconnected', { ms: Date.now() }); } catch (e) { /* eventBus might be undefined at boot */ }
     });
 
     ws.on('message', (raw) => {
@@ -82,8 +168,14 @@ class MarketWsManager {
       try { ws.pong(data); } catch (e) { /* ignore */ }
     });
 
+    ws.on('pong', () => {
+      // Layer A: อัปเดต timestamp ล่าสุดที่ได้รับ pong
+      this._lastPong = Date.now();
+    });
+
     ws.on('close', (code, reason) => {
       this.connected = false;
+      this._clearTimers();
       logger.warn({ code, reason: reason.toString() }, 'market WS closed');
       this.scheduleReconnect();
     });
@@ -122,19 +214,24 @@ class MarketWsManager {
       if (stream.endsWith('@bookTicker')) {
         this.handleBookTicker(data);
       } else if (stream.includes('@kline_')) {
-        this.handleKline(data);
+        this.handleKline(data, stream);
       }
     } else if (msg.e === 'bookTicker') {
       this.handleBookTicker(msg);
     } else if (msg.e === 'kline') {
-      this.handleKline(msg);
+      const stream = `${(msg.s || '').toLowerCase()}@kline_${msg.k.i}`;
+      this.handleKline(msg, stream);
     }
   }
 
-  handleKline(data) {
+  handleKline(data, stream) {
     const k = data.k;
     const symbol = data.s;
     const interval = k.i;
+    // Layer B: อัปเดต timestamp ล่าสุดที่ได้รับ kline (กัน false positive ของ watchdog)
+    const streamKey = stream || `${symbol.toLowerCase()}@kline_${interval}`;
+    this._lastKlineAt[streamKey] = Date.now();
+
     const kline = {
       symbol,
       interval,
@@ -217,6 +314,8 @@ class MarketWsManager {
     const cur = this.subscriptions.get(stream) || 0;
     if (cur === 0) {
       this.subscriptions.set(stream, 1);
+      // Layer B: seed grace period สำหรับ kline stream (กัน watchdog trigger ทันที)
+      if (stream.includes('@kline_')) this._lastKlineAt[stream] = Date.now();
       this.sendSubscribe([stream]);
       logger.debug({ stream, refCount: 1 }, 'WS subscribe');
     } else {
@@ -228,6 +327,8 @@ class MarketWsManager {
     const cur = this.subscriptions.get(stream) || 0;
     if (cur <= 1) {
       this.subscriptions.delete(stream);
+      // Layer B: clean up kline timestamp
+      if (stream.includes('@kline_')) delete this._lastKlineAt[stream];
       this.sendUnsubscribe([stream]);
       logger.debug({ stream }, 'WS unsubscribe');
     } else {
@@ -367,7 +468,8 @@ class UserDataStreamManager {
   }
 
   async sendSubscribe() {
-    const params = binanceRest.signUserStreamParams();
+    // FIX-2026-07-14: signUserStreamParams is now async (awaits ensureTimeOffset) — await it
+    const params = await binanceRest.signUserStreamParams();
     const resp = await this.sendRpc('userDataStream.subscribe.signature', params);
     this.subscriptionId = resp.result && resp.result.subscriptionId;
     logger.info({ subscriptionId: this.subscriptionId }, 'user data stream connected');

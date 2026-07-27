@@ -10,12 +10,23 @@ const logger = require('../utils/logger');
 
 /**
  * ดึง klines ย้อนหลังจาก Binance (loop ถ้าเกิน 1000 แท่ง)
+ *
+ * SAFETY_LIMIT = 300000 — รองรับ:
+ *   - 1m  × ~200 วัน
+ *   - 3m  × ~600 วัน (~1.6 ปี)   ← รวม 3m × 1 ปี (~175k)
+ *   - 5m  × ~1000 วัน (~2.7 ปี)
+ *   - 15m × ~3000 วัน (~8 ปี)
+ *   - 1h  × ~35 ปี
+ * ถ้าเกิน limit จะ log warning + return truncated data + ตั้ง result.truncated=true
  */
-async function fetchKlines({ symbol, interval, fromMs, toMs }) {
+async function fetchKlines({ symbol, interval, fromMs, toMs, onProgress = null }) {
   const all = [];
   let cursor = fromMs;
   const stepMs = intervalToMs(interval) * 1000;
-  const SAFETY_LIMIT = 5000;
+  // FIX 2026-07-13: SAFETY_LIMIT เดิม 5000 ตัดข้อมูลเงียบ ๆ เวลาขอ > 17 วัน บน 5m
+  //   เพิ่มเป็น 100,000 รองรับ 3–6 เดือนบน 5m
+  // FIX 2026-07-13 (round 2): bump เป็น 300,000 รองรับ 3m × 1 ปี (~175k)
+  const SAFETY_LIMIT = 300000;
 
   while (cursor < toMs && all.length < SAFETY_LIMIT) {
     const limit = Math.min(1000, SAFETY_LIMIT - all.length);
@@ -48,9 +59,11 @@ async function fetchKlines({ symbol, interval, fromMs, toMs }) {
     cursor = lastOpenTime + stepMs;
 
     if (resp.length < limit) break;
+    if (onProgress) onProgress(all.length);
   }
 
-  return all;
+  const truncated = all.length >= SAFETY_LIMIT && cursor < toMs;
+  return { klines: all, truncated };
 }
 
 function intervalToMs(interval) {
@@ -110,6 +123,14 @@ function simulateTrades({ klines, signals, opts }) {
   const trades = [];
   // Active trades: เรียงตาม exitIdx ascending (FIFO) เพื่อ clean up เร็ว
   const activeExits = []; // array of { buyCandleIdx, exitIdx }
+  // จำนวนไม้ที่เปิดพร้อมกันสูงสุดตลอด simulation (peak concurrency)
+  // ใช้ดูว่า bot ต้องการ maxConcurrentTrades ≥ เท่าไหร่ถึงจะรองรับช่วงที่ราคาไม่ TP
+  let maxConcurrentTradesUsed = 0;
+  const trackPeak = () => {
+    if (activeExits.length > maxConcurrentTradesUsed) {
+      maxConcurrentTradesUsed = activeExits.length;
+    }
+  };
 
   // หา stepMs ของชุด klines (ใช้สำหรับ BUY fill timestamp = กลางแท่ง)
   const stepMs = klines.length >= 2 ? (klines[1].openTime - klines[0].openTime) : 0;
@@ -140,6 +161,7 @@ function simulateTrades({ klines, signals, opts }) {
     const remaining = activeExits.filter((e) => e.exitIdx >= idx);
     activeExits.length = 0;
     activeExits.push(...remaining);
+    trackPeak(); // track ไม้ที่เหลืออยู่หลัง cleanup (ก่อน push ใหม่)
 
     // ─── Check concurrent slot ────────────────────────
     if (activeExits.length >= maxConcurrentTrades) {
@@ -248,6 +270,7 @@ function simulateTrades({ klines, signals, opts }) {
         feeRate,
       });
       activeExits.push({ buyCandleIdx, exitIdx: sellCandleIdx });
+      trackPeak(); // track หลัง push (TP hit ที่ยังไม่ close)
       // BUY/SELL fill timestamp = กลางแท่ง (openTime + stepMs/2)
       // สะท้อนว่า maker order มัก fill ระหว่างแท่ง ไม่ใช่ตอนปิดพอดี
       const buyFilledAtMs = stepMs > 0 ? klines[buyCandleIdx].openTime + Math.floor(stepMs / 2) : klines[buyCandleIdx].closeTime;
@@ -274,6 +297,7 @@ function simulateTrades({ klines, signals, opts }) {
     } else {
       // ไม่มี stop loss → ถือต่อจนกว่าข้อมูลจะหมด → ยังไม่นับ PnL (unrealized)
       activeExits.push({ buyCandleIdx, exitIdx: klines.length });
+      trackPeak(); // track หลัง push (still_holding ถือต่อจนจบข้อมูล)
       const lastClose = klines[klines.length - 1].close;
       const unrealizedPnlResult = fees.calcPnl({
         buyPrice,
@@ -305,7 +329,7 @@ function simulateTrades({ klines, signals, opts }) {
     }
   }
 
-  return trades;
+  return { trades, maxConcurrentTradesUsed };
 }
 
 /**
@@ -421,12 +445,22 @@ async function runBacktest(params) {
 
   logger.info({ symbol, timeframe, fromMs, toMs }, 'backtest: fetching klines');
 
-  const klines = await fetchKlines({
+  const { klines, truncated } = await fetchKlines({
     symbol,
     interval: timeframe,
     fromMs,
     toMs,
   });
+
+  if (truncated) {
+    logger.warn({
+      symbol,
+      timeframe,
+      requestedDays: Math.round((toMs - fromMs) / 86400000),
+      actualCandles: klines.length,
+      actualDays: Math.round((klines[klines.length - 1].openTime - klines[0].openTime) / 86400000),
+    }, 'backtest: klines truncated by SAFETY_LIMIT — requested range exceeds fetch cap');
+  }
 
   if (klines.length < 50) {
     throw new Error(`Not enough klines: got ${klines.length}, need >= 50`);
@@ -448,11 +482,15 @@ async function runBacktest(params) {
   logger.info({
     symbol, timeframe, klines: klines.length, signals: signals.length,
     stepSize: stepSizeStr, minNotional: minNotional.toString(),
+    truncated,
+    actualDays: klines.length > 1
+      ? Math.round((klines[klines.length - 1].openTime - klines[0].openTime) / 86400000)
+      : 0,
   }, 'backtest: signals detected');
 
   const feeRate = fees.getMakerRate({ useBnbForFees });
 
-  const trades = simulateTrades({
+  const { trades, maxConcurrentTradesUsed } = simulateTrades({
     klines,
     signals,
     opts: {
@@ -467,6 +505,8 @@ async function runBacktest(params) {
   });
 
   const stats = summarize(trades);
+  // เพิ่ม peak concurrency เข้า stats (track ไว้ระหว่าง simulate)
+  stats.maxConcurrentTradesUsed = maxConcurrentTradesUsed;
 
   const storedTrades = trades.length > 500 ? trades.slice(0, 250).concat(trades.slice(-250)) : trades;
 
@@ -506,9 +546,21 @@ async function runBacktest(params) {
     exitRate: stats.exitRate.toFixed(1),
     winRate: stats.winRate.toFixed(1),
     totalPnl: stats.totalPnl.toFixed(2),
+    maxConcurrentTradesUsed,
   }, 'backtest: complete');
 
-  return { result, signals, trades, stats };
+  return {
+    result,
+    signals,
+    trades,
+    stats,
+    truncated,        // FIX 2026-07-13: แจ้งให้ UI รู้ว่าข้อมูลถูกตัดจาก SAFETY_LIMIT
+    requestedDays: Math.round((toMs - fromMs) / 86400000),
+    actualDays: klines.length > 1
+      ? Math.round((klines[klines.length - 1].openTime - klines[0].openTime) / 86400000)
+      : 0,
+    candlesFetched: klines.length,
+  };
 }
 
 module.exports = {

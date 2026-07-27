@@ -114,7 +114,10 @@ async function runBacktest() {
     useBnbForFees: document.getElementById('b-bnb').checked,
   };
 
-  document.getElementById('result').innerHTML = '<div class="alert alert-info">กำลังรัน backtest...</div>';
+  // hint estimate wait time for long ranges (3m × 1y ≈ 175k candles ≈ 30–90s)
+  const days = Math.max(1, Math.round((new Date(data.to) - new Date(data.from)) / 86400000));
+  document.getElementById('result').innerHTML =
+    `<div class="alert alert-info">⏳ กำลังรัน backtest ${data.symbol} ${data.timeframe} (${days} วัน) — อาจใช้เวลา 10–60 วินาที สำหรับช่วงยาว ๆ</div>`;
 
   try {
     const resp = await API.post('/api/backtest', data);
@@ -134,6 +137,26 @@ function renderResult(resp, params) {
   const fillClass = s.fillRate >= 70 ? 'pnl-positive' : (s.fillRate >= 40 ? 'pnl-warning' : 'pnl-negative');
   const exitClass = s.exitRate >= 70 ? 'pnl-positive' : (s.exitRate >= 40 ? 'pnl-warning' : 'pnl-negative');
 
+  // Max concurrent trades used (peak concurrency)
+  // - แดงเมื่อใกล้ max (≥80%) = สัญญาณว่า slot เต็มบ่อย → ควรเพิ่ม maxConcurrentTrades
+  // - เหลืองเมื่อใช้ ≥50%
+  // - ปกติเมื่อใช้น้อย
+  const maxSlot = params.maxConcurrentTrades || 10;
+  const peakUsed = s.maxConcurrentTradesUsed || 0;
+  const peakRatio = maxSlot > 0 ? (peakUsed / maxSlot) * 100 : 0;
+  const peakClass = peakRatio >= 80 ? 'pnl-negative' : (peakRatio >= 50 ? 'pnl-warning' : 'pnl-positive');
+  const peakLabel = `${peakUsed} / ${maxSlot}`;
+
+  // FIX 2026-07-13: เตือนเมื่อ fetchKlines ตัดข้อมูล (ช่วงที่ขอ > 6 เดือนบน 5m)
+  const truncated = !!resp.truncated;
+  const truncationHtml = truncated ? `
+    <div class="alert alert-warning small mb-2">
+      <strong>⚠️ ข้อมูลถูกตัดจาก SAFETY_LIMIT:</strong>
+      ขอช่วง <code>${resp.requestedDays}</code> วัน แต่ดึงได้แค่
+      <code>${resp.candlesFetched}</code> แท่ง (~${resp.actualDays} วัน)
+      — backtest รันบนช่วงแค่ <code>${params.from} → ${params.to}</code> จริง ๆ ไม่ครบ
+    </div>` : '';
+
   // เก็บ trades ทั้งหมด + reset หน้า
   setTradesState(resp.trades || []);
 
@@ -141,6 +164,7 @@ function renderResult(resp, params) {
     <div class="card">
       <div class="card-header"><strong>📊 ผล Backtest</strong> — ${params.symbol} ${params.timeframe} (${params.from} → ${params.to})</div>
       <div class="card-body">
+        ${truncationHtml}
         <div class="row g-2 mb-3">
           <div class="col-md-2"><div class="stat-tile"><div class="value">${resp.signalsCount}</div><div class="label">Signals (S1)</div></div></div>
           <div class="col-md-2"><div class="stat-tile"><div class="value ${fillClass}">${s.fillRate.toFixed(1)}%</div><div class="label">Buy Fill Rate</div></div></div>
@@ -148,6 +172,22 @@ function renderResult(resp, params) {
           <div class="col-md-2"><div class="stat-tile"><div class="value ${winClass}">${s.winRate.toFixed(1)}%</div><div class="label">Win Rate (realized)</div></div></div>
           <div class="col-md-2"><div class="stat-tile"><div class="value ${pnlClass}">${s.totalPnl.toFixed(4)}</div><div class="label">Total PnL (USDT)</div></div></div>
           <div class="col-md-2"><div class="stat-tile"><div class="value ${pnlClass}">${s.totalPnlPercent.toFixed(3)}%</div><div class="label">PnL %</div></div></div>
+        </div>
+
+        <div class="row g-2 mb-3">
+          <div class="col-md-3">
+            <div class="stat-tile" title="จำนวนไม้ที่เปิดพร้อมกันสูงสุดในช่วง simulation — ถ้าใกล้ max แสดงว่าช่วงนั้นเทรนลงแรงและ TP ยาก ควรพิจารณาเพิ่ม maxConcurrentTrades">
+              <div class="value ${peakClass}">${peakLabel}</div>
+              <div class="label">Peak Concurrent / Max</div>
+            </div>
+          </div>
+          <div class="col-md-9 text-muted small d-flex align-items-center">
+            ${peakRatio >= 80
+              ? `<span class="pnl-negative">⚠️ ใช้ slot สูงถึง ${peakRatio.toFixed(0)}% ของ max — มี Skip (เต็ม) ${s.maxConcurrentSkipCount || 0} ครั้ง พิจารณาเพิ่ม <code>maxConcurrentTrades</code></span>`
+              : (peakRatio >= 50
+                ? `<span class="pnl-warning">📊 ใช้ slot สูงสุด ${peakRatio.toFixed(0)}% ของ max — เริ่มมีช่วงที่หลายไม้ค้างพร้อมกัน</span>`
+                : `<span>✅ peak usage ${peakRatio.toFixed(0)}% ของ max — slot เพียงพอ`)}
+          </div>
         </div>
 
         <div class="row g-2 mb-3">
@@ -230,7 +270,8 @@ async function loadHistory() {
         <thead>
           <tr>
             <th>เวลา</th><th>Symbol</th><th>TF</th><th>ช่วง</th><th>Model</th>
-            <th>Signals</th><th>Fill%</th><th>Exit%</th><th>Win%</th><th>W/L</th><th>PnL</th><th>PnL %</th><th></th>
+            <th>Signals</th><th>Fill%</th><th>Exit%</th><th>Skip</th><th>W/L</th>
+            <th>Peak Conc.</th><th>PnL</th><th>PnL %</th><th></th>
           </tr>
         </thead>
         <tbody>
@@ -239,6 +280,16 @@ async function loadHistory() {
             const modelBadge = r.executionModel
               ? `<span class="badge bg-secondary" title="Execution model">${r.executionModel}</span>`
               : '<span class="text-muted small">unknown</span>';
+            // peak concurrent = peak / maxConcurrentTrades (จาก params)
+            // ถ้า doc เก่าไม่มี r.params.maxConcurrentTrades (บันทึกก่อน schema update) → แสดง peak อย่างเดียว
+            const peakUsed = r.maxConcurrentTradesUsed || 0;
+            const maxSlot = r.params ? r.params.maxConcurrentTrades : null;
+            const peakCell = maxSlot ? `${peakUsed}/${maxSlot}` : `${peakUsed} / <span class="text-muted" title="doc เก่า — บันทึกก่อน schema update">?</span>`;
+            const peakRatio = maxSlot > 0 ? (peakUsed / maxSlot) * 100 : 0;
+            const peakCls = maxSlot && peakRatio >= 80 ? 'pnl-negative' : (maxSlot && peakRatio >= 50 ? 'pnl-warning' : '');
+            const peakTitle = maxSlot
+              ? `peak concurrent / maxConcurrentTrades = ${peakUsed}/${maxSlot}`
+              : `peak concurrent = ${peakUsed} (max ไม่ได้บันทึกไว้ใน doc เก่า)`;
             return `
               <tr>
                 <td>${fmtDateTime(r.createdAt)}</td>
@@ -249,8 +300,9 @@ async function loadHistory() {
                 <td>${r.signalsCount}</td>
                 <td>${(r.fillRate || 0).toFixed(0)}%</td>
                 <td>${(r.exitRate || 0).toFixed(0)}%</td>
-                <td>${(r.winRate || 0).toFixed(1)}%</td>
+                <td class="${(r.maxConcurrentSkipCount || 0) > 0 ? 'pnl-negative' : 'text-muted'}" title="จำนวนครั้งที่ bot ต้อง skip สัญญาณเพราะ slot เต็ม — ถ้าเยอะควรเพิ่ม maxConcurrentTrades">${r.maxConcurrentSkipCount || 0}</td>
                 <td>${r.wins || 0}/${r.losses || 0}</td>
+                <td class="${peakCls}" title="${peakTitle}">${peakCell}</td>
                 <td class="${pnlClass}">${(r.totalPnl || 0).toFixed(4)}</td>
                 <td class="${pnlClass}">${(r.totalPnlPercent || 0).toFixed(3)}%</td>
                 <td><button class="btn btn-sm btn-outline-danger" onclick="deleteBacktest('${r._id}')">🗑</button></td>

@@ -22,6 +22,32 @@ const appConfigSchema = new mongoose.Schema(
 
     setupCompleted: { type: Boolean, default: false },
     setupAt: { type: Date, default: null },
+
+    // FIX-2026-07-24: Telegram bot (encrypted token + plain chatId + per-event toggles + thresholds)
+    //   - Token encrypted AES-256-GCM (mirror binanceApi*Enc pattern)
+    //   - Chat ID is plain (ไม่ใช่ secret)
+    //   - Events/Thresholds เป็น Mixed object — Mongoose ไม่ enforce schema ภายใน
+    telegramBotTokenEnc:     { type: String, default: '' },
+    telegramBotTokenIv:      { type: String, default: '' },
+    telegramBotTokenAuthTag: { type: String, default: '' },
+    telegramChatId:          { type: String, default: '' },
+    telegramEnabled:         { type: Boolean, default: false },
+    telegramEvents: {
+      type: Object,
+      default: () => ({
+        buyFilled: true, sellFilled: true, insufficientBalance: true,
+        botEnabled: true, botDisabled: true, botDeleted: true,
+        positionLoss: true, positionProfit: true, positionStuck: true,
+        // FIX-2026-07-26: สรุปการเทรด (ส่งที่ HH:00:00 ของวันใหม่/สัปดาห์ใหม่/เดือนใหม่)
+        dailySummary: true, weeklySummary: true, monthlySummary: true,
+        // FIX-2026-07-26: เตือน NET TP ต่ำกว่า 0.2% (เฉพาะบอทที่เปิด autoUpdateTp)
+        tpLowPnL: true,
+      }),
+    },
+    telegramThresholds: {
+      type: Object,
+      default: () => ({ positionLossPct: 2, positionProfitPct: 1, positionStuckMin: 30 }),
+    },
   },
   { timestamps: true }
 );

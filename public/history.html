@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="th">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>History - OnePercentBotTrade</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet" />
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+  <link href="/css/app.css" rel="stylesheet" />
+</head>
+<body>
+  <nav class="app-nav" id="app-nav"></nav>
+
+  <div class="container-fluid px-3 px-md-4 py-3 py-md-4">
+    <div class="page-title">
+      <h3>📜 Trade & Signal History</h3>
+      <a href="/bots.html" class="btn-lux btn-sm">← กลับ</a>
+    </div>
+
+    <!-- Stats tiles -->
+    <div class="summary-row mb-3" id="stats-row">
+      <div class="stat-tile">
+        <div class="k">Trades (วันนี้)</div>
+        <div class="v" id="stat-trades">—</div>
+      </div>
+      <div class="stat-tile">
+        <div class="k">Wins / Losses</div>
+        <div class="v" id="stat-wl">—</div>
+      </div>
+      <div class="stat-tile">
+        <div class="k">Today's PnL</div>
+        <div class="v" id="stat-pnl">—</div>
+      </div>
+      <div class="stat-tile">
+        <div class="k">Signals Skipped</div>
+        <div class="v" id="stat-skip">—</div>
+      </div>
+    </div>
+
+    <div id="history-content" class="lux-card"><div class="lux-body text-center py-5 text-muted-3">Loading…</div></div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+  <script src="/js/api.js"></script>
+  <script>window.NAV_ACTIVE = 'history';</script>
+  <script src="/js/partials/nav.js"></script>
+  <script src="/js/pages/history.js"></script>
+</body>
+</html>

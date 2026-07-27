@@ -130,23 +130,29 @@
   <!-- New Bot Modal -->
   <div class="modal fade" id="newBotModal" tabindex="-1">
     <div class="modal-dialog modal-dialog-centered modal-dialog-scrollable">
-      <div class="modal-content">
-        <div class="modal-header">
-          <h5 class="modal-title">สร้างบอทใหม่</h5>
-          <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      <div class="modal-content lux-modal">
+        <div class="modal-header lux-modal-header is-gold">
+          <div class="lux-modal-title-wrap">
+            <span class="lux-modal-icon">✨</span>
+            <div>
+              <h5 class="modal-title mb-0">สร้างบอทใหม่</h5>
+              <div class="lux-modal-sub">ตั้งค่าบอทเทรดใหม่ — บอทจะหยุดอยู่ จนกว่าจะกดเริ่ม</div>
+            </div>
+          </div>
+          <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
         </div>
         <div class="modal-body">
-          <div class="mb-3">
-            <label class="form-label">ชื่อบอท (optional)</label>
-            <input type="text" class="form-control" id="nb-name" placeholder="My Bot 1" />
+          <div class="lux-form-section">
+            <div class="lux-form-label">ตั้งชื่อบอท</div>
+            <input type="text" class="form-control" id="nb-name" placeholder="เช่น SOL scalp · 1m" />
           </div>
-          <div class="row g-2">
+          <div class="row g-2 lux-form-section">
             <div class="col-6">
-              <label class="form-label">คู่เทรด</label>
+              <div class="lux-form-label">คู่เทรด</div>
               <select class="form-select" id="nb-symbol"></select>
             </div>
             <div class="col-6">
-              <label class="form-label">Timeframe</label>
+              <div class="lux-form-label">Timeframe</div>
               <select class="form-select" id="nb-timeframe">
                 <option value="1m">1m</option><option value="3m">3m</option>
                 <option value="5m" selected>5m</option><option value="15m">15m</option>
@@ -155,37 +161,151 @@
               </select>
             </div>
           </div>
-          <div class="row g-2 mt-1">
+          <div class="lux-divider"><span>ทุน & ความเสี่ยง</span></div>
+          <div class="row g-2 lux-form-section">
             <div class="col-6">
-              <label class="form-label">ทุน/ไม้ (USDT)</label>
+              <div class="lux-form-label">ทุน/ไม้ (USDT)</div>
               <input type="number" class="form-control" id="nb-capital" value="10" step="0.01" min="1" />
             </div>
             <div class="col-6">
-              <label class="form-label">จำนวนไม้</label>
+              <div class="lux-form-label">จำนวนไม้</div>
               <input type="number" class="form-control" id="nb-maxtrades" value="10" step="1" min="1" max="100" />
             </div>
           </div>
-          <div class="row g-2 mt-1">
+          <div class="row g-2 lux-form-section">
             <div class="col-4">
-              <label class="form-label">TP %</label>
+              <div class="lux-form-label d-flex justify-content-between align-items-center">
+                <span>TP %</span>
+                <button type="button" class="btn btn-sm btn-outline-warning" id="nb-tp-recommend" title="คำนวณ TP% จาก Min %KC(500 bars) + trend(upper-TF)">
+                  ✨ Get
+                </button>
+              </div>
               <input type="number" class="form-control" id="nb-tp" value="0.1" step="0.01" min="0.001" />
             </div>
             <div class="col-4">
-              <label class="form-label">Retry (นาที)</label>
-              <input type="number" class="form-control" id="nb-retry" value="1" step="1" min="1" max="60" />
+              <div class="lux-form-label">Retry (นาที)</div>
+              <input type="number" class="form-control" id="nb-retry" value="1" step="0.1" min="0.1" max="60" />
+              <small class="text-muted">ทศนิยมได้ เช่น 0.5 = 30 วินาที</small>
             </div>
             <div class="col-4">
-              <label class="form-label">Retry max</label>
+              <div class="lux-form-label">Retry max</div>
               <input type="number" class="form-control" id="nb-retry-max" value="1" step="1" min="0" max="10" />
             </div>
+            <div class="col-4">
+              <div class="lux-form-label">KC Mult</div>
+              <input type="number" class="form-control" id="nb-kc-mult" value="1.5" step="0.1" min="0.5" max="5" title="ความกว้างของ Keltner Channel (default 1.5)" />
+            </div>
           </div>
-          <div class="form-text mt-1">0 = วางครั้งเดียว ไม่ retry; 1 = วางได้อีก 1 ครั้งถ้า bid ขยับ</div>
-          <div class="alert alert-info mt-3 mb-0" id="nb-total">ทุนรวมที่ต้องเตรียม: 0.00 USDT</div>
+          <div class="lux-form-hint">0 = วางครั้งเดียว ไม่ retry · 1 = วางได้อีก 1 ครั้งถ้า bid ขยับ · บอทจะบวก fee buffer ให้อัตโนมัติ</div>
+          <div class="lux-form-hint" id="nb-tp-hint">กด ✨ Get เพื่อให้ระบบคำนวณ TP% จาก Min %KC(500 bars) + EMA20 trend(upper-TF) ของคู่เทรด/tf ที่เลือก</div>
+          <div class="lux-form-section">
+            <div class="form-check">
+              <input class="form-check-input" type="checkbox" id="nb-stop-loss-upper-kc" />
+              <label class="form-check-label" for="nb-stop-loss-upper-kc">
+                🛑 <strong>Stop Loss เมื่อราคาปิดทะลุ upper-KC</strong> (เฉพาะตอนขาดทุน)
+              </label>
+              <small class="text-muted-3 d-block mt-1">
+                ตรวจทุก <code>kline:closed</code>: ถ้า <code>candle.close &gt; upperKC</code> และ position ยังขาดทุน → cancel LIMIT_MAKER SELL ค้าง + MARKET SELL ทันที
+              </small>
+            </div>
+            <div class="form-check mt-2">
+              <input class="form-check-input" type="checkbox" id="nb-auto-update-tp" />
+              <label class="form-check-label" for="nb-auto-update-tp">
+                ⏰ <strong>อัพเดท TP% อัตโนมัติทุกต้นชั่วโมง</strong>
+              </label>
+              <small class="text-muted-3 d-block mt-1">
+                ระบบจะ recompute TP% จาก Min %KC(500 bars) + EMA20 trend(upper-TF) แล้ว persist ทุก <code>HH:00:00</code> (top-of-hour)
+              </small>
+            </div>
+          </div>
+          <div class="alert alert-info mt-3 mb-0 lux-summary-tile" id="nb-total">
+            <div class="lbl">ทุนรวมที่ต้องเตรียม</div>
+            <div class="val" id="nb-total-val">0.00 <span class="cur">USDT</span></div>
+          </div>
+          <div class="lux-divider"><span>ยืนยัน</span></div>
+          <div class="lux-form-section">
+            <div class="lux-form-label">รหัสยืนยัน <span class="text-muted-3">(ตั้งใน .env: BOT_ACTION_PASSWORD)</span></div>
+            <div class="lux-password-field">
+              <input type="password" class="form-control" id="nb-password" autocomplete="off" placeholder="••••••" />
+              <button class="lux-pw-toggle" type="button" data-target="nb-password" aria-label="แสดงรหัส">👁</button>
+            </div>
+            <div class="lux-form-hint">ถ้า backend ไม่ได้ตั้งรหัส ให้เว้นว่างไว้</div>
+          </div>
           <div class="text-danger small mt-2" id="nb-error"></div>
         </div>
-        <div class="modal-footer">
+        <div class="modal-footer lux-modal-footer">
           <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">ยกเลิก</button>
-          <button type="button" class="btn btn-primary" id="nb-create">สร้าง</button>
+          <button type="button" class="btn btn-primary" id="nb-create">
+            <span class="btn-glyph">✨</span>
+            <span class="btn-label">สร้างบอท</span>
+            <span class="btn-spinner" aria-hidden="true"></span>
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Confirm Action Modal (enable / disable / delete + password retry) -->
+  <div class="modal fade" id="confirmActionModal" tabindex="-1" data-bs-backdrop="static" data-bs-keyboard="false">
+    <div class="modal-dialog modal-dialog-centered">
+      <div class="modal-content lux-modal">
+        <div class="modal-header lux-modal-header" id="cam-header">
+          <div class="lux-modal-title-wrap">
+            <span class="lux-modal-icon" id="cam-icon">⚠️</span>
+            <div>
+              <h5 class="modal-title mb-0" id="cam-title">ยืนยันการทำรายการ</h5>
+              <div class="lux-modal-sub" id="cam-sub">กรุณาตรวจสอบรายละเอียดก่อนดำเนินการ</div>
+            </div>
+          </div>
+          <button type="button" class="btn-close btn-close-white" id="cam-close" aria-label="Close"></button>
+        </div>
+        <div class="modal-body">
+          <!-- Target card (bot identity, only shown when action targets a specific bot) -->
+          <div class="cam-target" id="cam-target" hidden>
+            <div class="cam-target-row">
+              <span class="k">บอท</span>
+              <span class="v" id="cam-target-name">—</span>
+            </div>
+            <div class="cam-target-row">
+              <span class="k">คู่เทรด</span>
+              <span class="v mono" id="cam-target-symbol">—</span>
+            </div>
+            <div class="cam-target-row">
+              <span class="k">Timeframe</span>
+              <span class="v mono" id="cam-target-tf">—</span>
+            </div>
+          </div>
+
+          <!-- Description / message -->
+          <div class="cam-message" id="cam-message">ดำเนินการต่อหรือไม่?</div>
+
+          <!-- Inline warning callout (variant: danger) -->
+          <div class="alert alert-danger cam-danger-note" id="cam-danger-note" hidden>
+            <span class="alert-glyph">⚠️</span>
+            <span id="cam-danger-text">การกระทำนี้ไม่สามารถยกเลิกได้</span>
+          </div>
+
+          <!-- Password field (only shown when bot-action password is required) -->
+          <div class="cam-pw-block" id="cam-pw-block">
+            <div class="lux-divider"><span>ยืนยันตัวตน</span></div>
+            <div class="lux-form-label">รหัสยืนยัน <span class="text-muted-3">(BOT_ACTION_PASSWORD)</span></div>
+            <div class="lux-password-field">
+              <input type="password" class="form-control" id="cam-password" autocomplete="off" placeholder="••••••" />
+              <button class="lux-pw-toggle" type="button" data-target="cam-password" aria-label="แสดงรหัส">👁</button>
+            </div>
+            <div class="lux-form-hint">ปล่อยว่างไว้ได้ถ้า backend ไม่ได้ตั้งรหัส</div>
+          </div>
+
+          <!-- Inline error (set after server reject, etc.) -->
+          <div class="text-danger small mt-2" id="cam-error" hidden></div>
+        </div>
+        <div class="modal-footer lux-modal-footer">
+          <button type="button" class="btn btn-secondary" id="cam-cancel">ยกเลิก</button>
+          <button type="button" class="btn" id="cam-confirm">
+            <span class="btn-glyph" id="cam-confirm-glyph">✓</span>
+            <span class="btn-label" id="cam-confirm-label">ยืนยัน</span>
+            <span class="btn-spinner" aria-hidden="true"></span>
+          </button>
         </div>
       </div>
     </div>
@@ -226,10 +346,12 @@
   </div>
 
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+  <script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
   <script src="/js/api.js"></script>
   <script src="/js/ws-client.js"></script>
   <script>window.NAV_ACTIVE = 'bots';</script>
   <script src="/js/partials/nav.js"></script>
+  <script src="/js/luxConfirm.js"></script>
   <script src="/js/pages/bots.js"></script>
 </body>
 </html>

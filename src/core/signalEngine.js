@@ -21,6 +21,15 @@ const { ema, atr } = require('./indicators');
  *   bg_state = 0 ถ้าไม่เข้าเงื่อนไขใดเลย
  *
  *   S1 = bg_prev == 2 AND (bg_state == 3 OR bg_state == 1)
+ *
+ * FIX-2026-07-25: XS1 anti-dump gate (per-bot toggle via opts.xs1Enabled, default true)
+ *   ป้องกันการซื้อขณะราคาไหลเร็วเกินไป (candle-wide dump)
+ *   XS1 = (close < lowerKC AND open > basisKC)
+ *      OR (open[1] > basisKC[1] AND close[1] < basisKC[1]
+ *          AND close < lowerKC AND open < basisKC)
+ *   opts.xs1Enabled:
+ *     - true  (default) → ถ้า XS1 = true ให้ skip S1 signal
+ *     - false           → ใช้สัญญาณดั้งเดิม (ไม่ skip แม้ candle-wide dump) — สำหรับบอทที่ user อยาก S1 ตามปกติ
  */
 
 const KC_LEN = 20;
@@ -56,10 +65,57 @@ function computeBgStates({ closes, highs, lows, length = KC_LEN, mult = KC_MULT,
 }
 
 // ตรวจ S1 ที่ดัชนี i (ต้องมี bg[i-1])
-function isS1At(bg, i) {
+// FIX-2026-07-24: opts.onlyDown
+//   - false (default, backward-compat): S1 = bg_prev=2 AND (bg=1 OR bg=3)
+//   - true: S1 = bg_prev=2 AND bg=3 เท่านั้น (ลง — ไม่ซื้อตอนราคาสูง)
+// FIX-2026-07-25: XS1 anti-dump (always applied)
+//   - ถ้า candle-wide dump → skip signal (กันราคาไหลเร็ว)
+//   - ดู isXS1At() ด้านล่างสำหรับ pattern เต็ม
+function isS1At(bg, i, opts = {}) {
   if (i <= 0) return false;
   if (bg[i] === null || bg[i - 1] === null) return false;
-  return bg[i - 1] === 2 && (bg[i] === 1 || bg[i] === 3);
+  if (bg[i - 1] !== 2) return false;
+  if (opts.onlyDown) {
+    if (bg[i] !== 3) return false;
+  } else {
+    if (bg[i] !== 1 && bg[i] !== 3) return false;
+  }
+  return true;
+}
+
+// FIX-2026-07-25: XS1 anti-dump gate (hard rule)
+//   ตรวจว่า candle มี pattern "ไหลเร็วเกินไป" หรือไม่ — ถ้าใช่ → skip S1
+//
+//   XS1 = (close < lowerKC AND open > basisKC)
+//      OR (open[1] > basisKC[1] AND close[1] < basisKC[1]
+//          AND close < lowerKC AND open < basisKC)
+//
+//   index [1] = previous candle (i-1)
+//
+//   Inputs:
+//     i         - index ของ current candle
+//     opens     - array ของ open prices (ทุก kline)
+//     closes    - array ของ close prices
+//     basis     - array ของ basisKC (จาก computeBgStates)
+//     lower     - array ของ lowerKC (จาก computeBgStates)
+//
+//   Returns: true ถ้า candle มี dump pattern (ให้ caller skip signal)
+function isXS1At(i, opens, closes, basis, lower) {
+  if (i <= 0) return false;
+  if (opens[i] == null || closes[i] == null || basis[i] == null || lower[i] == null) return false;
+  if (opens[i - 1] == null || closes[i - 1] == null || basis[i - 1] == null || lower[i - 1] == null) return false;
+  // Pattern A: current candle alone dumps hard
+  //   close < lowerKC AND open > basisKC
+  //   → opened above basis, closed below lower (full-channel crash)
+  const patternA = closes[i] < lower[i] && opens[i] > basis[i];
+  // Pattern B: previous candle started above basis, then 2 consecutive dumps
+  //   open[1] > basisKC[1] AND close[1] < basisKC[1]
+  //   AND close < lowerKC AND open < basisKC
+  const patternB = opens[i - 1] > basis[i - 1]
+    && closes[i - 1] < basis[i - 1]
+    && closes[i] < lower[i]
+    && opens[i] < basis[i];
+  return patternA || patternB;
 }
 
 /**
@@ -70,38 +126,63 @@ function detectS1Signals(klines, opts = {}) {
   const closes = klines.map((k) => parseFloat(k.close));
   const highs = klines.map((k) => parseFloat(k.high));
   const lows = klines.map((k) => parseFloat(k.low));
+  // FIX-2026-07-25: opens needed for XS1 anti-dump pattern A/B
+  const opens = klines.map((k) => parseFloat(k.open));
 
   const { basis, upper, lower, bg } = computeBgStates({ closes, highs, lows, ...opts });
 
   const signals = [];
   for (let i = 0; i < klines.length; i += 1) {
-    if (isS1At(bg, i)) {
-      signals.push({
-        index: i,
-        openTime: klines[i].openTime,
-        closeTime: klines[i].closeTime,
-        type: 'S1',
-        close: closes[i],
-        basisKC: basis[i],
-        upperKC: upper[i],
-        lowerKC: lower[i],
-        bgState: bg[i],
-        bgPrev: bg[i - 1],
-      });
-    }
+    if (!isS1At(bg, i, opts)) continue;
+    // FIX-2026-07-25: XS1 anti-dump gate (per-bot toggle — opts.xs1Enabled, default true)
+    //   ผู้ใช้สามารถปิดได้ต่อบอท (bot.xs1Enabled=false) → ใช้สัญญาณดั้งเดิม
+    if (opts.xs1Enabled !== false && isXS1At(i, opens, closes, basis, lower)) continue;
+    signals.push({
+      index: i,
+      openTime: klines[i].openTime,
+      closeTime: klines[i].closeTime,
+      type: 'S1',
+      close: closes[i],
+      basisKC: basis[i],
+      upperKC: upper[i],
+      lowerKC: lower[i],
+      bgState: bg[i],
+      bgPrev: bg[i - 1],
+    });
   }
 
   return { signals, basis, upper, lower, bg };
 }
 
 // ตรวจ S1 บนแท่งล่าสุดเท่านั้น (สำหรับ live trading — ต้องมี previous candle)
+// FIX-2026-07-25: คืน object { signal, xs1 } — xs1=true ถ้า candle มี dump pattern
+//   - signal=null && xs1=true  → S1 base match แต่ skip เพราะ candle-wide dump
+//   - signal=null && xs1=false → ไม่ใช่ S1 base match
+//   - signal=object && xs1=false → valid S1 signal
+//   - signal=object && xs1=true  → เป็นไปไม่ได้ (filter ที่ detectS1Signals แล้ว)
+// FIX-2026-07-25: opts.xs1Enabled (per-bot toggle)
+//   - true (default): ถ้า XS1 = true → skip (return { signal: null, xs1: true })
+//   - false: XS1 ไม่ skip → return signal ปกติ (xs1=false)
 function checkS1OnLatestCandle(klines, opts = {}) {
-  if (!klines || klines.length < 2) return null;
+  if (!klines || klines.length < 2) return { signal: null, xs1: false };
   const { signals, bg } = detectS1Signals(klines, opts);
   const i = klines.length - 1;
-  if (!isS1At(bg, i)) return null;
+  const baseS1 = isS1At(bg, i, opts);
+  if (!baseS1) return { signal: null, xs1: false };
+  // ตรวจ XS1 เพิ่มเติม (สำหรับ diagnostic — caller รู้ว่าถูก skip เพราะอะไร)
+  const opens = klines.map((k) => parseFloat(k.open));
+  const closes = klines.map((k) => parseFloat(k.close));
+  const { basis, lower } = computeBgStates({
+    closes,
+    highs: klines.map((k) => parseFloat(k.high)),
+    lows: klines.map((k) => parseFloat(k.low)),
+    ...opts,
+  });
+  const xs1 = isXS1At(i, opens, closes, basis, lower);
+  // FIX-2026-07-25: ถ้า xs1Enabled=false → ไม่ skip แม้ xs1=true (return signal ปกติ)
+  if (xs1 && opts.xs1Enabled !== false) return { signal: null, xs1: true };
   const s = signals[signals.length - 1];
-  return s;
+  return { signal: s, xs1 };
 }
 
 // เช็คว่าพร้อมคำนวณสัญญาณหรือยัง (ต้องมีข้อมูล >= warm-up candles)
@@ -113,6 +194,7 @@ function isWarmedUp(klinesLength, length = KC_LEN) {
 module.exports = {
   computeBgStates,
   isS1At,
+  isXS1At,
   detectS1Signals,
   checkS1OnLatestCandle,
   isWarmedUp,

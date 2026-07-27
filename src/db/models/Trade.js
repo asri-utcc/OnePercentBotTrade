@@ -4,10 +4,12 @@ const mongoose = require('mongoose');
 
 const TRADE_STATES = [
   'placed',         // BUY order วางแล้ว รอ fill
+  'partial_wait',   // FIX-2026-07-23: deadline handler กำลังตัดสินใจ top-up/accept (atomic claim guard)
   'filled',         // BUY fill แล้ว กำลังจะวาง SELL
   'retrying',       // cancel + re-place BUY (best bid ขยับ)
   'cancelled',      // cancel แล้ว ไม่ได้ fill (signal expired หรือ user cancel)
   'holding',        // มี base asset แล้ว รอวาง/รอ fill SELL
+  'stopping',       // FIX-2026-07-23: stop-loss handler กำลังจะ force close (atomic claim guard)
   'selling',        // SELL order วางแล้ว รอ fill
   'sold',           // SELL fill แล้ว จบรอบ
   'failed',         // error
@@ -46,6 +48,14 @@ const tradeSchema = new mongoose.Schema(
     targetSellPrice: { type: Number, default: null }, // ราคาเป้าหมาย (TP + fee buffer)
 
     retryCount: { type: Number, default: 0 },
+
+    // FIX-2026-07-23: partial-fill deadline decision tracking (optional, default null)
+    partialDecisionAt: { type: Date, default: null },
+    partialDecisionMode: { type: String, default: null }, // 'accept_partial' | 'top_up_market'
+    topUpOrderId: { type: Number, default: null },
+    // FIX P3.1: persist partial-fill deadline timestamp → restore ได้หลัง bot restart
+    //   เดิมเก็บใน instance only → restart ระหว่าง partial fill → deadline หาย → partialFillWatcher ค้าง
+    partialFillDeadlineAt: { type: Date, default: null },
 
     state: { type: String, enum: TRADE_STATES, default: 'placed', index: true },
     realizedPnl: { type: Number, default: null },     // กำไรขาดทุนจริง (USDT)

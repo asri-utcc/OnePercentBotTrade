@@ -9,6 +9,13 @@ const logger = require('../utils/logger');
 const Bot = require('../db/models/Bot');
 const Trade = require('../db/models/Trade');
 const Trader = require('./trader');
+// FIX-2026-07-23: TP auto-updater (per-bot autoUpdateTp toggle → top-of-hour recompute)
+const tpUpdater = require('./tpUpdater');
+
+// FIX-2026-07-14: periodic reconcile interval (ms) — safety net กัน WS event หลุด
+//   2 นาที ตามที่ user ระบุ (1–3 นาที) — เร็วพอที่จะจับ SELL filled ภายใน 2 นาที,
+//   ช้าพอที่จะไม่ spam Binance API
+const RECONCILE_INTERVAL_MS = 2 * 60 * 1000;
 
 /**
  * Bot Manager — spawn/stop Trader ต่อ bot, จัดการ WS subscriptions
@@ -18,6 +25,13 @@ class BotManager {
   constructor() {
     this.traders = new Map(); // botId -> Trader
     this.running = false;
+    // FIX-2026-07-14: periodic reconciliation timer (safety net for missed WS updates)
+    //   reconcilePendingTrades() เดิมรันแค่ครั้งเดียวตอน startup — ถ้า WS event หลุดระหว่าง runtime
+    //   (listenkey expired, network blip, race กับ idempotent guard) จะมี position ที่ SELL fill แล้วบน Binance
+    //   แต่ trade.state ยัง stuck ที่ 'selling' ใน DB → ระบบค้าง
+    //   fix: ยิง reconcilePendingTrades() ทุก RECONCILE_INTERVAL_MS (default 2 นาที)
+    this.reconcileTimer = null;
+    this.reconcileInFlight = false; // guard กัน overlap ถ้า reconcile รอบก่อนยังไม่จบ
   }
 
   async start() {
@@ -47,10 +61,45 @@ class BotManager {
     // ซ่อม Bot totals (totalPnl/totalTrades/winTrades) ให้ตรงกับ Trade collection
     // (กัน drift จาก read-modify-write race ที่เคยทำให้ totalTrades ตกหล่น)
     await this.recomputeBotStats();
+
+    // FIX-2026-07-14: schedule periodic reconcile (safety net)
+    //   - ห่าง RECONCILE_INTERVAL_MS (default 2 นาที) — กัน WS event หลุดระหว่าง runtime
+    //   - clearInterval ตอน stop()
+    //   - guard reconcileInFlight กัน overlap กรณี reconcile นาน (เช่น reconcile 50 trades)
+    if (this.reconcileTimer) clearInterval(this.reconcileTimer);
+    this.reconcileTimer = setInterval(() => {
+      if (!this.running || this.reconcileInFlight) return;
+      this.reconcileInFlight = true;
+      this.reconcilePendingTrades()
+        .catch((err) => logger.error({ err: err.message }, 'botManager: periodic reconcile failed'))
+        .finally(() => { this.reconcileInFlight = false; });
+    }, RECONCILE_INTERVAL_MS);
+    logger.info({ intervalMs: RECONCILE_INTERVAL_MS }, 'botManager: periodic reconcile scheduled');
+
+    // FIX-2026-07-23: schedule TP auto-updater (recompute TP% top-of-hour สำหรับบอทที่ autoUpdateTp=true)
+    tpUpdater.scheduleHourlyTpUpdate();
+
+    // FIX-2026-07-24: start Telegram notifier (subscribe eventBus + periodic PnL scan)
+    const telegramNotifier = require('../services/telegramNotifier');
+    telegramNotifier.start().catch((e) => logger.warn({ err: e.message }, 'telegramNotifier start failed'));
+
+    // FIX-2026-07-14: sync Binance server time on startup (กัน -1021 timestamp drift)
+    binanceRest.refreshServerTimeOffset()
+      .then((offsetMs) => logger.info({ offsetMs }, 'botManager: initial Binance time-sync done'))
+      .catch((err) => logger.warn({ err: err.message }, 'botManager: initial Binance time-sync failed'));
   }
 
   async stop() {
     this.running = false;
+    // FIX-2026-07-14: clear periodic reconcile timer ด้วย
+    if (this.reconcileTimer) {
+      clearInterval(this.reconcileTimer);
+      this.reconcileTimer = null;
+    }
+    // FIX-2026-07-23: หยุด TP auto-updater timer
+    tpUpdater.stopHourlyTpUpdate();
+    // FIX-2026-07-24: หยุด Telegram notifier (clear listeners + timers)
+    try { require('../services/telegramNotifier').stop(); } catch (e) { /* ignore */ }
     for (const [id, trader] of this.traders.entries()) {
       try { await trader.stop(); } catch (e) { /* ignore */ }
     }
@@ -210,6 +259,82 @@ class BotManager {
               // BUY ถูก cancel จริง — sync DB
               logger.info({ tradeId: trade._id.toString() }, 'reconcile: BUY cancelled/expired, marking DB');
               await Trade.updateOne({ _id: trade._id }, { state: 'cancelled', buyStatus: order.status });
+            } else if (order.status === 'NEW' && trade.state === 'placed') {
+              // FIX: BUY ค้างที่ state=placed นานเกิน retry budget → cancel + sync DB
+              // (กันเคสที่ bot restart ระหว่างรอ retry → in-memory retry state หาย
+              //  → BUY order ค้างบน Binance แบบไม่มีใครดูแล)
+              // เกณฑ์: retryTimeMin × (retryMax + 1) นาที — ตามสเปคที่ user กำหนด
+              //         "wait 1 min, retry 1 min, if still no fill → cancel ไม่เทรดรอบนั้น"
+              const retryBudgetMs = (bot.retryTimeMin || 1) * 60 * 1000 * ((bot.retryMax || 1) + 1);
+              const placedAt = trade.buyPlacedAt ? new Date(trade.buyPlacedAt).getTime() : 0;
+              const ageMs = placedAt ? Date.now() - placedAt : Infinity;
+              if (ageMs > retryBudgetMs) {
+                logger.warn({
+                  tradeId: trade._id.toString(),
+                  orderId: trade.buyOrderId,
+                  ageMs,
+                  retryBudgetMs,
+                  botId: trade.botId.toString(),
+                }, 'reconcile: stuck BUY beyond retry budget — cancelling');
+                let cancelResp;
+                try {
+                  cancelResp = await binanceRest.cancelOrder({
+                    symbol: trade.symbol,
+                    orderId: trade.buyOrderId,
+                  });
+                } catch (err) {
+                  const ferr = binanceRest.formatBinanceError(err);
+                  if (ferr && ferr.code === -2011) {
+                    // already gone — sync DB ตามสถานะจริง (NEW/CANCELED) แล้วปล่อยผ่าน
+                    logger.info({ tradeId: trade._id.toString() }, 'reconcile: stuck BUY already gone (-2011), marking cancelled');
+                    await Trade.updateOne({ _id: trade._id }, { state: 'cancelled', buyStatus: 'CANCELED' });
+                    // FIX: เคลียร์ bot.status + trader.currentTrade ด้วยเหมือนกรณี cancel สำเร็จ
+                    await Bot.updateOne(
+                      { _id: trade.botId, status: { $in: ['waiting_fill', 'holding', 'selling', 'error'] } },
+                      { $set: { status: 'idle', lastError: null } }
+                    );
+                    const traderAfter = this.traders.get(bot._id.toString());
+                    if (traderAfter && traderAfter.currentTrade && traderAfter.currentTrade._id.toString() === trade._id.toString()) {
+                      traderAfter._unregisterTrade(trade);
+                      traderAfter.currentTrade = null;
+                      eventBus.emit('bot:status', { botId: bot._id, status: 'idle' });
+                      logger.info({ botId: bot._id.toString(), tradeId: trade._id.toString() }, 'reconcile: cleared trader.currentTrade after stuck BUY already gone (-2011)');
+                    }
+                  } else {
+                    logger.error({
+                      tradeId: trade._id.toString(),
+                      code: ferr && ferr.code,
+                      msg: ferr && ferr.msg,
+                    }, 'reconcile: stuck BUY cancel failed — will retry next reconcile cycle');
+                  }
+                  // ไม่ mark DB ทิ้ง — ให้ reconcile รอบหน้าลองใหม่
+                  return;
+                }
+                logger.info({
+                  tradeId: trade._id.toString(),
+                  orderId: trade.buyOrderId,
+                  status: cancelResp.status,
+                }, 'reconcile: stuck BUY cancelled — marking DB cancelled');
+                await Trade.updateOne({
+                  _id: trade._id,
+                }, {
+                  state: 'cancelled',
+                  buyStatus: cancelResp.status || 'CANCELED',
+                });
+                // FIX: รีเซ็ต bot.status กลับเป็น idle + clear currentTrade ของ trader (ถ้ามี)
+                // (ถ้าไม่เคลียร์ บอทจะติด 'waiting_fill' และ skip signal ใหม่ทุกตัว — เคสนี้เคยเกิด 21:09 / 21:21)
+                await Bot.updateOne(
+                  { _id: trade.botId, status: { $in: ['waiting_fill', 'holding', 'selling', 'error'] } },
+                  { $set: { status: 'idle', lastError: null } }
+                );
+                const traderAfter = this.traders.get(bot._id.toString());
+                if (traderAfter && traderAfter.currentTrade && traderAfter.currentTrade._id.toString() === trade._id.toString()) {
+                  traderAfter._unregisterTrade(trade);
+                  traderAfter.currentTrade = null;
+                  eventBus.emit('bot:status', { botId: bot._id, status: 'idle' });
+                  logger.info({ botId: bot._id.toString(), tradeId: trade._id.toString() }, 'reconcile: cleared trader.currentTrade after stuck BUY cancel');
+                }
+              }
             }
           }
         }
@@ -272,6 +397,46 @@ class BotManager {
                   }
                 );
               }
+            } else if ((order.status === 'CANCELED' || order.status === 'EXPIRED') && trade.state !== 'cancelled') {
+              // FIX: SELL ถูก cancel/expire (เช่น manual cancel หรือ TTL) แต่ DB state ยังเป็น selling
+              // เคยเกิด: cancel แล้ว trade stuck ที่ selling → scheduleHoldingRetry loop forever
+              // → แก้โดย sync state กลับเป็น holding + เคลียร์ sellOrderId → ให้ trader re-place
+              logger.warn({
+                tradeId: trade._id.toString(),
+                dbState: trade.state,
+                sellOrderId: trade.sellOrderId,
+                orderStatus: order.status,
+                botId: trade.botId.toString(),
+              }, 'reconcile: ORPHAN — SELL cancelled/expired but DB state still selling, reverting to holding');
+              await Trade.updateOne(
+                { _id: trade._id, state: { $in: ['selling', 'placed', 'filled'] } },
+                {
+                  state: 'holding',
+                  sellStatus: order.status,
+                  $unset: { sellOrderId: '', sellClientOrderId: '' },
+                }
+              );
+              // ถ้ามี trader live ให้ sync currentTrade + trigger holding retry
+              const trader = this.traders.get(bot._id.toString());
+              if (trader) {
+                const fresh = await Trade.findById(trade._id);
+                if (fresh) {
+                  trader.currentTrade = fresh;
+                  logger.info({
+                    tradeId: fresh._id.toString(),
+                    botId: bot._id.toString(),
+                  }, 'reconcile: re-armed holding retry after SELL cancel detected');
+                  trader.scheduleHoldingRetry(fresh, fresh.buyQty, fresh.buyPrice, fresh.targetSellPrice);
+                }
+              }
+            } else if (order.status === 'NEW' && trade.state === 'selling') {
+              // FIX: SELL ยังมีชีวิตอยู่ — ไม่ต้องทำอะไร
+              // (เคยมี bug: restart แล้ว reconcile วนซ้ำหรือไป trigger handleSellFilled ซ้ำ)
+              // แค่ log debug เพื่อ visibility
+              logger.debug({
+                tradeId: trade._id.toString(),
+                sellOrderId: trade.sellOrderId,
+              }, 'reconcile: SELL still NEW on book, trade in selling state — skip');
             }
           }
         }
@@ -343,19 +508,53 @@ class BotManager {
     await bot.save();
     await this.spawnTrader(bot);
     eventBus.emit('bot:updated', { botId });
+    // FIX-2026-07-24: action-specific event สำหรับ Telegram notifier (bot:updated payload ไม่มี verb)
+    eventBus.emit('bot:enabled', { botId });
     return bot;
   }
 
   async disableBot(botId) {
     const bot = await Bot.findById(botId);
     if (!bot) throw new Error('Bot not found');
+    // สะสมเวลา enabled รอบนี้เข้า totalActiveMs ก่อนเคลียร์ enabledAt
+    if (bot.enabledAt) {
+      const sessionMs = Date.now() - new Date(bot.enabledAt).getTime();
+      if (sessionMs > 0) bot.totalActiveMs = (bot.totalActiveMs || 0) + sessionMs;
+    }
     bot.enabled = false;
     bot.enabledAt = null;
     bot.status = 'idle';
     await bot.save();
     await this.stopTrader(botId);
     eventBus.emit('bot:updated', { botId });
+    // FIX-2026-07-24: action-specific event สำหรับ Telegram notifier
+    eventBus.emit('bot:disabled', { botId });
     return bot;
+  }
+
+  /**
+   * Flush cumulative active time for every enabled bot (called on graceful shutdown).
+   * ป้องกันข้อมูลเวลาหายเมื่อ PM2 kill server หรือ SIGTERM ก่อนผู้ใช้กด disable
+   */
+  async flushActiveTimeOnShutdown() {
+    try {
+      const enabled = await Bot.find({ enabled: true, enabledAt: { $ne: null } });
+      const now = Date.now();
+      for (const b of enabled) {
+        const sessionMs = now - new Date(b.enabledAt).getTime();
+        if (sessionMs > 0) {
+          await Bot.updateOne(
+            { _id: b._id },
+            { $inc: { totalActiveMs: sessionMs } }
+          );
+        }
+      }
+      if (enabled.length) {
+        logger.info({ count: enabled.length }, 'flushed totalActiveMs on shutdown');
+      }
+    } catch (e) {
+      logger.warn({ err: e.message }, 'flushActiveTimeOnShutdown failed');
+    }
   }
 }
 

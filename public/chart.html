@@ -44,6 +44,107 @@
       </div>
     </div>
 
+    <div class="lux-card mb-3">
+      <div class="lux-body">
+        <details id="signal-info" class="lux-details" open>
+          <summary class="lux-details-summary">
+            <span class="glyph">📘</span>
+            <span>คำอธิบายเส้น Signal &amp; Pine Script</span>
+            <span class="lux-details-hint">คลิกเพื่อยุบ/ขยาย</span>
+          </summary>
+          <div class="lux-details-body">
+
+            <p class="text-muted-2 small mb-3">
+              ทั้ง 3 เส้นคำนวณจาก <code>close/high/low</code> ของแท่งเทียด — เหมือนกันทั้งในบอทเราและใน Pine Script ด้านล่าง
+              ตัวบอทเทรดจริงใช้สูตรเดียวกัน 100%
+            </p>
+
+            <div class="signal-info-grid">
+
+              <div class="signal-info-item">
+                <span class="swatch" style="background:#2196f3;"></span>
+                <div class="info-body">
+                  <div class="info-title">EMA20 (basis KC)</div>
+                  <div class="info-desc">
+                    เส้นกลางของ Keltner Channel — <strong>EMA(close, 20)</strong>
+                    (Exponential Moving Average 20 แท่ง, seed = SMA 20 แท่งแรก)
+                    ใช้เป็นฐานในการคำนวณ upper/lower
+                  </div>
+                  <div class="info-formula"><code>basis = ta.ema(close, 20)</code></div>
+                </div>
+              </div>
+
+              <div class="signal-info-item">
+                <span class="swatch" style="background:#4caf50;"></span>
+                <div class="info-body">
+                  <div class="info-title">Upper KC</div>
+                  <div class="info-desc">
+                    ขอบบนของ Keltner Channel — ถ้า <code>close &gt; upper</code>
+                    ถือว่าเป็น <strong>Strong Up (bg_state = 1)</strong>
+                    (ราคา breakout เหนือแนวต้าน)
+                  </div>
+                  <div class="info-formula">
+                    <code>upper = basis + 1.5 × ta.atr(20)</code><br/>
+                    <code>ta.atr(20) = ta.rma(ta.tr, 20)</code> &nbsp;(Wilder smoothing)
+                  </div>
+                </div>
+              </div>
+
+              <div class="signal-info-item">
+                <span class="swatch" style="background:#f44336;"></span>
+                <div class="info-body">
+                  <div class="info-title">Lower KC</div>
+                  <div class="info-desc">
+                    ขอบล่างของ Keltner Channel — ถ้า <code>close &lt; lower</code>
+                    ถือว่าเป็น <strong>Strong Down (bg_state = 3)</strong>
+                    (ราคา breakdown ใต้แนวรับ)
+                  </div>
+                  <div class="info-formula">
+                    <code>lower = basis − 1.5 × ta.atr(20)</code>
+                  </div>
+                </div>
+              </div>
+
+              <div class="signal-info-item">
+                <span class="swatch" style="background:#22c55e;"></span>
+                <div class="info-body">
+                  <div class="info-title">S1 Signal (ลูกศรเขียวใต้แท่ง)</div>
+                  <div class="info-desc">
+                    ยิงเมื่อ <strong>แท่งก่อนหน้า</strong>อยู่ในโซน "Weak" (close &lt; basis และ close &gt; lower)
+                    แล้ว<strong>แท่งปัจจุบัน</strong>ดีดออกจากโซนนั้น — ขึ้นไปชน upper (Strong Up) หรือลงไปทะลุ lower (Strong Down)
+                    บอทจะวาง BUY ทันที (post-only LIMIT_MAKER ที่ราคาปิดของแท่ง S1)
+                  </div>
+                  <div class="info-formula">
+                    <code>bg = close &gt; upper ? 1 : close &lt; lower ? 3 : close &lt; basis ? 2 : 0</code><br/>
+                    <code>S1 = (bg[1] == 2) and (bg == 1 or bg == 3)</code>
+                  </div>
+                </div>
+              </div>
+
+            </div>
+
+            <div class="lux-divider"><span>Pine Script v5 (คัดลอกไปรันบน TradingView)</span></div>
+
+            <div class="pine-script-block">
+              <div class="pine-script-header">
+                <span class="pine-script-name">KC + S1.indicator.pine</span>
+                <button type="button" class="btn-lux btn-gold btn-sm" id="copy-pine-btn">
+                  <span class="btn-glyph">📋</span>
+                  <span class="btn-label">Copy code</span>
+                </button>
+              </div>
+              <pre class="pine-script-pre"><code id="pine-script-code">// loading…</code></pre>
+            </div>
+
+            <div class="text-success small mt-2" id="pine-copy-status" hidden>
+              ✓ คัดลอก Pine Script แล้ว
+            </div>
+
+          </div>
+        </details>
+      </div>
+    </div>
+
     <div class="lux-card">
       <div class="lux-body no-pad" style="padding:0.5rem;">
         <div id="chart-container"></div>
