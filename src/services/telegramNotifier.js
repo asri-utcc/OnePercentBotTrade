@@ -142,31 +142,37 @@ function renderMessage(eventKey, p, cfg) {
         // FIX-2026-07-26: แสดง "รายการที่ N ของวันนี้" (นับ trades ที่ buyFilledAt อยู่ในวันเดียวกัน ตาม bot)
         const tradeNum = p.dailyTradeNumber || '?';
         const total = p.dailyTradeTotal || '?';
-        // FIX-2026-07-27: USDT balance remain หลัง BUY fill
-        const balLine = p.usdtTotal != null
-          ? `\nUSDT remain: ${p.usdtTotal.toFixed(2)} (free ${p.usdtFree != null ? p.usdtFree.toFixed(2) : '?'} · locked ${p.usdtLocked != null ? p.usdtLocked.toFixed(2) : '?'})`
-          : '';
+        // FIX-2026-07-27: USDT balance remain หลัง BUY fill — แสดง THB เทียบเท่าด้วย
+        let balLine = '';
+        if (p.usdtTotal != null) {
+          const thbEq = p.fxRate != null ? Number((p.usdtTotal * p.fxRate).toFixed(2)) : null;
+          balLine = thbEq != null
+            ? `\nUSDT remain: ${p.usdtTotal.toFixed(2)} (≈ ${thbEq.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} THB)`
+            : `\nUSDT remain: ${p.usdtTotal.toFixed(2)}`;
+        }
         return `🟢 BUY filled #${tradeNum}/${total} (วันนี้)\nBot: ${p.botName}\nSymbol: ${p.symbol}\nQty: ${formatQty(p.qty)}\nPrice: ${formatPrice(p.price)}${balLine}`;
       }
       case 'sellFilled': {
         const pnl = Number(p.realizedPnl) || 0;
         const sign = pnl >= 0 ? '+' : '';
         const emoji = pnl >= 0 ? '💰' : '🟥';
-        // FIX-2026-07-26: เพิ่ม P&L in THB (USDT × USDT/THB rate)
+        // FIX-2026-07-27: P&L % อยู่ในวงเล็บต่อท้ายบรรทัด USDT
+        const pnlPct = p.pnlPercent != null ? Number(p.pnlPercent) : null;
+        const pctInline = pnlPct != null ? ` (${sign}${pnlPct.toFixed(2)}%)` : '';
+        // FIX-2026-07-26: P&L in THB บรรทัดถัดไป
         const pnlThb = p.pnlThb != null ? Number(p.pnlThb) : null;
         const thbLine = pnlThb != null
           ? `\nP&L: ${sign}${pnlThb.toFixed(2)} THB (1 USDT ≈ ${p.fxRate ? p.fxRate.toFixed(2) : '?'} THB)`
           : '';
-        // FIX-2026-07-27: เพิ่ม PnL % (เทียบ buyQuoteQty)
-        const pnlPct = p.pnlPercent != null ? Number(p.pnlPercent) : null;
-        const pctLine = pnlPct != null
-          ? `\nP&L %: ${sign}${pnlPct.toFixed(2)}%`
-          : '';
-        // FIX-2026-07-27: USDT balance remain หลัง SELL fill
-        const balLine = p.usdtTotal != null
-          ? `\nUSDT remain: ${p.usdtTotal.toFixed(2)} (free ${p.usdtFree != null ? p.usdtFree.toFixed(2) : '?'} · locked ${p.usdtLocked != null ? p.usdtLocked.toFixed(2) : '?'})`
-          : '';
-        return `${emoji} SELL filled\nBot: ${p.botName}\nSymbol: ${p.symbol}\nQty: ${formatQty(p.qty)}\nPrice: ${formatPrice(p.price)}\nP&L: ${sign}${pnl.toFixed(4)} USDT${pctLine}${thbLine}${balLine}`;
+        // FIX-2026-07-27: USDT balance remain หลัง SELL fill — แสดง THB เทียบเท่า
+        let balLine = '';
+        if (p.usdtTotal != null) {
+          const thbEq = p.fxRate != null ? Number((p.usdtTotal * p.fxRate).toFixed(2)) : null;
+          balLine = thbEq != null
+            ? `\nUSDT remain: ${p.usdtTotal.toFixed(2)}  (≈ ${thbEq.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} THB)`
+            : `\nUSDT remain: ${p.usdtTotal.toFixed(2)}`;
+        }
+        return `${emoji} SELL filled\nBot: ${p.botName}\nSymbol: ${p.symbol}\nQty: ${formatQty(p.qty)} @${formatPrice(p.price)}\nP&L: ${sign}${pnl.toFixed(4)} USDT${pctInline}${thbLine}${balLine}`;
       }
       case 'insufficientBalance':
         return `⚠️ Insufficient USDT\nBot: ${p.botName}\nSymbol: ${p.symbol}\n${p.note || ''}`.trim();
@@ -337,6 +343,13 @@ function bindEventHandlers() {
           });
           // FIX-2026-07-27: USDT balance remain หลัง BUY fill (fail-safe — null ถ้า fetch ล้ม)
           const bal = await fetchUsdtBalance();
+          // FIX-2026-07-27: FX rate สำหรับแสดง USDT→THB เทียบเท่า (fail-safe — null ถ้า fetch ล้ม)
+          let fxRate = null;
+          try {
+            fxRate = (await fxService.getUsdtToThb()).rate;
+          } catch (err) {
+            logger.warn({ err: err.message }, 'telegramNotifier: FX fetch failed — buyFilled will omit THB equivalent');
+          }
           await dispatch('buyFilled', {
             botId: trade.botId,
             botName: bot ? bot.name : '?',
@@ -348,6 +361,7 @@ function bindEventHandlers() {
             usdtFree: bal ? bal.free : null,   // FIX-2026-07-27: USDT free
             usdtLocked: bal ? bal.locked : null, // FIX-2026-07-27: USDT locked (ถ้ามี SELL pending)
             usdtTotal: bal ? bal.total : null,   // FIX-2026-07-27: USDT total (free+locked)
+            fxRate, // FIX-2026-07-27: USDT→THB rate (ใช้คำนวณ THB equivalent ของ balance remain)
           });
           st.buyNotified = true;
           tradeNotifyState.set(id, st);
