@@ -31,6 +31,14 @@ const logger = require('../utils/logger');
 
 const SUGGEST_WINDOW_DEFAULT = 500; // FIX-2026-07-25: per-bot override ผ่าน bot.suggestTpWindow (range 30..1000)
 
+// FIX-2026-07-28: auto-floor — เมื่อ NET TP% (ก่อน format) < MIN → override เป็น OVERRIDE
+//   - ใช้กับ autoUpdateTp flow ตอน low-volatility regime
+//   - ไม่ทำให้บอทหยุดเทรด (TP 0.111% ยังดีกว่าไม่เทรดเลย)
+//   - tpLowPnL warning (threshold 0.2%) ยังคง trigger เพราะ 0.111 < 0.2
+//   - ใช้ helper เดียวกันทั้งใน computeSuggestedTpForBot + suggest-tp route (single source of truth)
+const TP_FLOOR_THRESHOLD_PCT = 0.1; // NET TP < ค่านี้ → trigger override
+const TP_FLOOR_OVERRIDE_PCT = 0.111; // ค่าที่ใช้แทน (pass formatTpToXxx1 → 0.111)
+
 /**
  * FIX-2026-07-23: format TP ให้เป็นทศนิยม 3 ตำแหน่ง โดยหลักพัน (ตำแหน่งที่ 3) ต้องเป็น 1 เสมอ
  *   - floor ทศนิยมที่ 2 แล้ว +0.001 → output อยู่ในรูป x.xx1 เสมอ
@@ -39,6 +47,31 @@ function formatTpToXxx1(value) {
   if (value == null || !Number.isFinite(value)) return value;
   const truncated2 = Math.floor(value * 100) / 100;
   return Number((truncated2 + 0.001).toFixed(3));
+}
+
+/**
+ * FIX-2026-07-28: auto-floor — ถ้า NET TP% (raw ก่อน format) < TP_FLOOR_THRESHOLD_PCT → override เป็น TP_FLOOR_OVERRIDE_PCT
+ *   - return { value, overridden, rawNetBeforeOverride }
+ *     - value: ค่าที่จะใช้ (post-floor) — caller ต้องผ่าน formatTpToXxx1 อีกครั้ง
+ *     - overridden: true ถ้าเคย override (ให้ caller แสดง tooltip / log)
+ *     - rawNetBeforeOverride: ค่า NET ดิบก่อน floor (null ถ้า raw = null)
+ */
+function applyMinNetTpFloor(netSuggestedTpPct) {
+  if (netSuggestedTpPct == null || !Number.isFinite(netSuggestedTpPct)) {
+    return { value: null, overridden: false, rawNetBeforeOverride: null };
+  }
+  if (netSuggestedTpPct < TP_FLOOR_THRESHOLD_PCT) {
+    return {
+      value: TP_FLOOR_OVERRIDE_PCT,
+      overridden: true,
+      rawNetBeforeOverride: netSuggestedTpPct,
+    };
+  }
+  return {
+    value: netSuggestedTpPct,
+    overridden: false,
+    rawNetBeforeOverride: netSuggestedTpPct,
+  };
 }
 
 /**
@@ -108,7 +141,10 @@ async function computeSuggestedTpForBot(bot) {
     const netSuggestedTpPct = rawSuggestedTpPct == null
       ? null
       : Math.max(0, rawSuggestedTpPct - feeBufferPct);
-    const suggestedTpPct = netSuggestedTpPct == null ? null : formatTpToXxx1(netSuggestedTpPct);
+    // FIX-2026-07-28: auto-floor — ถ้า NET TP ต่ำเกินไป (< 0.1%) → override เป็น 0.111%
+    //   - ใช้กับบอทที่ autoUpdateTp=true เพื่อให้ยัง trade ได้ใน low-volatility regime
+    const floored = applyMinNetTpFloor(netSuggestedTpPct);
+    const suggestedTpPct = floored.value == null ? null : formatTpToXxx1(floored.value);
 
     return {
       suggestedTpPct,
@@ -120,6 +156,11 @@ async function computeSuggestedTpForBot(bot) {
       trendGapPct: trend.trendGapPct,
       lastClose: closes[closes.length - 1],
       ms: Date.now() - start,
+      // FIX-2026-07-28: surface override info ให้ caller ใช้ (UI tooltip + log)
+      tpOverridden: floored.overridden,
+      rawNetBeforeOverride: floored.rawNetBeforeOverride,
+      tpFloorThreshold: TP_FLOOR_THRESHOLD_PCT,
+      tpFloorOverride: TP_FLOOR_OVERRIDE_PCT,
     };
   } catch (err) {
     return { error: err.message, ms: Date.now() - start };
@@ -163,20 +204,41 @@ async function runTpUpdateForAllEligibleBots() {
         logger.debug({ botId, symbol: bot.symbol, tf: bot.timeframe, tp: calc.suggestedTpPct }, 'tpUpdater: TP unchanged — skip');
         // FIX-2026-07-26: แม้ TP ไม่เปลี่ยน → ยังเช็ค low TP warning (อาจเคยแจ้งแล้ว)
         checkAndEmitLowTp(bot, calc.suggestedTpPct);
+        // FIX-2026-07-28: sync tpOnFloor flag (rare — happens เมื่อ floor threshold flip จาก off→on ใน tick เดียวกัน)
+        //   - ถ้า calc.tpOverridden !== bot.tpOnFloor → fix flag ให้ตรง
+        const expectedFloor = !!calc.tpOverridden;
+        if (!!bot.tpOnFloor !== expectedFloor) {
+          await Bot.updateOne({ _id: bot._id }, { $set: { tpOnFloor: expectedFloor } });
+          logger.info({ botId, symbol: bot.symbol, tpOnFloor: expectedFloor }, 'tpUpdater: tpOnFloor flag synced (no TP value change)');
+        }
         skipped += 1;
         continue;
       }
       const oldTp = bot.tpPercent;
+      // FIX-2026-07-28: persist tpOnFloor flag ตามสถานะ override ปัจจุบัน (UI ใช้แสดง badge)
       await Bot.updateOne(
         { _id: bot._id },
-        { $set: { tpPercent: calc.suggestedTpPct, updateTpAt: Date.now() } }
+        {
+          $set: {
+            tpPercent: calc.suggestedTpPct,
+            updateTpAt: Date.now(),
+            tpOnFloor: !!calc.tpOverridden,
+          },
+        }
       );
+      // FIX-2026-07-28: log เมื่อ auto-floor ทำงาน (NET TP ต่ำกว่า threshold)
+      const logMsg = calc.tpOverridden ? 'tpUpdater: TP updated (auto-floor applied)' : 'tpUpdater: TP updated';
       logger.info({
         botId, symbol: bot.symbol, tf: bot.timeframe,
         oldTp, newTp: calc.suggestedTpPct,
         trendTF: calc.trendTF, trendState: calc.trendState,
         kcMinPct: calc.kcMinPct, ms: calc.ms,
-      }, 'tpUpdater: TP updated');
+        ...(calc.tpOverridden ? {
+          rawNetBeforeOverride: calc.rawNetBeforeOverride,
+          tpFloorThreshold: calc.tpFloorThreshold,
+          tpFloorOverride: calc.tpFloorOverride,
+        } : {}),
+      }, logMsg);
       // FIX-2026-07-26: emit tp:low หลัง update (NET TP ต่ำกว่า threshold → แจ้ง Telegram)
       checkAndEmitLowTp(bot, calc.suggestedTpPct);
       updated += 1;
@@ -273,6 +335,7 @@ function stopHourlyTpUpdate() {
 
 module.exports = {
   formatTpToXxx1,
+  applyMinNetTpFloor, // FIX-2026-07-28: ให้ suggest-tp route reuse floor logic
   computeSuggestedTpForBot,
   runTpUpdateForAllEligibleBots,
   scheduleHourlyTpUpdate,

@@ -65,6 +65,11 @@ const botSchema = new mongoose.Schema(
     //   - ค่ามาก = Min %KC จากช่วงยาว (conservative จับ squeeze ที่ลึก)
     //   - trend TF ยังคงใช้ 30 bars fixed (ไม่ override ได้)
     suggestTpWindow: { type: Number, default: 500, min: 30, max: 1000 },
+    // FIX-2026-07-28: TP auto-floor flag — true เมื่อ bot.tpPercent ถูก override เป็น 0.111%
+    //   (เนื่องจาก NET TP ต่ำกว่า 0.1% — low-volatility regime)
+    //   - persist ไว้ให้ UI แสดง badge + log + warning
+    //   - reset เป็น false เมื่อ NET TP กลับมา >= 0.1%
+    tpOnFloor: { type: Boolean, default: false },
     // สถิติสะสม
     totalPnl: { type: Number, default: 0 },
     totalTrades: { type: Number, default: 0 },

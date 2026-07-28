@@ -14,6 +14,7 @@ const volatilityScanner = require('../../core/volatilityScanner');
 const binanceRest = require('../../binance/binanceRest');
 const signalEngine = require('../../core/signalEngine');
 const fees = require('../../binance/fees');
+const tpUpdater = require('../../core/tpUpdater'); // FIX-2026-07-28: applyMinNetTpFloor (single source of truth)
 const logger = require('../../utils/logger');
 const eventBus = require('../../services/eventBus');
 
@@ -551,16 +552,19 @@ router.post('/suggest-tp', requireAuth, async (req, res) => {
     const netSuggestedTpPct = rawSuggestedTpPct == null
       ? null
       : Math.max(0, rawSuggestedTpPct - feeBufferPct);
+    // FIX-2026-07-28: auto-floor — ถ้า NET TP < 0.1% → override เป็น 0.111% (single source of truth จาก tpUpdater)
+    const floored = tpUpdater.applyMinNetTpFloor(netSuggestedTpPct);
     // FIX-2026-07-23: format TP ให้เป็นทศนิยม 3 ตำแหน่ง โดยหลักพัน (ตำแหน่งที่ 3) ต้องเป็น 1 เสมอ
     //   - floor ทศนิยมที่ 2 แล้ว +0.001 → output อยู่ในรูป x.xx1 เสมอ (หลีกเลี่ยง TP = 0.350 vs 0.351 แล้วเทียบไม่ตรง)
     //   - apply กับ NET value (ที่จะให้ user เห็น/เก็บใน bot.tpPercent)
-    const suggestedTpPct = netSuggestedTpPct == null ? null : formatTpToXxx1(netSuggestedTpPct);
+    const suggestedTpPct = floored.value == null ? null : formatTpToXxx1(floored.value);
 
     const ms = Date.now() - start;
     logger.info({
       symbol, timeframe, window, trendTF, trendState: trend.trendState,
       kcMinPct, rawSuggestedTpPct, feeBufferPct, netSuggestedTpPct, suggestedTpPct, ms,
-    }, 'suggest-tp: done');
+      tpOverridden: floored.overridden, rawNetBeforeOverride: floored.rawNetBeforeOverride,
+    }, floored.overridden ? 'suggest-tp: done (auto-floor applied)' : 'suggest-tp: done');
 
     res.json({
       symbol,
@@ -577,6 +581,9 @@ router.post('/suggest-tp', requireAuth, async (req, res) => {
       feeBufferPct, // 0.21 (หรือ 0.15 ถ้า BNB on)
       netSuggestedTpPct, // raw net (ก่อน formatTpToXxx1)
       suggestedTpPct, // formatted x.xx1 → ค่าที่ user ควรเก็บใน bot.tpPercent
+      // FIX-2026-07-28: surface auto-floor info ให้ UI แสดง tooltip
+      tpOverridden: floored.overridden,
+      rawNetBeforeOverride: floored.rawNetBeforeOverride,
       ms,
     });
   } catch (err) {

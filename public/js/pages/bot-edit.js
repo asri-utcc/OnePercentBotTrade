@@ -200,7 +200,11 @@ async function recommendTp() {
       const tfLabel = resp.trendTF || '';
       const grossPct = resp.rawSuggestedTpPct != null ? resp.rawSuggestedTpPct.toFixed(3) : 'n/a';
       const feePct = resp.feeBufferPct != null ? resp.feeBufferPct.toFixed(2) : '0.2';
-      hint.innerHTML = `<span class="text-success">✅ ใช้ ${resp.suggestedTpPct.toFixed(3)}% &nbsp;= &nbsp;gross ${grossPct}% − fee ${feePct}% &nbsp;· &nbsp;Min %KC=${resp.kcMinPct.toFixed(3)}% &nbsp;· &nbsp;EMA20(${tfLabel}) ${trendGlyph} ${resp.trendState} (gap ${(resp.trendGapPct >= 0 ? '+' : '') + resp.trendGapPct.toFixed(2)}%)</span>`;
+      // FIX-2026-07-28: แสดง auto-floor badge ถ้า NET TP ต่ำกว่า threshold → override เป็น 0.111%
+      const floorBadge = resp.tpOverridden
+        ? ` &nbsp;<span class="lux-badge lux-badge-warn" title="NET TP ต่ำกว่า 0.1% — auto-floor ใช้ 0.111% แทน (raw ${resp.rawNetBeforeOverride != null ? resp.rawNetBeforeOverride.toFixed(3) : '?'}%)">⚙️ auto-floor</span>`
+        : '';
+      hint.innerHTML = `<span class="text-success">✅ ใช้ ${resp.suggestedTpPct.toFixed(3)}% &nbsp;= &nbsp;gross ${grossPct}% − fee ${feePct}% &nbsp;· &nbsp;Min %KC=${resp.kcMinPct.toFixed(3)}% &nbsp;· &nbsp;EMA20(${tfLabel}) ${trendGlyph} ${resp.trendState} (gap ${(resp.trendGapPct >= 0 ? '+' : '') + resp.trendGapPct.toFixed(2)}%)${floorBadge}</span>`;
     }
   } catch (err) {
     hint.innerHTML = `<span class="text-danger">❌ คำนวณล้มเหลว: ${escapeHtml(err.message || 'unknown')}</span>`;

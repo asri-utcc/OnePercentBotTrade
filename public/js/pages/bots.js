@@ -369,7 +369,7 @@ function renderBotCard(b) {
         </div>
       </div>
       <div class="bc-stats">
-        <span class="stat"><span class="lbl">TP</span><strong>${b.tpPercent}%</strong></span>
+        <span class="stat"><span class="lbl">TP</span><strong>${b.tpPercent}%${b.tpOnFloor ? ' <span class="lux-badge lux-badge-warn" title="NET TP ต่ำกว่า 0.1% — auto-floor ใช้ 0.111% แทน">⚙️ floor</span>' : ''}</strong></span>
         <span class="stat"><span class="lbl">ทุน</span><strong>$${b.capitalPerTrade} × ${b.maxTrades} = $${b.totalCapital.toFixed(2)}</strong></span>
         <span class="stat"><span class="lbl">Retry</span><strong>${formatRetryTime(b.retryTimeMin)} × ${b.retryMax ?? 1}</strong></span>
         <span class="stat"><span class="lbl">⏱ Uptime</span><strong>${uptime}</strong></span>
