@@ -180,4 +180,57 @@ router.get('/series', requireAuth, async (req, res) => {
   }
 });
 
+// ─── GET /api/pnl/day ────────────────────────────────
+// Query: ?from=YYYY-MM-DD&to=YYYY-MM-DD (same day OK) &botId=<optional>
+// FIX-2026-07-29: รายละเอียดเทรดรายวัน (ใช้ตอนคลิก cell ใน calendar)
+router.get('/day', requireAuth, async (req, res) => {
+  try {
+    const from = parseDate(req.query.from);
+    const to = parseDate(req.query.to, true);
+    if (!from || !to) {
+      return res.status(400).json({ error: 'from/to required (YYYY-MM-DD)' });
+    }
+    const botId = req.query.botId;
+
+    const match = {
+      sellFilledAt: { $gte: from, $lte: to },
+      realizedPnl: { $ne: null },
+    };
+    if (botId && mongoose.Types.ObjectId.isValid(botId)) {
+      match.botId = new mongoose.Types.ObjectId(botId);
+    }
+
+    const trades = await Trade.find(match)
+      .select('_id botId symbol entryPrice exitPrice qty realizedPnl sellFilledAt side')
+      .sort({ sellFilledAt: 1 })
+      .lean();
+
+    const botIds = [...new Set(trades.map((t) => String(t.botId)))];
+    const bots = await Bot.find({ _id: { $in: botIds } }, 'name').lean();
+    const botNameMap = Object.fromEntries(bots.map((b) => [String(b._id), b.name]));
+
+    res.json({
+      from: req.query.from,
+      to: req.query.to,
+      botId: botId || null,
+      count: trades.length,
+      trades: trades.map((t) => ({
+        _id: t._id,
+        botId: t.botId,
+        botName: botNameMap[String(t.botId)] || '?',
+        symbol: t.symbol,
+        side: t.side,
+        entryPrice: t.entryPrice,
+        exitPrice: t.exitPrice,
+        qty: t.qty,
+        realizedPnl: t.realizedPnl,
+        sellFilledAt: t.sellFilledAt,
+      })),
+    });
+  } catch (err) {
+    logger.error({ err: err.message, stack: err.stack }, 'pnl.day failed');
+    res.status(500).json({ error: err.message });
+  }
+});
+
 module.exports = router;

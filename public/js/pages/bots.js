@@ -21,6 +21,7 @@ async function init() {
   await loadBots();
   await loadBalance();
   await loadApiKeysStatus();
+  await refreshPnlShortcut(); // FIX-2026-07-29: shortcut label "PnL $X.XX"
 
   // re-render once nav.js publishes the FX rate (so THB equivalents appear)
   document.addEventListener('fx:updated', () => {
@@ -58,6 +59,8 @@ async function init() {
     } else {
       loadBots();
     }
+    // FIX-2026-07-29: refresh PnL shortcut label เมื่อมี SELL fill (today's PnL เปลี่ยน)
+    if (p && p.state === 'sold') refreshPnlShortcut();
   });
   WSClient.on('health:update', (s) => renderHeartbeat(s));
 
@@ -102,6 +105,29 @@ function setupEventHandlers() {
   document.getElementById('refresh-balance').onclick = loadBalance;
   document.getElementById('ak-save').onclick = saveApiKeys;
   document.getElementById('nb-tp-recommend').onclick = recommendNewBotTp;
+  // FIX-2026-07-29: shortcut → /pnl.html
+  document.getElementById('pnl-shortcut-btn').onclick = () => { location.href = '/pnl.html'; };
+}
+
+// FIX-2026-07-29: label = "PnL $X.XX" (today's realized PnL across all bots) — refresh on load + 60s + WS
+async function refreshPnlShortcut() {
+  const label = document.getElementById('pnl-shortcut-label');
+  if (!label) return;
+  try {
+    // today range (server local TZ = Asia/Bangkok)
+    const now = new Date();
+    const from = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+    const to = from;
+    const data = await API.get(`/api/pnl/day?from=${from}&to=${to}`);
+    const pnl = (data.trades || []).reduce((a, t) => a + (t.realizedPnl || 0), 0);
+    const sign = pnl >= 0 ? '+' : '';
+    const cls = pnl >= 0 ? 'is-bull' : 'is-bear';
+    const color = pnl >= 0 ? '#00e5b8' : '#ff4d6d';
+    label.innerHTML = `<span class="${cls}" style="color:${color};font-weight:700;">📅 PnL ${sign}$${Math.abs(pnl).toFixed(2)}</span>`;
+    label.title = `${data.count} ไม้วันนี้\nกดเพื่อเปิดหน้า PnL Calendar`;
+  } catch (err) {
+    label.innerHTML = '📅 PnL …';
+  }
 }
 
 /**

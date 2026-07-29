@@ -82,6 +82,16 @@ function tileThb(usdt) {
   return `${sign}${thb.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} THB`;
 }
 
+// FIX-2026-07-29: compact THB formatter สำหรับใน calendar cell (ใช้ k/M suffix)
+function formatThbInline(v) {
+  if (v == null || !Number.isFinite(v)) return '—';
+  const sign = v < 0 ? '-' : '';
+  const abs = Math.abs(v);
+  if (abs >= 1000000) return `${sign}${(abs / 1000000).toFixed(2)}M`;
+  if (abs >= 10000)   return `${sign}${(abs / 1000).toFixed(1)}k`;
+  return `${sign}${abs.toFixed(0)}`;
+}
+
 // ─── Bots dropdown ───────────────────────────────────
 async function loadBots() {
   try {
@@ -207,19 +217,30 @@ function renderCalendar(data) {
     }
     const dayNum = parseInt(day.date.slice(-2), 10);
     const pnlCls = day.pnl > 0 ? 'pnl-bull' : day.pnl < 0 ? 'pnl-bear' : '';
+    // FIX-2026-07-29: เพิ่ม THB equivalent ใต้ USDT pnl (ถ้ามี FX rate)
+    const thb = (window.__fx && window.__fx.rate) ? (day.pnl * window.__fx.rate) : null;
+    const thbLine = thb != null && day.trades > 0
+      ? `<div class="pnl-cal-thb ${pnlCls}">≈ ฿${formatThbInline(thb)}</div>`
+      : '';
     cell.innerHTML = `
       <div class="pnl-cal-day-num">${dayNum}</div>
       ${
         day.trades > 0
           ? `<div class="pnl-cal-pnl ${pnlCls}">${formatUsdt(day.pnl)}</div>
+             ${thbLine}
              <div class="pnl-cal-trades">${day.trades} ไม้</div>`
           : ''
       }
     `;
     cell.title =
       day.trades > 0
-        ? `${day.date}\nPnL: ${formatUsdt(day.pnl)} USDT\nWins: ${day.wins} · Losses: ${day.losses}\nTrades: ${day.trades}`
+        ? `${day.date}\nPnL: ${formatUsdt(day.pnl)} USDT${thb != null ? ' (≈ ฿' + formatThbInline(thb) + ')' : ''}\nWins: ${day.wins} · Losses: ${day.losses}\nTrades: ${day.trades}\n(คลิกเพื่อดูรายละเอียด)`
         : day.date;
+    // FIX-2026-07-29: คลิกที่ cell (ที่มี trades) → เปิด modal รายละเอียดของวันนั้น
+    if (day.trades > 0) {
+      cell.classList.add('is-clickable');
+      cell.addEventListener('click', () => openDayModal(day));
+    }
     cal.appendChild(cell);
   });
 
@@ -233,6 +254,96 @@ function renderCalendar(data) {
     `${year}-${String(month).padStart(2, '0')} · ${days.filter((d) => d.trades > 0).length} วันที่เทรด`;
 }
 
+// ─── Day-detail modal (FIX-2026-07-29) ─────────────────
+// คลิกที่ cell ใน calendar → modal แสดงรายการเทรดทั้งหมดของวันนั้น
+let _modalOverlay = null;
+
+async function openDayModal(day) {
+  // 1) Lazy-build modal DOM (ครั้งเดียว)
+  if (!_modalOverlay) buildModalSkeleton();
+  const overlay = _modalOverlay;
+  const body = overlay.querySelector('#pnl-modal-body');
+  const titleEl = overlay.querySelector('#pnl-modal-title');
+  const totalEl = overlay.querySelector('#pnl-modal-total');
+
+  titleEl.textContent = `📊 ${day.date}`;
+  const thb = (window.__fx && window.__fx.rate) ? (day.pnl * window.__fx.rate) : null;
+  totalEl.innerHTML = `
+    <span class="${day.pnl >= 0 ? 'is-bull' : 'is-bear'}">${formatUsdt(day.pnl)} USDT</span>
+    ${thb != null ? `<span class="muted">≈ ฿${formatThbInline(thb)}</span>` : ''}
+    <span class="muted">· ${day.trades} ไม้ · ${day.wins}W/${day.losses}L · ${day.trades ? Math.round((day.wins / day.trades) * 100) : 0}% win</span>
+  `;
+  body.innerHTML = '<div class="text-center py-4 text-muted-3">กำลังโหลด…</div>';
+  overlay.classList.add('is-open');
+
+  // 2) Fetch trades for that day (ใช้ endpoint เดียวกับ history)
+  try {
+    const params = new URLSearchParams({ from: day.date, to: day.date });
+    if (currentBotId) params.set('botId', currentBotId);
+    const data = await API.get(`/api/pnl/day?${params}`);
+    renderModalTrades(body, data.trades || []);
+  } catch (err) {
+    body.innerHTML = `<div class="text-center py-4 text-muted-3">โหลดล้มเหลว: ${escapeHtml(err.message || 'unknown')}</div>`;
+  }
+}
+
+function renderModalTrades(container, trades) {
+  if (!trades.length) {
+    container.innerHTML = '<div class="text-center py-4 text-muted-3">ไม่มีไม้</div>';
+    return;
+  }
+  const rows = trades.map((t) => {
+    const pnl = t.realizedPnl || 0;
+    const cls = pnl > 0 ? 'pnl-bull' : pnl < 0 ? 'pnl-bear' : '';
+    const ts = t.sellFilledAt ? new Date(t.sellFilledAt).toLocaleString('th-TH', { hour: '2-digit', minute: '2-digit', day: '2-digit', month: 'short' }) : '';
+    const thb = (window.__fx && window.__fx.rate) ? (pnl * window.__fx.rate) : null;
+    return `<tr>
+      <td><span class="badge-bot">${escapeHtml(t.botName || '?')}</span></td>
+      <td>${escapeHtml(t.symbol || '')}</td>
+      <td class="text-end">${t.entryPrice ? parseFloat(t.entryPrice).toFixed(4) : '—'}</td>
+      <td class="text-end">${t.exitPrice ? parseFloat(t.exitPrice).toFixed(4) : '—'}</td>
+      <td class="text-end">${t.qty ? parseFloat(t.qty).toFixed(4) : '—'}</td>
+      <td class="text-end ${cls}">${formatUsdt(pnl)}${thb != null ? `<br><span class="thb-sub">≈ ฿${formatThbInline(thb)}</span>` : ''}</td>
+      <td class="text-end muted">${ts}</td>
+    </tr>`;
+  }).join('');
+  container.innerHTML = `
+    <table class="pnl-modal-table">
+      <thead>
+        <tr>
+          <th>Bot</th><th>Symbol</th>
+          <th class="text-end">Entry</th><th class="text-end">Exit</th>
+          <th class="text-end">Qty</th>
+          <th class="text-end">PnL</th>
+          <th class="text-end">เวลา</th>
+        </tr>
+      </thead>
+      <tbody>${rows}</tbody>
+    </table>
+  `;
+}
+
+function buildModalSkeleton() {
+  const overlay = document.createElement('div');
+  overlay.className = 'pnl-modal-overlay';
+  overlay.innerHTML = `
+    <div class="pnl-modal-card">
+      <div class="pnl-modal-header">
+        <h5 id="pnl-modal-title">—</h5>
+        <button type="button" class="pnl-modal-close" aria-label="ปิด">✕</button>
+      </div>
+      <div id="pnl-modal-total" class="pnl-modal-total"></div>
+      <div id="pnl-modal-body" class="pnl-modal-body"></div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+  // close handlers
+  overlay.querySelector('.pnl-modal-close').addEventListener('click', () => overlay.classList.remove('is-open'));
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.classList.remove('is-open'); });
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') overlay.classList.remove('is-open'); });
+  _modalOverlay = overlay;
+}
+
 // ─── Chart load + render ─────────────────────────────
 async function loadChart() {
   const lastDay = new Date(currentYear, currentMonth, 0).getDate();
@@ -242,6 +353,7 @@ async function loadChart() {
   if (currentBotId) params.set('botId', currentBotId);
   try {
     const data = await API.get(`/api/pnl/series?${params}`);
+    console.log('[pnl] series', { count: data.count, sample: data.trades?.[0] });
     renderPnlChart(data.trades || []);
     document.getElementById('pnl-chart-range').textContent = `${from} → ${to} · ${data.count} ไม้`;
   } catch (err) {
@@ -259,13 +371,14 @@ function renderPnlChart(trades) {
   }
   container.innerHTML = '';
 
-  const w = container.clientWidth || 800;
+  const w = Math.max(container.clientWidth || 0, 320);
   const h = 380;
   pnlChart = LightweightCharts.createChart(container, chartBaseOptions(w, h));
   pnlSeries = pnlChart.addAreaSeries({});
 
   if (!trades.length) {
     pnlSeries.setData([]);
+    document.getElementById('pnl-chart-range').textContent = 'ไม่มีไม้ในช่วงนี้';
     return;
   }
 
@@ -275,32 +388,43 @@ function renderPnlChart(trades) {
   const pts = trades.map((t) => {
     const inc = currencyMode === 'THB' ? t.realizedPnl * fxRate : t.realizedPnl;
     cum += inc;
+    const ts = new Date(t.sellFilledAt).getTime();
+    if (!isFinite(ts)) {
+      console.warn('[pnl] bad sellFilledAt', t);
+      return null;
+    }
     return {
-      time: Math.floor(new Date(t.sellFilledAt).getTime() / 1000),
+      time: Math.floor(ts / 1000),
       value: parseFloat(cum.toFixed(currencyMode === 'THB' ? 2 : 4)),
     };
-  });
+  }).filter(Boolean);
 
-  const bull = cum >= 0;
+  // FIX-2026-07-29 (v3): chart ว่างมาตลอด — สาเหตุ area series ที่ baseValue=0 ที่ใช้ topColor/bottomColor คนละโทน
+  //   เมื่อ cum ไต่ขึ้น-ลง สลับ บน-ล่างของเส้น 0 → fill blend หายไปกับ dark bg
+  //   - แก้: ใช้ topColor เดียว (line color) ไล่จาง → bottomColor โปร่งใส → เส้น/area ชัดเจนทุกทิศ
+  //   - ใช้ baseValue เป็น 'price' price:0 เพื่อให้ area paint จากเส้น 0 ขึ้น/ลง
+  const lastVal = pts[pts.length - 1].value;
+  const bull = lastVal >= 0;
   pnlSeries.applyOptions({
-    topColor: bull ? 'rgba(0,229,184,0.45)' : 'rgba(255,77,109,0.45)',
-    bottomColor: bull ? 'rgba(0,229,184,0.04)' : 'rgba(255,77,109,0.04)',
+    topColor: bull ? 'rgba(0,229,184,0.6)' : 'rgba(255,77,109,0.6)',
+    bottomColor: 'rgba(0,0,0,0)',
     lineColor: bull ? '#00e5b8' : '#ff4d6d',
+    lineWidth: 2,
+    priceLineVisible: false,
+    lastValueVisible: false,
     baseValue: { type: 'price', price: 0 },
-    priceFormat: {
-      type: currencyMode === 'THB' ? 'price' : 'price',
-      precision: currencyMode === 'THB' ? 2 : 4,
-      minMove: currencyMode === 'THB' ? 0.01 : 0.0001,
-    },
   });
   pnlSeries.setData(pts);
+  // baseline ที่ 0 (dashed)
   pnlSeries.createPriceLine({
     price: 0,
-    color: 'rgba(255,255,255,0.18)',
+    color: 'rgba(255,255,255,0.25)',
+    lineWidth: 1,
     lineStyle: 2,
     title: 'break-even',
   });
   pnlChart.timeScale().fitContent();
+  console.log('[pnl] chart rendered', { pts: pts.length, last: lastVal });
 }
 
 // ─── Currency toggle ─────────────────────────────────
