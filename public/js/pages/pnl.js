@@ -371,13 +371,7 @@ function renderPnlChart(trades) {
   }
   container.innerHTML = '';
 
-  const w = Math.max(container.clientWidth || 0, 320);
-  const h = 380;
-  pnlChart = LightweightCharts.createChart(container, chartBaseOptions(w, h));
-  pnlSeries = pnlChart.addAreaSeries({});
-
   if (!trades.length) {
-    pnlSeries.setData([]);
     document.getElementById('pnl-chart-range').textContent = 'ไม่มีไม้ในช่วงนี้';
     return;
   }
@@ -399,32 +393,56 @@ function renderPnlChart(trades) {
     };
   }).filter(Boolean);
 
-  // FIX-2026-07-29 (v3): chart ว่างมาตลอด — สาเหตุ area series ที่ baseValue=0 ที่ใช้ topColor/bottomColor คนละโทน
-  //   เมื่อ cum ไต่ขึ้น-ลง สลับ บน-ล่างของเส้น 0 → fill blend หายไปกับ dark bg
-  //   - แก้: ใช้ topColor เดียว (line color) ไล่จาง → bottomColor โปร่งใส → เส้น/area ชัดเจนทุกทิศ
-  //   - ใช้ baseValue เป็น 'price' price:0 เพื่อให้ area paint จากเส้น 0 ขึ้น/ลง
+  console.log('[pnl] renderPnlChart', { trades: trades.length, pts: pts.length, first: pts[0], last: pts[pts.length - 1], containerW: container.clientWidth });
+
+  // FIX-2026-07-29 (v5): chart ไม่ paint — ลองใช้ addLineSeries แทน area (debug ที่ง่ายกว่า)
+  //   ปัญหาก่อนหน้า: area series + priceLineVisible:false + lastValueVisible:false → ไม่ paint
+  //   ลอง: addLineSeries (พิสูจน์ว่า data valid) + ตั้ง priceScale mode บังคับ autoScale
   const lastVal = pts[pts.length - 1].value;
   const bull = lastVal >= 0;
-  pnlSeries.applyOptions({
-    topColor: bull ? 'rgba(0,229,184,0.6)' : 'rgba(255,77,109,0.6)',
-    bottomColor: 'rgba(0,0,0,0)',
-    lineColor: bull ? '#00e5b8' : '#ff4d6d',
+  const w = Math.max(container.clientWidth || 0, 320);
+  const h = 380;
+  pnlChart = LightweightCharts.createChart(container, {
+    ...chartBaseOptions(w, h),
+    autoSize: false,
+  });
+  // บังคับให้ price scale fit ข้อมูลเสมอ + autoscale
+  pnlChart.priceScale('right').applyOptions({
+    autoScale: true,
+    mode: 0, // PriceScaleMode.Normal
+    scaleMargins: { top: 0.15, bottom: 0.15 },
+  });
+  // ใช้ LINE series ก่อน (debug) — แทน area เพื่อตัดปัญหา area gradient
+  pnlSeries = pnlChart.addLineSeries({
+    color: bull ? '#00e5b8' : '#ff4d6d',
     lineWidth: 2,
     priceLineVisible: false,
     lastValueVisible: false,
-    baseValue: { type: 'price', price: 0 },
+    crosshairMarkerVisible: true,
+    crosshairMarkerRadius: 4,
+    crosshairMarkerBorderColor: bull ? '#00e5b8' : '#ff4d6d',
+    crosshairMarkerBackgroundColor: '#0c1220',
   });
   pnlSeries.setData(pts);
-  // baseline ที่ 0 (dashed)
+  // baseline ที่ 0 (dashed) — หลัง setData เท่านั้น
   pnlSeries.createPriceLine({
     price: 0,
-    color: 'rgba(255,255,255,0.25)',
+    color: 'rgba(255,255,255,0.35)',
     lineWidth: 1,
     lineStyle: 2,
     title: 'break-even',
+    axisLabelVisible: true,
   });
-  pnlChart.timeScale().fitContent();
-  console.log('[pnl] chart rendered', { pts: pts.length, last: lastVal });
+  // FIT content หลังจาก container มี width เต็ม
+  requestAnimationFrame(() => {
+    if (pnlChart) {
+      pnlChart.applyOptions({ width: container.clientWidth || w });
+      pnlChart.timeScale().fitContent();
+      // double-fit price scale หลัง render
+      pnlChart.priceScale('right').applyOptions({ autoScale: true });
+    }
+  });
+  console.log('[pnl] chart rendered', { pts: pts.length, last: lastVal, w: container.clientWidth });
 }
 
 // ─── Currency toggle ─────────────────────────────────
