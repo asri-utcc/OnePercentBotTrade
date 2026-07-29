@@ -1938,3 +1938,82 @@ a:hover { color: var(--gold-2); text-decoration: none; }
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+/* === PnL Calendar (FIX-2026-07-29) === */
+.pnl-filter-row {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 12px;
+  padding: 12px 16px; border-radius: 10px;
+  background: rgba(255,255,255,0.03); border: 1px solid var(--border-soft);
+}
+.pnl-month-nav { display: flex; align-items: center; gap: 8px; }
+.pnl-month-nav button {
+  background: rgba(255,255,255,0.05); border: 1px solid var(--border-soft);
+  color: var(--text-2); padding: 4px 12px; border-radius: 6px; cursor: pointer;
+  font-size: 1.1em; line-height: 1;
+}
+.pnl-month-nav button:hover { background: rgba(255,255,255,0.10); color: var(--text-1); }
+#pnl-month-label {
+  font-weight: 600; color: var(--text-1); min-width: 150px; text-align: center;
+  font-family: var(--font-mono);
+}
+.pnl-currency-toggle { display: inline-flex; gap: 4px; margin-left: auto; }
+.pnl-currency-toggle button {
+  background: rgba(255,255,255,0.05); border: 1px solid var(--border-soft);
+  color: var(--text-3); padding: 4px 14px; border-radius: 6px; cursor: pointer;
+  font-size: 0.85em; font-weight: 600;
+}
+.pnl-currency-toggle button:hover { background: rgba(255,255,255,0.10); }
+.pnl-currency-toggle button.active {
+  background: var(--gold-1); color: #0c1220; border-color: var(--gold-1);
+}
+
+.pnl-cal {
+  display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px;
+}
+.pnl-cal-weekday {
+  text-align: center; font-size: 0.75em; color: var(--text-4);
+  padding: 6px 0; font-weight: 600; letter-spacing: 0.04em;
+}
+.pnl-cal-cell {
+  min-height: 78px; padding: 6px 8px;
+  background: rgba(255,255,255,0.02); border: 1px solid var(--border-soft);
+  border-radius: 6px; display: flex; flex-direction: column; gap: 2px;
+  font-size: 0.78em; transition: transform 0.1s ease;
+}
+.pnl-cal-cell:hover { transform: translateY(-1px); border-color: rgba(255,255,255,0.15); }
+.pnl-cal-cell.is-empty {
+  background: rgba(255,255,255,0.01); opacity: 0.35;
+}
+.pnl-cal-cell.is-bull {
+  background: rgba(0,229,184, var(--intensity, 0.5));
+  border-color: rgba(0,229,184, 0.5);
+}
+.pnl-cal-cell.is-bear {
+  background: rgba(255,77,109, var(--intensity, 0.5));
+  border-color: rgba(255,77,109, 0.5);
+}
+.pnl-cal-cell.is-flat {
+  background: rgba(245,184,0, 0.25);
+  border-color: rgba(245,184,0, 0.4);
+}
+.pnl-cal-day-num {
+  color: var(--text-1); font-weight: 600; font-size: 0.95em;
+}
+.pnl-cal-pnl {
+  font-family: var(--font-mono); font-weight: 700; font-size: 0.95em;
+  color: var(--text-1);
+}
+.pnl-cal-trades {
+  color: rgba(255,255,255,0.7); font-size: 0.78em; margin-top: auto;
+}
+
+.pnl-chart-wrap { width: 100%; min-height: 380px; }
+
+@media (max-width: 768px) {
+  .pnl-cal-cell { min-height: 56px; padding: 4px 5px; font-size: 0.65em; }
+  .pnl-cal-pnl { font-size: 0.85em; }
+  .pnl-cal-trades { font-size: 0.7em; }
+  #pnl-month-label { min-width: 110px; font-size: 0.9em; }
+  .pnl-filter-row { padding: 10px 12px; gap: 8px; }
+  .pnl-currency-toggle { margin-left: 0; }
+}

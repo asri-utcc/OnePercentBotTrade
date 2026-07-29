@@ -26,6 +26,8 @@ const scanRoutes = require('./api/routes/scan.routes');
 // FIX-2026-07-24: Telegram + History (ใหม่)
 const telegramRoutes = require('./api/routes/telegram.routes');
 const historyRoutes = require('./api/routes/history.routes');
+// FIX-2026-07-29: PnL Calendar + PnL Chart (ใหม่)
+const pnlRoutes = require('./api/routes/pnl.routes');
 
 function createApp() {
   const app = express();
@@ -105,6 +107,8 @@ function createApp() {
   app.use('/api/scan', scanRoutes);
   // FIX-2026-07-24: register telegram + history
   app.use('/api/telegram', telegramRoutes);
+  // FIX-2026-07-29: register pnl (calendar + series)
+  app.use('/api/pnl', pnlRoutes);
   app.use('/api/history', historyRoutes);
 
   // Health

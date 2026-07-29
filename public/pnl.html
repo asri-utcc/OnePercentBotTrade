@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="th">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>PnL Calendar - OnePercentBotTrade</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet" />
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+  <link href="/css/app.css" rel="stylesheet" />
+</head>
+<body>
+  <nav class="app-nav" id="app-nav"></nav>
+
+  <div class="container-fluid px-3 px-md-4 py-3 py-md-4">
+    <div class="page-title">
+      <h3>📅 PnL Calendar</h3>
+      <a href="/bots.html" class="btn-lux btn-sm">← กลับ</a>
+    </div>
+
+    <!-- Filter row -->
+    <div class="pnl-filter-row mb-3">
+      <div class="pnl-month-nav">
+        <button id="pnl-prev-month" type="button" title="เดือนก่อนหน้า">‹</button>
+        <span id="pnl-month-label">—</span>
+        <button id="pnl-next-month" type="button" title="เดือนถัดไป">›</button>
+        <button id="pnl-today" type="button" class="btn-lux btn-sm">วันนี้</button>
+      </div>
+      <select id="pnl-bot-filter" class="form-select form-select-sm">
+        <option value="">ทุกบอท</option>
+      </select>
+      <div class="pnl-currency-toggle">
+        <button id="pnl-currency-usdt" type="button" class="active">USDT</button>
+        <button id="pnl-currency-thb" type="button">THB</button>
+      </div>
+    </div>
+
+    <!-- KPI tiles -->
+    <div class="summary-row mb-3" id="pnl-stats-row"></div>
+
+    <!-- Calendar card -->
+    <div class="lux-card mb-3">
+      <div class="lux-header">
+        <h5>📅 Daily PnL</h5>
+        <span id="pnl-month-range" class="text-muted-3">—</span>
+      </div>
+      <div class="lux-body">
+        <div class="pnl-cal" id="pnl-calendar">
+          <div class="text-center py-5 text-muted-3" style="grid-column: 1 / -1;">กำลังโหลด…</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Chart card -->
+    <div class="lux-card">
+      <div class="lux-header">
+        <h5>📈 Cumulative PnL</h5>
+        <span id="pnl-chart-range" class="text-muted-3">—</span>
+      </div>
+      <div class="lux-body">
+        <div class="pnl-chart-wrap">
+          <div id="pnl-chart" style="width:100%; height:380px;"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+  <script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
+  <script src="/js/api.js"></script>
+  <script src="/js/ws-client.js"></script>
+  <script>window.NAV_ACTIVE = 'pnl';</script>
+  <script src="/js/partials/nav.js"></script>
+  <script src="/js/pages/pnl.js"></script>
+</body>
+</html>

@@ -27,6 +27,7 @@
     { key: 'chart',    href: '/chart.html',    label: '📈 Chart' },
     { key: 'backtest', href: '/backtest.html', label: '🧪 Backtest' },
     { key: 'scan',     href: '/scan-volatility.html', label: '🎰 Scan' },
+    { key: 'pnl',      href: '/pnl.html',      label: '📅 PnL' },               // FIX-2026-07-29
     { key: 'history',  href: '/history.html',  label: '📜 History' },           // FIX-2026-07-24
     { key: 'settings', href: '/settings.html', label: '⚙️ Settings' },          // FIX-2026-07-24
   ].filter((l) => l.key !== 'detail' || botId); // hide detail if no botId
