@@ -1998,34 +1998,56 @@ a:hover { color: var(--gold-2); text-decoration: none; }
 }
 .pnl-cal-day-num {
   color: var(--text-1); font-weight: 600; font-size: 0.95em;
-}
-/* FIX-2026-07-29: สลับสีตัวอักษรตามความอิ่มของ bg (--on-intensity: 0/1 ตั้งโดย JS) */
-.pnl-cal-cell.is-bull .pnl-cal-day-num,
-.pnl-cal-cell.is-bear .pnl-cal-day-num {
-  color: rgba(12, 18, 32, calc(var(--on-intensity, 0) * 1));
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.45);
 }
 .pnl-cal-pnl {
   font-family: var(--font-mono); font-weight: 700; font-size: 0.95em;
   color: var(--text-1);
-  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
-}
-/* FIX-2026-07-29: dark text + light shadow เมื่อ bg อิ่ม (readable บนสีเข้ม) */
-.pnl-cal-cell.is-bull .pnl-cal-pnl,
-.pnl-cal-cell.is-bear .pnl-cal-pnl {
-  color: rgba(12, 18, 32, calc(var(--on-intensity, 0) * 1));
-  text-shadow: calc(var(--on-intensity, 0) * 0) 0 0 transparent;
-}
-.pnl-cal-cell.is-bull[style*="--on-intensity: 1"] .pnl-cal-pnl,
-.pnl-cal-cell.is-bear[style*="--on-intensity: 1"] .pnl-cal-pnl {
-  text-shadow: 0 1px 1px rgba(255, 255, 255, 0.25);
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.45);
 }
 .pnl-cal-trades {
-  color: rgba(255,255,255,0.7); font-size: 0.78em; margin-top: auto;
+  color: var(--text-3); font-size: 0.78em; margin-top: auto;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.45);
 }
-/* FIX-2026-07-29: เมื่อ bg อิ่ม — ใช้สีเข้มกว่านิดหน่อยเพื่อ contrast กับ day-num/trades */
+
+/* FIX-2026-07-29 (v2): สลับสีตัวอักษรเมื่อ bg อิ่มตัว โดยใช้ class ชัดเจน (ไม่พึ่ง calc+rgba alpha)
+   - .is-on-bright ถูกตั้งโดย JS เมื่อ intensity >= 0.55
+   - dark text + light shadow บน teal/red อิ่ม → readable
+   - cell ที่ไม่ใช่ .is-on-bright ใช้สีเดิม (light text + dark shadow) */
+.pnl-cal-cell.is-on-bright {
+  background-color: rgba(255, 255, 255, 0.0); /* คงตามเดิม — ไม่ override จริงๆ แค่ marker */
+}
+.pnl-cal-cell.is-bull.is-on-bright .pnl-cal-day-num,
+.pnl-cal-cell.is-bear.is-on-bright .pnl-cal-day-num {
+  color: #0c1220;
+  text-shadow: 0 1px 1px rgba(255, 255, 255, 0.35);
+}
+.pnl-cal-cell.is-bull.is-on-bright .pnl-cal-pnl,
+.pnl-cal-cell.is-bear.is-on-bright .pnl-cal-pnl {
+  color: #0c1220;
+  text-shadow: 0 1px 1px rgba(255, 255, 255, 0.35);
+}
+.pnl-cal-cell.is-bull.is-on-bright .pnl-cal-trades,
+.pnl-cal-cell.is-bear.is-on-bright .pnl-cal-trades {
+  color: rgba(12, 18, 32, 0.75);
+  text-shadow: 0 1px 1px rgba(255, 255, 255, 0.3);
+}
+
+/* fallback (low intensity) — light text + dark shadow อ่านง่ายบน faded bg */
+.pnl-cal-cell.is-bull .pnl-cal-day-num,
+.pnl-cal-cell.is-bear .pnl-cal-day-num {
+  color: #f8fafc;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.55);
+}
+.pnl-cal-cell.is-bull .pnl-cal-pnl,
+.pnl-cal-cell.is-bear .pnl-cal-pnl {
+  color: #f8fafc;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.55);
+}
 .pnl-cal-cell.is-bull .pnl-cal-trades,
 .pnl-cal-cell.is-bear .pnl-cal-trades {
-  color: rgba(12, 18, 32, calc(var(--on-intensity, 0) * 0.7));
+  color: rgba(248, 250, 252, 0.75);
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.55);
 }
 
 .pnl-chart-wrap { width: 100%; min-height: 380px; }

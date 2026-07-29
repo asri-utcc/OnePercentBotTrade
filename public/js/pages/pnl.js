@@ -200,10 +200,10 @@ function renderCalendar(data) {
       cell.classList.add(cls);
       const intensity = Math.min(1, Math.abs(day.pnl) / maxAbs);
       cell.style.setProperty('--intensity', (0.18 + intensity * 0.82).toFixed(2));
-      // FIX-2026-07-29: flip text color เมื่อ bg อิ่มตัว (light text on dark bg = good; light text on saturated teal/red = poor)
-      //   - intensity >= 0.55 → ใช้ dark text (var(--bg-1)) สำหรับ contrast ที่ดี
-      //   - intensity < 0.55  → ใช้ light text (var(--text-1)) — bg ยัง faded เห็นเป็นสีจางบน dark bg
-      cell.style.setProperty('--on-intensity', intensity >= 0.55 ? '1' : '0');
+      // FIX-2026-07-29 (v2): ใช้ class แทน calc+rgba alpha (calc() ใน rgba alpha ไม่เสถียร + ทำให้ day-num หายเมื่อ intensity=0)
+      //   - intensity >= 0.55 → .is-on-bright → dark text + light shadow บน saturated bg
+      //   - intensity < 0.55  → ค่า default → light text + dark shadow บน faded bg
+      if (intensity >= 0.55) cell.classList.add('is-on-bright');
     }
     const dayNum = parseInt(day.date.slice(-2), 10);
     const pnlCls = day.pnl > 0 ? 'pnl-bull' : day.pnl < 0 ? 'pnl-bear' : '';
