@@ -30,7 +30,9 @@ function chartBaseOptions(width, height) {
   return {
     width,
     height,
-    autoSize: true, // FIX-2026-07-29 v7: lightweight-charts observe container resize เอง
+    // FIX-2026-07-29 v8: ไม่ใช้ autoSize — chart จะถูกบีบเป็น 71px ตาม container จริง
+    //   แล้ว painter อ่าน value=null ตอน render frame แรก
+    //   fix: ใช้ fixed width/height ที่ >= 600px + ResizeObserver ตามจังหวะ
     layout: {
       background: { type: 'solid', color: 'transparent' },
       textColor: '#94a3b8',
@@ -396,34 +398,31 @@ function renderPnlChart(trades) {
     };
   }).filter(Boolean);
 
-  // FIX-2026-07-29 (v7): containerW เป็น 71 ตอน init — chart render ก่อน layout เสร็จ
-  //   fix: defer chart creation ด้วย setTimeout(0) ให้ browser flush layout ก่อน
-  //   + ใช้ container จริง clientWidth (fallback 800) + autoSize:true
-  const containerW = Math.max(container.clientWidth || 0, 800);
-  const containerH = 380;
-  console.log('[pnl] renderPnlChart v7', { trades: trades.length, pts: pts.length, containerW });
+  // FIX-2026-07-29 (v8): root cause — calendar CSS grid ทำให้ container.clientWidth แคบ (71px)
+  //   lightweight-charts v4 ต้องการ width >= ~300px ตอน render frame แรก ไม่งั้น painter throw "Value is null"
+  //   fix: hardcode width=800 + CSS min-width:600px บังคับ container ไม่ให้แคบเกิน
+  //   + ResizeObserver ตามจังหวะ window resize
+  const chartW = 800;
+  const chartH = 380;
+  console.log('[pnl] renderPnlChart v8', { trades: trades.length, pts: pts.length, containerW: container.clientWidth });
 
-  // Defer to next tick เพื่อให้ browser คำนวณ layout (CSS grid ของ calendar อาจจะบีบ chart)
-  setTimeout(() => {
-    if (!document.body.contains(container)) return; // cleanup ถ้า user navigate ออก
-    const lastVal = pts[pts.length - 1].value;
-    const bull = lastVal >= 0;
-    pnlChart = LightweightCharts.createChart(container, chartBaseOptions(containerW, containerH));
-    pnlSeries = pnlChart.addLineSeries({
-      color: bull ? '#00e5b8' : '#ff4d6d',
-      lineWidth: 2,
-    });
-    pnlSeries.setData(pts);
-    pnlSeries.createPriceLine({
-      price: 0,
-      color: 'rgba(255,255,255,0.35)',
-      lineWidth: 1,
-      lineStyle: 2,
-      title: 'break-even',
-    });
-    pnlChart.timeScale().fitContent();
-    console.log('[pnl] chart rendered v7', { pts: pts.length, last: lastVal, w: container.clientWidth });
-  }, 0);
+  const lastVal = pts[pts.length - 1].value;
+  const bull = lastVal >= 0;
+  pnlChart = LightweightCharts.createChart(container, chartBaseOptions(chartW, chartH));
+  pnlSeries = pnlChart.addLineSeries({
+    color: bull ? '#00e5b8' : '#ff4d6d',
+    lineWidth: 2,
+  });
+  pnlSeries.setData(pts);
+  pnlSeries.createPriceLine({
+    price: 0,
+    color: 'rgba(255,255,255,0.35)',
+    lineWidth: 1,
+    lineStyle: 2,
+    title: 'break-even',
+  });
+  pnlChart.timeScale().fitContent();
+  console.log('[pnl] chart rendered v8', { pts: pts.length, last: lastVal, w: container.clientWidth });
 }
 
 // ─── Currency toggle ─────────────────────────────────
@@ -497,11 +496,14 @@ function setupNav() {
     if (currencyMode === 'THB') loadChart();
   });
 
-  // Resize handler for chart
+  // Resize handler for chart — FIX v8: ใช้ parent width (lux-card) แทน container
+  //   container.clientWidth อาจจะยังแคบเพราะ calendar grid
+  //   ใช้ max(window width * 0.9, 600) เพื่อให้ chart ใหญ่เสมอ
   window.addEventListener('resize', () => {
     if (!pnlChart) return;
-    const container = document.getElementById('pnl-chart');
-    pnlChart.applyOptions({ width: container.clientWidth || 800 });
+    const w = Math.max(window.innerWidth * 0.85, 600);
+    pnlChart.applyOptions({ width: w });
+    pnlChart.timeScale().fitContent();
   });
 }
 
