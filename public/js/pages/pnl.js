@@ -384,36 +384,69 @@ function renderPnlChart(trades) {
   // Build cumulative points (USDT หรือ THB ตาม currencyMode)
   const fxRate = currencyMode === 'THB' && window.__fx && window.__fx.rate ? window.__fx.rate : 1;
   let cum = 0;
-  const pts = trades.map((t) => {
+  const pts = [];
+  let badDataCount = 0;
+  for (const t of trades) {
     const inc = currencyMode === 'THB' ? t.realizedPnl * fxRate : t.realizedPnl;
+    if (typeof inc !== 'number' || !isFinite(inc)) { badDataCount++; continue; }
     cum += inc;
     const ts = new Date(t.sellFilledAt).getTime();
-    if (!isFinite(ts)) {
-      console.warn('[pnl] bad sellFilledAt', t);
-      return null;
-    }
-    return {
+    if (!isFinite(ts)) { badDataCount++; continue; }
+    pts.push({
       time: Math.floor(ts / 1000),
       value: parseFloat(cum.toFixed(currencyMode === 'THB' ? 2 : 4)),
-    };
-  }).filter(Boolean);
+    });
+  }
+  // FIX-2026-07-29 v9: lightweight-charts v4 ต้องการ sorted + unique time
+  //   duplicate time → painter งง → "Value is null"
+  const seenTime = new Set();
+  const deduped = [];
+  let dupCount = 0;
+  for (const p of pts) {
+    if (seenTime.has(p.time)) { dupCount++; continue; }
+    seenTime.add(p.time);
+    deduped.push(p);
+  }
+  deduped.sort((a, b) => a.time - b.time);
 
-  // FIX-2026-07-29 (v8): root cause — calendar CSS grid ทำให้ container.clientWidth แคบ (71px)
-  //   lightweight-charts v4 ต้องการ width >= ~300px ตอน render frame แรก ไม่งั้น painter throw "Value is null"
-  //   fix: hardcode width=800 + CSS min-width:600px บังคับ container ไม่ให้แคบเกิน
-  //   + ResizeObserver ตามจังหวะ window resize
-  const chartW = 800;
+  console.log('[pnl] v9 data check', { trades: trades.length, pts: pts.length, deduped: deduped.length, badData: badDataCount, dups: dupCount, sampleFirst: deduped[0], sampleLast: deduped[deduped.length - 1] });
+
+  if (!deduped.length) {
+    document.getElementById('pnl-chart-range').textContent = 'ไม่มีข้อมูล valid';
+    return;
+  }
+
+  // FIX-2026-07-29 (v9): width=600 ก็ยัง error → ปัญหาน่าจะเป็น timing ของ internal RAF loop
+  //   fix: ใช้ minimal options (ตัด crosshair/handle* ออก) เพื่อให้ lightweight-charts render simple ที่สุด
+  const chartW = Math.max(container.clientWidth, 600);
   const chartH = 380;
-  console.log('[pnl] renderPnlChart v8', { trades: trades.length, pts: pts.length, containerW: container.clientWidth });
-
-  const lastVal = pts[pts.length - 1].value;
+  const lastVal = deduped[deduped.length - 1].value;
   const bull = lastVal >= 0;
-  pnlChart = LightweightCharts.createChart(container, chartBaseOptions(chartW, chartH));
+  pnlChart = LightweightCharts.createChart(container, {
+    width: chartW,
+    height: chartH,
+    layout: {
+      background: { type: 'solid', color: 'transparent' },
+      textColor: '#94a3b8',
+      fontSize: 11,
+    },
+    grid: {
+      vertLines: { color: 'rgba(255,255,255,0.04)' },
+      horzLines: { color: 'rgba(255,255,255,0.04)' },
+    },
+    rightPriceScale: { borderColor: 'rgba(255,255,255,0.06)' },
+    timeScale: {
+      borderColor: 'rgba(255,255,255,0.06)',
+      timeVisible: true,
+      secondsVisible: false,
+      rightOffset: 12,
+    },
+  });
   pnlSeries = pnlChart.addLineSeries({
     color: bull ? '#00e5b8' : '#ff4d6d',
     lineWidth: 2,
   });
-  pnlSeries.setData(pts);
+  pnlSeries.setData(deduped);
   pnlSeries.createPriceLine({
     price: 0,
     color: 'rgba(255,255,255,0.35)',
@@ -422,7 +455,7 @@ function renderPnlChart(trades) {
     title: 'break-even',
   });
   pnlChart.timeScale().fitContent();
-  console.log('[pnl] chart rendered v8', { pts: pts.length, last: lastVal, w: container.clientWidth });
+  console.log('[pnl] chart rendered v9', { pts: deduped.length, last: lastVal, w: chartW });
 }
 
 // ─── Currency toggle ─────────────────────────────────
