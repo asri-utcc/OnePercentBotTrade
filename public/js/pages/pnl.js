@@ -30,6 +30,7 @@ function chartBaseOptions(width, height) {
   return {
     width,
     height,
+    autoSize: true, // FIX-2026-07-29 v7: lightweight-charts observe container resize เอง
     layout: {
       background: { type: 'solid', color: 'transparent' },
       textColor: '#94a3b8',
@@ -395,33 +396,34 @@ function renderPnlChart(trades) {
     };
   }).filter(Boolean);
 
-  console.log('[pnl] renderPnlChart', { trades: trades.length, pts: pts.length, first: pts[0], last: pts[pts.length - 1], containerW: container.clientWidth });
+  // FIX-2026-07-29 (v7): containerW เป็น 71 ตอน init — chart render ก่อน layout เสร็จ
+  //   fix: defer chart creation ด้วย setTimeout(0) ให้ browser flush layout ก่อน
+  //   + ใช้ container จริง clientWidth (fallback 800) + autoSize:true
+  const containerW = Math.max(container.clientWidth || 0, 800);
+  const containerH = 380;
+  console.log('[pnl] renderPnlChart v7', { trades: trades.length, pts: pts.length, containerW });
 
-  // FIX-2026-07-29 (v6): "Value is null" error จาก requestAnimationFrame ของ lightweight-charts
-  //   root cause: lightweight-charts v4 ตอน render แรก priceScale autoScale + requestAnimationFrame
-  //   timing race ทำให้ series painter อ่าน value=null
-  //   fix: ลบ priceLineVisible:false ออก (default true) + ไม่ call requestAnimationFrame
-  //        (chartBaseOptions มี shiftVisibleRangeOnNewBar:true ที่จัดการ timing ให้แล้ว)
-  const lastVal = pts[pts.length - 1].value;
-  const bull = lastVal >= 0;
-  const w = Math.max(container.clientWidth || 0, 320);
-  const h = 380;
-  pnlChart = LightweightCharts.createChart(container, chartBaseOptions(w, h));
-  pnlSeries = pnlChart.addLineSeries({
-    color: bull ? '#00e5b8' : '#ff4d6d',
-    lineWidth: 2,
-  });
-  pnlSeries.setData(pts);
-  // baseline ที่ 0 (dashed) — หลัง setData เท่านั้น
-  pnlSeries.createPriceLine({
-    price: 0,
-    color: 'rgba(255,255,255,0.35)',
-    lineWidth: 1,
-    lineStyle: 2,
-    title: 'break-even',
-  });
-  pnlChart.timeScale().fitContent();
-  console.log('[pnl] chart rendered v6', { pts: pts.length, last: lastVal, w: container.clientWidth });
+  // Defer to next tick เพื่อให้ browser คำนวณ layout (CSS grid ของ calendar อาจจะบีบ chart)
+  setTimeout(() => {
+    if (!document.body.contains(container)) return; // cleanup ถ้า user navigate ออก
+    const lastVal = pts[pts.length - 1].value;
+    const bull = lastVal >= 0;
+    pnlChart = LightweightCharts.createChart(container, chartBaseOptions(containerW, containerH));
+    pnlSeries = pnlChart.addLineSeries({
+      color: bull ? '#00e5b8' : '#ff4d6d',
+      lineWidth: 2,
+    });
+    pnlSeries.setData(pts);
+    pnlSeries.createPriceLine({
+      price: 0,
+      color: 'rgba(255,255,255,0.35)',
+      lineWidth: 1,
+      lineStyle: 2,
+      title: 'break-even',
+    });
+    pnlChart.timeScale().fitContent();
+    console.log('[pnl] chart rendered v7', { pts: pts.length, last: lastVal, w: container.clientWidth });
+  }, 0);
 }
 
 // ─── Currency toggle ─────────────────────────────────
