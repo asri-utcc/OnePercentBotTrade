@@ -474,7 +474,12 @@ async function mbInit() {
   document.getElementById('mb-from').value = fmt(past);
   document.getElementById('mb-to').value = fmt(today);
   document.getElementById('mb-add-row').addEventListener('click', () => {
-    mbState.rows.push({ symbol: mbState.symbols[0] || 'BTCUSDT', timeframe: '5m', tpPercent: 0.1, capitalPerTrade: 10, maxConcurrentTrades: 5 });
+    // FIX-2026-07-30: copy config จากแถวล่าสุด (เพื่อให้ตั้งค่าเหมือนกันแค่เปลี่ยน symbol)
+    const last = mbState.rows[mbState.rows.length - 1];
+    const newRow = last
+      ? { ...last }
+      : { symbol: mbState.symbols[0] || 'BTCUSDT', timeframe: '5m', tpPercent: 0.1, capitalPerTrade: 10, maxConcurrentTrades: 5 };
+    mbState.rows.push(newRow);
     mbRenderRows();
   });
   document.getElementById('mb-run').addEventListener('click', mbRun);
