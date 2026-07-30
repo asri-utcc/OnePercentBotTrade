@@ -609,12 +609,12 @@ async function runMultiBacktest(params) {
       toMs,
     });
     if (klines.length < 50) throw new Error(`${b.symbol}: not enough klines (${klines.length})`);
-    // FIX-2026-07-30: per-bot KC multiplier — ส่ง opts.mult เข้า computeBgStates/detectS1Signals
+    // FIX-2026-07-30: per-bot KC multiplier — ส่ง opts.mult เข้า detectS1Signals
+    //   detectS1Signals(klines, opts) — opts จะถูก spread เข้า computeBgStates({closes, highs, lows, ...opts})
     const signalOpts = {
       mult: b.kcMult != null ? parseFloat(b.kcMult) : 1.5,
       xs1Enabled: b.xs1Enabled !== false, // default true
     };
-    const states = signalEngine.computeBgStates(klines, signalOpts);
     const signals = signalEngine.detectS1Signals(klines, signalOpts);
     let stepSizeStr = null;
     let minNotional = new Decimal('10');
