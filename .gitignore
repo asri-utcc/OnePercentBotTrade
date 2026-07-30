@@ -14,4 +14,4 @@ build/
 tmp/
 *.tmp
 logs/
-.pm2/
+.pm2/cookies.txt
