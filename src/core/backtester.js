@@ -569,4 +569,269 @@ module.exports = {
   simulateTrades,
   summarize,
   runBacktest,
+  runMultiBacktest, // FIX-2026-07-30: multi-bot backtest with shared capital pool
 };
+
+/**
+ * FIX-2026-07-30: Multi-bot backtest engine
+ *   - input: { totalCapital, from, to, bots: [{symbol, timeframe, tpPercent, capitalPerTrade, maxConcurrentTrades, useBnbForFees, maxBuyWait}] }
+ *   - แต่ละบอท pre-fetch klines + generate signals แยก
+ *   - รวม signals ทั้งหมด → เรียงตาม openTime (asc)
+ *   - shared simulator: ตรวจ "sum(capitalPerTrade ของ active ทุกบอท) <= totalCapital" ก่อน BUY
+ *     - ถ้าเกิน → skip signal นั้น (mark skipped: 'capital_exhausted')
+ *   - per-bot stats + combined stats
+ *   - output: { perBot: [{botId, symbol, timeframe, trades, stats, skipped}], combined: {trades, stats, capitalUsagePeak}, peaks }
+ */
+async function runMultiBacktest(params) {
+  const {
+    totalCapital,
+    from,
+    to,
+    bots = [],
+  } = params;
+
+  if (!totalCapital || totalCapital <= 0) throw new Error('totalCapital required (> 0)');
+  if (!bots.length) throw new Error('bots[] required (>= 1)');
+  if (!from || !to) throw new Error('from, to required');
+
+  const fromMs = typeof from === 'string' ? new Date(from).getTime() : from;
+  const toMs = typeof to === 'string' ? new Date(to).getTime() : to;
+  const totalCap = new Decimal(totalCapital);
+
+  // 1) Pre-fetch klines + signals per bot (parallel)
+  const botInputs = await Promise.all(bots.map(async (b, idx) => {
+    const botId = b.botId || `bot_${idx}`;
+    const feeRate = fees.getMakerRate({ useBnbForFees: !!b.useBnbForFees });
+    const { klines, truncated } = await fetchKlines({
+      symbol: b.symbol.toUpperCase(),
+      interval: b.timeframe,
+      fromMs,
+      toMs,
+    });
+    if (klines.length < 50) throw new Error(`${b.symbol}: not enough klines (${klines.length})`);
+    const states = signalEngine.computeBgStates(klines, b.timeframe);
+    const signals = signalEngine.detectS1Signals(klines, states, b.timeframe);
+    let stepSizeStr = null;
+    let minNotional = new Decimal('10');
+    try {
+      const info = await symbolInfo.loadSymbol(b.symbol.toUpperCase());
+      if (info.lotSize) stepSizeStr = info.lotSize.stepSize.toString();
+      if (info.minNotional) minNotional = new Decimal(info.minNotional.toString());
+    } catch (_) { /* keep defaults */ }
+    return {
+      botId,
+      cfg: {
+        symbol: b.symbol.toUpperCase(),
+        timeframe: b.timeframe,
+        tpPercent: parseFloat(b.tpPercent),
+        capitalPerTrade: parseFloat(b.capitalPerTrade),
+        feeRate,
+        maxBuyWait: b.maxBuyWait != null ? parseInt(b.maxBuyWait, 10) : 6,
+        maxConcurrentTrades: parseInt(b.maxConcurrentTrades, 10),
+        stepSize: stepSizeStr,
+        minNotional,
+      },
+      klines,
+      signals: signals.map((s) => ({ ...s, botId })),
+      truncated,
+      candlesFetched: klines.length,
+    };
+  }));
+
+  // 2) Merge signals across bots + sort by openTime asc
+  const merged = [];
+  for (const bi of botInputs) {
+    for (const s of bi.signals) merged.push({ ...s, _cfg: bi.cfg, _klines: bi.klines });
+  }
+  merged.sort((a, b) => a.openTime - b.openTime);
+
+  // 3) Shared capital pool simulator
+  // Active trades = array of { botId, exitIdx, capitalUsed }
+  const activeExits = [];
+  let peakCapitalUsed = new Decimal(0);
+  let peakConcurrentTrades = 0;
+  let capitalExhaustedSkips = 0;
+
+  // Per-bot trade arrays (เก็บแยก เพื่อ summary per-bot)
+  const perBotTrades = {};
+  for (const bi of botInputs) perBotTrades[bi.botId] = [];
+
+  const allTrades = [];
+  for (const sig of merged) {
+    const cfg = sig._cfg;
+    const idx = sig.index;
+    const buyPrice = sig.close;
+    const target = new Decimal(buyPrice).mul(1 + cfg.tpPercent / 100 + 2 * cfg.feeRate).toNumber();
+    const stepMs = sig._klines.length >= 2 ? (sig._klines[1].openTime - sig._klines[0].openTime) : 0;
+
+    // Qty calc
+    let qty;
+    try {
+      const rawQty = new Decimal(cfg.capitalPerTrade).div(new Decimal(buyPrice));
+      qty = floorQtyToStep(rawQty, cfg.stepSize);
+    } catch (_) {
+      qty = new Decimal(cfg.capitalPerTrade / buyPrice);
+    }
+    const notional = qty.mul(new Decimal(buyPrice));
+
+    // Cleanup active trades that exit before this idx
+    const before = activeExits.length;
+    const remaining = activeExits.filter((e) => e.exitIdx >= idx);
+    activeExits.length = 0;
+    activeExits.push(...remaining);
+
+    // Track peak concurrency (across all bots)
+    if (activeExits.length > peakConcurrentTrades) peakConcurrentTrades = activeExits.length;
+
+    // ─── Check per-bot concurrent slot ─────────────
+    const activeForBot = activeExits.filter((e) => e.botId === sig.botId).length;
+    if (activeForBot >= cfg.maxConcurrentTrades) {
+      // slot เต็ม → skip (เหมือน single-bot behavior)
+      perBotTrades[sig.botId].push({
+        signalTime: new Date(sig.openTime),
+        candleCloseTime: new Date(sig.closeTime),
+        buyPrice,
+        outcome: 'skipped_slot',
+        skipReason: 'concurrent_limit',
+      });
+      continue;
+    }
+
+    // ─── Check shared capital pool ────────────────
+    const currentUsed = activeExits.reduce((s, e) => s + e.capitalUsed, 0);
+    if (currentUsed + cfg.capitalPerTrade > totalCap.toNumber()) {
+      capitalExhaustedSkips++;
+      perBotTrades[sig.botId].push({
+        signalTime: new Date(sig.openTime),
+        candleCloseTime: new Date(sig.closeTime),
+        buyPrice,
+        outcome: 'skipped_capital',
+        skipReason: 'capital_exhausted',
+      });
+      continue;
+    }
+
+    // ─── Buy fill check (เหมือน single) ────────────
+    const candle = sig._klines[idx];
+    const low = candle.low;
+    const close = candle.close;
+    const volume = candle.volume;
+    if (!(low <= buyPrice && close >= buyPrice && volume > 0)) {
+      // post-only bid skip (บอทจริงตามลง = ไม่นับ)
+      continue;
+    }
+
+    // ─── Open trade ──────────────────────────────
+    // Find exit: scan forward for TP hit
+    let exitIdx = sig._klines.length; // still holding by default
+    for (let j = idx + 1; j < sig._klines.length; j++) {
+      if (sig._klines[j].high >= target) { exitIdx = j; break; }
+      if (j - idx >= cfg.maxBuyWait) break;
+    }
+    const exitCandle = exitIdx < sig._klines.length ? sig._klines[exitIdx] : null;
+    const exitPrice = exitCandle ? exitCandle.high : null;
+    let pnl = null;
+    if (exitPrice != null) {
+      const gross = new Decimal(exitPrice).minus(new Decimal(buyPrice)).mul(qty);
+      const feeBuy = new Decimal(buyPrice).mul(qty).mul(cfg.feeRate);
+      const feeSell = new Decimal(exitPrice).mul(qty).mul(cfg.feeRate);
+      pnl = gross.minus(feeBuy).minus(feeSell).toNumber();
+    }
+
+    const trade = {
+      botId: sig.botId,
+      symbol: cfg.symbol,
+      timeframe: cfg.timeframe,
+      signalTime: new Date(sig.openTime),
+      candleCloseTime: new Date(sig.closeTime),
+      buyTime: new Date(sig.openTime + stepMs / 2),
+      buyPrice,
+      qty: qty.toNumber(),
+      notional: notional.toNumber(),
+      exitTime: exitCandle ? new Date(exitCandle.openTime + stepMs / 2) : null,
+      exitPrice,
+      target,
+      outcome: exitPrice != null ? 'tp_hit' : 'still_holding',
+      pnl,
+      pnlPct: pnl != null ? (pnl / cfg.capitalPerTrade) * 100 : null,
+      capitalUsed: cfg.capitalPerTrade,
+    };
+    allTrades.push(trade);
+    perBotTrades[sig.botId].push(trade);
+
+    // Track active capital usage
+    activeExits.push({ botId: sig.botId, exitIdx, capitalUsed: cfg.capitalPerTrade });
+    const newUsed = activeExits.reduce((s, e) => s + e.capitalUsed, 0);
+    if (newUsed > peakCapitalUsed.toNumber()) peakCapitalUsed = new Decimal(newUsed);
+  }
+
+  // 4) Per-bot stats + combined stats
+  const perBot = botInputs.map((bi) => {
+    const trades = perBotTrades[bi.botId].filter((t) => t.outcome === 'tp_hit' || t.outcome === 'still_holding');
+    const skipped = perBotTrades[bi.botId].filter((t) => t.outcome === 'skipped_slot' || t.outcome === 'skipped_capital').length;
+    const stats = summarize(trades);
+    return {
+      botId: bi.botId,
+      symbol: bi.cfg.symbol,
+      timeframe: bi.cfg.timeframe,
+      tpPercent: bi.cfg.tpPercent,
+      capitalPerTrade: bi.cfg.capitalPerTrade,
+      maxConcurrentTrades: bi.cfg.maxConcurrentTrades,
+      candlesFetched: bi.candlesFetched,
+      truncated: bi.truncated,
+      signalsCount: bi.signals.length,
+      tradesCount: trades.length,
+      skippedCount: skipped,
+      stats,
+    };
+  });
+
+  const closedTrades = allTrades.filter((t) => t.outcome === 'tp_hit' || t.outcome === 'still_holding');
+  const combinedStats = summarize(closedTrades);
+
+  // Store result
+  const storedTrades = closedTrades.length > 500 ? closedTrades.slice(0, 250).concat(closedTrades.slice(-250)) : closedTrades;
+
+  let savedId = null;
+  try {
+    const doc = await BacktestResult.create({
+      symbol: bots.map((b) => b.symbol).join('+'),
+      timeframe: 'multi',
+      from: new Date(fromMs),
+      to: new Date(toMs),
+      executionModel: 'v4_maker_fill_multi',
+      params: {
+        totalCapital,
+        bots: bots.map((b) => ({
+          symbol: b.symbol, timeframe: b.timeframe, tpPercent: b.tpPercent,
+          capitalPerTrade: b.capitalPerTrade, maxConcurrentTrades: b.maxConcurrentTrades,
+        })),
+        model: 'realistic_v3_multi',
+      },
+      signalsCount: merged.length,
+      tradesSimulated: closedTrades.length,
+      ...combinedStats,
+      trades: storedTrades,
+    });
+    savedId = doc._id.toString();
+  } catch (e) {
+    logger.warn({ err: e.message }, 'multi backtest: failed to save result (non-fatal)');
+  }
+
+  return {
+    id: savedId,
+    executionModel: 'v4_maker_fill_multi',
+    totalCapital,
+    from: new Date(fromMs),
+    to: new Date(toMs),
+    perBot,
+    combined: {
+      tradesCount: closedTrades.length,
+      skippedCapitalCount: capitalExhaustedSkips,
+      peakCapitalUsed: peakCapitalUsed.toNumber(),
+      peakConcurrentTrades,
+      stats: combinedStats,
+      trades: storedTrades,
+    },
+  };
+}

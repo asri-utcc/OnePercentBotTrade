@@ -77,6 +77,7 @@ async function init() {
   setDefaultDates();
   document.getElementById('b-run').onclick = runBacktest;
   await loadHistory();
+  await mbInit(); // FIX-2026-07-30: multi-bot backtest
 }
 
 async function loadSymbols() {
@@ -321,5 +322,162 @@ window.deleteBacktest = async (id) => {
   await API.del(`/api/backtest/${id}`);
   await loadHistory();
 };
+
+// ────────────────────────────────────────────────────────────
+// FIX-2026-07-30: Multi-bot backtest (shared capital pool)
+// ────────────────────────────────────────────────────────────
+const TF_OPTIONS = ['1m', '3m', '5m', '15m', '30m', '1h', '2h', '4h', '1d'];
+const mbState = {
+  symbols: ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT', 'DOGEUSDT'],
+  rows: [],
+};
+
+function mbDefaultRows() {
+  return [
+    { symbol: 'BTCUSDT', timeframe: '5m', tpPercent: 0.1, capitalPerTrade: 10, maxConcurrentTrades: 5 },
+    { symbol: 'ETHUSDT', timeframe: '5m', tpPercent: 0.1, capitalPerTrade: 10, maxConcurrentTrades: 5 },
+  ];
+}
+
+async function mbLoadSymbols() {
+  try {
+    const resp = await API.get('/api/bots/symbols');
+    const syms = (resp && resp.symbols) || [];
+    if (syms.length) mbState.symbols = syms;
+  } catch (_) { /* fallback to defaults */ }
+}
+
+function mbRenderRows() {
+  const container = document.getElementById('mb-rows');
+  if (!container) return;
+  container.innerHTML = '';
+  mbState.rows.forEach((row, idx) => {
+    const el = document.createElement('div');
+    el.className = 'mb-row';
+    const symbolOpts = mbState.symbols.map((s) => `<option value="${s}" ${s === row.symbol ? 'selected' : ''}>${s}</option>`).join('');
+    const tfOpts = TF_OPTIONS.map((tf) => `<option value="${tf}" ${tf === row.timeframe ? 'selected' : ''}>${tf}</option>`).join('');
+    el.innerHTML = `
+      <select data-i="${idx}" data-k="symbol">${symbolOpts}</select>
+      <select data-i="${idx}" data-k="timeframe">${tfOpts}</select>
+      <input type="number" step="0.01" min="0.05" value="${row.tpPercent}" data-i="${idx}" data-k="tpPercent" />
+      <input type="number" step="0.01" min="1" value="${row.capitalPerTrade}" data-i="${idx}" data-k="capitalPerTrade" />
+      <input type="number" step="1" min="1" max="100" value="${row.maxConcurrentTrades}" data-i="${idx}" data-k="maxConcurrentTrades" />
+      <button class="mb-del" data-i="${idx}" title="ลบบอท">✕</button>
+    `;
+    container.appendChild(el);
+  });
+  container.querySelectorAll('select,input').forEach((el) => {
+    el.addEventListener('change', (e) => {
+      const i = parseInt(e.target.dataset.i, 10);
+      const k = e.target.dataset.k;
+      const v = e.target.type === 'number' ? parseFloat(e.target.value) : e.target.value;
+      mbState.rows[i][k] = v;
+    });
+  });
+  container.querySelectorAll('.mb-del').forEach((btn) => {
+    btn.addEventListener('click', (e) => {
+      const i = parseInt(e.target.dataset.i, 10);
+      mbState.rows.splice(i, 1);
+      mbRenderRows();
+    });
+  });
+}
+
+async function mbRun() {
+  const totalCapital = parseFloat(document.getElementById('mb-capital').value);
+  const from = document.getElementById('mb-from').value;
+  const to = document.getElementById('mb-to').value;
+  const out = document.getElementById('mb-result');
+  if (!totalCapital || totalCapital <= 0) { out.innerHTML = '<div class="alert alert-warning">ใส่ทุนรวม</div>'; return; }
+  if (!from || !to) { out.innerHTML = '<div class="alert alert-warning">เลือกวันที่</div>'; return; }
+  if (!mbState.rows.length) { out.innerHTML = '<div class="alert alert-warning">เพิ่มบอทอย่างน้อย 1 ตัว</div>'; return; }
+
+  out.innerHTML = '<div class="text-center py-4 text-muted-3">⏳ กำลังรัน multi-bot backtest (อาจใช้เวลา 10–30s)…</div>';
+  const t0 = Date.now();
+  try {
+    const resp = await API.post('/api/backtest/multi', { totalCapital, from, to, bots: mbState.rows });
+    const ms = Date.now() - t0;
+    mbRenderResult(resp, ms);
+  } catch (err) {
+    out.innerHTML = `<div class="alert alert-danger">ผิดพลาด: ${escapeHtml(err.message || 'unknown')}</div>`;
+  }
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
+}
+
+function mbRenderResult(resp, ms) {
+  const out = document.getElementById('mb-result');
+  const { perBot = [], combined = {}, totalCapital } = resp;
+  const s = combined.stats || {};
+  const pnlCls = (s.netPnl || 0) >= 0 ? 'mb-bull' : 'mb-bear';
+
+  const summary = `
+    <div class="lux-card mb-3" style="border: 1px solid rgba(245,184,0,0.3);">
+      <div class="lux-header">
+        <span class="title">📊 Multi-Bot Combined Result · ${ms}ms</span>
+        <span class="text-muted-3" style="font-size:0.8rem;">ทุนรวม $${totalCapital} · Peak ใช้ $${(combined.peakCapitalUsed || 0).toFixed(2)} (${Math.round(((combined.peakCapitalUsed || 0) / totalCapital) * 100)}%)</span>
+      </div>
+      <div class="lux-body">
+        <div class="mb-result-summary">
+          <div class="stat-tile ${pnlCls}"><div class="tile-label">Total PnL</div><div class="tile-value">${(s.netPnl || 0).toFixed(4)}</div><div class="tile-sub">USDT</div></div>
+          <div class="stat-tile is-gold"><div class="tile-label">Win Rate</div><div class="tile-value">${(s.winRate || 0)}%</div><div class="tile-sub">${s.wins || 0}W / ${s.losses || 0}L</div></div>
+          <div class="stat-tile is-info"><div class="tile-label">Trades</div><div class="tile-value">${combined.tradesCount || 0}</div><div class="tile-sub">ไม้รวม</div></div>
+          <div class="stat-tile is-info"><div class="tile-label">Peak ไม้พร้อมกัน</div><div class="tile-value">${combined.peakConcurrentTrades || 0}</div><div class="tile-sub">ข้ามทุกบอท</div></div>
+          <div class="stat-tile ${(combined.skippedCapitalCount || 0) > 0 ? 'is-gold' : ''}"><div class="tile-label">Skip (ทุนเต็ม)</div><div class="tile-value">${combined.skippedCapitalCount || 0}</div><div class="tile-sub">สัญญาณที่ถูก skip</div></div>
+          <div class="stat-tile is-gold"><div class="tile-label">Avg PnL/ไม้</div><div class="tile-value">${(s.avgPnl || 0).toFixed(4)}</div><div class="tile-sub">USDT</div></div>
+        </div>
+      </div>
+    </div>
+  `;
+
+  const botRows = perBot.map((b) => {
+    const bs = b.stats || {};
+    const cls = (bs.netPnl || 0) >= 0 ? 'mb-bull' : 'mb-bear';
+    return `<div class="mb-bot-row">
+      <div><strong>${escapeHtml(b.symbol)}</strong> <span class="text-muted-3" style="font-size:0.85em;">${b.timeframe} · TP ${b.tpPercent}% · $${b.capitalPerTrade}/ไม้ · max ${b.maxConcurrentTrades}</span></div>
+      <div class="${cls}">${(bs.netPnl || 0).toFixed(4)}</div>
+      <div>${bs.trades || 0} <span class="mb-skip-note">(${b.skippedCount || 0} skip)</span></div>
+      <div>${bs.wins || 0}W/${bs.losses || 0}L</div>
+      <div>${bs.winRate || 0}%</div>
+      <div>${(bs.avgPnl || 0).toFixed(4)}</div>
+    </div>`;
+  }).join('');
+
+  out.innerHTML = summary + `
+    <div class="lux-card">
+      <div class="lux-header"><span class="title">🤖 Per-Bot Breakdown</span></div>
+      <div class="lux-body">
+        <div class="mb-bot-row" style="font-weight:700;color:var(--text-3);text-transform:uppercase;font-size:0.78em;">
+          <div>Bot</div>
+          <div>PnL (USDT)</div>
+          <div>Trades</div>
+          <div>W/L</div>
+          <div>Win%</div>
+          <div>Avg/ไม้</div>
+        </div>
+        ${botRows}
+      </div>
+    </div>
+  `;
+}
+
+async function mbInit() {
+  await mbLoadSymbols();
+  mbState.rows = mbDefaultRows();
+  mbRenderRows();
+  // Pre-fill dates (last 14 days)
+  const today = new Date();
+  const past = new Date(today.getTime() - 14 * 86400000);
+  const fmt = (d) => d.toISOString().slice(0, 10);
+  document.getElementById('mb-from').value = fmt(past);
+  document.getElementById('mb-to').value = fmt(today);
+  document.getElementById('mb-add-row').addEventListener('click', () => {
+    mbState.rows.push({ symbol: mbState.symbols[0] || 'BTCUSDT', timeframe: '5m', tpPercent: 0.1, capitalPerTrade: 10, maxConcurrentTrades: 5 });
+    mbRenderRows();
+  });
+  document.getElementById('mb-run').addEventListener('click', mbRun);
+}
 
 init();

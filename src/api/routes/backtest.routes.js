@@ -82,6 +82,54 @@ router.get('/:id', requireAuth, async (req, res) => {
   }
 });
 
+// FIX-2026-07-30: Multi-bot backtest — shared capital pool + per-bot stats
+router.post('/multi', requireAuth, async (req, res) => {
+  try {
+    const { totalCapital, from, to, bots = [] } = req.body || {};
+
+    if (!totalCapital || totalCapital <= 0) {
+      return res.status(400).json({ error: 'totalCapital required (> 0)' });
+    }
+    if (!bots.length) {
+      return res.status(400).json({ error: 'bots[] required (>= 1)' });
+    }
+    if (!from || !to) {
+      return res.status(400).json({ error: 'from, to required (YYYY-MM-DD)' });
+    }
+    for (let i = 0; i < bots.length; i++) {
+      const b = bots[i];
+      if (!b.symbol || !b.timeframe) {
+        return res.status(400).json({ error: `bots[${i}]: symbol + timeframe required` });
+      }
+      if (!config.binanceIntervals.includes(b.timeframe)) {
+        return res.status(400).json({ error: `bots[${i}]: invalid timeframe "${b.timeframe}"` });
+      }
+    }
+
+    logger.info({ totalCapital, botCount: bots.length, from, to }, 'multi-bot backtest requested');
+
+    const result = await backtester.runMultiBacktest({
+      totalCapital: parseFloat(totalCapital),
+      from,
+      to,
+      bots: bots.map((b) => ({
+        symbol: b.symbol,
+        timeframe: b.timeframe,
+        tpPercent: parseFloat(b.tpPercent != null ? b.tpPercent : 0.1),
+        capitalPerTrade: parseFloat(b.capitalPerTrade != null ? b.capitalPerTrade : 10),
+        maxConcurrentTrades: parseInt(b.maxConcurrentTrades != null ? b.maxConcurrentTrades : 10, 10),
+        maxBuyWait: parseInt(b.maxBuyWait != null ? b.maxBuyWait : 6, 10),
+        useBnbForFees: !!b.useBnbForFees,
+      })),
+    });
+
+    res.json(result);
+  } catch (err) {
+    logger.error({ err: err.message, stack: err.stack }, 'multi-bot backtest failed');
+    res.status(500).json({ error: err.message });
+  }
+});
+
 router.delete('/:id', requireAuth, async (req, res) => {
   try {
     await BacktestResult.deleteOne({ _id: req.params.id });
