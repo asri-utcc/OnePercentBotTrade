@@ -334,8 +334,8 @@ const mbState = {
 
 function mbDefaultRows() {
   return [
-    { symbol: 'BTCUSDT', timeframe: '5m', tpPercent: 0.1, capitalPerTrade: 10, maxConcurrentTrades: 5 },
-    { symbol: 'ETHUSDT', timeframe: '5m', tpPercent: 0.1, capitalPerTrade: 10, maxConcurrentTrades: 5 },
+    { symbol: 'BTCUSDT', timeframe: '5m', tpPercent: 0.1, kcMult: 1.5, capitalPerTrade: 10, maxConcurrentTrades: 5 },
+    { symbol: 'ETHUSDT', timeframe: '5m', tpPercent: 0.1, kcMult: 1.5, capitalPerTrade: 10, maxConcurrentTrades: 5 },
   ];
 }
 
@@ -359,9 +359,10 @@ function mbRenderRows() {
     el.innerHTML = `
       <select data-i="${idx}" data-k="symbol">${symbolOpts}</select>
       <select data-i="${idx}" data-k="timeframe">${tfOpts}</select>
-      <input type="number" step="0.01" min="0.05" value="${row.tpPercent}" data-i="${idx}" data-k="tpPercent" />
-      <input type="number" step="0.01" min="1" value="${row.capitalPerTrade}" data-i="${idx}" data-k="capitalPerTrade" />
-      <input type="number" step="1" min="1" max="100" value="${row.maxConcurrentTrades}" data-i="${idx}" data-k="maxConcurrentTrades" />
+      <input type="number" step="0.01" min="0.05" value="${row.tpPercent}" data-i="${idx}" data-k="tpPercent" title="TP%" />
+      <input type="number" step="0.1" min="0.5" max="5" value="${row.kcMult ?? 1.5}" data-i="${idx}" data-k="kcMult" title="KC Multiplier (default 1.5)" />
+      <input type="number" step="0.01" min="1" value="${row.capitalPerTrade}" data-i="${idx}" data-k="capitalPerTrade" title="ทุน/ไม้" />
+      <input type="number" step="1" min="1" max="100" value="${row.maxConcurrentTrades}" data-i="${idx}" data-k="maxConcurrentTrades" title="Max ไม้" />
       <button class="mb-del" data-i="${idx}" title="ลบบอท">✕</button>
     `;
     container.appendChild(el);
@@ -436,7 +437,7 @@ function mbRenderResult(resp, ms) {
     const bs = b.stats || {};
     const cls = (bs.netPnl || 0) >= 0 ? 'mb-bull' : 'mb-bear';
     return `<div class="mb-bot-row">
-      <div><strong>${escapeHtml(b.symbol)}</strong> <span class="text-muted-3" style="font-size:0.85em;">${b.timeframe} · TP ${b.tpPercent}% · $${b.capitalPerTrade}/ไม้ · max ${b.maxConcurrentTrades}</span></div>
+      <div><strong>${escapeHtml(b.symbol)}</strong> <span class="text-muted-3" style="font-size:0.85em;">${b.timeframe} · TP ${b.tpPercent}% · KC×${b.kcMult ?? 1.5} · $${b.capitalPerTrade}/ไม้ · max ${b.maxConcurrentTrades}</span></div>
       <div class="${cls}">${(bs.netPnl || 0).toFixed(4)}</div>
       <div>${bs.trades || 0} <span class="mb-skip-note">(${b.skippedCount || 0} skip)</span></div>
       <div>${bs.wins || 0}W/${bs.losses || 0}L</div>

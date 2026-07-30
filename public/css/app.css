@@ -2146,13 +2146,13 @@ a:hover { color: var(--gold-2); text-decoration: none; }
 /* FIX-2026-07-30: Multi-bot backtest UI */
 .mb-multi-rows { display: flex; flex-direction: column; gap: 8px; }
 .mb-row-header {
-  display: grid; grid-template-columns: 2fr 1fr 1fr 1.2fr 1fr 40px;
+  display: grid; grid-template-columns: 2fr 1fr 1fr 0.7fr 1.2fr 1fr 40px;
   gap: 8px; padding: 0 4px;
   font-size: 0.78em; color: var(--text-3); font-weight: 600;
   text-transform: uppercase; letter-spacing: 0.04em;
 }
 .mb-row {
-  display: grid; grid-template-columns: 2fr 1fr 1fr 1.2fr 1fr 40px;
+  display: grid; grid-template-columns: 2fr 1fr 1fr 0.7fr 1.2fr 1fr 40px;
   gap: 8px; align-items: center;
   background: rgba(255,255,255,0.02); border: 1px solid var(--border-soft);
   border-radius: 8px; padding: 6px 8px;

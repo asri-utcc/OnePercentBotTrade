@@ -609,8 +609,13 @@ async function runMultiBacktest(params) {
       toMs,
     });
     if (klines.length < 50) throw new Error(`${b.symbol}: not enough klines (${klines.length})`);
-    const states = signalEngine.computeBgStates(klines, b.timeframe);
-    const signals = signalEngine.detectS1Signals(klines, states, b.timeframe);
+    // FIX-2026-07-30: per-bot KC multiplier — ส่ง opts.mult เข้า computeBgStates/detectS1Signals
+    const signalOpts = {
+      mult: b.kcMult != null ? parseFloat(b.kcMult) : 1.5,
+      xs1Enabled: b.xs1Enabled !== false, // default true
+    };
+    const states = signalEngine.computeBgStates(klines, signalOpts);
+    const signals = signalEngine.detectS1Signals(klines, signalOpts);
     let stepSizeStr = null;
     let minNotional = new Decimal('10');
     try {
@@ -630,6 +635,7 @@ async function runMultiBacktest(params) {
         maxConcurrentTrades: parseInt(b.maxConcurrentTrades, 10),
         stepSize: stepSizeStr,
         minNotional,
+        kcMult: signalOpts.mult,
       },
       klines,
       signals: signals.map((s) => ({ ...s, botId })),
@@ -775,6 +781,7 @@ async function runMultiBacktest(params) {
       symbol: bi.cfg.symbol,
       timeframe: bi.cfg.timeframe,
       tpPercent: bi.cfg.tpPercent,
+      kcMult: bi.cfg.kcMult,
       capitalPerTrade: bi.cfg.capitalPerTrade,
       maxConcurrentTrades: bi.cfg.maxConcurrentTrades,
       candlesFetched: bi.candlesFetched,

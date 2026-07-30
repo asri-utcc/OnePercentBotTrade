@@ -120,6 +120,8 @@ router.post('/multi', requireAuth, async (req, res) => {
         maxConcurrentTrades: parseInt(b.maxConcurrentTrades != null ? b.maxConcurrentTrades : 10, 10),
         maxBuyWait: parseInt(b.maxBuyWait != null ? b.maxBuyWait : 6, 10),
         useBnbForFees: !!b.useBnbForFees,
+        kcMult: b.kcMult != null ? parseFloat(b.kcMult) : 1.5,
+        xs1Enabled: b.xs1Enabled !== false,
       })),
     });
 
