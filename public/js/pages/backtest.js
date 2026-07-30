@@ -334,9 +334,15 @@ const mbState = {
 
 function mbDefaultRows() {
   return [
-    { symbol: 'BTCUSDT', timeframe: '5m', tpPercent: 0.1, kcMult: 1.5, capitalPerTrade: 10, maxConcurrentTrades: 5 },
-    { symbol: 'ETHUSDT', timeframe: '5m', tpPercent: 0.1, kcMult: 1.5, capitalPerTrade: 10, maxConcurrentTrades: 5 },
+    { symbol: 'BTCUSDT', timeframe: '5m', tpPercent: 0.1, kcMult: 1.5, capitalPerTrade: 10, maxConcurrentTrades: 10 },
+    { symbol: 'ETHUSDT', timeframe: '5m', tpPercent: 0.1, kcMult: 1.5, capitalPerTrade: 10, maxConcurrentTrades: 10 },
   ];
+}
+
+// FIX-2026-07-30: คำนวณทุนรวมที่แนะนำ ≥ ผลรวม maxConcurrent × capitalPerTrade ของทุกบอท
+function mbSuggestCapital() {
+  const needed = mbState.rows.reduce((sum, r) => sum + (parseFloat(r.capitalPerTrade) || 0) * (parseInt(r.maxConcurrentTrades, 10) || 0), 0);
+  return needed;
 }
 
 async function mbLoadSymbols() {
@@ -373,6 +379,9 @@ function mbRenderRows() {
       const k = e.target.dataset.k;
       const v = e.target.type === 'number' ? parseFloat(e.target.value) : e.target.value;
       mbState.rows[i][k] = v;
+      // FIX-2026-07-30: hint ทุนรวมขั้นต่ำ
+      const hint = document.getElementById('mb-capital-hint');
+      if (hint) hint.textContent = `ขั้นต่ำที่แนะนำ: $${mbSuggestCapital()}`;
     });
   });
   container.querySelectorAll('.mb-del').forEach((btn) => {
@@ -392,6 +401,17 @@ async function mbRun() {
   if (!totalCapital || totalCapital <= 0) { out.innerHTML = '<div class="alert alert-warning">ใส่ทุนรวม</div>'; return; }
   if (!from || !to) { out.innerHTML = '<div class="alert alert-warning">เลือกวันที่</div>'; return; }
   if (!mbState.rows.length) { out.innerHTML = '<div class="alert alert-warning">เพิ่มบอทอย่างน้อย 1 ตัว</div>'; return; }
+
+  // FIX-2026-07-30: เตือนถ้าทุนไม่พอ (จะทำให้หลายไม้ถูก skip เพราะ capital exhausted)
+  const needed = mbSuggestCapital();
+  if (totalCapital < needed) {
+    const confirm = window.confirm(
+      `⚠️ ทุนรวม ($${totalCapital}) น้อยกว่าที่ควรใช้ ($${needed})\n` +
+      `(ผลรวม Max ไม้ × ทุน/ไม้ ของทุกบอท)\n\n` +
+      `จะมี skip เยอะเพราะทุนเต็ม — ดำเนินการต่อหรือไม่?`
+    );
+    if (!confirm) return;
+  }
 
   out.innerHTML = '<div class="text-center py-4 text-muted-3">⏳ กำลังรัน multi-bot backtest (อาจใช้เวลา 10–30s)…</div>';
   const t0 = Date.now();
@@ -474,14 +494,20 @@ async function mbInit() {
   const fmt = (d) => d.toISOString().slice(0, 10);
   document.getElementById('mb-from').value = fmt(past);
   document.getElementById('mb-to').value = fmt(today);
+  // FIX-2026-07-30: hint ทุนขั้นต่ำเริ่มต้น
+  const hint = document.getElementById('mb-capital-hint');
+  if (hint) hint.textContent = `ขั้นต่ำที่แนะนำ: $${mbSuggestCapital()}`;
+  // FIX-2026-07-30: default ทุนรวม = ขั้นต่ำที่แนะนำ
+  const capitalInput = document.getElementById('mb-capital');
+  if (capitalInput && !capitalInput.value) capitalInput.value = mbSuggestCapital();
   document.getElementById('mb-add-row').addEventListener('click', () => {
-    // FIX-2026-07-30: copy config จากแถวล่าสุด (เพื่อให้ตั้งค่าเหมือนกันแค่เปลี่ยน symbol)
     const last = mbState.rows[mbState.rows.length - 1];
     const newRow = last
       ? { ...last }
-      : { symbol: mbState.symbols[0] || 'BTCUSDT', timeframe: '5m', tpPercent: 0.1, capitalPerTrade: 10, maxConcurrentTrades: 5 };
+      : { symbol: mbState.symbols[0] || 'BTCUSDT', timeframe: '5m', tpPercent: 0.1, kcMult: 1.5, capitalPerTrade: 10, maxConcurrentTrades: 5 };
     mbState.rows.push(newRow);
     mbRenderRows();
+    if (hint) hint.textContent = `ขั้นต่ำที่แนะนำ: $${mbSuggestCapital()}`;
   });
   document.getElementById('mb-run').addEventListener('click', mbRun);
 }
