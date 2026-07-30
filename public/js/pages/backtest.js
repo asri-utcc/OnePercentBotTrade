@@ -33,8 +33,11 @@ function renderTradesPage() {
 
   const tbody = document.getElementById('trades-tbody');
   if (!tbody) return;
+  // FIX 2026-07-30: detect multi-bot mode (any trade has symbol/tf from bot)
+  const isMultiBot = all.some((t) => t.symbol && t.timeframe);
   tbody.innerHTML = slice.map((t) => `
     <tr>
+      ${isMultiBot ? `<td><small class="text-muted-3">${escapeHtml(t.symbol || '')} <span style="opacity:0.6;">${t.timeframe || ''}</span></small></td>` : ''}
       <td>${fmtDateTime(t.signalTime)}</td>
       <td>${t.buyFilledAt ? fmtDateTime(t.buyFilledAt) : '<span class="text-muted">—</span>'}</td>
       <td>${(t.buyPrice || 0).toFixed(4)}</td>
@@ -432,42 +435,93 @@ function mbRenderResult(resp, ms) {
   const out = document.getElementById('mb-result');
   const { perBot = [], combined = {}, totalCapital } = resp;
   const s = combined.stats || {};
-  const pnlCls = (s.netPnl || 0) >= 0 ? 'mb-bull' : 'mb-bear';
+  const totalPnl = s.totalPnl || 0;
+  const pnlCls = totalPnl >= 0 ? 'pnl-positive' : 'pnl-negative';
+  const winCls = (s.winRate || 0) >= 50 ? 'pnl-positive' : 'pnl-negative';
+  const fillClass = (s.fillRate || 0) >= 70 ? 'pnl-positive' : ((s.fillRate || 0) >= 40 ? 'pnl-warning' : 'pnl-negative');
+  const exitClass = (s.exitRate || 0) >= 70 ? 'pnl-positive' : ((s.exitRate || 0) >= 40 ? 'pnl-warning' : 'pnl-negative');
+
+  // Total peak / max across all bots (peak = sum ของ maxConcurrentTrades ของทุกบอท)
+  const totalMaxSlots = perBot.reduce((s2, b) => s2 + (b.maxConcurrentTrades || 0), 0);
+  const peakRatio = totalMaxSlots > 0 ? ((combined.peakConcurrentTrades || 0) / totalMaxSlots) * 100 : 0;
+  const peakClass = peakRatio >= 80 ? 'pnl-negative' : (peakRatio >= 50 ? 'pnl-warning' : 'pnl-positive');
+  const peakLabel = `${combined.peakConcurrentTrades || 0} / ${totalMaxSlots}`;
+
+  const peakCapRatio = totalCapital > 0 ? ((combined.peakCapitalUsed || 0) / totalCapital) * 100 : 0;
+
+  // FIX 2026-07-30: warning banner เมื่อ below_min_notional เป็น skip หลัก (>50% ของ signals)
+  // ปกติเกิดเมื่อ capital/trade น้อยเกินไปสำหรับราคา symbol (เช่น BTC@$110K + $10/trade = $9.90 < $10 minNotional)
+  const totalSignals = perBot.reduce((sum, b) => sum + (b.signalsCount || 0), 0);
+  const belowMinTotal = combined.belowMinNotionalCount || 0;
+  const belowMinRatio = totalSignals > 0 ? (belowMinTotal / totalSignals) * 100 : 0;
+  const belowMinWarn = belowMinRatio > 50 ? `
+    <div class="alert alert-warning small mb-2">
+      <strong>⚠️ Below-min-notional:</strong> ${belowMinTotal}/${totalSignals} (${belowMinRatio.toFixed(0)}%) สัญญาณถูก skip เพราะ notional &lt; Binance minNotional
+      — <strong>เพิ่ม "ทุน/ไม้"</strong> ให้ ≥ minNotional ของ symbol (BTC@$110K ต้อง ≥ ~$11)
+    </div>` : '';
 
   const summary = `
     <div class="lux-card mb-3" style="border: 1px solid rgba(245,184,0,0.3);">
+      ${belowMinWarn}
       <div class="lux-header">
         <span class="title">📊 Multi-Bot Combined Result · ${ms}ms</span>
-        <span class="text-muted-3" style="font-size:0.8rem;">ทุนรวม $${totalCapital} · Peak ใช้ $${(combined.peakCapitalUsed || 0).toFixed(2)} (${Math.round(((combined.peakCapitalUsed || 0) / totalCapital) * 100)}%)</span>
+        <span class="text-muted-3" style="font-size:0.8rem;">ทุนรวม $${totalCapital} · Peak ใช้ $${(combined.peakCapitalUsed || 0).toFixed(2)} (${peakCapRatio.toFixed(0)}%)</span>
       </div>
       <div class="lux-body">
-        <div class="mb-result-summary">
-          <div class="stat-tile ${pnlCls}"><div class="tile-label">Total PnL</div><div class="tile-value">${(s.netPnl || 0).toFixed(4)}</div><div class="tile-sub">USDT</div></div>
-          <div class="stat-tile is-gold"><div class="tile-label">Win Rate</div><div class="tile-value">${(s.winRate || 0)}%</div><div class="tile-sub">${s.wins || 0}W / ${s.losses || 0}L</div></div>
-          <div class="stat-tile is-info"><div class="tile-label">Trades</div><div class="tile-value">${combined.tradesCount || 0}</div><div class="tile-sub">ไม้รวม</div></div>
-          <div class="stat-tile is-info"><div class="tile-label">Peak ไม้พร้อมกัน</div><div class="tile-value">${combined.peakConcurrentTrades || 0}</div><div class="tile-sub">ข้ามทุกบอท</div></div>
-          <div class="stat-tile ${(combined.skippedCapitalCount || 0) > 0 ? 'is-gold' : ''}"><div class="tile-label">Skip (ทุนเต็ม)</div><div class="tile-value">${combined.skippedCapitalCount || 0}</div><div class="tile-sub">สัญญาณที่ถูก skip</div></div>
-          <div class="stat-tile is-gold"><div class="tile-label">Avg PnL/ไม้</div><div class="tile-value">${(s.avgPnl || 0).toFixed(4)}</div><div class="tile-sub">USDT</div></div>
+        <div class="row g-2 mb-3">
+          <div class="col-md-2"><div class="stat-tile"><div class="value ${pnlCls}">${totalPnl.toFixed(4)}</div><div class="label">Total PnL (USDT)</div></div></div>
+          <div class="col-md-2"><div class="stat-tile"><div class="value ${pnlCls}">${(s.totalPnlPercent || 0).toFixed(3)}%</div><div class="label">PnL %</div></div></div>
+          <div class="col-md-2"><div class="stat-tile"><div class="value ${winCls}">${(s.winRate || 0).toFixed(1)}%</div><div class="label">Win Rate</div></div></div>
+          <div class="col-md-2"><div class="stat-tile"><div class="value ${fillClass}">${(s.fillRate || 0).toFixed(1)}%</div><div class="label">Buy Fill Rate</div></div></div>
+          <div class="col-md-2"><div class="stat-tile"><div class="value ${exitClass}">${(s.exitRate || 0).toFixed(1)}%</div><div class="label">Exit Rate</div></div></div>
+          <div class="col-md-2"><div class="stat-tile" title="จำนวนไม้ที่เปิดพร้อมกันสูงสุดในช่วง simulation (ข้ามทุกบอท)"><div class="value ${peakClass}">${peakLabel}</div><div class="label">Peak Conc. / Max</div></div></div>
+        </div>
+
+        <div class="row g-2 mb-3">
+          <div class="col-md-2"><div class="stat-tile small-tile"><div class="value">${s.tpHitCount || 0}</div><div class="label">TP hit ✓</div></div></div>
+          <div class="col-md-2"><div class="stat-tile small-tile"><div class="value">${s.stillHoldingCount || 0}</div><div class="label">ยังถืออยู่</div></div></div>
+          <div class="col-md-2"><div class="stat-tile small-tile"><div class="value">${s.noBuyFillCount || 0}</div><div class="label">No buy fill</div></div></div>
+          <div class="col-md-2"><div class="stat-tile small-tile"><div class="value">${s.maxConcurrentSkipCount || 0}</div><div class="label">Skip (เต็ม)</div></div></div>
+          <div class="col-md-2"><div class="stat-tile small-tile"><div class="value">${combined.skippedCapitalCount || 0}</div><div class="label">Skip (ทุนเต็ม)</div></div></div>
+          <div class="col-md-2"><div class="stat-tile small-tile"><div class="value">${s.belowMinNotionalCount || 0}</div><div class="label">Below min</div></div></div>
+        </div>
+
+        <div class="row g-2 mb-3 text-muted small">
+          <div class="col-md-2"><strong>Trades:</strong> ${combined.tradesCount || 0}</div>
+          <div class="col-md-2"><strong>W/L:</strong> ${s.wins || 0}/${s.losses || 0}</div>
+          <div class="col-md-2">Avg PnL/signal: <strong>${(s.avgPnlPerSignal || 0).toFixed(4)}</strong> USDT</div>
+          <div class="col-md-2">Total fees: <strong>${(s.totalFees || 0).toFixed(4)}</strong> USDT</div>
+          <div class="col-md-2">Unrealized: <strong>${(s.totalUnrealizedPnl || 0).toFixed(4)}</strong> USDT</div>
+          <div class="col-md-2">Max DD: <strong class="pnl-negative">${(s.maxDrawdown || 0).toFixed(4)}</strong> USDT (${(s.maxDrawdownPercent || 0).toFixed(1)}%)</div>
         </div>
       </div>
     </div>
   `;
 
+  // Per-bot table with peak slot usage
   const botRows = perBot.map((b) => {
     const bs = b.stats || {};
-    const cls = (bs.netPnl || 0) >= 0 ? 'mb-bull' : 'mb-bear';
+    const cls = (bs.totalPnl || 0) >= 0 ? 'pnl-positive' : 'pnl-negative';
+    const peakUsed = b.maxConcurrentTradesUsed || 0;
+    const peakBotRatio = (b.maxConcurrentTrades || 0) > 0 ? (peakUsed / b.maxConcurrentTrades) * 100 : 0;
+    const peakBotCls = peakBotRatio >= 80 ? 'pnl-negative' : (peakBotRatio >= 50 ? 'pnl-warning' : 'pnl-positive');
     return `<div class="mb-bot-row">
       <div><strong>${escapeHtml(b.symbol)}</strong> <span class="text-muted-3" style="font-size:0.85em;">${b.timeframe} · TP ${b.tpPercent}% · KC×${b.kcMult ?? 1.5} · $${b.capitalPerTrade}/ไม้ · max ${b.maxConcurrentTrades}</span></div>
-      <div class="${cls}">${(bs.netPnl || 0).toFixed(4)}</div>
-      <div>${bs.trades || 0} <span class="mb-skip-note">(${b.skippedCount || 0} skip)</span></div>
+      <div class="${cls}">${(bs.totalPnl || 0).toFixed(4)}</div>
+      <div>${b.tradesCount || 0} <span class="mb-skip-note">(${b.skippedCount || 0} skip)</span></div>
       <div>${bs.wins || 0}W/${bs.losses || 0}L</div>
-      <div>${bs.winRate || 0}%</div>
-      <div>${(bs.avgPnl || 0).toFixed(4)}</div>
+      <div>${(bs.winRate || 0).toFixed(1)}%</div>
+      <div class="${peakBotCls}" title="Peak slot usage ${peakUsed}/${b.maxConcurrentTrades} (${peakBotRatio.toFixed(0)}%)">${peakUsed}/${b.maxConcurrentTrades}</div>
+      <div>${(bs.avgPnlPerSignal || 0).toFixed(4)}</div>
     </div>`;
   }).join('');
 
+  // Trades table (paginated, mirror single-bot render)
+  const tradesAll = (combined.trades || []).slice();
+  setTradesState(tradesAll);
+
   out.innerHTML = summary + `
-    <div class="lux-card">
+    <div class="lux-card mb-3">
       <div class="lux-header"><span class="title">🤖 Per-Bot Breakdown</span></div>
       <div class="lux-body">
         <div class="mb-bot-row" style="font-weight:700;color:var(--text-3);text-transform:uppercase;font-size:0.78em;">
@@ -476,12 +530,60 @@ function mbRenderResult(resp, ms) {
           <div>Trades</div>
           <div>W/L</div>
           <div>Win%</div>
+          <div title="Peak slot usage / max">Peak</div>
           <div>Avg/ไม้</div>
         </div>
         ${botRows}
       </div>
     </div>
+
+    <div id="trades-table-wrap" class="lux-card">
+      <div class="lux-header">
+        <span class="title">📋 รายการเทรดทั้งหมด (${tradesAll.length} ไม้)</span>
+        <div class="d-flex align-items-center gap-2">
+          <button id="trades-prev" class="btn btn-sm btn-outline-secondary" onclick="tradesPageGo(-1)">◀ ก่อนหน้า</button>
+          <span id="trades-page-label" class="text-muted small"></span>
+          <button id="trades-next" class="btn btn-sm btn-outline-secondary" onclick="tradesPageGo(1)">ถัดไป ▶</button>
+        </div>
+      </div>
+      <div class="lux-body">
+        <div class="table-responsive">
+          <table class="table table-sm table-striped">
+            <thead>
+              <tr>
+                <th>Bot</th>
+                <th>Signal Time</th>
+                <th>Buy Time</th>
+                <th>Buy</th>
+                <th>Sell Time</th>
+                <th>Target</th>
+                <th>Sell</th>
+                <th>Buy</th>
+                <th>Exit</th>
+                <th>PnL</th>
+                <th>%</th>
+                <th>Reason</th>
+              </tr>
+            </thead>
+            <tbody id="trades-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <div class="alert alert-light small mt-2">
+      <strong>ℹ️ Multi-Bot Execution Model: <code>${resp.executionModel || 'v4_maker_fill_multi'}</code></strong>
+      <ul class="mb-1">
+        <li><strong>BUY fill</strong>: scan future candles (idx+1 ถึง idx+maxBuyWait) ต้อง <code>low ≤ P AND close ≥ P AND volume &gt; 0</code></li>
+        <li><strong>SELL fill</strong>: scan to end of data — <strong>ไม่มี stop loss</strong></li>
+        <li><strong>Shared capital pool</strong>: ทุกบอทแข่งกันใช้ทุนรวม — ถ้าเกิน → skip (capital_exhausted)</li>
+        <li><strong>Per-bot slot</strong>: แต่ละบอทมี maxConcurrentTrades เป็นของตัวเอง (ไม่ share)</li>
+        <li><strong>Skip types</strong>: no_buy_fill · below_min_notional · max_concurrent_skip · capital_exhausted_skip</li>
+      </ul>
+    </div>
   `;
+
+  renderTradesPage();
 }
 
 async function mbInit() {

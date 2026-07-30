@@ -621,7 +621,13 @@ async function runMultiBacktest(params) {
     try {
       const info = await symbolInfo.loadSymbol(b.symbol.toUpperCase());
       if (info.lotSize) stepSizeStr = info.lotSize.stepSize.toString();
-      if (info.minNotional) minNotional = new Decimal(info.minNotional.toString());
+      // FIX 2026-07-30: เดิมใช้ info.minNotional (undefined) → ตกไปใช้ default $10
+      //   Binance จริง ๆ อาจ minNotional สูงกว่า (เช่น BTCUSDT = $50+)
+      if (info.notional && info.notional.minNotional) {
+        minNotional = info.notional.minNotional instanceof Decimal
+          ? info.notional.minNotional
+          : new Decimal(info.notional.minNotional.toString());
+      }
     } catch (_) { /* keep defaults */ }
     return {
       botId,
@@ -663,6 +669,10 @@ async function runMultiBacktest(params) {
   for (const bi of botInputs) perBotTrades[bi.botId] = [];
 
   const allTrades = [];
+  // FIX 2026-07-30: per-bot peak concurrency tracking
+  const perBotPeak = {};
+  for (const bi of botInputs) perBotPeak[bi.botId] = 0;
+
   for (const sig of merged) {
     const cfg = sig._cfg;
     const idx = sig.index;
@@ -681,24 +691,33 @@ async function runMultiBacktest(params) {
     const notional = qty.mul(new Decimal(buyPrice));
 
     // Cleanup active trades that exit before this idx
-    const before = activeExits.length;
     const remaining = activeExits.filter((e) => e.exitIdx >= idx);
     activeExits.length = 0;
     activeExits.push(...remaining);
 
-    // Track peak concurrency (across all bots)
+    // Track peak concurrency (across all bots + per-bot)
     if (activeExits.length > peakConcurrentTrades) peakConcurrentTrades = activeExits.length;
+    const activeForBotNow = activeExits.filter((e) => e.botId === sig.botId).length;
+    if (activeForBotNow > perBotPeak[sig.botId]) perBotPeak[sig.botId] = activeForBotNow;
 
     // ─── Check per-bot concurrent slot ─────────────
-    const activeForBot = activeExits.filter((e) => e.botId === sig.botId).length;
-    if (activeForBot >= cfg.maxConcurrentTrades) {
+    if (activeForBotNow >= cfg.maxConcurrentTrades) {
       // slot เต็ม → skip (เหมือน single-bot behavior)
       perBotTrades[sig.botId].push({
         signalTime: new Date(sig.openTime),
         candleCloseTime: new Date(sig.closeTime),
         buyPrice,
-        exitReason: 'max_concurrent_skip',
+        targetSellPrice: target,
+        sellPrice: null,
+        buyFilled: false,
+        sellFilled: false,
+        qty: qty.toNumber(),
+        notional: notional.toNumber(),
+        grossPnl: 0,
+        fees: 0,
         realizedPnl: 0,
+        pnlPercent: 0,
+        exitReason: 'max_concurrent_skip',
       });
       continue;
     }
@@ -711,38 +730,110 @@ async function runMultiBacktest(params) {
         signalTime: new Date(sig.openTime),
         candleCloseTime: new Date(sig.closeTime),
         buyPrice,
-        exitReason: 'capital_exhausted_skip',
+        targetSellPrice: target,
+        sellPrice: null,
+        buyFilled: false,
+        sellFilled: false,
+        qty: qty.toNumber(),
+        notional: notional.toNumber(),
+        grossPnl: 0,
+        fees: 0,
         realizedPnl: 0,
+        pnlPercent: 0,
+        exitReason: 'capital_exhausted_skip',
       });
       continue;
     }
 
-    // ─── Buy fill check (เหมือน single) ────────────
-    const candle = sig._klines[idx];
-    const low = candle.low;
-    const close = candle.close;
-    const volume = candle.volume;
-    if (!(low <= buyPrice && close >= buyPrice && volume > 0)) {
-      // post-only bid skip (บอทจริงตามลง = ไม่นับ)
+    // ─── Buy fill check (FIX 2026-07-30: scan FUTURE candles เหมือน simulateTrades) ─────
+    // เดิมเช็ค candle เดียวกับ signal candle เท่านั้น → always pass → overcount
+    // จริง ๆ maker BUY ที่ราคา P จะ fill ก็ต่อเมื่อ candle ถัดไป dip ลงถึง P แล้วปิดเหนือ P
+    let buyFilled = false;
+    let buyCandleIdx = null;
+    const buyEnd = Math.min(sig._klines.length, idx + 1 + cfg.maxBuyWait);
+    for (let j = idx + 1; j < buyEnd; j += 1) {
+      const c = sig._klines[j];
+      if (c.low <= buyPrice && c.close >= buyPrice && c.volume > 0) {
+        buyFilled = true;
+        buyCandleIdx = j;
+        break;
+      }
+    }
+
+    if (!buyFilled) {
+      perBotTrades[sig.botId].push({
+        signalTime: new Date(sig.openTime),
+        candleCloseTime: new Date(sig.closeTime),
+        buyPrice,
+        targetSellPrice: target,
+        sellPrice: null,
+        buyFilled: false,
+        sellFilled: false,
+        qty: qty.toNumber(),
+        notional: notional.toNumber(),
+        grossPnl: 0,
+        fees: 0,
+        realizedPnl: 0,
+        pnlPercent: 0,
+        exitReason: 'no_buy_fill',
+      });
       continue;
     }
 
-    // ─── Open trade ──────────────────────────────
-    // Find exit: scan forward for TP hit
-    let exitIdx = sig._klines.length; // still holding by default
-    for (let j = idx + 1; j < sig._klines.length; j++) {
-      if (sig._klines[j].high >= target) { exitIdx = j; break; }
-      if (j - idx >= cfg.maxBuyWait) break;
+    // ─── Notional check (FIX 2026-07-30: ขาดไปก่อนหน้านี้) ────────
+    if (notional.lessThan(cfg.minNotional)) {
+      perBotTrades[sig.botId].push({
+        signalTime: new Date(sig.openTime),
+        candleCloseTime: new Date(sig.closeTime),
+        buyPrice,
+        targetSellPrice: target,
+        sellPrice: null,
+        buyFilled: false,
+        sellFilled: false,
+        qty: qty.toNumber(),
+        notional: notional.toNumber(),
+        grossPnl: 0,
+        fees: 0,
+        realizedPnl: 0,
+        pnlPercent: 0,
+        exitReason: 'below_min_notional',
+      });
+      continue;
     }
-    const exitCandle = exitIdx < sig._klines.length ? sig._klines[exitIdx] : null;
-    const exitPrice = exitCandle ? exitCandle.high : null;
+
+    // ─── Phase 2: SELL fill check (FIX 2026-07-30: scan to end of data, NO maxBuyWait break) ─
+    // เดิม break ที่ j-idx >= maxBuyWait ทำให้ sell สแกนแค่ 5–6 แท่ง → TP 0.1% มักไม่ทัน → still_holding หมด
+    // โมเดลจริงไม่มี stop loss → รอจน TP หรือจบข้อมูล
+    let sellFilled = false;
+    let sellCandleIdx = null;
+    for (let j = buyCandleIdx + 1; j < sig._klines.length; j += 1) {
+      if (sig._klines[j].high >= target) {
+        sellFilled = true;
+        sellCandleIdx = j;
+        break;
+      }
+    }
+
+    const exitIdx = sellCandleIdx != null ? sellCandleIdx : sig._klines.length;
+    const exitPrice = sellFilled ? target : null;
+
     let pnl = null;
-    if (exitPrice != null) {
-      const gross = new Decimal(exitPrice).minus(new Decimal(buyPrice)).mul(qty);
+    let grossVal = 0;
+    let feesVal = 0;
+    if (sellFilled) {
+      const gross = new Decimal(target).minus(new Decimal(buyPrice)).mul(qty);
       const feeBuy = new Decimal(buyPrice).mul(qty).mul(cfg.feeRate);
-      const feeSell = new Decimal(exitPrice).mul(qty).mul(cfg.feeRate);
+      const feeSell = new Decimal(target).mul(qty).mul(cfg.feeRate);
       pnl = gross.minus(feeBuy).minus(feeSell).toNumber();
+      grossVal = gross.toNumber();
+      feesVal = feeBuy.plus(feeSell).toNumber();
     }
+
+    // BUY/SELL fill timestamp = กลางแท่ง (openTime + stepMs/2) — ตรงกับ single-bot
+    const buyFilledAtMs = stepMs > 0 ? sig._klines[buyCandleIdx].openTime + Math.floor(stepMs / 2) : sig._klines[buyCandleIdx].closeTime;
+    const sellFilledAtMs = sellCandleIdx != null
+      ? (stepMs > 0 ? sig._klines[sellCandleIdx].openTime + Math.floor(stepMs / 2) : sig._klines[sellCandleIdx].closeTime)
+      : null;
 
     const trade = {
       botId: sig.botId,
@@ -750,17 +841,20 @@ async function runMultiBacktest(params) {
       timeframe: cfg.timeframe,
       signalTime: new Date(sig.openTime),
       candleCloseTime: new Date(sig.closeTime),
-      buyTime: new Date(sig.openTime + stepMs / 2),
+      buyFilledAt: new Date(buyFilledAtMs),
+      sellFilledAt: sellFilledAtMs != null ? new Date(sellFilledAtMs) : null,
       buyPrice,
+      targetSellPrice: target,
+      sellPrice: exitPrice,
+      buyFilled: true,
+      sellFilled,
       qty: qty.toNumber(),
       notional: notional.toNumber(),
-      exitTime: exitCandle ? new Date(exitCandle.openTime + stepMs / 2) : null,
-      exitPrice,
-      target,
-      // FIX-2026-07-30: ใช้ field names ตรงกับ summarize() — exitReason + realizedPnl
-      exitReason: exitPrice != null ? 'tp_hit' : 'still_holding',
+      grossPnl: grossVal,
+      fees: feesVal,
       realizedPnl: pnl,
-      pnlPct: pnl != null ? (pnl / cfg.capitalPerTrade) * 100 : null,
+      pnlPercent: pnl != null ? (pnl / notional.toNumber()) * 100 : 0,
+      exitReason: sellFilled ? 'tp_hit' : 'still_holding',
       capitalUsed: cfg.capitalPerTrade,
     };
     allTrades.push(trade);
@@ -770,13 +864,17 @@ async function runMultiBacktest(params) {
     activeExits.push({ botId: sig.botId, exitIdx, capitalUsed: cfg.capitalPerTrade });
     const newUsed = activeExits.reduce((s, e) => s + e.capitalUsed, 0);
     if (newUsed > peakCapitalUsed.toNumber()) peakCapitalUsed = new Decimal(newUsed);
+    const newActiveForBot = activeExits.filter((e) => e.botId === sig.botId).length;
+    if (newActiveForBot > perBotPeak[sig.botId]) perBotPeak[sig.botId] = newActiveForBot;
   }
 
   // 4) Per-bot stats + combined stats
+  // FIX 2026-07-30: ส่ง trades ทั้งหมด (รวม skip types) เข้า summarize() — เพื่อให้นับ no_buy_fill,
+  //   below_min_notional, max_concurrent_skip, capital_exhausted_skip ได้ครบ
   const perBot = botInputs.map((bi) => {
-    const trades = perBotTrades[bi.botId].filter((t) => t.exitReason === 'tp_hit' || t.exitReason === 'still_holding');
-    const skipped = perBotTrades[bi.botId].filter((t) => t.exitReason === 'max_concurrent_skip' || t.exitReason === 'capital_exhausted_skip').length;
-    const stats = summarize(trades);
+    const allBotTrades = perBotTrades[bi.botId];
+    const stats = summarize(allBotTrades);
+    const openedTrades = allBotTrades.filter((t) => t.exitReason === 'tp_hit' || t.exitReason === 'still_holding');
     return {
       botId: bi.botId,
       symbol: bi.cfg.symbol,
@@ -788,14 +886,16 @@ async function runMultiBacktest(params) {
       candlesFetched: bi.candlesFetched,
       truncated: bi.truncated,
       signalsCount: bi.signals.length,
-      tradesCount: trades.length,
-      skippedCount: skipped,
+      tradesCount: openedTrades.length,        // FIX: opened (tp_hit + still_holding) เท่านั้น
+      skippedCount: allBotTrades.length - openedTrades.length,
+      maxConcurrentTradesUsed: perBotPeak[bi.botId] || 0, // FIX: peak slot usage ต่อบอท
       stats,
     };
   });
 
   const closedTrades = allTrades.filter((t) => t.exitReason === 'tp_hit' || t.exitReason === 'still_holding');
-  const combinedStats = summarize(closedTrades);
+  // FIX 2026-07-30: combinedStats = summarize over ALL trades (รวม skip) เพื่อให้นับ skip types ได้
+  const combinedStats = summarize(allTrades);
 
   // Store result
   const storedTrades = closedTrades.length > 500 ? closedTrades.slice(0, 250).concat(closedTrades.slice(-250)) : closedTrades;
@@ -835,7 +935,13 @@ async function runMultiBacktest(params) {
     perBot,
     combined: {
       tradesCount: closedTrades.length,
+      // FIX 2026-07-30: expose every skip counter (ให้ UI แสดงเหมือน single backtest)
       skippedCapitalCount: capitalExhaustedSkips,
+      noBuyFillCount: combinedStats.noBuyFillCount,
+      maxConcurrentSkipCount: combinedStats.maxConcurrentSkipCount,
+      belowMinNotionalCount: combinedStats.belowMinNotionalCount,
+      stillHoldingCount: combinedStats.stillHoldingCount,
+      tpHitCount: combinedStats.tpHitCount,
       peakCapitalUsed: peakCapitalUsed.toNumber(),
       peakConcurrentTrades,
       stats: combinedStats,
