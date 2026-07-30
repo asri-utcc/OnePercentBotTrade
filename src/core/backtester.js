@@ -697,8 +697,8 @@ async function runMultiBacktest(params) {
         signalTime: new Date(sig.openTime),
         candleCloseTime: new Date(sig.closeTime),
         buyPrice,
-        outcome: 'skipped_slot',
-        skipReason: 'concurrent_limit',
+        exitReason: 'max_concurrent_skip',
+        realizedPnl: 0,
       });
       continue;
     }
@@ -711,8 +711,8 @@ async function runMultiBacktest(params) {
         signalTime: new Date(sig.openTime),
         candleCloseTime: new Date(sig.closeTime),
         buyPrice,
-        outcome: 'skipped_capital',
-        skipReason: 'capital_exhausted',
+        exitReason: 'capital_exhausted_skip',
+        realizedPnl: 0,
       });
       continue;
     }
@@ -757,8 +757,9 @@ async function runMultiBacktest(params) {
       exitTime: exitCandle ? new Date(exitCandle.openTime + stepMs / 2) : null,
       exitPrice,
       target,
-      outcome: exitPrice != null ? 'tp_hit' : 'still_holding',
-      pnl,
+      // FIX-2026-07-30: ใช้ field names ตรงกับ summarize() — exitReason + realizedPnl
+      exitReason: exitPrice != null ? 'tp_hit' : 'still_holding',
+      realizedPnl: pnl,
       pnlPct: pnl != null ? (pnl / cfg.capitalPerTrade) * 100 : null,
       capitalUsed: cfg.capitalPerTrade,
     };
@@ -773,8 +774,8 @@ async function runMultiBacktest(params) {
 
   // 4) Per-bot stats + combined stats
   const perBot = botInputs.map((bi) => {
-    const trades = perBotTrades[bi.botId].filter((t) => t.outcome === 'tp_hit' || t.outcome === 'still_holding');
-    const skipped = perBotTrades[bi.botId].filter((t) => t.outcome === 'skipped_slot' || t.outcome === 'skipped_capital').length;
+    const trades = perBotTrades[bi.botId].filter((t) => t.exitReason === 'tp_hit' || t.exitReason === 'still_holding');
+    const skipped = perBotTrades[bi.botId].filter((t) => t.exitReason === 'max_concurrent_skip' || t.exitReason === 'capital_exhausted_skip').length;
     const stats = summarize(trades);
     return {
       botId: bi.botId,
@@ -793,7 +794,7 @@ async function runMultiBacktest(params) {
     };
   });
 
-  const closedTrades = allTrades.filter((t) => t.outcome === 'tp_hit' || t.outcome === 'still_holding');
+  const closedTrades = allTrades.filter((t) => t.exitReason === 'tp_hit' || t.exitReason === 'still_holding');
   const combinedStats = summarize(closedTrades);
 
   // Store result
