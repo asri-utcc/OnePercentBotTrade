@@ -2,7 +2,10 @@
 
 const mongoose = require('mongoose');
 
-const BOT_STATUSES = ['idle', 'waiting_fill', 'holding', 'selling', 'error', 'disabled'];
+// FIX-2026-08-01: เพิ่ม 'starting' สำหรับ atomic create+enable (POST /api/bots ที่ data.enabled=true)
+//   - ใช้ตอน create บอทที่ enable=true ทันที — เป็น transient state ก่อน botManager.enableBot() ทำงานเสร็จ
+//   - เมื่อ enable สำเร็จจะถูกเปลี่ยนเป็น 'idle' (รอ S1 signal) → 'waiting_fill' (มี trade เปิดอยู่)
+const BOT_STATUSES = ['idle', 'starting', 'waiting_fill', 'holding', 'selling', 'error', 'disabled'];
 
 const botSchema = new mongoose.Schema(
   {
@@ -11,6 +14,23 @@ const botSchema = new mongoose.Schema(
     timeframe: { type: String, required: true, default: '5m' },
     capitalPerTrade: { type: Number, required: true, default: 10, min: 0.00000001 },
     maxTrades: { type: Number, required: true, default: 10, min: 1, max: 1000 },
+    // FIX-2026-08-02: DCA + BEP stack mode (opt-in, default off — backward compatible)
+    //   - false (default) → พฤติกรรมเดิม 1 BUY → 1 SELL (no change)
+    //   - true → 1 บอท = 1 open DCA stack ในเวลาเดียว, S1 แต่ละครั้งจะเพิ่ม layer เข้า stack
+    //   - เมื่อ layer ใหม่ fill → recompute BEP = totalSpent/totalQty → cancel SELL เก่า + place ใหม่ที่ BEP+TP
+    //   - SL-UKC apply per-stack (ใช้ BEP) แทน per-trade
+    //   - CB panic-sell ถูก disable ทั้งหมดใน DCA mode (matches "no cut loss" ของ DCA strategy)
+    dcaEnabled: { type: Boolean, default: false },
+    dcaMaxLayers: {
+      type: Number,
+      default: 3,
+      min: 1,
+      max: 100,
+      validate: {
+        validator: Number.isInteger,
+        message: 'dcaMaxLayers must be an integer between 1 and 100',
+      },
+    },
     tpPercent: { type: Number, required: true, default: 0.1, min: 0.001 },
     // FIX-2026-07-24: รองรับทศนิยม (เช่น 0.5 = 30 วินาที) — ใช้สำหรับ timeframe สั้น (1m/3m) ที่รอ 1 นาทีนานเกิน
     retryTimeMin: { type: Number, required: true, default: 1, min: 0.1, max: 60 },
@@ -43,6 +63,11 @@ const botSchema = new mongoose.Schema(
     //   fix: เก็บ lastSignalCloseTime ใน DB + sweep candles ที่หายไปเมื่อ reconnect
     lastSignalCloseTime: { type: Number, default: null },
     lastError: { type: String, default: '' },
+    // FIX-2026-08-01: per-bot warning (latched alerts) — แสดงใน UI badge
+    //   - เมื่อมี trade ในบอทที่ partial-fill เกิน 1h → set warning message
+    //   - reset เมื่อ trade ออกจาก selling state (SELL fill/cancel/freeze)
+    warning: { type: String, default: '' },
+    warningAt: { type: Date, default: null },
     // FIX-2026-07-24: per-bot minimum spread (in ticks) ที่ยอมให้ BUY ได้
     //   - low-cap coin เช่น RIF มี spread = 1 tick เสมอ → ถ้า default 2 = skip ทุก signal
     //   - ค่า 1 = ใช้ bid ตรงๆ (post-only guaranteed, fill เร็ว) — เหมาะกับ low-cap
@@ -59,16 +84,53 @@ const botSchema = new mongoose.Schema(
     //   - false → ใช้สัญญาณดั้งเดิม (ไม่ skip แม้ candle-wide dump) — สำหรับบอทที่อยาก S1 ตามปกติ
     //   - ใช้ pattern A/B เดิม: (close<lowerKC && open>basisKC) หรือ (open[1]>basisKC[1] && close[1]<basisKC[1] && close<lowerKC && open<basisKC)
     xs1Enabled: { type: Boolean, default: true },
+    // FIX-2026-07-30: per-bot circuit-breaker (CB) panic-sell toggle (default true) — เดิมชื่อ sls1Enabled
+    //   - true (default): panic-close ALL positions เมื่อ 3 แท่งติด close<lowerKC + open<lowerKC + แดง
+    //   - false: ไม่ panic-close (เสี่ยงขาดทุนต่อถ้ากราฟไหล)
+    cbEnabled: { type: Boolean, default: true },
+    // FIX-2026-08-01: timestamp เมื่อ CB panic-sell ทำงานล่าสุด — เดิมชื่อ sls1LastFiredAt
+    //   - persist โดย _checkCBPanicClose หลัง force-close loop สำเร็จ
+    //   - restore ใน start() เพื่อ continue suppression ข้าม bot restart
+    //   - ไม่ใช่ anti-spam latch โดยตรง (cbCheckInFlight mutex ทำหน้าที่นั้น)
+    //   - audit trail สำหรับ dashboard "🚨 CB fired at HH:MM:SS"
+    cbLastFiredAt: { type: Date, default: null },
+    // FIX-2026-08-01: per-bot safe-trade filter (default ON)
+    //   - On S1 buy signal: check super-upper TF (3m/5m→4h, 15m→1d, 1h→1w) — SAFE_TRADE_SUPER_TF_MAP
+    //   - PASS = lastClose > open (green) OR lastClose > ema20 (uptrend) → ผ่านเข้า BUY
+    //   - FAIL-OPEN on Binance error (API outage ไม่บล็อกการเทรด)
+    safeTradeEnabled: { type: Boolean, default: true },
+    // FIX-2026-08-01: per-bot auto-pause on low Min-%KC (default ON)
+    //   - ทุก 5 min: scan Min-%KC(30 bars) — ถ้า < autoPauseMinKcPct (default 2%) → set enabled=false
+    //   - ถ้า ≥ threshold (และเคยถูก auto-pause) → auto-resume (vol_recovered)
+    //   - ดูแลใน botManager.checkAutoPauseBots()
+    autoPauseEnabled: { type: Boolean, default: true },
+    autoPauseMinKcPct: { type: Number, default: 2, min: 0.1, max: 50 },
+    autoPauseLastCheckedAt: { type: Date, default: null },
+    autoPauseLastActionAt: { type: Date, default: null },
+    autoPauseReason: { type: String, default: null }, // 'low_vol' | 'vol_recovered' | null
+    // FIX-2026-07-31: auto-arm SL-on-UKC for stuck losing positions (per-bot toggle, default true)
+    //   - เมื่อ position ขาดทุน >10% + เปิดมา >4h → trader set trade.useStopLossOnUKC=true
+    //   - _checkStopLossOnUpperKC จะยอม trigger เฉพาะ trade ที่มี flag นี้
+    autoArmStopLossOnUKC: { type: Boolean, default: true },
+    // FIX-2026-07-31: TP trend multiplier — เมื่อ upper-TF close > EMA20 → tpPercent *= tpTrendMultiplier
+    //   - default 2 (0.2% → 0.4%)
+    //   - range 1..10 (1 = no multiplier, 10 = aggressive)
+    //   - apply เฉพาะ position ใหม่ (เมื่อ BUY fill) — ไม่กระทบ in-flight SELL
+    tpTrendMultiplier: { type: Number, default: 2, min: 1, max: 10 },
+    // FIX-2026-08-01: per-bot toggle for tpTrendMultiplier (default on)
+    //   - true (default): คูณ tpPercent ด้วย tpTrendMultiplier เมื่อ upper-TF trend=upper
+    //   - false: ใช้ tpPercent ตรงๆ (ไม่สนใจ trend) — เหมือนยุคก่อน F2
+    tpTrendEnabled: { type: Boolean, default: true },
     // FIX-2026-07-25: per-bot TP suggestion window (bars) — default 500 (match current behavior)
     //   - ใช้กับ /api/bots/suggest-tp + tpUpdater auto-update (single source of truth)
     //   - range 30..1000 — ค่าน้อย = Min %KC จากช่วงสั้น (sensitive ต่อ squeeze ล่าสุด)
     //   - ค่ามาก = Min %KC จากช่วงยาว (conservative จับ squeeze ที่ลึก)
     //   - trend TF ยังคงใช้ 30 bars fixed (ไม่ override ได้)
     suggestTpWindow: { type: Number, default: 500, min: 30, max: 1000 },
-    // FIX-2026-07-28: TP auto-floor flag — true เมื่อ bot.tpPercent ถูก override เป็น 0.111%
-    //   (เนื่องจาก NET TP ต่ำกว่า 0.1% — low-volatility regime)
+    // FIX-2026-08-02: TP auto-floor flag — true เมื่อ bot.tpPercent ถูก override เป็น 0.281%
+    //   (เนื่องจาก NET TP ต่ำกว่า 0.281% — low-volatility regime)
     //   - persist ไว้ให้ UI แสดง badge + log + warning
-    //   - reset เป็น false เมื่อ NET TP กลับมา >= 0.1%
+    //   - reset เป็น false เมื่อ NET TP กลับมา >= 0.281%
     tpOnFloor: { type: Boolean, default: false },
     // สถิติสะสม
     totalPnl: { type: Number, default: 0 },
@@ -80,6 +142,12 @@ const botSchema = new mongoose.Schema(
 
 botSchema.virtual('totalCapital').get(function totalCapital() {
   return this.capitalPerTrade * this.maxTrades;
+});
+
+// FIX-2026-08-02: DCA max capital — capitalPerTrade × dcaMaxLayers (used for UI display + safety check)
+botSchema.virtual('dcaMaxCapital').get(function dcaMaxCapital() {
+  if (!this.dcaEnabled) return 0;
+  return this.capitalPerTrade * this.dcaMaxLayers;
 });
 
 botSchema.set('toJSON', { virtuals: true });
