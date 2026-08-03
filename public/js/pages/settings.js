@@ -29,6 +29,9 @@ async function loadConfig() {
 function render() {
   const ev = cfg.events || {};
   const th = cfg.thresholds || {};
+  const qth = cfg.qualityThresholds || {};
+  const qEnabled = cfg.qualityEnabled !== false; // default true
+  const qRefreshMin = Math.round((Number.isFinite(cfg.qualityRefreshMs) ? cfg.qualityRefreshMs : 5 * 60 * 1000) / 60000);
   const status = cfg.hasToken && cfg.chatId
     ? (cfg.enabled ? '🟢 live' : '🟡 token only')
     : '⚪ not configured';
@@ -159,6 +162,12 @@ function render() {
             <span class="form-check-label">⚠️ <strong>TP ต่ำเกินไป</strong> <small class="text-muted d-block">NET TP &lt; 0.2% (เฉพาะบอทที่เปิด autoUpdateTp)</small></span>
           </label>
         </div>
+        <div class="col-md-6">
+          <label class="form-check">
+            <input type="checkbox" class="form-check-input" id="ev-cbPanicClose" ${ev.cbPanicClose !== false ? 'checked' : ''} />
+            <span class="form-check-label">🚨 <strong>Circuit-breaker panic-sell</strong> <small class="text-muted d-block">3 แท่งติด red + below lowerKC → panic-close ALL positions</small></span>
+          </label>
+        </div>
       </div>
 
       <div class="mt-3">
@@ -198,6 +207,63 @@ function render() {
         <strong>หมายเหตุ:</strong> ระบบจะสแกน open positions ทุก 30s (PnL) และ 60s (stuck); การแจ้งจะเกิดตอน <em>crossing</em> เข้า threshold เท่านั้น (ไม่ spam) — และ stuck จะแจ้งครั้งเดียวต่อ trade
       </div>
 
+      <hr />
+
+      <!-- ── FIX-2026-08-01: Bot Quality Indicator ────── -->
+      <h6 class="text-muted-3 mb-3">4️⃣ 🎯 Quality Indicator <small class="text-muted-3">(0–4 per bot, click pill to drill down)</small></h6>
+
+      <div class="mb-3">
+        <label class="form-check form-switch">
+          <input type="checkbox" class="form-check-input" id="q-enabled" ${qEnabled ? 'checked' : ''} />
+          <span class="form-check-label"><strong>เปิด Quality Indicator</strong> — ถ้าปิดจะไม่คำนวณ score ใดๆ (cache clears)</span>
+        </label>
+      </div>
+
+      <div class="row g-3">
+        <div class="col-md-6">
+          <label class="form-label">💰 Volume threshold (USDT)</label>
+          <input type="number" class="form-control" id="q-vol" value="${qth.volumeMinUSDT != null ? qth.volumeMinUSDT : 100000}" step="1000" min="0" />
+          <small class="text-muted">24h quote volume ≥ ค่านี้ถึงจะ pass</small>
+        </div>
+        <div class="col-md-6">
+          <label class="form-label">🏆 Top-N size</label>
+          <input type="number" class="form-control" id="q-topn" value="${qth.topN != null ? qth.topN : 50}" step="1" min="1" max="500" />
+          <small class="text-muted">top-N symbols by 24h quote volume</small>
+        </div>
+        <div class="col-md-4">
+          <label class="form-label">📏 KC tight % (&lt; = tight)</label>
+          <input type="number" class="form-control" id="q-kc" value="${qth.kcTightPct != null ? qth.kcTightPct : 1.0}" step="0.1" min="0.01" max="50" />
+        </div>
+        <div class="col-md-4">
+          <label class="form-label">💧 Squeeze min % (≥ pass)</label>
+          <input type="number" class="form-control" id="q-sq" value="${qth.squeezeMinPct != null ? qth.squeezeMinPct : 40}" step="1" min="0" max="100" />
+          <small class="text-muted">% ของ 50 แท่งที่ KC &lt; tight</small>
+        </div>
+        <div class="col-md-4">
+          <label class="form-label">📈 Trend min % (≥ pass)</label>
+          <input type="number" class="form-control" id="q-tr" value="${qth.trendMinPct != null ? qth.trendMinPct : 50}" step="1" min="0" max="100" />
+          <small class="text-muted">% ของ bars เหนือ EMA20 บน upper-TF</small>
+        </div>
+        <div class="col-md-4">
+          <label class="form-label">🔄 Refresh interval (นาที)</label>
+          <input type="number" class="form-control" id="q-refresh" value="${qRefreshMin}" step="1" min="1" max="60" />
+          <small class="text-muted">default 5 นาที (60s..1h clamp)</small>
+        </div>
+      </div>
+
+      <div class="mt-3">
+        <button type="button" class="btn btn-primary" id="btn-save-quality">💾 บันทึก Quality Indicator</button>
+        <span class="ms-2 text-muted small" id="quality-status"></span>
+      </div>
+
+      <div class="text-muted small mt-4">
+        <strong>สูตรคะแนน:</strong> Volume (≥) + Top50 (≤N) + Squeeze (% ≥) + Trend (upper-TF + EMA20%) → 0–4
+        <br />สี: <span class="quality-pill is-red">0</span>
+        <span class="quality-pill is-orange">1</span>
+        <span class="quality-pill is-yellow">2</span>
+        <span class="quality-pill is-green">3–4</span>
+      </div>
+
     </div>
   `;
 
@@ -213,6 +279,8 @@ function bindEvents() {
   document.getElementById('f-enabled').onchange = toggleEnabled;
   document.getElementById('btn-save-events').onclick = saveEvents;
   document.getElementById('btn-save-thresholds').onclick = saveThresholds;
+  const sq = document.getElementById('btn-save-quality');
+  if (sq) sq.onclick = saveQualityThresholds;
 }
 
 function setStatus(elId, msg, isError = false) {
@@ -301,6 +369,7 @@ async function saveEvents() {
     monthlySummary:      document.getElementById('ev-monthlySummary').checked,
     // FIX-2026-07-26: TP ต่ำเกินไป
     tpLowPnL:            document.getElementById('ev-tpLowPnL').checked,
+    cbPanicClose:       document.getElementById('ev-cbPanicClose').checked,
   };
   try {
     await API.put('/api/telegram/config', { events });
@@ -327,6 +396,41 @@ async function saveThresholds() {
     await loadConfig();
   } catch (err) {
     setStatus('thresholds-status', '❌ ' + err.message, true);
+  }
+}
+
+// FIX-2026-08-01: save Bot Quality Indicator settings
+//   - PUT /api/telegram/config with qualityEnabled + qualityRefreshMs + qualityThresholds
+//   - backend calls qualityIndicator.reloadConfig() → clears caches + restarts refresh timer
+async function saveQualityThresholds() {
+  const qualityEnabled = !!document.getElementById('q-enabled').checked;
+  const refreshMin = parseInt(document.getElementById('q-refresh').value, 10);
+  const qualityThresholds = {
+    volumeMinUSDT:  parseFloat(document.getElementById('q-vol').value),
+    topN:           parseInt(document.getElementById('q-topn').value, 10),
+    kcTightPct:     parseFloat(document.getElementById('q-kc').value),
+    squeezeMinPct:  parseFloat(document.getElementById('q-sq').value),
+    trendMinPct:    parseFloat(document.getElementById('q-tr').value),
+  };
+  if (!Number.isFinite(qualityThresholds.volumeMinUSDT) ||
+      !Number.isFinite(qualityThresholds.topN) ||
+      !Number.isFinite(qualityThresholds.kcTightPct) ||
+      !Number.isFinite(qualityThresholds.squeezeMinPct) ||
+      !Number.isFinite(qualityThresholds.trendMinPct) ||
+      !Number.isFinite(refreshMin)) {
+    setStatus('quality-status', '❌ ค่าต้องเป็นตัวเลข', true);
+    return;
+  }
+  try {
+    await API.put('/api/telegram/config', {
+      qualityEnabled,
+      qualityRefreshMs: Math.max(1, Math.min(60, refreshMin)) * 60_000,
+      qualityThresholds,
+    });
+    setStatus('quality-status', '✅ บันทึกแล้ว · cache จะ refresh ทันที');
+    await loadConfig();
+  } catch (err) {
+    setStatus('quality-status', '❌ ' + err.message, true);
   }
 }
 

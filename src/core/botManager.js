@@ -11,11 +11,19 @@ const Trade = require('../db/models/Trade');
 const Trader = require('./trader');
 // FIX-2026-07-23: TP auto-updater (per-bot autoUpdateTp toggle → top-of-hour recompute)
 const tpUpdater = require('./tpUpdater');
+const indicators = require('./indicators'); // FIX-2026-08-01: keltnerChannel() for auto-pause Min-%KC scan
 
 // FIX-2026-07-14: periodic reconcile interval (ms) — safety net กัน WS event หลุด
 //   2 นาที ตามที่ user ระบุ (1–3 นาที) — เร็วพอที่จะจับ SELL filled ภายใน 2 นาที,
 //   ช้าพอที่จะไม่ spam Binance API
 const RECONCILE_INTERVAL_MS = 2 * 60 * 1000;
+
+// FIX-2026-08-01: auto-pause on low Min-%KC (default ON per bot)
+//   - ทุก 5 นาที: scan Min-%KC(30 bars) — ถ้า < autoPauseMinKcPct → set enabled=false
+//   - ถ้า ≥ threshold (และเคยถูก auto-pause) → auto-resume (vol_recovered)
+//   - ตรวจเฉพาะบอทที่ autoPauseEnabled !== false (default true)
+const AUTO_PAUSE_INTERVAL_MS = 5 * 60 * 1000;
+let autoPauseTimer = null;
 
 /**
  * Bot Manager — spawn/stop Trader ต่อ bot, จัดการ WS subscriptions
@@ -79,6 +87,13 @@ class BotManager {
     // FIX-2026-07-23: schedule TP auto-updater (recompute TP% top-of-hour สำหรับบอทที่ autoUpdateTp=true)
     tpUpdater.scheduleHourlyTpUpdate();
 
+    // FIX-2026-08-01: auto-pause scanner (ทุก 5 นาที: pause/resume ตาม Min-%KC 30 bars)
+    autoPauseTimer = setInterval(() => {
+      checkAutoPauseBots().catch((err) => logger.warn({ err: err.message }, 'botManager: auto-pause tick failed'));
+    }, AUTO_PAUSE_INTERVAL_MS);
+    if (autoPauseTimer && typeof autoPauseTimer.unref === 'function') autoPauseTimer.unref();
+    logger.info({ intervalMs: AUTO_PAUSE_INTERVAL_MS }, 'botManager: auto-pause scanner scheduled');
+
     // FIX-2026-07-24: start Telegram notifier (subscribe eventBus + periodic PnL scan)
     const telegramNotifier = require('../services/telegramNotifier');
     telegramNotifier.start().catch((e) => logger.warn({ err: e.message }, 'telegramNotifier start failed'));
@@ -98,6 +113,8 @@ class BotManager {
     }
     // FIX-2026-07-23: หยุด TP auto-updater timer
     tpUpdater.stopHourlyTpUpdate();
+    // FIX-2026-08-01: หยุด auto-pause scanner timer
+    if (autoPauseTimer) { clearInterval(autoPauseTimer); autoPauseTimer = null; }
     // FIX-2026-07-24: หยุด Telegram notifier (clear listeners + timers)
     try { require('../services/telegramNotifier').stop(); } catch (e) { /* ignore */ }
     for (const [id, trader] of this.traders.entries()) {
@@ -219,7 +236,11 @@ class BotManager {
           }).catch(() => null);
           if (order) {
             // BUY filled จริง — ไม่ว่า trade.state จะเป็นอะไร ต้อง proceed SELL
-            if (order.status === 'FILLED' || order.status === 'PARTIALLY_FILLED') {
+            // FIX-2026-07-31 (BUG-22): don't call handleBuyFilled for PARTIALLY_FILLED — the BUY
+            //   is still open and filling more. Calling handleBuyFilled would place a SELL for
+            //   current executedQty while the remainder of the BUY keeps filling → over-exposure.
+            //   Let the trader manage PARTIALLY_FILLED via its own schedulePartialFillWatch.
+            if (order.status === 'FILLED') {
               // skip ถ้า trade เป็น selling/sold อยู่แล้ว (normal path)
               if (['selling', 'sold'].includes(trade.state)) {
                 logger.debug({ tradeId: trade._id.toString(), dbState: trade.state }, 'reconcile: BUY filled, trade already in selling/sold — skip');
@@ -255,6 +276,14 @@ class BotManager {
                   );
                 }
               }
+            } else if (order.status === 'PARTIALLY_FILLED') {
+              // FIX-2026-07-31 (BUG-22): partial BUY in-progress — let trader manage via
+              //   schedulePartialFillWatch. Don't call handleBuyFilled (would over-expose).
+              logger.debug({
+                tradeId: trade._id.toString(),
+                dbState: trade.state,
+                executedQty: order.executedQty,
+              }, 'reconcile: BUY partially filled in-progress, skip — trader manages');
             } else if ((order.status === 'CANCELED' || order.status === 'EXPIRED') && trade.state === 'placed') {
               // BUY ถูก cancel จริง — sync DB
               logger.info({ tradeId: trade._id.toString() }, 'reconcile: BUY cancelled/expired, marking DB');
@@ -308,7 +337,9 @@ class BotManager {
                     }, 'reconcile: stuck BUY cancel failed — will retry next reconcile cycle');
                   }
                   // ไม่ mark DB ทิ้ง — ให้ reconcile รอบหน้าลองใหม่
-                  return;
+                  // FIX-2026-07-31 (BUG-21): `return` aborted the entire reconcile pass for ALL
+                  //   remaining trades — should be `continue` so we move on to next trade.
+                  continue;
                 }
                 logger.info({
                   tradeId: trade._id.toString(),
@@ -440,6 +471,36 @@ class BotManager {
             }
           }
         }
+
+        // FIX-2026-07-31 (BUG-13): orphan holding with no sellOrderId — re-arm scheduleHoldingRetry
+        //   เดิม: reconcile path ต้องการ sellOrderId + CANCELED/EXPIRED → trade no sellOrderId ค้างตลอด
+        //   ใหม่: ถ้า trade.state='holding' และไม่มี sellOrderId → สั่ง trader ให้ scheduleHoldingRetry
+        if (trade.state === 'holding' && !trade.sellOrderId) {
+          const trader = this.traders.get(bot._id.toString());
+          if (trader && trader.running) {
+            logger.warn({
+              tradeId: trade._id.toString(),
+              botId: bot._id.toString(),
+              symbol: bot.symbol,
+              buyQty: trade.buyQty,
+              buyFilledQty: trade.buyFilledQty,
+            }, 'reconcile: ORPHAN holding with no sellOrderId — re-arming scheduleHoldingRetry');
+            const fresh = await Trade.findById(trade._id);
+            if (fresh && fresh.state === 'holding') {
+              const qty = parseFloat(fresh.buyFilledQty || fresh.buyQty) || 0;
+              const buyPrice = parseFloat(fresh.buyPrice) || 0;
+              const targetSell = parseFloat(fresh.targetSellPrice) || 0;
+              if (qty > 0 && buyPrice > 0) {
+                trader.scheduleHoldingRetry(fresh, qty, buyPrice, targetSell);
+              } else {
+                logger.warn({
+                  tradeId: fresh._id.toString(),
+                  qty, buyPrice, targetSell,
+                }, 'reconcile: orphan holding has no buyQty/buyPrice — cannot re-arm');
+              }
+            }
+          }
+        }
       } catch (err) {
         logger.error({ err: err.message, tradeId: trade._id.toString() }, 'reconcile error');
       }
@@ -554,6 +615,93 @@ class BotManager {
       }
     } catch (e) {
       logger.warn({ err: e.message }, 'flushActiveTimeOnShutdown failed');
+    }
+  }
+}
+
+// FIX-2026-08-01: Auto-pause scanner — ทุก 5 นาที ตรวจ Min-%KC(30 bars) ของทุกบอทที่ autoPauseEnabled !== false
+//   - ถ้า minKcPct < threshold และบอท enabled → PAUSE (set enabled=false + telegram + stop trader)
+//   - ถ้า minKcPct >= threshold และบอท auto-paused ก่อนหน้า (autoPauseReason === 'low_vol') → RESUME
+//   - auto-resume เฉพาะบอทที่ถูก auto-pause (ไม่ resume บอทที่ user ปิดเอง)
+async function checkAutoPauseBots() {
+  let bots;
+  try {
+    bots = await Bot.find({ autoPauseEnabled: { $ne: false } }).lean();
+  } catch (err) {
+    logger.warn({ err: err.message }, 'botManager: checkAutoPauseBots — Bot.find failed');
+    return;
+  }
+  if (!bots || bots.length === 0) return;
+
+  const telegramNotifier = require('../services/telegramNotifier');
+  const now = new Date();
+
+  for (const b of bots) {
+    try {
+      const raw = await binanceRest.getKlines({ symbol: b.symbol, interval: b.timeframe, limit: 50 });
+      if (!Array.isArray(raw) || raw.length < 25) continue;
+      const highs = raw.map((k) => parseFloat(k[2]));
+      const lows = raw.map((k) => parseFloat(k[3]));
+      const closes = raw.map((k) => parseFloat(k[4]));
+      const kc = indicators.keltnerChannel(highs, lows, closes, 20, b.kcMult || 1.5);
+      const tail = kc.width.slice(-30).filter((w) => w != null && Number.isFinite(w));
+      if (tail.length < 5) continue;
+      const minKcPct = Math.min(...tail);
+      const threshold = b.autoPauseMinKcPct != null ? b.autoPauseMinKcPct : 2;
+
+      const update = { autoPauseLastCheckedAt: now };
+
+      if (minKcPct < threshold && b.enabled !== false) {
+        // ─── PAUSE ────────────────────────────────────────────────────
+        Object.assign(update, {
+          enabled: false,
+          enabledAt: null,
+          status: 'idle',
+          autoPauseLastActionAt: now,
+          autoPauseReason: 'low_vol',
+        });
+        await Bot.updateOne({ _id: b._id }, { $set: update });
+        eventBus.emit('bot:disabled', { botId: String(b._id), reason: 'auto_pause_low_kc', minKcPct });
+        try {
+          await telegramNotifier.sendNow('botDisabled', {
+            botId: String(b._id),
+            botName: b.name || b.symbol,
+            symbol: b.symbol,
+            timeframe: b.timeframe,
+            reason: `auto-pause: Min-%KC=${minKcPct.toFixed(2)}% < ${threshold}%`,
+          });
+        } catch (_) { /* non-fatal */ }
+        const trader = this.traders.get(String(b._id));
+        if (trader) await trader.stop('auto_pause_low_kc').catch(() => {});
+        logger.info({ botId: String(b._id), minKcPct, threshold }, 'botManager: auto-paused bot (low Min-%KC)');
+      } else if (minKcPct >= threshold && b.enabled === false && b.autoPauseReason === 'low_vol') {
+        // ─── RESUME (เฉพาะบอทที่เคยถูก auto-pause) ──────────────────
+        Object.assign(update, {
+          enabled: true,
+          enabledAt: now,
+          autoPauseLastActionAt: now,
+          autoPauseReason: 'vol_recovered',
+        });
+        await Bot.updateOne({ _id: b._id }, { $set: update });
+        eventBus.emit('bot:enabled', { botId: String(b._id), reason: 'auto_resume_vol_recovered', minKcPct });
+        try {
+          await telegramNotifier.sendNow('botEnabled', {
+            botId: String(b._id),
+            botName: b.name || b.symbol,
+            symbol: b.symbol,
+            timeframe: b.timeframe,
+            reason: `auto-resume: Min-%KC=${minKcPct.toFixed(2)}% ≥ ${threshold}%`,
+          });
+        } catch (_) { /* non-fatal */ }
+        // re-spawn trader (mirror enableBot behavior — without totalActiveMs accrual since autoPause is short)
+        await this.spawnTrader({ _id: b._id, ...b }).catch((err) => logger.warn({ botId: String(b._id), err: err.message }, 'botManager: auto-resume spawn failed'));
+        logger.info({ botId: String(b._id), minKcPct, threshold }, 'botManager: auto-resumed bot (vol recovered)');
+      } else {
+        // ปกติ: แค่ update timestamp
+        await Bot.updateOne({ _id: b._id }, { $set: update });
+      }
+    } catch (err) {
+      logger.warn({ botId: String(b._id), err: err.message }, 'botManager: auto-pause check failed');
     }
   }
 }

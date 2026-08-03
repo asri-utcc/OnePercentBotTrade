@@ -62,6 +62,16 @@ router.get('/calendar', requireAuth, async (req, res) => {
             },
           },
           pnl: { $sum: '$realizedPnl' },
+          // FIX-2026-08-01: แยก gross profit vs gross loss (mirror frontend UX request)
+          //   - grossProfit: sum ของ realizedPnl > 0 (only winning trades)
+          //   - grossLoss: sum ของ realizedPnl < 0 (absolute value ไม่ใส่ - — เก็บเป็นลบเพื่อความง่าย)
+          //   - verify: grossProfit + grossLoss ≈ pnl (จะตรงเสมอเพราะ sum ของค่าทั้งสองกลุ่ม = sum ใหญ่)
+          grossProfit: {
+            $sum: { $cond: [{ $gt: ['$realizedPnl', 0] }, '$realizedPnl', 0] },
+          },
+          grossLoss: {
+            $sum: { $cond: [{ $lt: ['$realizedPnl', 0] }, '$realizedPnl', 0] },
+          },
           trades: { $sum: 1 },
           wins: { $sum: { $cond: [{ $gt: ['$realizedPnl', 0] }, 1, 0] } },
           losses: { $sum: { $cond: [{ $lt: ['$realizedPnl', 0] }, 1, 0] } },
@@ -80,6 +90,9 @@ router.get('/calendar', requireAuth, async (req, res) => {
       result.push({
         date: dateStr,
         pnl: row ? Number(row.pnl.toFixed(4)) : 0,
+        // FIX-2026-08-01: grossProfit + grossLoss (per-day)
+        grossProfit: row ? Number(row.grossProfit.toFixed(4)) : 0,
+        grossLoss: row ? Number(row.grossLoss.toFixed(4)) : 0, // negative number
         trades: row ? row.trades : 0,
         wins: row ? row.wins : 0,
         losses: row ? row.losses : 0,
@@ -90,11 +103,13 @@ router.get('/calendar', requireAuth, async (req, res) => {
     const totals = result.reduce(
       (a, d) => ({
         pnl: a.pnl + d.pnl,
+        grossProfit: a.grossProfit + d.grossProfit,
+        grossLoss: a.grossLoss + d.grossLoss, // sum of negatives
         trades: a.trades + d.trades,
         wins: a.wins + d.wins,
         losses: a.losses + d.losses,
       }),
-      { pnl: 0, trades: 0, wins: 0, losses: 0 },
+      { pnl: 0, grossProfit: 0, grossLoss: 0, trades: 0, wins: 0, losses: 0 },
     );
     const tradeDays = result.filter((d) => d.trades > 0);
     const best = tradeDays.length
@@ -111,11 +126,23 @@ router.get('/calendar', requireAuth, async (req, res) => {
       days: result,
       totals: {
         pnl: Number(totals.pnl.toFixed(4)),
+        // FIX-2026-08-01: grossProfit + grossLoss (totals) — grossLoss คงเป็นลบ
+        grossProfit: Number(totals.grossProfit.toFixed(4)),
+        grossLoss: Number(totals.grossLoss.toFixed(4)),
         trades: totals.trades,
         wins: totals.wins,
         losses: totals.losses,
         winRate: totals.trades
           ? Number(((totals.wins / totals.trades) * 100).toFixed(1))
+          : 0,
+        // FIX-2026-08-01: avgWin / avgLoss per trade (เฉพ่ยต่อไม้)
+        //   - avgWin: grossProfit / wins (0 ถ้าไม่มีไม้ชนะ)
+        //   - avgLoss: grossLoss / losses (negative, 0 ถ้าไม่มีไม้แพ้)
+        avgWin: totals.wins
+          ? Number((totals.grossProfit / totals.wins).toFixed(4))
+          : 0,
+        avgLoss: totals.losses
+          ? Number((totals.grossLoss / totals.losses).toFixed(4))
           : 0,
       },
       bestDay: best ? { date: best.date, pnl: best.pnl } : null,
@@ -165,6 +192,26 @@ router.get('/series', requireAuth, async (req, res) => {
       to: req.query.to,
       botId: botId || null,
       count: trades.length,
+      // FIX-2026-08-01: grossProfit + grossLoss + avgWin + avgLoss (เหมือน /day endpoint)
+      totals: (() => {
+        const grossProfit = trades
+          .filter((t) => (t.realizedPnl || 0) > 0)
+          .reduce((s, t) => s + t.realizedPnl, 0);
+        const grossLoss = trades
+          .filter((t) => (t.realizedPnl || 0) < 0)
+          .reduce((s, t) => s + t.realizedPnl, 0);
+        const wins = trades.filter((t) => (t.realizedPnl || 0) > 0).length;
+        const losses = trades.filter((t) => (t.realizedPnl || 0) < 0).length;
+        return {
+          pnl: Number((grossProfit + grossLoss).toFixed(4)),
+          grossProfit: Number(grossProfit.toFixed(4)),
+          grossLoss: Number(grossLoss.toFixed(4)),
+          wins,
+          losses,
+          avgWin: wins ? Number((grossProfit / wins).toFixed(4)) : 0,
+          avgLoss: losses ? Number((grossLoss / losses).toFixed(4)) : 0,
+        };
+      })(),
       trades: trades.map((t) => ({
         _id: t._id,
         botId: t.botId,
@@ -214,6 +261,29 @@ router.get('/day', requireAuth, async (req, res) => {
       to: req.query.to,
       botId: botId || null,
       count: trades.length,
+      // FIX-2026-08-01: grossProfit + grossLoss + avgWin + avgLoss สำหรับ modal summary
+      //   - grossProfit: sum ของ realizedPnl > 0
+      //   - grossLoss: sum ของ realizedPnl < 0 (คงเป็นลบ)
+      //   - wins/losses: นับจำนวนไม้
+      totals: (() => {
+        const grossProfit = trades
+          .filter((t) => (t.realizedPnl || 0) > 0)
+          .reduce((s, t) => s + t.realizedPnl, 0);
+        const grossLoss = trades
+          .filter((t) => (t.realizedPnl || 0) < 0)
+          .reduce((s, t) => s + t.realizedPnl, 0);
+        const wins = trades.filter((t) => (t.realizedPnl || 0) > 0).length;
+        const losses = trades.filter((t) => (t.realizedPnl || 0) < 0).length;
+        return {
+          pnl: Number((grossProfit + grossLoss).toFixed(4)),
+          grossProfit: Number(grossProfit.toFixed(4)),
+          grossLoss: Number(grossLoss.toFixed(4)),
+          wins,
+          losses,
+          avgWin: wins ? Number((grossProfit / wins).toFixed(4)) : 0,
+          avgLoss: losses ? Number((grossLoss / losses).toFixed(4)) : 0,
+        };
+      })(),
       trades: trades.map((t) => ({
         _id: t._id,
         botId: t.botId,

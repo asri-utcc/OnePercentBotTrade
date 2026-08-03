@@ -31,6 +31,29 @@ const botSchema = new mongoose.Schema(
         message: 'dcaMaxLayers must be an integer between 1 and 100',
       },
     },
+    // FIX-2026-08-03: DCA + Martingale sizing (opt-in, default off — backward compatible 100%)
+    //   - false (default) → ทุก DCA layer ใช้ capitalPerTrade เท่ากัน (พฤติกรรมเดิม)
+    //   - true → layer N notional = capitalPerTrade × martingaleMultiplier^(N-1)
+    //     เช่น mult=1.5, layers=3 → [10, 15, 22.5] USDT (รวม 47.5 vs fixed 30)
+    //   - apply เฉพาะ DCA mode (martingaleEnabled requires dcaEnabled=true — validate ใน routes)
+    //   - Martingale ไม่ retro-apply กับ layer เก่า (ใช้ actual qty จาก buyLayers เสมอ)
+    //   - per-layer size cap (martingaleMaxLayerNotional) กันไม่ให้ layer สูงๆ ใหญ่เกินไป
+    martingaleEnabled: { type: Boolean, default: false },
+    martingaleMultiplier: {
+      type: Number,
+      default: 1.5,
+      min: 1.0,
+      max: 3.0,
+    },
+    // FIX-2026-08-03: per-layer notional cap (USDT) — safety guard กัน layer สูงๆ ใหญ่เกินไป
+    //   - เช่น mult=2.0, layers=5, capital=10 → layer 5 = 10×16 = 160 USDT (vs cap 50 = 50)
+    //   - default 100 USDT (สูงพอสำหรับส่วนใหญ่ — override ได้ใน bot-edit)
+    martingaleMaxLayerNotional: {
+      type: Number,
+      default: 100,
+      min: 1,
+      max: 10000,
+    },
     tpPercent: { type: Number, required: true, default: 0.1, min: 0.001 },
     // FIX-2026-07-24: รองรับทศนิยม (เช่น 0.5 = 30 วินาที) — ใช้สำหรับ timeframe สั้น (1m/3m) ที่รอ 1 นาทีนานเกิน
     retryTimeMin: { type: Number, required: true, default: 1, min: 0.1, max: 60 },

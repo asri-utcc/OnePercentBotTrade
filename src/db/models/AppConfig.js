@@ -48,6 +48,23 @@ const appConfigSchema = new mongoose.Schema(
       type: Object,
       default: () => ({ positionLossPct: 2, positionProfitPct: 1, positionStuckMin: 30 }),
     },
+
+    // FIX-2026-08-01: Bot Quality Indicator (mirror telegramThresholds pattern)
+    //   - qualityEnabled: master switch — ถ้าปิด, computeBotQuality returns {enabled:false,score:null,color:'gray'}
+    //   - qualityRefreshMs: shared top-N cache TTL (60s..1h clamp), default 5min
+    //   - qualityThresholds: { volumeMinUSDT, topN, kcTightPct, squeezeMinPct, trendMinPct }
+    qualityEnabled:  { type: Boolean, default: true },
+    qualityRefreshMs: { type: Number,  default: 5 * 60 * 1000 },
+    qualityThresholds: {
+      type: Object,
+      default: () => ({
+        volumeMinUSDT: 100_000,
+        topN: 50,
+        kcTightPct: 1.0,
+        squeezeMinPct: 40,
+        trendMinPct: 50,
+      }),
+    },
   },
   { timestamps: true }
 );

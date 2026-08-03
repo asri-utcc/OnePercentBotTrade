@@ -78,11 +78,27 @@
         <div class="value" id="stat-active">0</div>
         <div class="sub">ทำงานอยู่</div>
       </div>
+      <div class="stat-tile is-emerald" id="tile-recommended-capital" title="ทุนแนะนำรวม = ผลรวม (ทุน/ไม้ × จำนวนไม้สูงสุด) ของทุกบอท — เป็นเงินทุนขั้นต่ำที่ควรมีในบัญชี Binance เพื่อรันบอททั้งหมดพร้อมกัน">
+        <span class="glyph">💰</span>
+        <div class="label">ทุนแนะนำรวม</div>
+        <div class="value" id="stat-recommended-capital">0.00</div>
+        <div class="sub" id="stat-recommended-capital-sub">จาก 0 บอท</div>
+      </div>
       <div class="stat-tile is-violet">
         <span class="glyph">📈</span>
         <div class="label">Total Trades</div>
         <div class="value" id="stat-trades">0</div>
         <div class="sub">ทั้งหมด</div>
+      </div>
+      <div class="stat-tile is-gold is-clickable"
+           id="tile-open-positions"
+           data-bs-toggle="modal"
+           data-bs-target="#openPositionsModal"
+           title="คลิกเพื่อดู positions ที่เปิดอยู่ทั้งหมด">
+        <span class="glyph">📂</span>
+        <div class="label">Open Positions</div>
+        <div class="value" id="stat-open-positions">0</div>
+        <div class="sub" id="stat-open-positions-sub">ไม้ที่กำลังถืออยู่ · คลิกเพื่อดู</div>
       </div>
       <div class="stat-tile">
         <span class="glyph">🎯</span>
@@ -125,7 +141,16 @@
     <!-- Bots list -->
     <div class="page-title">
       <h3>🤖 บอททั้งหมด</h3>
-      <button class="btn btn-primary" id="new-bot-btn" data-bs-toggle="modal" data-bs-target="#newBotModal">+ New Bot</button>
+      <div class="d-flex align-items-center gap-2 flex-wrap">
+        <!-- FIX-2026-07-31: สลับมุมมอง Compact / Expand -->
+        <div class="view-mode-toggle btn-group btn-group-sm" role="group" aria-label="มุมมองบอท">
+          <button type="button" class="btn btn-outline-gold is-active" data-mode="compact" id="vm-compact" title="ย่อ — ซ่อนกราฟและ tiles แสดงเฉพาะสถิติและปุ่ม">📋 Compact</button>
+          <button type="button" class="btn btn-outline-gold" data-mode="expand" id="vm-expand" title="ขยาย — แสดงทุกอย่าง (กราฟ + tiles + สถิติ)">📊 Expand</button>
+        </div>
+        <button class="btn btn-primary" id="new-bot-btn" data-bs-toggle="modal" data-bs-target="#newBotModal">+ New Bot</button>
+        <!-- FIX-2026-08-01: Master Config — bulk-edit หลายบอทพร้อมกัน -->
+        <button class="btn btn-outline-primary" id="btn-master-config" title="ตั้งค่าหลายบอทพร้อมกัน (clobber mode)">⚙️ Master Config</button>
+      </div>
     </div>
     <div id="bots-list"></div>
   </div>
@@ -198,26 +223,135 @@
               <div class="lux-form-label">KC Mult</div>
               <input type="number" class="form-control" id="nb-kc-mult" value="1.5" step="0.1" min="0.5" max="5" title="ความกว้างของ Keltner Channel (default 1.5)" />
             </div>
+            <div class="col-4">
+              <div class="lux-form-label">Min spread (ticks)</div>
+              <input type="number" class="form-control" id="nb-min-spread" value="1" step="1" min="0" max="10" title="0=ไม่สนใจ, 1=ใช้ bid (low-cap), 2=ต้อง margin 1 tick" />
+            </div>
+            <div class="col-4">
+              <div class="lux-form-label">TP suggest window (bars)</div>
+              <input type="number" class="form-control" id="nb-suggest-tp-window" value="500" step="10" min="30" max="1000" />
+            </div>
           </div>
           <div class="lux-form-hint">0 = วางครั้งเดียว ไม่ retry · 1 = วางได้อีก 1 ครั้งถ้า bid ขยับ · บอทจะบวก fee buffer ให้อัตโนมัติ</div>
           <div class="lux-form-hint" id="nb-tp-hint">กด ✨ Get เพื่อให้ระบบคำนวณ TP% จาก Min %KC(500 bars) + EMA20 trend(upper-TF) ของคู่เทรด/tf ที่เลือก</div>
           <div class="lux-form-section">
             <div class="form-check">
+              <input class="form-check-input" type="checkbox" id="nb-s1-only-down" checked />
+              <label class="form-check-label" for="nb-s1-only-down">
+                📉 <strong>S1 = เฉพาะ bg 2→3 (ลงเท่านั้น)</strong> — ข้าม bg 2→1 (ซื้อตอนราคาสูง)
+              </label>
+              <small class="text-muted d-block mt-1">
+                bg_state: 1=Strong Up (เขียว), 2=Weak Down (ม่วง), 3=Strong Down (แดง)
+                · S1 ปกติ = bg_prev=2 AND (bg=1 OR bg=3) · ถ้าเปิด toggle นี้ S1 = bg_prev=2 AND bg=3 (ลง) — ปลอดภัยกว่า
+              </small>
+            </div>
+            <div class="form-check mt-2">
+              <input class="form-check-input" type="checkbox" id="nb-xs1-enabled" checked />
+              <label class="form-check-label" for="nb-xs1-enabled">
+                🚫 <strong>XS1 anti-dump gate</strong> — ข้าม S1 เมื่อ candle-wide dump (ป้องกันซื้อตอนราคาไหลเร็ว)
+              </label>
+              <small class="text-muted d-block mt-1">
+                XS1 = (close &lt; lowerKC AND open &gt; basisKC) หรือ (open[1] &gt; basisKC[1] AND close[1] &lt; basisKC[1] AND close &lt; lowerKC AND open &lt; basisKC)
+                · <strong>เปิด (default)</strong>: skip S1 เมื่อเจอ candle-wide dump (XS1 pattern)
+                · <strong>ปิด</strong>: ใช้สัญญาณดั้งเดิม S1 ปกติ (ไม่ skip แม้ candle-wide dump)
+              </small>
+            </div>
+            <div class="form-check mt-2">
               <input class="form-check-input" type="checkbox" id="nb-stop-loss-upper-kc" />
               <label class="form-check-label" for="nb-stop-loss-upper-kc">
-                🛑 <strong>Stop Loss เมื่อราคาปิดทะลุ upper-KC</strong> (เฉพาะตอนขาดทุน)
+                🛑 <strong>ปิด position อัตโนมัติเมื่อราคาปิดทะลุ upper-KC</strong> (เฉพาะตอนขาดทุน)
               </label>
-              <small class="text-muted-3 d-block mt-1">
+              <small class="text-muted d-block mt-1">
                 ตรวจทุก <code>kline:closed</code>: ถ้า <code>candle.close &gt; upperKC</code> และ position ยังขาดทุน → cancel LIMIT_MAKER SELL ค้าง + MARKET SELL ทันที
               </small>
+            </div>
+            <div class="form-check mt-2">
+              <input class="form-check-input" type="checkbox" id="nb-cb-enabled" checked />
+              <label class="form-check-label" for="nb-cb-enabled">
+                🚨 <strong>Circuit-breaker panic-sell — ปิดทุก position เมื่อกราฟดิ่ง 3 แท่งติด</strong>
+              </label>
+              <small class="text-muted d-block mt-1">
+                ตรวจทุก <code>kline:closed</code>: ถ้าแท่งปัจจุบัน + 3 แท่งก่อนหน้าทุกแท่ง "แดง (open &gt; close) AND open &lt; lowerKC AND close &lt; lowerKC"
+                → cancel SELL ค้าง + MARKET SELL ทันทีทุก position ในบอท (ทั้งกำไรและขาดทุน) เพื่อกันกราฟไหลลงแล้วไม่ขึ้นอีก
+                · <strong>เปิด (default)</strong>: panic-close ทุก position เมื่อ pattern ตรง
+                · <strong>ปิด</strong>: ไม่แตะ — ใช้ logic เดิม (อาจขาดทุนต่อถ้ากราฟไหล)
+              </small>
+            </div>
+            <div class="form-check mt-2">
+              <input class="form-check-input" type="checkbox" id="nb-safe-trade-enabled" checked />
+              <label class="form-check-label" for="nb-safe-trade-enabled">
+                🛡️ <strong>Safe-trade filter</strong> — ก่อนซื้อตรวจ super-upper TF (3m/5m→4h, 15m→1d, 1h→1w) ว่าเป็นแท่งเขียวหรือเหนือ EMA20
+              </label>
+              <small class="text-muted d-block mt-1">
+                · PASS = lastClose &gt; open (แท่งเขียว) OR lastClose &gt; ema20 (uptrend)
+                · FAIL-OPEN on Binance error (API outage ไม่บล็อกการเทรด)
+                · <strong>เปิด (default)</strong>: skip BUY ถ้า super-upper TF ไม่ผ่าน
+                · <strong>ปิด</strong>: ซื้อทันที (พฤติกรรมเดิม)
+              </small>
+            </div>
+            <div class="form-check mt-2">
+              <input class="form-check-input" type="checkbox" id="nb-auto-pause-enabled" checked />
+              <label class="form-check-label" for="nb-auto-pause-enabled">
+                ⏸️ <strong>Auto-pause on low Min-%KC</strong> — หยุดบอทอัตโนมัติเมื่อ Min-%KC (30 bars) ต่ำกว่า threshold (auto-resume เมื่อกลับมา)
+              </label>
+              <small class="text-muted d-block mt-1">
+                ตรวจทุก 5 นาที · ถ้า Min-%KC &lt; threshold → set bot.enabled=false
+                · <strong>เปิด (default)</strong>: หยุดอัตโนมัติ + auto-resume เมื่อ vol กลับมา
+                · <strong>ปิด</strong>: ไม่ตรวจ (พฤติกรรมเดิม)
+              </small>
+            </div>
+            <div class="mt-2">
+              <label for="nb-auto-pause-min-kc" class="form-label">📉 Auto-pause Min-%KC threshold</label>
+              <input type="number" class="form-control form-control-sm" id="nb-auto-pause-min-kc" value="2" step="0.1" min="0.1" max="50" />
+              <small class="text-muted d-block mt-1">ค่า default: 2% — ถ้า Min-%KC ต่ำกว่านี้จะ pause บอท</small>
             </div>
             <div class="form-check mt-2">
               <input class="form-check-input" type="checkbox" id="nb-auto-update-tp" />
               <label class="form-check-label" for="nb-auto-update-tp">
                 ⏰ <strong>อัพเดท TP% อัตโนมัติทุกต้นชั่วโมง</strong>
               </label>
-              <small class="text-muted-3 d-block mt-1">
+              <small class="text-muted d-block mt-1">
                 ระบบจะ recompute TP% จาก Min %KC(500 bars) + EMA20 trend(upper-TF) แล้ว persist ทุก <code>HH:00:00</code> (top-of-hour)
+              </small>
+            </div>
+            <div class="form-check mt-2">
+              <input class="form-check-input" type="checkbox" id="nb-auto-arm-stop-loss-ukc" checked />
+              <label class="form-check-label" for="nb-auto-arm-stop-loss-ukc">
+                🛡️ <strong>Auto-arm SL-on-UKC สำหรับ position ที่ขาดทุนค้างนาน</strong> (loss &gt; 10% + age &gt; 4h)
+              </label>
+              <small class="text-muted d-block mt-1">
+                เมื่อ position ในบอทนี้ <strong>ขาดทุน &gt; 10%</strong> + <strong>เปิดมา &gt; 4 ชั่วโมง</strong> → set <code>trade.useStopLossOnUKC = true</code> อัตโนมัติ
+                → <em>stop-loss on upper-KC</em> (toggle ด้านบน) จะยอม trigger
+                · <strong>เปิด (default)</strong>: auto-arm flag เพื่อป้องกัน position ค้างยาวขาดทุนต่อ
+                · <strong>ปิด</strong>: ไม่ arm flag — SL-on-UKC จะไม่ trigger แม้ toggle ด้านบนเปิดอยู่
+              </small>
+            </div>
+            <div class="row mt-2">
+              <div class="col-md-6">
+                <label class="form-label" for="nb-tp-trend-multiplier">📈 <strong>TP trend multiplier ×N</strong> <span title="เมื่อ upper-TF (e.g. 1h for 3m bot) close > EMA20 → ใช้ tpPercent × multiplier ตอนเปิด position ใหม่">ⓘ</span></label>
+                <label class="form-check form-switch mb-2">
+                  <input class="form-check-input" type="checkbox" id="nb-tp-trend-enabled" checked />
+                  <label class="form-check-label" for="nb-tp-trend-enabled">
+                    <strong>เปิดใช้ TP trend ×N</strong> <span class="text-muted-2 small">(default: เปิด)</span>
+                  </label>
+                </label>
+                <input type="number" class="form-control" id="nb-tp-trend-multiplier" step="0.1" min="1" max="10" value="2" />
+                <small class="text-muted">
+                  1 = off, 2 = double (default), 3-10 = aggressive
+                  · apply เฉพาะ position ใหม่ — ไม่กระทบ in-flight SELL
+                  · <strong>ปิด toggle ด้านบน</strong> = ใช้ tpPercent ตรงๆ ไม่สนใจ trend
+                </small>
+              </div>
+            </div>
+            <div class="form-check mt-2">
+              <input class="form-check-input" type="checkbox" id="nb-auto-enable" checked />
+              <label class="form-check-label" for="nb-auto-enable">
+                ▶️ <strong>เปิดบอททันทีหลังสร้าง</strong> <span class="text-muted-2 small">(default)</span>
+              </label>
+              <small class="text-muted d-block mt-1">
+                บอทจะเริ่มเทรดทันทีหลังสร้างเสร็จ — ไม่ต้องไปกดเปิดเองทีหลัง
+                · <strong>เปิด (default)</strong>: เริ่มเทรดทันที
+                · <strong>ปิด</strong>: สร้างค้างไว้ก่อน (สถานะ idle) แล้วค่อยมาเปิดภายหลัง
               </small>
             </div>
           </div>
@@ -348,13 +482,68 @@
     </div>
   </div>
 
+  <!-- 2026-07-30: Open Positions Modal — รายละเอียดทุกไม้ที่เปิดอยู่ across all bots -->
+  <div class="modal fade" id="openPositionsModal" tabindex="-1">
+    <div class="modal-dialog modal-dialog-centered modal-dialog-scrollable modal-xl">
+      <div class="modal-content lux-modal">
+        <div class="modal-header lux-modal-header is-gold">
+          <div class="lux-modal-title-wrap">
+            <span class="lux-modal-icon">📂</span>
+            <div>
+              <h5 class="modal-title mb-0">Open Positions — ทุกบอท</h5>
+              <div class="lux-modal-sub" id="opm-sub">กำลังโหลด…</div>
+            </div>
+          </div>
+          <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+        </div>
+        <div class="modal-body">
+          <div class="opm-summary">
+            <div class="opm-tile">
+              <div class="k">Positions</div>
+              <div class="v mono" id="opm-count">0</div>
+              <div class="sub">ไม้ที่เปิดอยู่</div>
+            </div>
+            <div class="opm-tile">
+              <div class="k">Total Cost</div>
+              <div class="v mono" id="opm-cost">0.00 USDT</div>
+              <div class="sub thb-eq" id="opm-cost-thb"></div>
+            </div>
+            <div class="opm-tile">
+              <div class="k">Unrealized PnL</div>
+              <div class="v mono" id="opm-upnl">0.0000 USDT</div>
+              <div class="sub thb-eq" id="opm-upnl-thb"></div>
+            </div>
+            <div class="opm-tile">
+              <div class="k">ราคา ณ</div>
+              <div class="v mono" id="opm-asof">-</div>
+              <div class="sub text-muted-3">อัปเดตล่าสุด</div>
+            </div>
+          </div>
+          <div id="opm-list" class="positions-list opm-list">
+            <div class="empty-positions">กำลังโหลด…</div>
+          </div>
+          <div id="opm-mob" class="mob-card-list opm-mob" style="padding:0.5rem;display:none;"></div>
+        </div>
+        <div class="modal-footer lux-modal-footer">
+          <button type="button" class="btn btn-outline-info btn-sm" id="opm-refresh">🔄 Refresh</button>
+          <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">ปิด</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
   <script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
   <script src="/js/api.js"></script>
+  <script src="/js/priceFormat.js"></script>
   <script src="/js/ws-client.js"></script>
   <script>window.NAV_ACTIVE = 'bots';</script>
   <script src="/js/partials/nav.js"></script>
   <script src="/js/luxConfirm.js"></script>
+  <script src="/js/partials/positionCard.js"></script>
+  <script src="/js/partials/qualityModal.js"></script>
+  <!-- FIX-2026-08-01: Master Config modal — bulk-edit หลายบอท -->
+  <script src="/js/partials/masterConfigModal.js"></script>
   <script src="/js/pages/bots.js"></script>
 </body>
 </html>

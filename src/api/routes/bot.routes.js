@@ -15,6 +15,8 @@ const binanceRest = require('../../binance/binanceRest');
 const signalEngine = require('../../core/signalEngine');
 const fees = require('../../binance/fees');
 const tpUpdater = require('../../core/tpUpdater'); // FIX-2026-07-28: applyMinNetTpFloor (single source of truth)
+const volatilityForBot = require('../../core/volatilityForBot'); // 2026-07-31: per-bot volatility snapshot (KC + TP + 24h vol)
+const qualityIndicator = require('../../core/qualityIndicator'); // FIX-2026-08-01: Bot Quality Indicator (0-4 score)
 const logger = require('../../utils/logger');
 const eventBus = require('../../services/eventBus');
 
@@ -199,8 +201,9 @@ async function aggregateMonthPerBot() {
 // ดึง list symbols ที่ valid (สำหรับ dropdown)
 router.get('/symbols', requireAuth, async (req, res) => {
   try {
-    const symbols = await symbolInfo.listSymbols();
-    res.json({ symbols });
+    // FIX-2026-07-31: ส่ง symbolInfo map (tickSize/pricePrecision) — client ใช้แทน hardcoded heuristic
+    const data = await symbolInfo.listSymbols();
+    res.json(data); // { symbols: [...], symbolInfo: { 'BTCUSDT': { tickSize, pricePrecision } } }
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -209,17 +212,44 @@ router.get('/symbols', requireAuth, async (req, res) => {
 // ─── GET /api/bots ────────────────────────────────────
 router.get('/', requireAuth, async (req, res) => {
   try {
+    // FIX-2026-08-02: ?expand=1 → include volatility snapshot (1.5s) + quality (5s on cold cache)
+    //   - default: skip BOTH — compact mode hides the tiles anyway, quality pill shows "—" until warm
+    //   - expand mode (user clicks "Expand") → re-fetch with ?expand=1 to populate tiles
+    //   - background fetch: /api/bots?quality=1 to warm quality cache without blocking first paint
+    const includeVolatility = req.query.expand === '1';
+    const includeQuality = req.query.quality === '1' || req.query.expand === '1';
     // FIX-2026-07-24: เรียง enabled ก่อน (true=1 มาก่อน false=0) → บอทที่เปิดอยู่ลอยขึ้นบนสุดอัตโนมัติ
     //   - secondary sort: createdAt desc (บอทใหม่อยู่บนสุดภายใน group)
     const bots = await Bot.find().sort({ enabled: -1, createdAt: -1 }).lean();
-    const todayMap = await aggregateTodayPerBot();
-    const monthMap = await aggregateMonthPerBot();
-    const activePosMap = await aggregateActivePositionsPerBot();
-    // เพิ่ม totalCapital virtual + today/month stats + price/EMA indicator
-    const enriched = bots.map((b) => {
+    // FIX-2026-08-02: run aggregations in parallel (independent)
+    const [todayMap, monthMap, activePosMap] = await Promise.all([
+      aggregateTodayPerBot(),
+      aggregateMonthPerBot(),
+      aggregateActivePositionsPerBot(),
+    ]);
+    // 2026-07-31: per-bot volatility snapshot (KC min + TP suggestion + 24h volume)
+    //   - reuse tpUpdater.computeSuggestedTpForBot + get24hrTickers ผ่าน volatilityForBot helper
+    //   - concurrency-6 กัน burst (Binance public weight limit)
+    //   - FIX-2026-08-02: only when ?expand=1 (default = skip for fast first paint)
+    const volSnapshots = includeVolatility
+      ? await volatilityForBot.mapWithConcurrency(
+          bots, 6, (b) => volatilityForBot.computeBotVolatilitySnapshot(b)
+        )
+      : bots.map(() => ({}));
+    // FIX-2026-08-01: Bot Quality Indicator — 0-4 score per bot (shared top-N + per-bot cache)
+    // FIX-2026-08-02: skip on cold default load (5s) — cache warm = 0ms anyway
+    //   - cached values still returned (server reads perBotCache before returning)
+    //   - explicit ?quality=1 forces full compute
+    const qualitySnaps = includeQuality
+      ? await qualityIndicator.computeBotsQuality(bots)
+      : bots.map((b) => qualityIndicator.getCachedOnly(b) || {});
+    // เพิ่ม totalCapital virtual + today/month stats + price/EMA indicator + volatility snapshot
+    const enriched = bots.map((b, idx) => {
       const t = todayMap.get(String(b._id)) || { todayTrades: 0, todayPnl: 0 };
       const m = monthMap.get(String(b._id)) || { monthTrades: 0, monthPnl: 0 };
       const indicator = computeBotIndicator(b);
+      const vol = volSnapshots[idx] || {};
+      const q = qualitySnaps[idx] || {};
       return {
         ...b,
         totalCapital: (b.capitalPerTrade || 0) * (b.maxTrades || 0),
@@ -235,10 +265,167 @@ router.get('/', requireAuth, async (req, res) => {
         emaGapPct: indicator.emaGapPct,
         emaState: indicator.emaState,
         emaCloses: indicator.closes, // last 20 closes for client EMA seed
+        // 2026-07-31: volatility snapshot (for expand-mode tiles)
+        volKcMinPct: vol.kcMinPct ?? null,
+        volKcMinPctDisplay: vol.kcMinPctDisplay ?? null,
+        volSuggestedTpPct: vol.suggestedTpPct ?? null,
+        volTrendState: vol.trendState ?? null,
+        volTrendTF: vol.trendTF ?? null,
+        volTpOverridden: !!vol.tpOverridden,
+        volRawSuggestedTpPct: vol.rawSuggestedTpPct ?? null,
+        volFeeBufferPct: vol.feeBufferPct ?? null,
+        volQuoteVolume24h: vol.quoteVolume24h ?? null,
+        volQuoteVolume24hDisplay: vol.quoteVolume24hDisplay ?? null,
+        volOk: !!vol.ok,
+        volError: vol.error || null,
+        volCached: !!vol.cached,
+        volMs: vol.ms ?? null,
+        // FIX-2026-08-01: Bot Quality Indicator flat fields (mirror vol* pattern)
+        qualityScore: q.score ?? null,
+        qualityColor: q.color || 'gray',
+        qualityUpdatedAt: q.updatedAt || null,
+        qualityCached: !!q.cached,
+        qualityEnabled: q.enabled !== false,
       };
     });
     res.json({ bots: enriched });
   } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── GET /api/bots/positions ───────────────────────────
+// 2026-07-30: Aggregate ALL open positions across every bot
+//   - filter by 7-state open set (ตรงกับ aggregateActivePositionsPerBot() ที่ line 107)
+//   - enrich ด้วย bot name + retryMax + currentPrice จาก klineCache
+//   - return { asOf, count, totalCostUsdt, totalUnrealizedUsdt, positions: [...] }
+//   ใช้ในหน้า /bots.html สำหรับ Open Positions tile + modal รายละเอียด
+// IMPORTANT: declare BEFORE /:id route เพื่อหลีกเลี่ยง Express match "positions" เป็น id
+const OPEN_POSITIONS_STATES_FOR_API = ['placed', 'partial_wait', 'filled', 'retrying', 'holding', 'selling', 'stopping'];
+
+router.get('/positions', requireAuth, async (req, res) => {
+  try {
+    // FIX-2026-08-03: ?fresh=1 — bypass klineCache (in-memory, may be stale when WS dropped)
+    //   and fetch latest bookTicker per unique symbol directly from Binance REST.
+    //   ใช้ตอน user กดปุ่ม Refresh ใน Open Positions modal (หน้า /bots.html)
+    //   - ลด impact: ใช้ bookTicker (weight=2/symbol) แทน get24hr (weight=2/symbol) → same weight
+    //   - dedupe by symbol → 1 Binance call ต่อ symbol ไม่ใช่ต่อ position
+    //   - เก็บ fresh price ใน Map<symbol, midPrice> แล้วใช้แทน klineCache snapshot
+    const freshMode = req.query.fresh === '1' || req.query.fresh === 'true';
+    let freshPriceMap = null;
+    if (freshMode) {
+      freshPriceMap = new Map();
+    }
+    const trades = await Trade.find({ state: { $in: OPEN_POSITIONS_STATES_FOR_API } })
+      .sort({ createdAt: -1 })
+      .limit(200)
+      .lean();
+    if (trades.length === 0) {
+      return res.json({ asOf: new Date().toISOString(), count: 0, totalCostUsdt: 0, totalUnrealizedUsdt: 0, positions: [] });
+    }
+    const botIds = [...new Set(trades.map((t) => String(t.botId)))];
+    const bots = await Bot.find({ _id: { $in: botIds } }).select('_id name symbol timeframe retryMax').lean();
+    const botMap = new Map(bots.map((b) => [String(b._id), b]));
+
+    // FIX-2026-08-03: fetch fresh bookTicker per unique symbol (Promise.all — parallel)
+    //   - ใช้ midPrice = (bidPrice + askPrice) / 2 (bookTicker ไม่มี lastPrice)
+    //   - ถ้า fetch fail → ใช้ klineCache fallback (เดิม) → PnL ไม่พัง
+    //   - mark freshFailedSymbols ใน response เพื่อ UI แสดง warning ถ้าจำเป็น
+    let freshFailedSymbols = [];
+    if (freshMode) {
+      const uniqueSymbols = [...new Set(trades.map((t) => t.symbol))];
+      const settled = await Promise.allSettled(
+        uniqueSymbols.map(async (sym) => {
+          const ticker = await binanceRest.getBookTicker(sym);
+          const bid = parseFloat(ticker.bidPrice);
+          const ask = parseFloat(ticker.askPrice);
+          if (!Number.isFinite(bid) || !Number.isFinite(ask) || bid <= 0 || ask <= 0) {
+            throw new Error(`bookTicker invalid for ${sym}`);
+          }
+          return { sym, midPrice: (bid + ask) / 2 };
+        })
+      );
+      for (let i = 0; i < settled.length; i += 1) {
+        const s = settled[i];
+        const sym = uniqueSymbols[i];
+        if (s.status === 'fulfilled' && s.value && Number.isFinite(s.value.midPrice)) {
+          freshPriceMap.set(sym, s.value.midPrice);
+        } else {
+          freshFailedSymbols.push(sym);
+          logger.warn({ symbol: sym, err: s.reason && s.reason.message }, 'positions ?fresh=1 — bookTicker fetch failed, will fallback to klineCache');
+        }
+      }
+    }
+
+    const positions = trades.map((t) => {
+      const bot = botMap.get(String(t.botId)) || {};
+      // price resolution priority:
+      //   1. freshMode + freshPriceMap → midPrice from Binance bookTicker (authoritative)
+      //   2. klineCache.getCurrent() → WS kline (fast but may be stale)
+      //   3. buyPrice fallback (PnL = 0)
+      let currentPrice = 0;
+      let priceSource = 'klineCache';
+      if (freshMode && freshPriceMap && freshPriceMap.has(t.symbol)) {
+        currentPrice = freshPriceMap.get(t.symbol);
+        priceSource = 'binance-bookTicker';
+      } else {
+        const current = klineCache.getCurrent(t.symbol, t.timeframe);
+        currentPrice = current ? parseFloat(current.close) : (Number(t.buyPrice) || 0);
+        priceSource = current ? 'klineCache' : 'buyPrice';
+      }
+      const qty = Number(t.buyQty) || 0;
+      const entry = Number(t.buyPrice) || 0;
+      const cost = Number(t.buyQuoteQty) || (entry * qty);
+      const unrealizedUsdt = (currentPrice - entry) * qty;
+      return {
+        tradeId: String(t._id),
+        botId: String(t.botId),
+        botName: bot.name || bot.symbol || '',
+        symbol: t.symbol,
+        timeframe: t.timeframe,
+        state: t.state,
+        buyOrderId: t.buyOrderId,
+        buyPrice: t.buyPrice,
+        buyQty: t.buyQty,
+        buyQuoteQty: t.buyQuoteQty,
+        buyFilledAt: t.buyFilledAt,
+        buyPlacedAt: t.buyPlacedAt,
+        targetSellPrice: t.targetSellPrice,
+        sellOrderId: t.sellOrderId,
+        retryCount: t.retryCount ?? 0,
+        botRetryMax: bot.retryMax ?? 1,
+        error: t.error || '',
+        // FIX-2026-08-01: SL-armed flags (F1) — exposed for position card badge (🛡️ Au)
+        //   - useStopLossOnUKC=true = trader._autoArmStopLossOnUKC armed (loss>10% + age>4h)
+        //   - autoArmedAt = timestamp when armed (audit)
+        useStopLossOnUKC: t.useStopLossOnUKC === true,
+        autoArmedAt: t.autoArmedAt || null,
+        createdAt: t.createdAt,
+        currentPrice,
+        priceSource, // FIX-2026-08-03: 'binance-bookTicker' | 'klineCache' | 'buyPrice' — exposed for UI badge
+        _costUsdt: cost,
+        _unrealizedUsdt: unrealizedUsdt,
+      };
+    });
+    const totalCost = positions.reduce((s, p) => s + (p._costUsdt || 0), 0);
+    const totalUnrealized = positions.reduce((s, p) => s + (p._unrealizedUsdt || 0), 0);
+    res.json({
+      asOf: new Date().toISOString(),
+      count: positions.length,
+      totalCostUsdt: totalCost,
+      totalUnrealizedUsdt: totalUnrealized,
+      // FIX-2026-08-03: ?fresh=1 metadata — UI ใช้แสดง badge "Binance" vs "cache"
+      fresh: freshMode,
+      priceSources: {
+        binance: positions.filter((p) => p.priceSource === 'binance-bookTicker').length,
+        klineCache: positions.filter((p) => p.priceSource === 'klineCache').length,
+        buyPrice: positions.filter((p) => p.priceSource === 'buyPrice').length,
+      },
+      freshFailedSymbols,
+      positions: positions.map(({ _costUsdt, _unrealizedUsdt, ...p }) => p),
+    });
+  } catch (err) {
+    logger.error({ err: err.message }, 'list open positions failed');
     res.status(500).json({ error: err.message });
   }
 });
@@ -249,6 +436,13 @@ router.get('/:id', requireAuth, async (req, res) => {
     const bot = await Bot.findById(req.params.id).lean();
     if (!bot) return res.status(404).json({ error: 'Bot not found' });
     const indicator = computeBotIndicator(bot);
+    // FIX-2026-08-01: enrich with Bot Quality Indicator fields (mirror vol* pattern)
+    let q = {};
+    try {
+      q = await qualityIndicator.computeBotQuality(bot);
+    } catch (qErr) {
+      logger.warn({ botId: String(bot._id), err: qErr.message }, 'bot: qualityIndicator.computeBotQuality failed (non-fatal)');
+    }
     res.json({
       bot: {
         ...bot,
@@ -262,9 +456,43 @@ router.get('/:id', requireAuth, async (req, res) => {
         emaGapPct: indicator.emaGapPct,
         emaState: indicator.emaState,
         emaCloses: indicator.closes,
+        // FIX-2026-08-01: Bot Quality Indicator flat fields
+        qualityScore: q.score ?? null,
+        qualityColor: q.color || 'gray',
+        qualityUpdatedAt: q.updatedAt || null,
+        qualityCached: !!q.cached,
+        qualityEnabled: q.enabled !== false,
       },
     });
   } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── GET /api/bots/:id/quality ────────────────────────
+// FIX-2026-08-01: full breakdown for the Quality Indicator modal
+//   - 4 criteria details (value + threshold + pass + extras)
+//   - works even when enabled=false (returns enabled:false, breakdown:null)
+//   - ไม่ผ่าน per-bot cache (modal ต้องการข้อมูลสด — bypass TTL by using computeBotQuality)
+//     (computeBotQuality เองใช้ cache 5min; modal เปิดเร็วๆนี้จะได้ cache hit ตามธรรมชาติ)
+router.get('/:id/quality', requireAuth, async (req, res) => {
+  try {
+    const bot = await Bot.findById(req.params.id).lean();
+    if (!bot) return res.status(404).json({ error: 'Bot not found' });
+    const q = await qualityIndicator.computeBotQuality(bot);
+    res.json({
+      botId: String(bot._id),
+      symbol: bot.symbol,
+      timeframe: bot.timeframe,
+      enabled: q.enabled,
+      score: q.score,
+      color: q.color,
+      updatedAt: q.updatedAt,
+      cached: q.cached,
+      breakdown: q.breakdown || null,
+    });
+  } catch (err) {
+    logger.error({ err: err.message }, 'GET /api/bots/:id/quality failed');
     res.status(500).json({ error: err.message });
   }
 });
@@ -301,6 +529,15 @@ router.post('/', requireAuth, requireBotActionPassword, async (req, res) => {
       return res.status(400).json({ error: `Symbol validation failed: ${err.message}` });
     }
 
+    // FIX-2026-08-03: validate Martingale requires DCA mode (Martingale เป็น DCA-only strategy)
+    //   - ป้องกัน Martingale ถูกเปิดโดยไม่ตั้งใจ (e.g. client bug, manual API call)
+    //   - reject early ก่อน Bot.create เพื่อไม่ให้เกิด bot doc ครึ่งๆ
+    if (data.martingaleEnabled === true && data.dcaEnabled !== true) {
+      return res.status(400).json({
+        error: 'martingaleEnabled requires dcaEnabled=true (Martingale is a DCA-mode-only strategy)',
+      });
+    }
+
     const bot = await Bot.create({
       name: data.name || `${symbol} ${timeframe}`,
       symbol,
@@ -308,6 +545,19 @@ router.post('/', requireAuth, requireBotActionPassword, async (req, res) => {
       capitalPerTrade: parseFloat(data.capitalPerTrade ?? defaults.capitalPerTrade),
       maxTrades: parseInt(data.maxTrades ?? defaults.maxTrades, 10),
       tpPercent: parseFloat(data.tpPercent ?? defaults.tpPercent),
+      // FIX-2026-08-02: DCA + BEP stack mode (opt-in, default off — backward compatible)
+      //   - false (default) → พฤติกรรมเดิม 1 BUY → 1 SELL (no change)
+      //   - true → 1 บอท = 1 open DCA stack, S1 แต่ละครั้งจะเพิ่ม layer เข้า stack
+      //   - dcaMaxLayers: จำนวน layer สูงสุด (default 3, range 1-100)
+      dcaEnabled: data.dcaEnabled === true,
+      dcaMaxLayers: Math.min(100, Math.max(1, parseInt(data.dcaMaxLayers ?? 3, 10))),
+      // FIX-2026-08-03: DCA + Martingale sizing (opt-in, default off — backward compatible 100%)
+      //   - martingaleEnabled requires dcaEnabled=true (validated below)
+      //   - layer N notional = capitalPerTrade × mult^(N-1), capped by martingaleMaxLayerNotional
+      //   - ปลอดภัย: ไม่มีบอทไหนถูกบังคับ Martingale อัตโนมัติ
+      martingaleEnabled: data.martingaleEnabled === true,
+      martingaleMultiplier: Math.min(3, Math.max(1, parseFloat(data.martingaleMultiplier ?? 1.5))),
+      martingaleMaxLayerNotional: Math.min(10000, Math.max(1, parseFloat(data.martingaleMaxLayerNotional ?? 100))),
       // FIX-2026-07-24: parseFloat เพื่อรองรับทศนิยม (0.5 = 30 วินาที)
       // FIX-2026-07-25: clamp 0.1..60 ตาม schema (mirror PUT route)
       retryTimeMin: Math.min(60, Math.max(0.1, parseFloat(data.retryTimeMin ?? defaults.retryTimeMin))),
@@ -316,17 +566,64 @@ router.post('/', requireAuth, requireBotActionPassword, async (req, res) => {
       kcMult: Math.min(5, Math.max(0.5, parseFloat(data.kcMult ?? 1.5))),
       // FIX-2026-07-24: minSpreadTicks (0..10, default 1) — per-bot spread tolerance
       minSpreadTicks: Math.min(10, Math.max(0, parseInt(data.minSpreadTicks ?? 1, 10))),
+      // FIX-2026-07-25: suggestTpWindow (30..1000, default 500) — bars for Min %KC calc
+      suggestTpWindow: Math.min(1000, Math.max(30, parseInt(data.suggestTpWindow ?? 500, 10))),
       // FIX-2026-07-24: s1OnlyDown (default false) — skip bg 2→1 (ซื้อตอนราคาสูง)
       s1OnlyDown: data.s1OnlyDown === true,
       // FIX-2026-07-25: xs1Enabled (default true) — per-bot XS1 anti-dump gate toggle
       //   - true (default): skip S1 เมื่อ candle-wide dump pattern
       //   - false: ใช้สัญญาณดั้งเดิม (ไม่ skip)
       xs1Enabled: data.xs1Enabled !== false,
+      // FIX-2026-08-01: cbEnabled (default true) — per-bot Circuit-breaker (CB) panic-sell toggle — เดิมชื่อ sls1Enabled
+      //   - true (default): panic-close ALL positions เมื่อ 3 แท่งติด close<lowerKC + open<lowerKC + แดง
+      //   - false: ไม่ panic-close (เสี่ยงขาดทุนต่อถ้ากราฟไหล)
+      cbEnabled: data.cbEnabled !== false,
+      // FIX-2026-08-01: safeTradeEnabled (default true) — per-bot safe-trade filter toggle
+      //   - true (default): ก่อนวาง BUY ให้เช็ค super-upper TF (4h/1d/1w ตาม bot TF) ว่าเป็นแท่งเขียว/เหนือ EMA20
+      //   - false: ซื้อทันที (พฤติกรรมเดิม)
+      safeTradeEnabled: data.safeTradeEnabled !== false,
+      // FIX-2026-08-01: autoPauseEnabled (default true) — per-bot auto-pause on low Min-%KC toggle
+      //   - true (default): ทุก 5 min ตรวจ Min-%KC(30 bars) — ถ้า < autoPauseMinKcPct → set enabled=false + auto-resume เมื่อกลับมา
+      //   - false: ไม่ตรวจ (พฤติกรรมเดิม)
+      autoPauseEnabled: data.autoPauseEnabled !== false,
+      autoPauseMinKcPct: Math.min(50, Math.max(0.1, parseFloat(data.autoPauseMinKcPct ?? 2))),
+      // FIX-2026-07-31: autoArmStopLossOnUKC (default true) — per-bot auto-arm SL-on-UKC toggle
+      //   - true (default): auto-arm trade.useStopLossOnUKC=true เมื่อ position loss >10% + age >4h
+      //   - false: ไม่ auto-arm (SL-on-UKC จะไม่ trigger แม้ bot.stopLossOnUpperKC=true)
+      autoArmStopLossOnUKC: data.autoArmStopLossOnUKC !== false,
+      // FIX-2026-07-31: tpTrendMultiplier (default 2, clamp 1..10) — TP ×N when upper-TF trend=upper
+      //   - 1 = off (no multiplier)
+      //   - 2 = double (default: 0.2% → 0.4%)
+      tpTrendMultiplier: Math.min(10, Math.max(1, parseFloat(data.tpTrendMultiplier ?? 2))),
+      // FIX-2026-08-01: tpTrendEnabled (per-bot toggle, default true)
+      //   - true → คูณ tpPercent ด้วย tpTrendMultiplier เมื่อ upper-TF trend=upper
+      //   - false → ใช้ tpPercent ตรงๆ (ไม่สนใจ trend)
+      tpTrendEnabled: data.tpTrendEnabled !== false,
       stopLossOnUpperKC: data.stopLossOnUpperKC === true, // FIX-2026-07-23: stop-loss toggle
       autoUpdateTp: data.autoUpdateTp === true, // FIX-2026-07-23: TP auto-update toggle
-      enabled: false,
-      status: 'idle',
+      // FIX-2026-07-31: รับ enabled จาก client — ถ้า true → enable ทันทีหลัง create
+      //   - default: false (เดิม) — preserve current behavior
+      //   - enabled: true ถ้า client ส่ง data.enabled === true (atomic create+enable ใน 1 round-trip)
+      enabled: data.enabled === true,
+      status: data.enabled === true ? 'starting' : 'idle',
     });
+
+    // FIX-2026-07-31: atomic auto-enable — ถ้า enabled=true ให้เริ่มเทรดทันที
+    //   - ต้อง await enableBot เพื่อให้แน่ใจว่า trader spawn สำเร็จก่อนตอบ response
+    //   - ถ้า enable ล้มเหลว → คืน 201 + warning (bot ถูกสร้างแล้ว แต่ยังไม่ได้ enable)
+    if (data.enabled === true) {
+      try {
+        const enabledBot = await botManager.enableBot(bot._id);
+        return res.status(201).json({ bot: enabledBot, autoEnabled: true });
+      } catch (err) {
+        logger.warn({ botId: String(bot._id), err: err.message }, 'create bot: auto-enable failed (bot saved but trader not started)');
+        return res.status(201).json({
+          bot,
+          autoEnabled: false,
+          autoEnableError: err.message,
+        });
+      }
+    }
 
     res.status(201).json({ bot });
   } catch (err) {
@@ -342,12 +639,34 @@ router.put('/:id', requireAuth, async (req, res) => {
     if (!bot) return res.status(404).json({ error: 'Bot not found' });
 
     const data = req.body || {};
-    const allowed = ['name', 'capitalPerTrade', 'maxTrades', 'tpPercent', 'retryTimeMin', 'retryMax', 'timeframe', 'stopLossOnUpperKC', 'autoUpdateTp', 'kcMult', 'minSpreadTicks', 's1OnlyDown', 'xs1Enabled', 'suggestTpWindow'];
+    const allowed = ['name', 'capitalPerTrade', 'maxTrades', 'tpPercent', 'retryTimeMin', 'retryMax', 'timeframe', 'stopLossOnUpperKC', 'autoUpdateTp', 'kcMult', 'minSpreadTicks', 's1OnlyDown', 'xs1Enabled', 'cbEnabled', 'safeTradeEnabled', 'autoPauseEnabled', 'autoPauseMinKcPct', 'suggestTpWindow', 'autoArmStopLossOnUKC', 'tpTrendMultiplier', 'tpTrendEnabled', 'dcaEnabled', 'dcaMaxLayers', 'martingaleEnabled', 'martingaleMultiplier', 'martingaleMaxLayerNotional'];
 
     for (const k of allowed) {
       if (data[k] !== undefined) {
         if (k === 'capitalPerTrade' || k === 'tpPercent' || k === 'kcMult') {
           bot[k] = parseFloat(data[k]);
+        } else if (k === 'tpTrendMultiplier') {
+          // FIX-2026-07-31 (F2): TP ×N multiplier clamp 1..10
+          bot[k] = Math.min(10, Math.max(1, parseFloat(data[k])));
+        } else if (k === 'tpTrendEnabled') {
+          // FIX-2026-08-01: per-bot toggle for TP trend multiplier (default true)
+          bot[k] = data[k] === true || data[k] === 'true';
+        } else if (k === 'dcaEnabled') {
+          // FIX-2026-08-02: DCA mode toggle (default false = backward compatible)
+          //   - ไม่ rewrite open trade (existing ใช้ trade.isDcaStack เป็น defensive signal)
+          bot[k] = data[k] === true || data[k] === 'true';
+        } else if (k === 'dcaMaxLayers') {
+          // FIX-2026-08-02: DCA max layers (1-100, integer)
+          bot[k] = Math.min(100, Math.max(1, parseInt(data[k], 10)));
+        } else if (k === 'martingaleEnabled') {
+          // FIX-2026-08-03: DCA + Martingale toggle (default false — backward compat 100%)
+          bot[k] = data[k] === true || data[k] === 'true';
+        } else if (k === 'martingaleMultiplier') {
+          // FIX-2026-08-03: Martingale multiplier (1.0..3.0, default 1.5)
+          bot[k] = Math.min(3, Math.max(1, parseFloat(data[k])));
+        } else if (k === 'martingaleMaxLayerNotional') {
+          // FIX-2026-08-03: Martingale per-layer notional cap (1..10000 USDT, default 100)
+          bot[k] = Math.min(10000, Math.max(1, parseFloat(data[k])));
         } else if (k === 'maxTrades' || k === 'retryTimeMin' || k === 'retryMax' || k === 'minSpreadTicks' || k === 'suggestTpWindow') {
           // FIX-2026-07-24: minSpreadTicks clamp 0..10
           // FIX-2026-07-25: retryTimeMin ต้อง parseFloat (รองรับ 0.1..60) ไม่ใช่ parseInt — เดิมใช้ parseInt ตัดทศนิยมทิ้ง → "0.1" กลายเป็น 0 → validation fail
@@ -373,6 +692,18 @@ router.put('/:id', requireAuth, async (req, res) => {
       return res.status(400).json({ error: `Invalid timeframe: ${bot.timeframe}` });
     }
 
+    // FIX-2026-08-03: Martingale requires DCA (post-merge check — effective state after this PUT)
+    //   - effectiveMartingale = data.martingaleEnabled ?? existing martingaleEnabled
+    //   - effectiveDca = data.dcaEnabled ?? existing dcaEnabled
+    //   - reject ถ้าจะเปิด Martingale แต่ DCA ปิด (ทั้งกรณี enable ใหม่ + กรณี DCA ถูก disable แต่ลืม Martingale)
+    const effectiveDca = data.dcaEnabled !== undefined ? (data.dcaEnabled === true || data.dcaEnabled === 'true') : bot.dcaEnabled === true;
+    const effectiveMartingale = data.martingaleEnabled !== undefined ? (data.martingaleEnabled === true || data.martingaleEnabled === 'true') : bot.martingaleEnabled === true;
+    if (effectiveMartingale && !effectiveDca) {
+      return res.status(400).json({
+        error: 'martingaleEnabled requires dcaEnabled=true (Martingale is a DCA-mode-only strategy)',
+      });
+    }
+
     // validate symbol (ไม่ให้แก้ symbol ใน v1 - ถ้าต้องการ ลบแล้วสร้างใหม่)
     try {
       await symbolInfo.loadSymbol(bot.symbol);
@@ -387,6 +718,24 @@ router.put('/:id', requireAuth, async (req, res) => {
     }
 
     await bot.save();
+
+    // 2026-07-31: invalidate per-bot volatility snapshot cache เมื่อ timeframe / suggestTpWindow เปลี่ยน
+    //   - ของเดิม: cache key รวม timeframe+window → ถ้าแก้แล้ว key เปลี่ยน entry เก่าจะถูกทิ้งเองตอน TTL expire
+    //   - เรียก invalidate เพื่อล้างทันที ลด confusion ตอน user แก้ window แล้วอยากเห็นค่าใหม่ทันที
+    if (data.timeframe !== undefined || data.suggestTpWindow !== undefined) {
+      try {
+        volatilityForBot.invalidate(bot.symbol, bot.timeframe);
+      } catch (_) { /* non-fatal */ }
+    }
+
+    // FIX-2026-08-01: invalidate per-bot Quality Indicator cache เมื่อ timeframe เปลี่ยน
+    //   - kcMult / s1OnlyDown / xs1Enabled / cbEnabled changes ก็ควร recompute — แต่ใช้ key เดิม (symbol+tf)
+    //     ดังนั้น invalidate แค่ครั้งเดียวตอน PUT พอ (next compute จะอ่าน bot.kcMult ใหม่)
+    if (data.timeframe !== undefined || data.kcMult !== undefined) {
+      try {
+        qualityIndicator.invalidate(bot.symbol, bot.timeframe);
+      } catch (_) { /* non-fatal */ }
+    }
 
     // FIX-2026-07-24: emit bot:updated เพื่อให้ trader.js hot-reload tunable fields
     //   (kcMult, s1OnlyDown, minSpreadTicks, ...) โดยไม่ต้อง restart
@@ -463,6 +812,27 @@ router.post('/:id/clear-error', requireAuth, async (req, res) => {
     const bot = await Bot.findById(req.params.id).lean();
     eventBus.emit('bot:updated', { botId: req.params.id });
     logger.info({ botId: req.params.id.toString() }, 'bot: clear-error — lastError cleared by user');
+    res.json({ ok: true, bot });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── POST /api/bots/:id/clear-warning ──────────────────
+// FIX-2026-08-01: ผู้ใช้กด × ปิด warning banner (1h latched alert) ได้เอง
+//   - clear warning + warningAt fields ใน DB
+//   - ไม่เปลี่ยน bot.status (warning = informational overlay, ไม่ใช่ error state)
+//   - ส่ง bot:updated WS event เพื่อให้ dashboard refresh
+router.post('/:id/clear-warning', requireAuth, async (req, res) => {
+  try {
+    const upd = await Bot.updateOne(
+      { _id: req.params.id },
+      { $set: { warning: '', warningAt: null } }
+    );
+    if (upd.matchedCount === 0) return res.status(404).json({ error: 'Bot not found' });
+    const bot = await Bot.findById(req.params.id).lean();
+    eventBus.emit('bot:updated', { botId: req.params.id });
+    logger.info({ botId: req.params.id.toString() }, 'bot: clear-warning — warning cleared by user');
     res.json({ ok: true, bot });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -552,7 +922,7 @@ router.post('/suggest-tp', requireAuth, async (req, res) => {
     const netSuggestedTpPct = rawSuggestedTpPct == null
       ? null
       : Math.max(0, rawSuggestedTpPct - feeBufferPct);
-    // FIX-2026-07-28: auto-floor — ถ้า NET TP < 0.1% → override เป็น 0.111% (single source of truth จาก tpUpdater)
+    // FIX-2026-08-02: auto-floor — ถ้า NET TP < 0.281% → override เป็น 0.281% (single source of truth จาก tpUpdater)
     const floored = tpUpdater.applyMinNetTpFloor(netSuggestedTpPct);
     // FIX-2026-07-23: format TP ให้เป็นทศนิยม 3 ตำแหน่ง โดยหลักพัน (ตำแหน่งที่ 3) ต้องเป็น 1 เสมอ
     //   - floor ทศนิยมที่ 2 แล้ว +0.001 → output อยู่ในรูป x.xx1 เสมอ (หลีกเลี่ยง TP = 0.350 vs 0.351 แล้วเทียบไม่ตรง)
@@ -808,4 +1178,215 @@ router.get('/:id/details', requireAuth, async (req, res) => {
   }
 });
 
+// FIX-2026-08-01: Master Config — bulk-update หลายบอทพร้อมกัน (clobber mode per user choice)
+//   - body: { botIds: [string], settings: { ... } }
+//   - apply fields ทั้งหมดใน settings ไปยังทุกบอทที่เลือก (whitelist)
+//   - invalidate cache + emit bot:updated สำหรับแต่ละบอท
+router.post('/bulk-update', requireAuth, async (req, res) => {
+  try {
+    const { botIds, settings } = req.body || {};
+    if (!Array.isArray(botIds) || botIds.length === 0) {
+      return res.status(400).json({ error: 'botIds must be a non-empty array' });
+    }
+    if (!settings || typeof settings !== 'object' || Array.isArray(settings)) {
+      return res.status(400).json({ error: 'settings must be an object' });
+    }
+    const allowed = [
+      'capitalPerTrade', 'maxTrades', 'tpPercent', 'retryTimeMin', 'retryMax',
+      'timeframe', 'stopLossOnUpperKC', 'autoUpdateTp', 'kcMult', 'minSpreadTicks',
+      's1OnlyDown', 'xs1Enabled', 'cbEnabled', 'safeTradeEnabled',
+      'autoPauseEnabled', 'autoPauseMinKcPct',
+      'suggestTpWindow', 'autoArmStopLossOnUKC', 'tpTrendMultiplier', 'tpTrendEnabled',
+      'dcaEnabled', 'dcaMaxLayers',
+      // FIX-2026-08-03: Martingale fields (Master Config support)
+      'martingaleEnabled', 'martingaleMultiplier', 'martingaleMaxLayerNotional',
+    ];
+    const update = {};
+    for (const k of allowed) {
+      if (k in settings) update[k] = settings[k];
+    }
+    if (Number.isFinite(update.autoPauseMinKcPct)) update.autoPauseMinKcPct = Math.max(0.1, Math.min(50, update.autoPauseMinKcPct));
+    if (Number.isFinite(update.tpPercent)) update.tpPercent = Math.max(0.1, Math.min(100, update.tpPercent));
+    if (Number.isFinite(update.kcMult)) update.kcMult = Math.max(0.5, Math.min(5, update.kcMult));
+    if (Number.isFinite(update.capitalPerTrade)) update.capitalPerTrade = Math.max(0.00000001, update.capitalPerTrade);
+    // FIX-2026-08-02: DCA field validation
+    if ('dcaEnabled' in update) update.dcaEnabled = update.dcaEnabled === true || update.dcaEnabled === 'true';
+    if (Number.isFinite(update.dcaMaxLayers)) update.dcaMaxLayers = Math.max(1, Math.min(100, Math.floor(update.dcaMaxLayers)));
+    // FIX-2026-08-03: Martingale field validation
+    if ('martingaleEnabled' in update) update.martingaleEnabled = update.martingaleEnabled === true || update.martingaleEnabled === 'true';
+    if (Number.isFinite(update.martingaleMultiplier)) update.martingaleMultiplier = Math.max(1, Math.min(3, update.martingaleMultiplier));
+    if (Number.isFinite(update.martingaleMaxLayerNotional)) update.martingaleMaxLayerNotional = Math.max(1, Math.min(10000, update.martingaleMaxLayerNotional));
+
+    // FIX-2026-08-03: bulk-update Martingale-requires-DCA validation
+    //   - bulk mode applies same settings to many bots — must check that after merge,
+    //     no bot ends up with martingaleEnabled=true but dcaEnabled!=true
+    //   - easiest check: if Martingale is on in update, DCA must also be on in update (or pre-existing)
+    //     → for simplicity, we require both to be set together (user-friendly fail-fast)
+    if (update.martingaleEnabled === true && update.dcaEnabled !== true) {
+      return res.status(400).json({
+        error: 'martingaleEnabled requires dcaEnabled=true in the same bulk-update (Martingale is DCA-only)',
+      });
+    }
+
+    if (Object.keys(update).length === 0) {
+      return res.status(400).json({ error: 'no valid fields in settings' });
+    }
+
+    // FIX-2026-08-02: validate timeframe against Binance-allowed intervals (fail-fast)
+    //   - trading ใน chart.routes.js ใช้ config.binanceIntervals whitelist เดียวกัน
+    if ('timeframe' in update && !config.binanceIntervals.includes(update.timeframe)) {
+      return res.status(400).json({ error: `Invalid timeframe: ${update.timeframe}. Allowed: ${config.binanceIntervals.join(', ')}` });
+    }
+
+    // FIX-2026-08-02: snapshot before-state เพื่อ detect TF change → trader restart
+    //   - เก็บ _id/symbol/timeframe/enabled ของแต่ละบอท (ก่อน update)
+    //   - ใช้ตอน post-update เพื่อตัดสินใจว่าบอทไหนต้อง stopTrader/spawnTrader ใหม่
+    const tfChangeBotIds = [];
+    if ('timeframe' in update) {
+      const before = await Bot.find({ _id: { $in: botIds } }).select('_id symbol timeframe enabled').lean();
+      for (const b of before) {
+        if (b.timeframe !== update.timeframe && b.enabled !== false) {
+          tfChangeBotIds.push(String(b._id));
+        }
+      }
+    }
+
+    const result = await Bot.updateMany({ _id: { $in: botIds } }, { $set: update });
+
+    // FIX-2026-08-02: restart trader สำหรับบอทที่ TF เปลี่ยนจริง + ยัง enabled
+    //   - trader caches interval ใน kline subscription + indicator cache ตอน spawn
+    //     → ถ้าไม่ restart, bot:updated จะ refresh this.bot.timeframe แต่ logic ยังใช้ TF เก่า
+    //   - stopTrader + spawnTrader sequentially ต่อบอท กัน race กับ in-flight signal
+    let traderRestarts = 0;
+    const restartErrors = [];
+    for (const id of tfChangeBotIds) {
+      try {
+        await botManager.stopTrader(id);
+        const fresh = await Bot.findById(id);
+        if (!fresh) continue;
+        await botManager.spawnTrader(fresh);
+        traderRestarts += 1;
+      } catch (err) {
+        restartErrors.push({ botId: id, err: err.message });
+        logger.warn({ botId: id, err: err.message }, 'bulk-update: trader restart failed after TF change');
+      }
+    }
+    if (restartErrors.length > 0) {
+      logger.warn({ count: restartErrors.length, errors: restartErrors }, 'bulk-update: some trader restarts failed');
+    }
+
+    for (const id of botIds) {
+      try { eventBus.emit('bot:updated', { botId: String(id) }); } catch (_) {}
+      try {
+        const b = await Bot.findById(id).lean();
+        if (b) {
+          volatilityForBot.invalidate(b.symbol, b.timeframe);
+          qualityIndicator.invalidate(b.symbol, b.timeframe);
+        }
+      } catch (_) {}
+    }
+    logger.info({
+      botIds: botIds.length,
+      modified: result.modifiedCount,
+      fields: Object.keys(update),
+      traderRestarts,
+    }, 'bots: bulk-update applied');
+    res.json({
+      ok: true,
+      modified: result.modifiedCount,
+      fields: Object.keys(update),
+      traderRestarts,
+      traderRestartErrors: restartErrors,
+    });
+  } catch (err) {
+    logger.error({ err: err.message }, 'bot bulk-update failed');
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// FIX-2026-08-02: admin — invalidate volatilityForBot cache (60s TTL force-expired)
+//   - ใช้เมื่อเปลี่ยน TP-fork constants หรือ floor config (cache เก็บค่าเก่า)
+//   - ไม่ต้องการ body — clear ทั้งหมด
+//   - requireBotActionPassword เพราะเป็น admin-level action (ไม่ใช่ user-flow)
+router.post('/invalidate-volatility-cache', requireAuth, requireBotActionPassword, async (req, res) => {
+  try {
+    let cleared = false;
+    if (typeof volatilityForBot._resetCache === 'function') {
+      volatilityForBot._resetCache();
+      cleared = true;
+    }
+    logger.info('admin: volatilityForBot cache invalidated');
+    res.json({ ok: true, cleared });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// FIX-2026-08-02: Master Config — bulk enable/disable (lifecycle action)
+//   - แยกจาก /bulk-update เพราะเป็น lifecycle action (ต้องใช้ BOT_ACTION_PASSWORD)
+//   - body: { botIds: [string], action: 'enable' | 'disable', password?: string }
+//   - แต่ละ bot ผ่าน botManager.enableBot/disableBot (DB + spawn/stop trader + emit events)
+//   - response: { ok: true, action, results: [{ botId, ok, error? }], succeeded, failed }
+router.post('/bulk-toggle', requireAuth, requireBotActionPassword, async (req, res) => {
+  try {
+    const { botIds, action } = req.body || {};
+    if (!Array.isArray(botIds) || botIds.length === 0) {
+      return res.status(400).json({ error: 'botIds must be a non-empty array' });
+    }
+    if (action !== 'enable' && action !== 'disable') {
+      return res.status(400).json({ error: "action must be 'enable' or 'disable'" });
+    }
+    // cap เพื่อกัน DoS (operator error กด select all + 50 บอท = race risk)
+    if (botIds.length > 100) {
+      return res.status(400).json({ error: 'botIds must be <= 100 per request' });
+    }
+
+    const results = [];
+    let succeeded = 0;
+    let failed = 0;
+    // รัน sequentially เพื่อไม่ให้ trader spawn/in-flight log ปนกัน + กัน Binance weight spike
+    for (const id of botIds) {
+      try {
+        const bot = action === 'enable'
+          ? await botManager.enableBot(id)
+          : await botManager.disableBot(id);
+        results.push({ botId: String(id), ok: true, name: bot.name || bot.symbol });
+        succeeded += 1;
+      } catch (err) {
+        results.push({ botId: String(id), ok: false, error: err.message });
+        failed += 1;
+      }
+    }
+
+    // FIX-2026-08-02: invalidate caches ของทุกบอทที่สำเร็จ (เผื่อ action ในอนาคตมี config-affecting effects)
+    for (const r of results) {
+      if (r.ok) {
+        try {
+          const b = await Bot.findById(r.botId).lean();
+          if (b) {
+            volatilityForBot.invalidate(b.symbol, b.timeframe);
+            qualityIndicator.invalidate(b.symbol, b.timeframe);
+          }
+        } catch (_) { /* ignore — non-fatal */ }
+      }
+    }
+
+    logger.info({
+      action,
+      requested: botIds.length,
+      succeeded,
+      failed,
+    }, 'bots: bulk-toggle applied');
+    res.json({ ok: true, action, succeeded, failed, results });
+  } catch (err) {
+    logger.error({ err: err.message }, 'bot bulk-toggle failed');
+    res.status(500).json({ error: err.message });
+  }
+});
+
 module.exports = router;
+
+// FIX-2026-08-01: start Bot Quality Indicator refresh loop at module load
+//   - เรียก init() ตอน Express require ไฟล์นี้ (=ตอน server start)
+//   - refreshMs/qualityEnabled/thresholds มาจาก AppConfig (reload-able via PUT /config)
+qualityIndicator.init().catch((err) => logger.error({ err: err.message }, 'qualityIndicator.init failed at startup'));

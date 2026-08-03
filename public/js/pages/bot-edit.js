@@ -305,13 +305,14 @@ function render() {
                 <li class="mb-1">✅ <strong>suggest-tp-window</strong> — Min %KC window</li>
                 <li class="mb-1">✅ <strong>XS1, S1-only-down, safe-trade</strong> — per-layer</li>
                 <li class="mb-1">✅ <strong>auto-pause, kcMult, minSpread, retry</strong> — per-layer</li>
+                <li class="mb-1">⚠️ <strong>🎲 Martingale sizing</strong> — opt-in ดูส่วนด้านล่าง</li>
               </ul>
             </div>
             <div class="col-md-6">
               <ul class="list-unstyled mb-0">
                 <li class="mb-1">⚠️ <strong>SL-UKC</strong> — ใช้ <em>stack BEP</em> (ต้องเปิดจาก Classic)</li>
                 <li class="mb-1">⚠️ <strong>autoArm SL-UKC</strong> — gate ต่อ stack (loss&gt;10% + age&gt;4h หลัง layer สุดท้าย)</li>
-                <li class="mb-1">❌ <strong>CB panic-sell</strong> — ปิดอัตโนมัติใน DCA mode</li>
+                <li class="mb-1">❌ <strong>CB panic-sell</strong> — �ปิดอัตโนมัติใน DCA mode</li>
                 <li class="mb-1">❌ <strong>maxTrades</strong> — ไม่ cap DCA (ใช้ dcaMaxLayers แทน)</li>
               </ul>
             </div>
@@ -327,6 +328,64 @@ function render() {
             <li>S1 #3 → <strong>layer 3</strong> BUY 10 USDT @ $80 → BEP=$90 → cancel SELL เดิม, place SELL ใหม่ที่ BEP=$90+TP</li>
             <li>S1 #4 → <strong>skip</strong> (dcaMaxLayersHit) — รอ SELL fill ที่ BEP+TP</li>
           </ol>
+        </div>
+
+        <!-- FIX-2026-08-03: 🎲 Martingale sizing section (DCA-only, opt-in) -->
+        <div class="card border-danger mb-3" id="dca-martingale-section" style="display:${bot.dcaEnabled ? '' : 'none'};">
+          <div class="card-body">
+            <div class="d-flex justify-content-between align-items-center mb-2 flex-wrap gap-2">
+              <strong>🎲 DCA + Martingale sizing</strong>
+              <span class="badge" id="dca-martingale-state-badge">${bot.martingaleEnabled ? 'ON' : 'OFF'}</span>
+            </div>
+            <div class="mb-2">
+              <label class="form-check mb-2">
+                <input type="checkbox" class="form-check-input" id="f-martingale-enabled" ${bot.martingaleEnabled ? 'checked' : ''} />
+                <span class="form-check-label">
+                  เปิดใช้ <strong>Martingale sizing</strong> — layer ถัดไปใหญ่ขึ้นตาม multiplier
+                </span>
+              </label>
+              <small class="text-muted d-block">
+                default <strong>ปิด</strong> (ทุก layer ใช้ capitalPerTrade เท่ากัน) — เปิดแล้ว layer N = capitalPerTrade × multiplier^(N-1)
+              </small>
+            </div>
+
+            <div class="row g-2">
+              <div class="col-md-6 mb-2">
+                <label class="form-label small">Multiplier (×)</label>
+                <input type="number" class="form-control form-control-sm" id="f-martingale-multiplier"
+                       value="${bot.martingaleMultiplier ?? 1.5}" step="0.1" min="1.0" max="3.0" />
+                <small class="text-muted">range 1.0..3.0 (1.5 = balanced, 2.0 = aggressive, 1.0 = เท่ากับ fixed)</small>
+              </div>
+              <div class="col-md-6 mb-2">
+                <label class="form-label small">Per-layer notional cap (USDT)</label>
+                <input type="number" class="form-control form-control-sm" id="f-martingale-max-notional"
+                       value="${bot.martingaleMaxLayerNotional ?? 100}" step="1" min="1" max="10000" />
+                <small class="text-muted">กัน layer สูงๆ ใหญ่เกินไป (default 100)</small>
+              </div>
+            </div>
+
+            <!-- Layer evolution preview -->
+            <div class="alert alert-light small mt-2 mb-0" style="font-size:0.78rem;">
+              <strong>📊 Layer sizing preview</strong>
+              <table class="table table-sm table-borderless mb-0 mt-1" style="font-size:0.78rem;">
+                <thead>
+                  <tr>
+                    <th>Layer</th>
+                    <th class="text-end">Notional (USDT)</th>
+                    <th class="text-end">Cumulative</th>
+                  </tr>
+                </thead>
+                <tbody id="dca-martingale-preview-rows">
+                  <!-- filled by JS -->
+                </tbody>
+              </table>
+            </div>
+
+            <div class="alert alert-warning small mt-2 mb-0" style="font-size:0.78rem;">
+              ⚠️ <strong>Martingale = aggressive sizing.</strong> ใช้ร่วมกับ SL-UKC + autoArm เสมอ —
+              layer ใหญ่ขึ้นแปรผกผันกับ max-loss ถ้าราคาวิ่งต่ำกว่า BEP
+            </div>
+          </div>
         </div>
 
         <!-- FIX-2026-08-03: Backtest quick-link -->
@@ -524,6 +583,68 @@ function render() {
     }
   }
 
+  // FIX-2026-08-03: DCA + Martingale layer preview — shows per-layer notional + cumulative
+  //   - parity with trader._computeDcaLayerNotional (capitalPerTrade × mult^(i-1), capped)
+  function updateDcaMartingalePreview() {
+    const tbody = document.getElementById('dca-martingale-preview-rows');
+    if (!tbody) return;
+    const cap = parseFloat(document.getElementById('f-capital').value) || 0;
+    const layers = Math.min(100, Math.max(1, parseInt(document.getElementById('f-dca-max-layers').value, 10) || 3));
+    const martOn = document.getElementById('f-martingale-enabled').checked;
+    const mult = parseFloat(document.getElementById('f-martingale-multiplier').value) || 1.5;
+    const layerCap = parseFloat(document.getElementById('f-martingale-max-notional').value) || 100;
+    const rows = [];
+    let cumulative = 0;
+    for (let i = 1; i <= layers; i++) {
+      let notional;
+      if (!martOn) {
+        notional = cap;
+      } else {
+        const raw = cap * Math.pow(mult, i - 1);
+        notional = Math.min(raw, layerCap);
+      }
+      cumulative += notional;
+      const cappedTag = (martOn && (cap * Math.pow(mult, i - 1)) > layerCap) ? ' <span class="badge bg-warning">cap</span>' : '';
+      rows.push(
+        `<tr>
+          <td>Layer ${i}</td>
+          <td class="text-end">${notional.toFixed(2)}${cappedTag}</td>
+          <td class="text-end">${cumulative.toFixed(2)}</td>
+        </tr>`
+      );
+    }
+    tbody.innerHTML = rows.join('');
+    // Update badge
+    const badge = document.getElementById('dca-martingale-state-badge');
+    if (badge) badge.textContent = martOn ? 'ON' : 'OFF';
+  }
+
+  // FIX-2026-08-03: show/hide Martingale section when DCA enabled changes
+  function updateDcaMartingaleVisibility() {
+    const dcaOn = document.getElementById('f-dca-enabled').checked;
+    const section = document.getElementById('dca-martingale-section');
+    if (section) section.style.display = dcaOn ? '' : 'none';
+    if (dcaOn) updateDcaMartingalePreview();
+  }
+  // Martingale field listeners
+  ['f-martingale-enabled', 'f-martingale-multiplier', 'f-martingale-max-notional'].forEach((id) => {
+    const el = document.getElementById(id);
+    if (el) el.addEventListener('input', updateDcaMartingalePreview);
+    if (el) el.addEventListener('change', updateDcaMartingalePreview);
+  });
+  // Recompute preview when capital / max-layers change (live)
+  ['f-capital', 'f-dca-max-layers'].forEach((id) => {
+    const el = document.getElementById(id);
+    if (el) el.addEventListener('input', updateDcaMartingalePreview);
+  });
+  // When DCA toggle flips, show/hide Martingale section
+  const _dcaToggleForMartingale = document.getElementById('f-dca-enabled');
+  if (_dcaToggleForMartingale) {
+    _dcaToggleForMartingale.addEventListener('change', updateDcaMartingaleVisibility);
+  }
+  // Initial render
+  updateDcaMartingaleVisibility();
+
   // FIX-2026-08-03: DCA toggle — show confirmation modal when state changes
   function refreshDcaUi({ autoSwitchTab = false } = {}) {
     const dcaOn = document.getElementById('f-dca-enabled').checked;
@@ -698,6 +819,12 @@ async function save(e) {
     // FIX-2026-08-02: DCA + BEP stack mode (opt-in, default off — backward compatible)
     dcaEnabled: document.getElementById('f-dca-enabled').checked,
     dcaMaxLayers: parseInt(document.getElementById('f-dca-max-layers').value, 10) || 3,
+    // FIX-2026-08-03: DCA + Martingale sizing (opt-in, default off — backward compatible 100%)
+    //   - server validates martingaleEnabled requires dcaEnabled=true (400 if violated)
+    //   - default values mirror Bot schema defaults
+    martingaleEnabled: document.getElementById('f-martingale-enabled').checked,
+    martingaleMultiplier: parseFloat(document.getElementById('f-martingale-multiplier').value) || 1.5,
+    martingaleMaxLayerNotional: parseFloat(document.getElementById('f-martingale-max-notional').value) || 100,
   };
   try {
     await API.put(`/api/bots/${botId}`, data);

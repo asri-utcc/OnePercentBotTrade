@@ -40,7 +40,35 @@ const botManager = require('./botManager');
 // Mirror OPEN_TRADE_STATES from bot-detail.js — duplicated to avoid circular require on trader.js
 // FIX-2026-07-23b: เพิ่ม 'stopping' เพื่อให้ manual force-close ทำงานได้ระหว่าง stop-loss atomic-claim window
 //   - ถ้า user กด force-close ขณะ stop-loss กำลัง force-close อยู่ → ทั้งคู่แข่งกัน, ใคร update 'sold' ก่อนชนะ
-const FORCE_OPEN_STATES = ['placed', 'filled', 'holding', 'selling', 'retrying', 'stopping'];
+// FIX-2026-08-02: เพิ่ม 'partial_wait', 'partial_sell_wait' เพื่อรองรับ DCA stack partial states
+const FORCE_OPEN_STATES = ['placed', 'partial_wait', 'filled', 'holding', 'selling', 'retrying', 'partial_sell_wait', 'stopping'];
+
+// FIX-2026-08-02: DCA stack BEP computation (local copy — avoid circular require on trader.js)
+//   - ใช้ใน forceClose เพื่อ derive buyPrice/buyQty จาก stack fields
+function computeStackBEP(trade) {
+  if (Array.isArray(trade.buyLayers) && trade.buyLayers.length > 0) {
+    let totalQty = 0;
+    let totalSpent = 0;
+    for (const layer of trade.buyLayers) {
+      if (!layer || layer.status !== 'FILLED') continue;
+      const p = Number(layer.price);
+      const q = Number(layer.qty);
+      if (!Number.isFinite(p) || !Number.isFinite(q) || q <= 0 || p <= 0) continue;
+      totalQty += q;
+      totalSpent += p * q;
+    }
+    if (totalQty > 0) {
+      return { totalQty, totalSpent, bep: totalSpent / totalQty };
+    }
+  }
+  // Fallback to scalar fields (mirror from _handleDcaBuyFilled)
+  const buyPrice = Number(trade.buyPrice);
+  const buyQty = Number(trade.buyQty);
+  if (Number.isFinite(buyPrice) && Number.isFinite(buyQty) && buyPrice > 0 && buyQty > 0) {
+    return { totalQty: buyQty, totalSpent: buyPrice * buyQty, bep: buyPrice };
+  }
+  return { totalQty: 0, totalSpent: 0, bep: null };
+}
 
 /**
  * Look up free + locked balances for the base asset derived from a USDT symbol.
@@ -112,28 +140,36 @@ async function placeMarketSell(symbol, qty, clientOrderTag) {
  * (e.g. the WS recovered and handleSellFilled ran) the `modifiedCount` is 0
  * and we treat it as a no-op success so we don't double-decrement bot totals.
  */
-async function markTradeSold({ trade, sold, errorNote, reason }) {
+async function markTradeSold({ trade, sold, errorNote, reason, sellReason, sellReasonDetail, sellReasonSource, isDcaStack }) {
+  const setFields = {
+    state: 'sold',
+    sellOrderId: sold.sellOrderId ?? null,
+    sellClientOrderId: sold.sellClientOrderId ?? null,
+    sellPrice: sold.sellPrice ?? null,
+    sellQty: sold.sellQty ?? null,
+    sellQuoteQty: sold.sellQuoteQty ?? null,
+    sellStatus: sold.sellStatus ?? 'FORCED',
+    sellFilledAt: sold.sellFilledAt ?? new Date(),
+    sellPlacedAt: sold.sellPlacedAt ?? new Date(),
+    realizedPnl: sold.realizedPnl ?? null,
+    pnlPercent: sold.pnlPercent ?? null,
+    error: errorNote || '',
+    // FIX-2026-08-01: structured sellReason — caller passes sellReason enum + free-text detail
+    sellReason: sellReason || null,
+    sellReasonDetail: sellReasonDetail || errorNote || null,
+    sellReasonAt: new Date(),
+    sellReasonSource: sellReasonSource || 'forceClose.markTradeSold',
+  };
+  // FIX-2026-08-02: DCA stack — stamp stackClosedAt
+  if (isDcaStack) {
+    setFields.stackClosedAt = new Date();
+  }
   const upd = await Trade.updateOne(
     {
       _id: trade._id,
       state: { $in: FORCE_OPEN_STATES },
     },
-    {
-      $set: {
-        state: 'sold',
-        sellOrderId: sold.sellOrderId ?? null,
-        sellClientOrderId: sold.sellClientOrderId ?? null,
-        sellPrice: sold.sellPrice ?? null,
-        sellQty: sold.sellQty ?? null,
-        sellQuoteQty: sold.sellQuoteQty ?? null,
-        sellStatus: sold.sellStatus ?? 'FORCED',
-        sellFilledAt: sold.sellFilledAt ?? new Date(),
-        sellPlacedAt: sold.sellPlacedAt ?? new Date(),
-        realizedPnl: sold.realizedPnl ?? null,
-        pnlPercent: sold.pnlPercent ?? null,
-        error: errorNote || '',
-      },
-    }
+    { $set: setFields }
   );
   const ok = upd.modifiedCount === 1;
   if (!ok) {
@@ -157,6 +193,24 @@ async function markTradeSold({ trade, sold, errorNote, reason }) {
  */
 async function forceCloseTrade({ trade, bot = null, allowMarketSell = true }) {
   const logCtx = { tradeId: trade._id && trade._id.toString(), symbol: trade.symbol };
+  // FIX-2026-08-02: DCA stack branch — derive qty/buyPrice from stack fields
+  const isDcaStack = trade.isDcaStack === true;
+  let stackBep = null;
+  let stackTotalQty = 0;
+  if (isDcaStack) {
+    const stack = computeStackBEP(trade);
+    stackBep = stack.bep;
+    stackTotalQty = stack.totalQty;
+    if (!stackBep || stackTotalQty <= 0) {
+      return { ok: false, mode: 'none', executedQty: 0, avgSellPrice: null, pnl: 0, error: 'DCA stack missing BEP/qty' };
+    }
+    logger.info({
+      ...logCtx,
+      stackId: trade.stackId?.toString(),
+      stackBep, stackTotalQty,
+      dcaLayerCount: trade.dcaLayerCount,
+    }, 'forceClose: DCA stack detected — using stackBep + stackTotalQty');
+  }
   try {
     if (!trade || !trade._id) {
       return { ok: false, mode: 'none', executedQty: 0, avgSellPrice: null, pnl: 0, error: 'trade missing' };
@@ -214,7 +268,7 @@ async function forceCloseTrade({ trade, bot = null, allowMarketSell = true }) {
         || parseFloat(resp.avgPrice)
         || (parseFloat(resp.cummulativeQuoteQty) / parseFloat(resp.executedQty))
         || 0;
-      const buyPrice = parseFloat(trade.buyPrice) || 0;
+      const buyPrice = isDcaStack ? stackBep : (parseFloat(trade.buyPrice) || 0);
       // MARKET is a taker leg — use taker rate. (The buy was a maker, but we don't
       // store buy fee separate per leg in this minimal helper; for v1 we accept the
       // same fee on both legs and document the approximation.)
@@ -225,6 +279,15 @@ async function forceCloseTrade({ trade, bot = null, allowMarketSell = true }) {
         qty: executed,
         feeRate,
       });
+
+      // FIX-2026-08-02: DCA stack — use dca_stack_force_close reason + stamp stackClosedAt
+      const finalSellReason = isDcaStack ? 'dca_stack_force_close' : 'manual_api_market';
+      const finalSellReasonDetail = isDcaStack
+        ? `manual close via API (DCA stack) — MARKET @ ${avgSell} qty=${executed} stackBep=${stackBep} layers=${trade.dcaLayerCount || 0}`
+        : `manual close via API — MARKET @ ${avgSell} qty=${executed}`;
+      const finalSellReasonSource = isDcaStack
+        ? 'forceClose.forceCloseTrade_dca'
+        : 'forceClose.forceCloseTrade';
 
       const marked = await markTradeSold({
         trade,
@@ -240,8 +303,12 @@ async function forceCloseTrade({ trade, bot = null, allowMarketSell = true }) {
           realizedPnl: pnl.net,
           pnlPercent: pnl.pnlPercent,
         },
-        errorNote: 'force_close: MARKET SELL via API',
+        errorNote: isDcaStack ? 'force_close: DCA stack MARKET SELL via API' : 'force_close: MARKET SELL via API',
         reason: 'market',
+        sellReason: finalSellReason,
+        sellReasonDetail: finalSellReasonDetail,
+        sellReasonSource: finalSellReasonSource,
+        isDcaStack,
       });
 
       if (marked) {
@@ -257,10 +324,23 @@ async function forceCloseTrade({ trade, bot = null, allowMarketSell = true }) {
           }
         );
       }
-      eventBus.emit('trade:update', { tradeId: trade._id, state: 'sold' });
+      eventBus.emit('trade:update', {
+        tradeId: trade._id,
+        botId: trade.botId,
+        state: 'sold',
+        reason: finalSellReason,
+        reasonDetail: finalSellReasonDetail,
+        stackId: isDcaStack ? trade.stackId : undefined,
+        dcaLayerCount: isDcaStack ? (trade.dcaLayerCount || 0) : undefined,
+        stackBep: isDcaStack ? stackBep : undefined,
+        stackTotalQty: isDcaStack ? stackTotalQty : undefined,
+        realizedPnl: pnl.net,
+        pnlPercent: pnl.pnlPercent,
+      });
       eventBus.emit('bot:status', { botId: trade.botId, status: 'idle' });
       logger.info({
         ...logCtx,
+        isDcaStack,
         mode: 'market', executedQty: executed, avgSellPrice: avgSell, pnl: pnl.net, freeQty: resolved.freeQty,
       }, 'forceCloseTrade: MARKET SELL completed');
       return { ok: true, mode: 'market', executedQty: executed, avgSellPrice: avgSell, pnl: pnl.net };
@@ -287,6 +367,15 @@ async function forceCloseTrade({ trade, bot = null, allowMarketSell = true }) {
  */
 async function forceCloseTrade_synthetic({ trade, logCtx, reason }) {
   const now = new Date();
+  // FIX-2026-08-02: DCA stack — use dca_stack_force_close + stamp stackClosedAt
+  const isDcaStack = trade.isDcaStack === true;
+  const finalSellReason = isDcaStack ? 'dca_stack_force_close' : 'manual_api_synthetic';
+  const finalSellReasonDetail = isDcaStack
+    ? `manual close via API (DCA stack, synthetic) — ${reason || 'asset missing'} layers=${trade.dcaLayerCount || 0}`
+    : (reason || 'asset missing on exchange');
+  const finalSellReasonSource = isDcaStack
+    ? 'forceClose.forceCloseTrade_synthetic_dca'
+    : 'forceClose.forceCloseTrade_synthetic';
   const marked = await markTradeSold({
     trade,
     sold: {
@@ -301,8 +390,13 @@ async function forceCloseTrade_synthetic({ trade, logCtx, reason }) {
       realizedPnl: 0,
       pnlPercent: 0,
     },
-    errorNote: `force_close: synthetic close — ${reason}`,
+    errorNote: isDcaStack ? `force_close: DCA stack synthetic close — ${reason}` : `force_close: synthetic close — ${reason}`,
     reason: 'synthetic',
+    // FIX-2026-08-01: structured sellReason — manual close via API (synthetic — asset missing)
+    sellReason: finalSellReason,
+    sellReasonDetail: finalSellReasonDetail,
+    sellReasonSource: finalSellReasonSource,
+    isDcaStack,
   });
   if (marked) {
     await Bot.updateOne(
@@ -313,7 +407,13 @@ async function forceCloseTrade_synthetic({ trade, logCtx, reason }) {
       }
     );
   }
-  eventBus.emit('trade:update', { tradeId: trade._id, state: 'sold' });
+  eventBus.emit('trade:update', {
+    tradeId: trade._id,
+    botId: trade.botId,
+    state: 'sold',
+    reason: 'manual_api_synthetic',
+    reasonDetail: reason || 'asset missing on exchange',
+  });
   eventBus.emit('bot:status', { botId: trade.botId, status: 'idle' });
   logger.warn({ ...logCtx, reason }, 'forceCloseTrade: synthetic close recorded');
   return { ok: true, mode: 'synthetic', executedQty: 0, avgSellPrice: 0, pnl: 0 };

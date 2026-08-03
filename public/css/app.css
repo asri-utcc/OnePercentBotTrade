@@ -304,12 +304,91 @@ a:hover { color: var(--gold-2); text-decoration: none; }
   font-family: var(--font-mono);
 }
 .stat-tile .glyph { position: absolute; right: 0.85rem; top: 0.85rem; font-size: 1.05rem; opacity: 0.55; }
-.stat-tile.is-bull .value { color: var(--bull-1); text-shadow: 0 0 20px rgba(0,229,184,0.25); }
-.stat-tile.is-bear .value { color: var(--bear-1); text-shadow: 0 0 20px rgba(255,77,109,0.25); }
-.stat-tile.is-gold .value { color: var(--gold-1); text-shadow: 0 0 20px rgba(245,184,0,0.25); }
+/* FIX-2026-08-01: alias classes tile-label/tile-sub/tile-value (ใช้ใน pnl.js + bots.js fallback)
+   — global rules (นอกเหนือจาก .bot-card-v2 scope ที่มีอยู่แล้ว)
+   ทำให้ PnL stat tile แสดงผลถูกต้องแม้ใช้ className ตรง ไม่ใช่ .label/.sub */
+.stat-tile .tile-label {
+  display: flex; align-items: center; gap: 0.4rem;
+  font-size: 0.7rem; font-weight: 600;
+  color: var(--text-3);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  margin-bottom: 0.5rem;
+}
+.stat-tile .tile-value {
+  font-family: var(--font-mono);
+  font-size: 1.55rem; font-weight: 700;
+  color: var(--text-1);
+  letter-spacing: -0.01em;
+  line-height: 1.1;
+}
+.stat-tile .tile-sub {
+  margin-top: 0.3rem;
+  font-size: 0.72rem;
+  color: var(--text-3);
+  font-family: var(--font-mono);
+}
+.stat-tile.is-bull {
+  /* FIX-2026-08-01: เพิ่ม gradient bg + accent border (อ่านง่ายขึ้นว่าเป็นกำไร) */
+  background: linear-gradient(135deg, rgba(0,229,184,0.16) 0%, rgba(0,229,184,0.04) 60%, var(--bg-3) 100%);
+  border-color: rgba(0,229,184,0.45);
+}
+.stat-tile.is-bull .value { color: var(--bull-1); text-shadow: 0 0 20px rgba(0,229,184,0.4); }
+.stat-tile.is-bear {
+  /* FIX-2026-08-01: gradient bg + accent border (ขาดทุน — แดงชัดเจน) */
+  background: linear-gradient(135deg, rgba(255,77,109,0.16) 0%, rgba(255,77,109,0.04) 60%, var(--bg-3) 100%);
+  border-color: rgba(255,77,109,0.45);
+}
+.stat-tile.is-bear .value { color: var(--bear-1); text-shadow: 0 0 20px rgba(255,77,109,0.4); }
+.stat-tile.is-gold {
+  /* FIX-2026-08-01: gradient bg + accent border (กลางๆ — Win Rate / Total PnL เมื่อเป็น 0) */
+  background: linear-gradient(135deg, rgba(245,184,0,0.14) 0%, rgba(245,184,0,0.03) 60%, var(--bg-3) 100%);
+  border-color: rgba(245,184,0,0.4);
+}
+.stat-tile.is-gold .value { color: var(--gold-1); text-shadow: 0 0 20px rgba(245,184,0,0.35); }
 .stat-tile.is-info .value { color: var(--info-1); }
 .stat-tile.is-violet .value { color: var(--violet-1); }
+/* FIX-2026-08-01: เพิ่ม .is-flat สำหรับ PnL รวมที่เป็น 0 (อยู่กลางๆ ไม่ใช่ทอง) */
+.stat-tile.is-flat {
+  background: linear-gradient(135deg, rgba(125,158,196,0.12) 0%, rgba(125,158,196,0.03) 60%, var(--bg-3) 100%);
+  border-color: rgba(125,158,196,0.35);
+}
+.stat-tile.is-bull:hover { box-shadow: 0 6px 22px -8px rgba(0,229,184,0.4), var(--shadow-2); }
+.stat-tile.is-bear:hover { box-shadow: 0 6px 22px -8px rgba(255,77,109,0.4), var(--shadow-2); }
+.stat-tile.is-gold:hover { box-shadow: 0 6px 22px -8px rgba(245,184,0,0.4), var(--shadow-2); }
+.stat-tile.is-flat .value { color: var(--text-2); }
+/* FIX-2026-08-01: top-edge accent bar (ดูเร็วขึ้นว่า tile ไหน bull/bear) */
+.stat-tile.is-bull::before,
+.stat-tile.is-bear::before,
+.stat-tile.is-gold::before {
+  content: '';
+  position: absolute; left: 0; right: 0; top: 0; height: 3px;
+  border-radius: var(--radius-md) var(--radius-md) 0 0;
+}
+.stat-tile.is-bull::before { background: linear-gradient(90deg, transparent, var(--bull-1), transparent); }
+.stat-tile.is-bear::before { background: linear-gradient(90deg, transparent, var(--bear-1), transparent); }
+.stat-tile.is-gold::before { background: linear-gradient(90deg, transparent, var(--gold-1), transparent); }
+/* FIX-2026-08-01: THB sub-line (ไอคอน + สีจาง แยกจาก sub line เดิม) */
+.stat-tile .sub-thb {
+  margin-top: 0.18rem; font-size: 0.68rem;
+  color: var(--text-3); font-family: var(--font-mono);
+  letter-spacing: 0.02em;
+  display: flex; align-items: center; gap: 0.25rem;
+}
+.stat-tile.is-bull .sub-thb { color: rgba(0,229,184,0.75); }
+.stat-tile.is-bear .sub-thb { color: rgba(255,77,109,0.75); }
+.stat-tile.is-gold .sub-thb { color: rgba(245,184,0,0.75); }
 .stat-tile .spark { margin-top: 0.45rem; }
+
+/* 2026-07-30: clickable stat tile (เปิด modal) — distinct hover เด่นขึ้นกว่า tile ปกติ */
+.stat-tile.is-clickable { cursor: pointer; user-select: none; }
+.stat-tile.is-clickable:hover {
+  transform: translateY(-2px);
+  border-color: var(--gold-1);
+  box-shadow: 0 6px 22px -6px rgba(245,184,0,0.30), var(--shadow-2);
+}
+.stat-tile.is-clickable:active { transform: translateY(0); }
+
 
 /* sparkline */
 .spark svg { width: 100%; height: 36px; display: block; }
@@ -583,10 +662,11 @@ a:hover { color: var(--gold-2); text-decoration: none; }
   border: 1px solid rgba(148,163,184,0.25);
 }
 
-/* ── 3 Tiles: Price/EMA | Active | Today PnL ─────── */
+/* ── 6 Tiles (3×2): Price/EMA | Active | Today PnL | Min-%KC | TP แนะนำ | 24h vol ─────── */
 .bot-card-v2 .bc-tiles {
   display: grid;
   grid-template-columns: 1.3fr 1fr 1.1fr;
+  grid-template-rows: auto auto;
   gap: 0.55rem;
   margin-bottom: 0.7rem;
 }
@@ -619,6 +699,25 @@ a:hover { color: var(--gold-2); text-decoration: none; }
   background: rgba(255,181,71,0.07);
   box-shadow: inset 0 0 0 1px rgba(255,181,71,0.10);
 }
+/* 2026-07-31: Min-%KC tile — highlight เมื่อ < 1.2% (warn: TP แนะนำจะน้อย / bot อาจ trade ถี่เกินไป) */
+.bot-card-v2 .bc-tile-kcmin.is-low {
+  border-color: rgba(245,184,0,0.55);
+  background: rgba(245,184,0,0.08);
+  box-shadow: inset 0 0 0 1px rgba(245,184,0,0.12);
+}
+.bot-card-v2 .bc-tile-kcmin.is-low .tile-value { color: #f5b800; }
+/* 2026-07-31: TP แนะนำ tile — ใช้ border ปกติ, is-floor ใช้สี warn (เหมือน badge ใน stats) */
+.bot-card-v2 .bc-tile-tpsugg.is-floor {
+  border-color: rgba(245,184,0,0.55);
+  background: rgba(245,184,0,0.08);
+}
+/* 2026-07-31: 24h vol tile — highlight เมื่อ < 1,000,000 USDT (warn: liquidity ต่ำ / slippage เสี่ยง) */
+.bot-card-v2 .bc-tile-vol24h.is-low {
+  border-color: rgba(245,184,0,0.55);
+  background: rgba(245,184,0,0.08);
+  box-shadow: inset 0 0 0 1px rgba(245,184,0,0.12);
+}
+.bot-card-v2 .bc-tile-vol24h.is-low .tile-value { color: #f5b800; }
 
 .bot-card-v2 .tile-label {
   font-size: 0.68rem; color: var(--text-3); text-transform: uppercase;
@@ -690,6 +789,172 @@ a:hover { color: var(--gold-2); text-decoration: none; }
   outline-offset: 2px;
 }
 
+/* ── Coin info chip (FIX-2026-08-01) ──────────── */
+.bot-card-v2 .coin-chip {
+  display: inline-flex; align-items: center; gap: 0.3rem;
+  font-family: var(--font-mono); font-size: 0.72rem;
+  padding: 0.16rem 0.5rem;
+  border-radius: 999px;
+  background: rgba(125, 158, 196, 0.08);
+  border: 1px solid rgba(125, 158, 196, 0.25);
+  color: var(--text-2);
+  white-space: nowrap;
+  cursor: default;
+}
+.bot-card-v2 .coin-chip:hover { border-color: rgba(125, 158, 196, 0.5); }
+.bot-card-v2 .coin-chip-loading { color: var(--text-3); opacity: 0.7; }
+.bot-card-v2 .coin-chip-sep { color: var(--text-3); opacity: 0.5; }
+.bot-card-v2 .coin-chip .pct-up { color: var(--bull-1); font-weight: 600; }
+.bot-card-v2 .coin-chip .pct-down { color: var(--bear-1); font-weight: 600; }
+.bot-card-v2 .coin-chip strong { color: var(--text-1); font-weight: 600; }
+/* FIX-2026-08-01: logo + full name (จาก BAPI marketing list) */
+.bot-card-v2 .coin-chip-logo {
+  width: 14px; height: 14px; border-radius: 50%;
+  background: rgba(255, 255, 255, 0.04);
+  object-fit: cover; flex-shrink: 0;
+}
+.bot-card-v2 .coin-chip-fullname {
+  color: var(--text-2); font-weight: 500;
+  font-family: var(--font-sans, system-ui, sans-serif);
+  font-size: 0.7rem;
+  max-width: 180px; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Coin info cell on scan-volatility table */
+/* FIX-2026-08-01: ใช้ :is() รองรับทั้ง .scan-table และ .lux-table (กัน selector miss) */
+.scan-table .coin-info-cell,
+.lux-table .coin-info-cell {
+  display: flex; flex-direction: column; gap: 0.15rem;
+  font-size: 0.75rem;
+}
+.scan-table .coin-info-cell .coin-status,
+.lux-table .coin-info-cell .coin-status { font-weight: 600; }
+.scan-table .coin-info-cell .coin-status.is-trading,
+.lux-table .coin-info-cell .coin-status.is-trading { color: var(--bull-1); }
+.scan-table .coin-info-cell .coin-status.is-break,
+.lux-table .coin-info-cell .coin-status.is-break { color: var(--bull-3, #ffb547); }
+.scan-table .coin-info-cell .coin-status.is-halt,
+.lux-table .coin-info-cell .coin-status.is-halt { color: var(--bear-1); }
+.scan-table .coin-info-cell .coin-meta,
+.lux-table .coin-info-cell .coin-meta { color: var(--text-3); font-size: 0.7rem; font-family: var(--font-mono); }
+.scan-table .coin-info-cell .coin-pct,
+.lux-table .coin-info-cell .coin-pct { font-family: var(--font-mono); font-weight: 600; }
+.scan-table .coin-info-cell .coin-pct.pct-up,
+.lux-table .coin-info-cell .coin-pct.pct-up { color: var(--bull-1); }
+.scan-table .coin-info-cell .coin-pct.pct-down,
+.lux-table .coin-info-cell .coin-pct.pct-down { color: var(--bear-1); }
+/* FIX-2026-08-01: logo + fullName (จาก BAPI marketing list) */
+.scan-table .coin-info-cell .coin-cell-logo,
+.lux-table .coin-info-cell .coin-cell-logo {
+  /* FIX-2026-08-01: ลดขนาดให้เล็กลง + max-width กันโหลดช้าแล้วขยายเป็นรูปใหญ่
+     + display:inline-block กัน baseline alignment กระตุก + min-width:0 กัน flex expand */
+  display: inline-block;
+  width: 14px !important; height: 14px !important;
+  max-width: 14px !important; max-height: 14px !important;
+  min-width: 0 !important; min-height: 0 !important;
+  aspect-ratio: 1 / 1;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.04);
+  object-fit: cover; flex-shrink: 0; flex-grow: 0;
+  vertical-align: middle;
+}
+.scan-table .coin-info-cell .coin-cell-row1,
+.lux-table .coin-info-cell .coin-cell-row1 {
+  display: inline-flex; align-items: center; gap: 0.35rem;
+}
+.scan-table .coin-info-cell .coin-cell-row2 strong,
+.lux-table .coin-info-cell .coin-cell-row2 strong {
+  color: var(--text-1); font-family: var(--font-mono); font-size: 0.78rem;
+}
+.scan-table .coin-info-cell .coin-cell-fullname,
+.lux-table .coin-info-cell .coin-cell-fullname {
+  color: var(--text-2); font-size: 0.68rem;
+  font-family: var(--font-sans, system-ui, sans-serif);
+  max-width: 220px; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; display: inline-block; vertical-align: bottom;
+}
+.scan-table .coin-info-cell .coin-cell-row3,
+.lux-table .coin-info-cell .coin-cell-row3 { color: var(--text-3); font-size: 0.68rem; font-family: var(--font-mono); }
+.scan-table .coin-info-cell .coin-cell-row4,
+.lux-table .coin-info-cell .coin-cell-row4 { font-family: var(--font-mono); }
+
+/* FIX-2026-08-01: mobile — ลด font + ตัด cell ให้แคบลง กันโลโก้+ข้อความล้น row
+   - บน mobile row เตี้ย logo 12px + fullName max-width 120px + ลด font */
+@media (max-width: 640px) {
+  .scan-table .coin-info-cell,
+  .lux-table .coin-info-cell {
+    gap: 0.08rem;
+  }
+  .scan-table .coin-info-cell .coin-cell-logo,
+  .lux-table .coin-info-cell .coin-cell-logo {
+    width: 12px !important; height: 12px !important;
+    max-width: 12px; max-height: 12px;
+  }
+  .scan-table .coin-info-cell .coin-cell-row2 strong,
+  .lux-table .coin-info-cell .coin-cell-row2 strong { font-size: 0.7rem; }
+  .scan-table .coin-info-cell .coin-cell-fullname,
+  .lux-table .coin-info-cell .coin-cell-fullname {
+    max-width: 120px; font-size: 0.62rem;
+  }
+  .scan-table .coin-info-cell .coin-cell-row3,
+  .scan-table .coin-info-cell .coin-cell-row4,
+  .lux-table .coin-info-cell .coin-cell-row3,
+  .lux-table .coin-info-cell .coin-cell-row4 { font-size: 0.62rem; }
+  .scan-table .coin-info-cell .coin-status,
+  .lux-table .coin-info-cell .coin-status { font-size: 0.65rem; }
+}
+/* FIX-2026-08-01: tablet — ขนาดกลาง */
+@media (max-width: 900px) and (min-width: 641px) {
+  .scan-table .coin-info-cell .coin-cell-fullname,
+  .lux-table .coin-info-cell .coin-cell-fullname { max-width: 160px; }
+}
+/* FIX-2026-08-01: 1h latched alerts (e.g. SELL partial-fill no-progress >1h)
+   orange/amber accent — softer than error, still actionable */
+.bot-card-v2.has-warning::before {
+  background: var(--bull-3, #ffb547);
+  box-shadow: 0 0 14px rgba(255,181,71,0.45);
+}
+.bot-card-v2.has-warning {
+  border-color: rgba(255,181,71,0.35);
+}
+.bot-card-v2 .bc-warn {
+  margin-top: 0.5rem; margin-bottom: 0.55rem;
+  font-size: 0.78rem; color: var(--bull-3, #ffb547);
+  font-family: var(--font-mono); padding: 0.4rem 0.55rem;
+  background: rgba(255,181,71,0.06); border-radius: 6px;
+  border-left: 2px solid var(--bull-3, #ffb547);
+  display: flex; align-items: center; gap: 0.5rem;
+}
+.bot-card-v2 .bc-warn-msg {
+  flex: 1; word-break: break-word; line-height: 1.45;
+}
+.bot-card-v2 .bc-warn-dismiss {
+  flex-shrink: 0;
+  background: transparent;
+  border: 1px solid rgba(255,181,71,0.30);
+  color: var(--bull-3, #ffb547);
+  font-size: 1.05rem; line-height: 1; font-weight: 600;
+  width: 22px; height: 22px;
+  border-radius: 50%;
+  cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  padding: 0;
+  transition: background 0.15s, transform 0.15s, border-color 0.15s;
+}
+.bot-card-v2 .bc-warn-dismiss:hover {
+  background: rgba(255,181,71,0.18);
+  border-color: var(--bull-3, #ffb547);
+  transform: scale(1.08);
+}
+.bot-card-v2 .bc-warn-dismiss:active {
+  transform: scale(0.92);
+}
+.bot-card-v2 .bc-warn-dismiss:focus-visible {
+  outline: 2px solid var(--bull-3, #ffb547);
+  outline-offset: 2px;
+}
+
 /* ── Action bar ───────────────────────────────── */
 .bot-card-v2 .bc-actions {
   display: flex; gap: 0.4rem; flex-wrap: wrap;
@@ -704,6 +969,103 @@ a:hover { color: var(--gold-2); text-decoration: none; }
   .bot-card-v2 .bc-tile { min-height: 0; padding: 0.5rem 0.6rem; }
   .bot-card-v2 .tile-value { font-size: 1.05rem; }
 }
+
+/* ── FIX-2026-07-31: Compact view mode (ซ่อน mini-chart + tiles) ───────── */
+.bot-card-v2.is-compact .bc-minichart-wrap { display: none !important; }
+.bot-card-v2.is-compact .bc-tiles { display: none !important; }
+.bot-card-v2.is-compact { padding: 0.7rem 0.85rem; }
+.bot-card-v2.is-compact .bc-head { margin-bottom: 0.45rem; }
+.bot-card-v2.is-compact .bc-stats { margin-top: 0.4rem; padding-top: 0.4rem; border-top: 1px solid rgba(255,255,255,0.04); }
+
+/* ── FIX-2026-07-31: View mode segmented control (Compact / Expand) ───────── */
+.view-mode-toggle { display: inline-flex; }
+.view-mode-toggle .btn {
+  border-color: rgba(241,194,82,0.45);
+  color: var(--text-2);
+  background: rgba(255,255,255,0.02);
+  font-size: 0.78rem;
+  padding: 0.32rem 0.7rem;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+.view-mode-toggle .btn:first-child { border-radius: 7px 0 0 7px; }
+.view-mode-toggle .btn:last-child { border-radius: 0 7px 7px 0; }
+.view-mode-toggle .btn + .btn { margin-left: -1px; }
+.view-mode-toggle .btn:hover {
+  background: rgba(241,194,82,0.08);
+  color: var(--gold);
+  border-color: rgba(241,194,82,0.6);
+}
+.view-mode-toggle .btn.is-active {
+  background: linear-gradient(180deg, rgba(241,194,82,0.22), rgba(241,194,82,0.12));
+  color: var(--gold);
+  border-color: rgba(241,194,82,0.85);
+  font-weight: 600;
+  box-shadow: inset 0 0 0 1px rgba(241,194,82,0.3);
+}
+.view-mode-toggle .btn.is-active:hover { background: linear-gradient(180deg, rgba(241,194,82,0.28), rgba(241,194,82,0.16)); }
+
+/* ── FIX-2026-07-31: Multi-bot backtest per-bot toggles ───────── */
+.mb-toggles {
+  display: inline-flex;
+  gap: 0.3rem;
+  align-items: center;
+  flex-wrap: wrap;
+  font-size: 0.72rem;
+}
+.mb-toggle {
+  display: inline-flex; align-items: center; gap: 0.2rem;
+  padding: 0.18rem 0.45rem;
+  background: rgba(255,255,255,0.03);
+  border: 1px solid rgba(148,163,184,0.22);
+  border-radius: 5px;
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+  transition: background 0.15s, border-color 0.15s;
+}
+.mb-toggle:hover { background: rgba(255,255,255,0.06); }
+.mb-toggle input[type="checkbox"] {
+  width: 12px; height: 12px;
+  margin: 0;
+  accent-color: var(--gold);
+  cursor: pointer;
+}
+.mb-toggle:has(input:checked) {
+  background: rgba(241,194,82,0.12);
+  border-color: rgba(241,194,82,0.5);
+  color: var(--gold);
+  font-weight: 600;
+}
+.mb-toggles-head {
+  font-size: 0.72rem;
+  color: var(--text-3);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+/* ── FIX-2026-07-31: Per-bot toggle badges (XS1 / CB / SL-UKC) ในผลลัพธ์ ───────── */
+.mb-toggle-badge {
+  display: inline-block;
+  font-size: 0.62rem;
+  padding: 0.1rem 0.35rem;
+  border-radius: 4px;
+  margin-left: 0.25rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  vertical-align: middle;
+}
+.mb-toggle-badge.is-on {
+  background: rgba(241,194,82,0.16);
+  color: var(--gold);
+  border: 1px solid rgba(241,194,82,0.45);
+}
+.mb-toggle-badge.is-off {
+  background: rgba(148,163,184,0.08);
+  color: var(--text-3);
+  border: 1px solid rgba(148,163,184,0.18);
+  opacity: 0.7;
+}
+.mb-badges { margin-top: 0.25rem; }
 
 /* compact action button */
 .btn-lux {
@@ -1078,6 +1440,21 @@ a:hover { color: var(--gold-2); text-decoration: none; }
 .text-mono { font-family: var(--font-mono); }
 .text-muted-2 { color: var(--text-3) !important; }
 .text-muted-3 { color: var(--text-4) !important; }
+/* FIX-2026-07-30: brighten description text — เดิมใช้ Bootstrap text-muted (#6c757d)
+   บน dark mode ทำให้คำอธิบายฟังชั่น/ฟิลด์อ่านแทบไม่ออก
+   - override .text-muted (Bootstrap default) + small/.text-muted under form-check
+   - เปลี่ยนเฉพาะ description/hint เพื่อไม่ให้กระทบ badge สีเทาอื่น ๆ */
+.text-muted,
+form small.text-muted,
+.lux-form-hint,
+small.text-muted {
+  color: #94a3b8 !important; /* --text-3 — สว่างขึ้นจาก #6c757d ปกติ */
+}
+.lux-form-hint {
+  font-size: 0.78rem;
+  margin-top: 0.4rem;
+  line-height: 1.45;
+}
 .divider-soft { border-color: var(--border-soft); }
 .section-title {
   font-size: 0.7rem; font-weight: 700; color: var(--text-3);
@@ -1181,6 +1558,164 @@ a:hover { color: var(--gold-2); text-decoration: none; }
 .position-card.pnl-bear { border-left-color: var(--bear-1); box-shadow: inset 3px 0 12px -6px rgba(255,77,109,0.18); }
 .position-card:hover { border-color: var(--border-mid); }
 
+/* FIX-2026-08-01: SL-armed highlight (F1 — autoArmStopLossOnUKC)
+   - armed   = trader._autoArmStopLossOnUKC set useStopLossOnUKC=true (loss>10% + age>4h)
+     → red border + glowing box-shadow + small ⚠ pulse
+   - pending = threshold ตรงแต่ flag ยังไม่มา (รอ candle close ถัดไป)
+     → orange dashed border */
+.position-card.is-sl-armed {
+  border-color: rgba(255,77,109,0.55);
+  border-left-color: var(--bear-1);
+  box-shadow: 0 0 0 1px rgba(255,77,109,0.22), 0 0 18px rgba(255,77,109,0.20), inset 3px 0 12px -6px rgba(255,77,109,0.30);
+  animation: slArmedPulse 2.4s ease-in-out infinite;
+}
+.position-card.is-stuck-likely {
+  border-color: rgba(255,181,71,0.45);
+  border-left-color: var(--bull-3, #ffb547);
+  border-style: dashed;
+  box-shadow: inset 3px 0 12px -6px rgba(255,181,71,0.30);
+}
+@keyframes slArmedPulse {
+  0%, 100% { box-shadow: 0 0 0 1px rgba(255,77,109,0.22), 0 0 18px rgba(255,77,109,0.20), inset 3px 0 12px -6px rgba(255,77,109,0.30); }
+  50%      { box-shadow: 0 0 0 1px rgba(255,77,109,0.40), 0 0 28px rgba(255,77,109,0.35), inset 3px 0 12px -6px rgba(255,77,109,0.40); }
+}
+
+/* SL-armed pill (🛡️ Au) — same accent as border */
+.position-card .sl-armed-pill,
+.mob-card .sl-armed-pill {
+  display: inline-flex; align-items: center; gap: 0.25rem;
+  font-family: var(--font-mono); font-size: 0.72rem; font-weight: 600;
+  padding: 0.18rem 0.55rem;
+  border-radius: 999px;
+  background: rgba(255,77,109,0.12);
+  color: var(--bear-1);
+  border: 1px solid rgba(255,77,109,0.40);
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+.position-card .sl-armed-pill.is-pending,
+.mob-card .sl-armed-pill.is-pending {
+  background: rgba(255,181,71,0.10);
+  color: var(--bull-3, #ffb547);
+  border-color: rgba(255,181,71,0.40);
+}
+
+/* FIX-2026-08-02: DCA stack pills + frozen indicator + per-layer table */
+.position-card .dca-pill,
+.mob-card .dca-pill {
+  display: inline-flex; align-items: center; gap: 0.25rem;
+  font-family: var(--font-mono); font-size: 0.72rem; font-weight: 700;
+  padding: 0.18rem 0.55rem;
+  border-radius: 999px;
+  background: rgba(99, 102, 241, 0.14);
+  color: #818cf8;
+  border: 1px solid rgba(99, 102, 241, 0.45);
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+.position-card .frozen-pill,
+.mob-card .frozen-pill {
+  display: inline-flex; align-items: center; gap: 0.25rem;
+  font-family: var(--font-mono); font-size: 0.72rem; font-weight: 700;
+  padding: 0.18rem 0.55rem;
+  border-radius: 999px;
+  background: rgba(56, 189, 248, 0.12);
+  color: #38bdf8;
+  border: 1px solid rgba(56, 189, 248, 0.45);
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+.position-card .stack-layers-wrap {
+  margin-top: 0.75rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+}
+.position-card .stack-layers-wrap .k {
+  display: block;
+  font-size: 0.72rem;
+  color: var(--muted, #94a3b8);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-bottom: 0.35rem;
+}
+.position-card table.stack-layers {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+}
+.position-card table.stack-layers th,
+.position-card table.stack-layers td {
+  padding: 0.32rem 0.5rem;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  text-align: left;
+}
+.position-card table.stack-layers th {
+  color: var(--muted, #94a3b8);
+  font-weight: 600;
+  text-transform: uppercase;
+  font-size: 0.66rem;
+  letter-spacing: 0.04em;
+}
+
+/* FIX-2026-08-01: sellReason pill — บอก trigger ของ SELL fill
+   ใช้กับ Trade history (bot-detail / history / pnl day-modal) */
+.sell-reason-pill {
+  display: inline-flex; align-items: center; gap: 0.25rem;
+  font-family: var(--font-mono); font-size: 0.72rem; font-weight: 600;
+  padding: 0.18rem 0.55rem;
+  border-radius: 999px;
+  background: #555;
+  color: #fff;
+  margin-left: 0.3rem;
+  white-space: nowrap;
+  cursor: help;
+  vertical-align: middle;
+  letter-spacing: 0.02em;
+}
+.sell-reason-pill.is-bull    { background: #1e8e3e; }
+.sell-reason-pill.is-bear    { background: #c0392b; }
+.sell-reason-pill.is-warn    { background: #e67e22; }
+.sell-reason-pill.is-manual  { background: #2980b9; }
+.sell-reason-pill.is-neutral { background: #7f8c8d; }
+
+/* FIX-2026-08-01: Bot Quality Indicator pill — 0-4 score, color tier per score */
+.quality-pill {
+  display: inline-flex; align-items: center; gap: 0.25rem;
+  font-family: var(--font-mono); font-size: 0.72rem; font-weight: 600;
+  padding: 0.18rem 0.55rem; border-radius: 999px;
+  background: #555; color: #fff; margin-left: 0.3rem;
+  white-space: nowrap; cursor: pointer; vertical-align: middle;
+  letter-spacing: 0.02em; user-select: none;
+  transition: filter 0.15s ease;
+}
+.quality-pill:hover { filter: brightness(1.15); }
+.quality-pill.is-red    { background: #c0392b; }
+.quality-pill.is-orange { background: #e67e22; }
+.quality-pill.is-yellow { background: #f1c40f; color: #1a1a1a; }
+.quality-pill.is-green  { background: #1e8e3e; }
+.quality-pill.is-gray   { background: #7f8c8d; cursor: default; }
+
+/* FIX-2026-08-01: Quality breakdown modal — clone of .pnl-modal-* pattern */
+.quality-modal-overlay { position: fixed; inset: 0; z-index: 9999; background: rgba(0,0,0,0.7); backdrop-filter: blur(4px); display: none; align-items: flex-start; justify-content: center; padding: 5vh 1rem 1rem; overflow-y: auto; }
+.quality-modal-overlay.is-open { display: flex; }
+.quality-modal-card { width: 100%; max-width: 720px; background: linear-gradient(180deg,#131a2a,#0d1320); border: 1px solid rgba(245,184,0,0.3); border-radius: 14px; box-shadow: 0 12px 40px rgba(0,0,0,0.6); }
+.quality-modal-header { display: flex; align-items: center; justify-content: space-between; padding: 1rem 1.25rem; border-bottom: 1px solid rgba(255,255,255,0.08); }
+.quality-modal-header h5 { margin: 0; color: var(--text-1); font-weight: 700; }
+.quality-modal-close { background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1); color: var(--text-2); width: 32px; height: 32px; border-radius: 8px; cursor: pointer; font-size: 1.1em; line-height: 1; }
+.quality-modal-close:hover { background: rgba(255,77,109,0.2); color: #ff4d6d; }
+.quality-modal-body { padding: 1rem 1.25rem; }
+.quality-summary { display: flex; align-items: center; gap: 1rem; margin-bottom: 1rem; padding: 0.85rem 1rem; background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.06); border-radius: 10px; }
+.quality-summary .score-pill { font-size: 1.4rem; font-weight: 700; padding: 0.4rem 1rem; }
+.quality-criterion-row { display: grid; grid-template-columns: 1.4fr 1fr 1fr auto; gap: 0.5rem; padding: 0.6rem 0.4rem; border-bottom: 1px solid rgba(255,255,255,0.05); align-items: center; font-family: var(--font-mono); font-size: 0.85rem; }
+.quality-criterion-row:last-child { border-bottom: none; }
+.quality-criterion-row .k { color: var(--text-2); font-weight: 600; }
+.quality-criterion-row .v { color: var(--text-1); text-align: right; }
+.quality-criterion-row .t { color: var(--text-3); text-align: right; font-size: 0.78rem; }
+.quality-criterion-row .p { font-weight: 700; padding: 0.15rem 0.6rem; border-radius: 999px; font-size: 0.72rem; }
+.quality-criterion-row .p.is-pass { background: rgba(30,142,62,0.18); color: #4ade80; }
+.quality-criterion-row .p.is-fail { background: rgba(192,57,43,0.18); color: #ff6b6b; }
+
 .position-card .pos-head {
   display: flex; align-items: center; justify-content: space-between;
   gap: 0.75rem; margin-bottom: 0.7rem; flex-wrap: wrap;
@@ -1275,6 +1810,49 @@ a:hover { color: var(--gold-2); text-decoration: none; }
 .empty-positions {
   text-align: center; padding: 2.5rem 1rem;
   color: var(--text-3); font-size: 0.95rem; line-height: 1.55;
+}
+
+/* 2026-07-30: Open Positions modal — summary tiles + per-position list */
+.opm-summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 0.6rem 0.85rem;
+  padding: 0.5rem 0 1rem;
+  margin-bottom: 0.85rem;
+  border-bottom: 1px dashed var(--border-soft);
+}
+.opm-tile {
+  padding: 0.7rem 0.9rem;
+  background: rgba(255,255,255,0.03);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-md);
+}
+.opm-tile .k {
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-3);
+  font-weight: 600;
+}
+.opm-tile .v {
+  font-size: 1.05rem;
+  font-weight: 700;
+  color: var(--text-1);
+  margin-top: 0.25rem;
+  font-family: var(--font-mono);
+}
+.opm-tile .v.pnl-bull { color: var(--bull-1); }
+.opm-tile .v.pnl-bear { color: var(--bear-1); }
+.opm-tile .sub { font-size: 0.72rem; color: var(--text-3); margin-top: 0.2rem; }
+
+.opm-list .pos-bot-name,
+.opm-mob .pos-bot-name {
+  font-size: 0.72rem;
+  color: var(--gold-2);
+  font-weight: 600;
+  margin: -0.35rem 0 0.55rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
 }
 
 /* Mobile variant of position card */
@@ -1588,6 +2166,42 @@ a:hover { color: var(--gold-2); text-decoration: none; }
   background: rgba(255,209,102,0.15);
   color: var(--gold-1);
   border: 1px solid rgba(255,209,102,0.35);
+}
+
+/* ── Hot symbol marker (scan-volatility) — FIX-2026-07-31 ───────────── */
+.hot-symbol {
+  display: inline-block;
+  font-size: 0.95rem;
+  line-height: 1;
+  filter: drop-shadow(0 0 4px rgba(255, 107, 0, 0.55));
+  cursor: help;
+  transition: transform 0.15s ease;
+}
+.hot-symbol:hover {
+  transform: scale(1.18);
+}
+
+/* ── Inline create-bot button on 🔥 rows — FIX-2026-07-31 ───────────── */
+.btn-create-bot-mini {
+  display: inline-block;
+  font-size: 0.68rem;
+  font-weight: 600;
+  padding: 0.18rem 0.45rem;
+  margin-right: 0.25rem;
+  border-radius: 6px;
+  background: linear-gradient(135deg, rgba(245,184,0,0.18), rgba(245,184,0,0.08));
+  border: 1px solid rgba(245,184,0,0.42);
+  color: var(--gold-1, #ffd166);
+  text-decoration: none !important;
+  transition: all 0.15s ease;
+  letter-spacing: 0.01em;
+}
+.btn-create-bot-mini:hover {
+  background: linear-gradient(135deg, rgba(245,184,0,0.32), rgba(245,184,0,0.18));
+  border-color: rgba(245,184,0,0.7);
+  color: var(--gold-1, #ffd166);
+  transform: translateY(-1px);
+  box-shadow: 0 2px 8px rgba(245,184,0,0.25);
 }
 
 /* ── Trend state pill (EMA20 upper-TF) — FIX-2026-07-23 ───────────── */
@@ -2103,12 +2717,66 @@ a:hover { color: var(--gold-2); text-decoration: none; }
 .pnl-modal-total {
   padding: 0.85rem 1.25rem; background: rgba(255,255,255,0.03);
   border-bottom: 1px solid rgba(255,255,255,0.06);
-  display: flex; gap: 0.6rem; flex-wrap: wrap; align-items: center;
+  display: flex; flex-direction: column; gap: 0.4rem;
   font-family: var(--font-mono); font-size: 0.95em;
+}
+.pnl-modal-total .pnl-modal-summary-row {
+  display: flex; gap: 0.6rem; flex-wrap: wrap; align-items: center;
+}
+.pnl-modal-total .pnl-modal-gl-row {
+  display: flex; gap: 0.6rem; flex-wrap: wrap; align-items: center;
+  font-size: 0.85em;
+}
+.pnl-modal-total .gl-pill {
+  padding: 0.18rem 0.55rem; border-radius: 999px;
+  font-weight: 600; font-family: var(--font-mono);
+}
+.pnl-modal-total .gl-pill.is-bull {
+  background: rgba(0, 229, 184, 0.12); color: #00e5b8;
+  border: 1px solid rgba(0, 229, 184, 0.35);
+}
+.pnl-modal-total .gl-pill.is-bear {
+  background: rgba(255, 77, 109, 0.12); color: #ff4d6d;
+  border: 1px solid rgba(255, 77, 109, 0.35);
 }
 .pnl-modal-total .is-bull { color: #00e5b8; font-weight: 700; }
 .pnl-modal-total .is-bear { color: #ff4d6d; font-weight: 700; }
 .pnl-modal-total .muted { color: var(--text-3); font-size: 0.9em; }
+/* FIX-2026-08-01: hero PnL block (main number + THB sub) */
+.pnl-modal-main-pnl {
+  font-family: var(--font-mono); font-size: 1.85rem; font-weight: 800;
+  letter-spacing: -0.02em;
+}
+.pnl-modal-main-pnl .unit {
+  font-size: 0.6em; color: var(--text-3); font-weight: 500;
+  margin-left: 0.3em; letter-spacing: 0.02em;
+}
+.pnl-modal-main-pnl.is-bull { color: #00e5b8; text-shadow: 0 0 24px rgba(0,229,184,0.5); }
+.pnl-modal-main-pnl.is-bear { color: #ff4d6d; text-shadow: 0 0 24px rgba(255,77,109,0.5); }
+.pnl-modal-thb {
+  font-family: var(--font-mono); font-size: 1.1rem; font-weight: 700;
+  padding: 0.25rem 0.65rem; border-radius: 8px;
+  background: rgba(255,255,255,0.04);
+  border: 1px solid rgba(255,255,255,0.08);
+}
+.pnl-modal-thb.is-bull { color: #00e5b8; border-color: rgba(0,229,184,0.4); background: rgba(0,229,184,0.08); }
+.pnl-modal-thb.is-bear { color: #ff4d6d; border-color: rgba(255,77,109,0.4); background: rgba(255,77,109,0.08); }
+/* FIX-2026-08-01: extended GL pill (label + USDT + THB + count) */
+.pnl-modal-total .gl-pill .gl-label {
+  font-size: 0.7rem; opacity: 0.7; margin-right: 0.4em;
+  text-transform: uppercase; letter-spacing: 0.06em;
+}
+.pnl-modal-total .gl-pill .gl-thb {
+  display: inline-block; margin-left: 0.5em;
+  font-size: 0.78em; opacity: 0.85;
+  padding: 0.1em 0.45em;
+  background: rgba(255,255,255,0.08);
+  border-radius: 6px;
+}
+.pnl-modal-total .gl-pill .gl-count {
+  margin-left: 0.4em; opacity: 0.7;
+  font-weight: 500;
+}
 .pnl-modal-body { padding: 1rem 1.25rem 1.25rem; max-height: 65vh; overflow-y: auto; }
 .pnl-modal-table { width: 100%; border-collapse: collapse; font-size: 0.85em; }
 .pnl-modal-table th {
@@ -2145,14 +2813,15 @@ a:hover { color: var(--gold-2); text-decoration: none; }
 
 /* FIX-2026-07-30: Multi-bot backtest UI */
 .mb-multi-rows { display: flex; flex-direction: column; gap: 8px; }
+/* FIX-2026-07-31: เพิ่ม column toggles (XS1/CB/SL-UKC) + delete — 9 cols */
 .mb-row-header {
-  display: grid; grid-template-columns: 2fr 1fr 1fr 0.7fr 1.2fr 1fr 40px;
+  display: grid; grid-template-columns: 2fr 1fr 1fr 0.7fr 1.2fr 1fr 2.2fr 40px;
   gap: 8px; padding: 0 4px;
   font-size: 0.78em; color: var(--text-3); font-weight: 600;
   text-transform: uppercase; letter-spacing: 0.04em;
 }
 .mb-row {
-  display: grid; grid-template-columns: 2fr 1fr 1fr 0.7fr 1.2fr 1fr 40px;
+  display: grid; grid-template-columns: 2fr 1fr 1fr 0.7fr 1.2fr 1fr 2.2fr 40px;
   gap: 8px; align-items: center;
   background: rgba(255,255,255,0.02); border: 1px solid var(--border-soft);
   border-radius: 8px; padding: 6px 8px;
@@ -2180,8 +2849,67 @@ a:hover { color: var(--gold-2); text-decoration: none; }
 .mb-bot-row .mb-bear { color: #ff4d6d; font-weight: 700; }
 .mb-skip-note { color: var(--text-3); font-size: 0.75em; }
 
+/* FIX 2026-07-30: Still-Holding Positions table (multi-bot backtest) */
+/* FIX 2026-07-30: Still-Holding Positions table (multi-bot backtest) */
+.mb-still-table { font-size: 0.82em; }
+.mb-still-table th.mb-sortable { transition: color 0.15s ease, background-color 0.15s ease; }
+.mb-still-table th.mb-sortable:hover { color: var(--gold-1); background: rgba(245,184,0,0.08); }
+.mb-still-table th.mb-sortable.is-active { color: var(--gold-1); }
+.mb-still-table th { color: var(--text-3); font-weight: 600; text-transform: uppercase; font-size: 0.72em; letter-spacing: 0.04em; border-bottom: 1px solid rgba(255,255,255,0.1); }
+.mb-still-table td { vertical-align: middle; padding: 0.45rem 0.5rem; }
+.mb-still-table tr:hover td { background: rgba(245,184,0,0.04); }
+.mb-tp-bar { width: 100%; height: 6px; background: rgba(255,255,255,0.06); border-radius: 3px; overflow: hidden; }
+.mb-tp-fill { height: 100%; transition: width 0.4s ease; }
+.mb-tp-fill.pnl-positive { background: linear-gradient(90deg, #00b894, #00e5b8); }
+.mb-tp-fill.pnl-negative { background: linear-gradient(90deg, #ff4d6d, #ff6b8a); }
+@media (max-width: 768px) {
+  .mb-still-table thead { display: none; }
+  .mb-still-table, .mb-still-table tbody, .mb-still-table tr, .mb-still-table td { display: block; width: 100%; }
+  .mb-still-table tr { margin-bottom: 0.75rem; padding: 0.5rem; border: 1px solid rgba(255,255,255,0.06); border-radius: 6px; }
+  .mb-still-table td { padding: 0.2rem 0; border: none; }
+  .mb-still-table td:before { content: attr(data-label); color: var(--text-3); font-size: 0.72em; text-transform: uppercase; margin-right: 6px; }
+}
+
 @media (max-width: 768px) {
   .mb-row-header { display: none; }
   .mb-row, .mb-bot-row { grid-template-columns: 1fr; gap: 4px; }
   .mb-bot-row { padding: 10px; }
+}
+
+/* FIX-2026-08-03: lux-badge — small inline pill used for status badges
+   (e.g. "🟢 Binance" price-source badge, "⚙️ floor" TP-floor badge) */
+.lux-badge {
+  display: inline-block;
+  padding: 1px 7px;
+  border-radius: 8px;
+  font-size: 0.78em;
+  font-weight: 600;
+  line-height: 1.4;
+  vertical-align: baseline;
+  border: 1px solid transparent;
+}
+.lux-badge-bull {
+  background: rgba(0, 229, 184, 0.12);
+  color: #00e5b8;
+  border-color: rgba(0, 229, 184, 0.35);
+}
+.lux-badge-bear {
+  background: rgba(255, 77, 109, 0.12);
+  color: #ff4d6d;
+  border-color: rgba(255, 77, 109, 0.35);
+}
+.lux-badge-warn {
+  background: rgba(245, 184, 0, 0.12);
+  color: #f5b800;
+  border-color: rgba(245, 184, 0, 0.35);
+}
+.lux-badge-gold {
+  background: rgba(245, 184, 0, 0.18);
+  color: #f5b800;
+  border-color: rgba(245, 184, 0, 0.5);
+}
+.lux-badge-gray {
+  background: rgba(148, 163, 184, 0.12);
+  color: #94a3b8;
+  border-color: rgba(148, 163, 184, 0.35);
 }

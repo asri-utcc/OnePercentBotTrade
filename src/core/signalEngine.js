@@ -118,6 +118,38 @@ function isXS1At(i, opens, closes, basis, lower) {
   return patternA || patternB;
 }
 
+// FIX-2026-07-30: Circuit-breaker (CB) panic-sell pattern (3-candle persistent lower-band breach) — เดิมชื่อ SLS1
+//   "กราฟไหลลงแล้วไม่ขึ้นอีกเลย" — 3 แท่งติด close<lowerKC AND open<lowerKC + แท่งปัจจุบันยังเป็นแดง
+//
+//   CB[i] = (open[i]  > close[i])  AND   # current red candle (ยังไหลลง)
+//             (open[i-1] > close[i-1]) AND
+//             (open[i-2] > close[i-2]) AND
+//             (close[i]   < lowerKC[i])   AND (open[i]   < lowerKC[i])
+//             AND for k in [i-1, i-2, i-3]:
+//                  close[k] < lowerKC[k] AND open[k] < lowerKC[k]
+//
+//   Inputs:
+//     i        - index ของ current candle (ต้อง >= 3)
+//     opens    - array ของ open prices
+//     closes   - array ของ close prices
+//     lower    - array ของ lowerKC (จาก computeBgStates)
+//
+//   Returns: true ถ้า candle มี panic-sell pattern (caller force-close ทุก position ในบอท)
+function isCBAt(i, opens, closes, lower) {
+  if (i < 3) return false;
+  // current bar must be valid + red + below lowerKC
+  if (opens[i] == null || closes[i] == null || lower[i] == null) return false;
+  if (opens[i] <= closes[i]) return false; // not a red candle
+  if (!(closes[i] < lower[i] && opens[i] < lower[i])) return false;
+  // previous 3 bars must each be red AND fully below lowerKC
+  for (let k = i - 1; k >= i - 3; k -= 1) {
+    if (opens[k] == null || closes[k] == null || lower[k] == null) return false;
+    if (opens[k] <= closes[k]) return false; // ไม่ใช่แท่งแดง
+    if (!(closes[k] < lower[k] && opens[k] < lower[k])) return false;
+  }
+  return true;
+}
+
 /**
  * รับ array ของ klines [{openTime, open, high, low, close, volume}, ...]
  * คืน array ของ signal objects (S1 ที่เจอ) + bg array ทั้งหมด
@@ -191,13 +223,76 @@ function isWarmedUp(klinesLength, length = KC_LEN) {
   return klinesLength >= length * 2;
 }
 
+// FIX-2026-08-01: Safe-trade super-upper TF map (separate from TREND_TF_MAP — thresholds differ)
+//   - 3m/5m → 4h (ตรวจ 4h ว่าเป็นแท่งเขียว/เหนือ EMA20 ก่อนซื้อ)
+//   - 15m → 1d
+//   - 1h → 1w
+//   - บอท TF อื่น (1m, 30m, 2h, 4h, 1d+) → no-filter (log "no_super_tf")
+const SAFE_TRADE_SUPER_TF_MAP = {
+  '3m': '4h',
+  '5m': '4h',
+  '15m': '1d',
+  '1h': '1w',
+};
+
+// FIX-2026-08-01: Safe-trade filter — ก่อนวาง BUY ให้เช็ค super-upper TF ว่า "อยู่ในขาขึ้น"
+//   - PASS condition (either or both):
+//     a) lastClose > lastOpen (แท่งเขียว)
+//     b) lastClose > ema20 (uptrend)
+//   - FAIL-OPEN on Binance error (API outage ไม่ block การเทรด)
+//   - return { skip, pass, greenCandle, aboveEma, superTF, lastClose, lastOpen, lastEma, reason }
+//     skip=true means trader should NOT place BUY on this S1 signal
+async function checkSafeTrade(bot, binanceRest, indicators) {
+  if (bot.safeTradeEnabled === false) {
+    return { skip: false, reason: 'disabled' };
+  }
+  const superTF = SAFE_TRADE_SUPER_TF_MAP[bot.timeframe];
+  if (!superTF) {
+    return { skip: false, reason: 'no_super_tf', superTF: null };
+  }
+  try {
+    const raw = await binanceRest.getKlines({ symbol: bot.symbol, interval: superTF, limit: 25 });
+    if (!Array.isArray(raw) || raw.length < 21) {
+      // FAIL-OPEN: insufficient data → allow buy + warn
+      return { skip: false, reason: 'insufficient_data_open', superTF };
+    }
+    const last = raw[raw.length - 1];
+    const lastClose = parseFloat(last[4]);
+    const lastOpen = parseFloat(last[1]);
+    const closes = raw.map((k) => parseFloat(k[4]));
+    const emaArr = indicators.ema(closes, 20);
+    const lastEma = emaArr[emaArr.length - 1];
+    const greenCandle = lastClose > lastOpen;
+    const aboveEma = lastEma != null && Number.isFinite(lastEma) && lastClose > lastEma;
+    const pass = greenCandle || aboveEma;
+    return {
+      skip: !pass,
+      pass,
+      greenCandle,
+      aboveEma,
+      superTF,
+      lastClose,
+      lastOpen,
+      lastEma,
+      reason: pass ? 'pass' : 'blocked',
+    };
+  } catch (err) {
+    // FAIL-OPEN: API error → allow buy + warn
+    return { skip: false, reason: 'api_error_open', error: err.message, superTF };
+  }
+}
+
 module.exports = {
   computeBgStates,
   isS1At,
   isXS1At,
+  isCBAt,    // FIX-2026-07-30: CB panic-sell pattern (3-candle lowerKC breach) — เดิมชื่อ isSLS1At
   detectS1Signals,
   checkS1OnLatestCandle,
   isWarmedUp,
   KC_LEN,
   KC_MULT,
+  // FIX-2026-08-01: Safe-trade filter exports
+  SAFE_TRADE_SUPER_TF_MAP,
+  checkSafeTrade,
 };

@@ -20,6 +20,19 @@ router.post('/', requireAuth, async (req, res) => {
       capitalPerTrade = 10,
       useBnbForFees = false,
       maxConcurrentTrades = 10,
+      // FIX-2026-08-02: DCA mode — opt-in via dcaEnabled. Dispatch to runDcaBacktest when true.
+      dcaEnabled = false,
+      dcaMaxLayers = 3,
+      kcMult = 1.5,
+      xs1Enabled = true,
+      stopLossOnUpperKC = false,
+      autoArmStopLossOnUKC = false,
+      // FIX-2026-08-03: DCA + Martingale sizing (opt-in, default off — backward compat 100%)
+      //   - martingaleEnabled requires dcaEnabled=true (validated below)
+      //   - layer N notional = capitalPerTrade × mult^(N-1), capped by martingaleMaxLayerNotional
+      martingaleEnabled = false,
+      martingaleMultiplier = 1.5,
+      martingaleMaxLayerNotional = 100,
     } = req.body || {};
 
     if (!symbol || !timeframe || !from || !to) {
@@ -29,7 +42,52 @@ router.post('/', requireAuth, async (req, res) => {
       return res.status(400).json({ error: 'invalid timeframe' });
     }
 
-    logger.info({ symbol, timeframe, from, to }, 'backtest requested');
+    logger.info({
+      symbol, timeframe, from, to, dcaEnabled: !!dcaEnabled, dcaMaxLayers,
+    }, 'backtest requested');
+
+    // FIX-2026-08-02: dispatch to DCA simulator when dcaEnabled=true.
+    // DCA mode is single-stack (1 bot = 1 open stack) so maxConcurrentTrades is irrelevant.
+    if (dcaEnabled) {
+      // FIX-2026-08-03: Martingale requires DCA — reject if user toggles Martingale without DCA
+      if (martingaleEnabled) {
+        return res.status(400).json({
+          error: 'martingaleEnabled requires dcaEnabled=true (Martingale is DCA-only)',
+        });
+      }
+      const result = await backtester.runDcaBacktest({
+        symbol: symbol.toUpperCase(),
+        timeframe,
+        from,
+        to,
+        tpPercent: parseFloat(tpPercent),
+        capitalPerTrade: parseFloat(capitalPerTrade),
+        dcaMaxLayers: parseInt(dcaMaxLayers, 10),
+        useBnbForFees: !!useBnbForFees,
+        kcMult: parseFloat(kcMult),
+        xs1Enabled: xs1Enabled !== false,
+        stopLossOnUpperKC: stopLossOnUpperKC === true,
+        autoArmStopLossOnUKC: autoArmStopLossOnUKC === true,
+        // FIX-2026-08-03: pass-through Martingale params (parity with trader._computeDcaLayerNotional)
+        martingaleEnabled: martingaleEnabled === true,
+        martingaleMultiplier: parseFloat(martingaleMultiplier) || 1.5,
+        martingaleMaxLayerNotional: parseFloat(martingaleMaxLayerNotional) || 100,
+      });
+      return res.json({
+        id: result.id,
+        executionModel: result.executionModel,
+        stats: result.stats,
+        signalsCount: result.signalsCount,
+        stacksCount: result.stacksCount,
+        truncated: result.truncated,
+        candlesFetched: result.candlesFetched,
+        requestedDays: result.requestedDays,
+        actualDays: result.actualDays,
+        stacks: result.stacks,
+        signalTrades: result.signalTrades,
+        stillHoldingPositions: result.stillHoldingPositions,
+      });
+    }
 
     const result = await backtester.runBacktest({
       symbol: symbol.toUpperCase(),
@@ -122,6 +180,13 @@ router.post('/multi', requireAuth, async (req, res) => {
         useBnbForFees: !!b.useBnbForFees,
         kcMult: b.kcMult != null ? parseFloat(b.kcMult) : 1.5,
         xs1Enabled: b.xs1Enabled !== false,
+        // FIX-2026-08-01: forward CB + Upper-KC stop-loss toggles per bot — เดิมชื่อ sls1Enabled
+        cbEnabled: b.cbEnabled !== false,             // default true (parity กับ live)
+        stopLossOnUpperKC: b.stopLossOnUpperKC === true, // default false
+        // FIX-2026-08-02: DCA mode (per bot) — when true, single-stack simulator runs instead of per-trade
+        dcaEnabled: b.dcaEnabled === true,
+        dcaMaxLayers: parseInt(b.dcaMaxLayers != null ? b.dcaMaxLayers : 3, 10),
+        autoArmStopLossOnUKC: b.autoArmStopLossOnUKC === true,
       })),
     });
 

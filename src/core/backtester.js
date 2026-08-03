@@ -92,6 +92,25 @@ function floorQtyToStep(rawQty, stepSizeStr) {
 }
 
 /**
+ * FIX-2026-08-02: DCA stack BEP — totalSpent / totalQty (weighted average across layers).
+ * Used by both runDcaBacktest and runMultiBacktest DCA pass.
+ */
+function computeBEP(layers) {
+  let totalSpent = new Decimal(0);
+  let totalQty = new Decimal(0);
+  for (const ly of layers) {
+    totalSpent = totalSpent.plus(new Decimal(ly.price).mul(new Decimal(ly.qty)));
+    totalQty = totalQty.plus(new Decimal(ly.qty));
+  }
+  if (totalQty.isZero()) return { totalQty: 0, totalSpent: 0, bep: 0 };
+  return {
+    totalQty: totalQty.toNumber(),
+    totalSpent: totalSpent.toNumber(),
+    bep: totalSpent.div(totalQty).toNumber(),
+  };
+}
+
+/**
  * Simulate trades from S1 signals — realistic model matching LIVE bot behavior.
  *
  * Rules (ตรงกับ bot จริง):
@@ -345,8 +364,13 @@ function summarize(trades) {
   const noBuyFill = trades.filter((t) => t.exitReason === 'no_buy_fill').length;
   const maxConcurrentSkip = trades.filter((t) => t.exitReason === 'max_concurrent_skip').length;
   const belowMinNotional = trades.filter((t) => t.exitReason === 'below_min_notional').length;
-  const buyFilled = tpHit + stillHolding;
-  const sellFilled = tpHit;
+  // FIX-2026-07-31: นับ exit ใหม่ — cb_panic + stop_loss_upper_kc (per-bot toggle)
+  const cbPanic = trades.filter((t) => t.exitReason === 'cb_panic').length;
+  const stopLossUpperKc = trades.filter((t) => t.exitReason === 'stop_loss_upper_kc').length;
+  // buyFilled = ทุก exit ที่เป็นการเปิดไม้จริง (รวม panic + SL exit)
+  const buyFilled = tpHit + stillHolding + cbPanic + stopLossUpperKc;
+  // sellFilled = ทุก exit ที่ปิดไม้จริง (ยังไม่ปิด = stillHolding)
+  const sellFilled = tpHit + cbPanic + stopLossUpperKc;
 
   // wins/losses นับตาม realizedPnl จริง (ไม่ใช่สถานะ fill) — เพื่อให้สะท้อน P&L จริง
   const wins = trades.filter((t) => t.realizedPnl > 0).length;
@@ -368,6 +392,11 @@ function summarize(trades) {
 
   const fillRate = signals > 0 ? (buyFilled / signals) * 100 : 0;
   const exitRate = signals > 0 ? (sellFilled / signals) * 100 : 0;
+  // FIX-2026-07-31: exit-by-reason breakdown (ใหม่ — UI ดูได้)
+  const exitClosedCount = sellFilled; // alias เพื่อความชัดเจน
+  const exitTpPct = signals > 0 ? (tpHit / signals) * 100 : 0;
+  const exitCbPct = signals > 0 ? (cbPanic / signals) * 100 : 0;
+  const exitStopLossPct = signals > 0 ? (stopLossUpperKc / signals) * 100 : 0;
 
   // Max drawdown บน equity curve (cumulative PnL) + consecutive losses
   let equity = 0;
@@ -407,6 +436,11 @@ function summarize(trades) {
     maxConcurrentSkipCount: maxConcurrentSkip,
     belowMinNotionalCount: belowMinNotional,
     tpHitCount: tpHit,
+    cbPanicCount: cbPanic,                  // FIX-2026-07-31: new exit reason
+    stopLossUpperKcCount: stopLossUpperKc,      // FIX-2026-07-31: new exit reason
+    exitTpPct,                                  // % exit by TP
+    exitCbPct,                                // % exit by CB panic
+    exitStopLossPct,                            // % exit by upper-KC stop-loss
     wins,
     losses,
     breakeven,
@@ -563,12 +597,598 @@ async function runBacktest(params) {
   };
 }
 
+/**
+ * FIX-2026-08-02: DCA + BEP stack backtest simulator
+ *
+ * Single-stack mode: 1 bot = 1 open DCA stack at a time.
+ * Each S1 signal either:
+ *   - opens a new stack (layer 1)
+ *   - adds a layer to the existing stack (until dcaMaxLayers)
+ *   - is skipped (max layers reached)
+ *
+ * On every layer fill: recompute BEP (totalSpent/totalQty) + replace aggregate SELL at stackBep+TP.
+ *
+ * Exit priority (NO CB in DCA mode):
+ *   1. SL-UKC on stack BEP (loss only, per-bot toggle + autoArmStopLossOnUKC)
+ *   2. TP hit on aggregate SELL
+ *
+ * Stats: count stacks (not layers) for trade count + win/loss.
+ *
+ * stillHoldingPositions[] returns DCA stacks still open at end of range, with:
+ *   { stackId, layerCount, totalQty, totalSpent, stackBep, targetSellPrice,
+ *     unrealizedPnl, unrealizedPnlPercent, candlesHeld }
+ */
+async function runDcaBacktest(params) {
+  const {
+    symbol,
+    timeframe,
+    from,
+    to,
+    tpPercent = 0.1,
+    capitalPerTrade = 10,
+    dcaMaxLayers = 3,
+    useBnbForFees = false,
+    maxBuyWait = 6,
+    kcMult = 1.5,
+    xs1Enabled = true,
+    stopLossOnUpperKC = false,
+    autoArmStopLossOnUKC = false,
+    // FIX-2026-08-03: DCA + Martingale sizing (opt-in, default off — parity with trader.js)
+    //   - martingaleEnabled=false (default) → ทุก layer ใช้ capitalPerTrade เท่ากัน (พฤติกรรมเดิม)
+    //   - martingaleEnabled=true → layer N notional = capitalPerTrade × mult^(N-1) (capped by maxLayerNotional)
+    martingaleEnabled = false,
+    martingaleMultiplier = 1.5,
+    martingaleMaxLayerNotional = 100,
+  } = params;
+
+  if (!symbol || !timeframe || !from || !to) {
+    throw new Error('symbol, timeframe, from, to required');
+  }
+  if (!Number.isInteger(dcaMaxLayers) || dcaMaxLayers < 1 || dcaMaxLayers > 100) {
+    throw new Error('dcaMaxLayers must be integer 1-100');
+  }
+  // FIX-2026-08-03: Martingale input validation
+  if (martingaleEnabled && (!Number.isFinite(martingaleMultiplier) || martingaleMultiplier < 1.0 || martingaleMultiplier > 3.0)) {
+    throw new Error('martingaleMultiplier must be 1.0..3.0');
+  }
+  if (!Number.isFinite(martingaleMaxLayerNotional) || martingaleMaxLayerNotional < 1) {
+    throw new Error('martingaleMaxLayerNotional must be >= 1');
+  }
+
+  // FIX-2026-08-03: DCA + Martingale per-layer notional helper (parity with trader._computeDcaLayerNotional)
+  //   - layerIndex is 1-based (1 for first layer, 2 for second, ...)
+  //   - When martingaleEnabled=false → return capitalPerTrade (unchanged, backward compat)
+  const computeLayerNotional = (layerIndex) => {
+    if (!martingaleEnabled) return parseFloat(capitalPerTrade) || 0;
+    const idx = Math.max(1, parseInt(layerIndex, 10) || 1);
+    const mult = parseFloat(martingaleMultiplier) || 1.5;
+    const raw = (parseFloat(capitalPerTrade) || 0) * Math.pow(mult, idx - 1);
+    return Math.min(raw, parseFloat(martingaleMaxLayerNotional) || 100);
+  };
+
+  const fromMs = typeof from === 'string' ? new Date(from).getTime() : from;
+  const toMs = typeof to === 'string' ? new Date(to).getTime() : to;
+
+  logger.info({
+    symbol, timeframe, fromMs, toMs, tpPercent, capitalPerTrade, dcaMaxLayers,
+  }, 'dca-backtest: fetching klines');
+
+  const { klines, truncated } = await fetchKlines({
+    symbol,
+    interval: timeframe,
+    fromMs,
+    toMs,
+  });
+
+  if (truncated) {
+    logger.warn({
+      symbol, timeframe,
+      requestedDays: Math.round((toMs - fromMs) / 86400000),
+      actualCandles: klines.length,
+      actualDays: klines.length > 1
+        ? Math.round((klines[klines.length - 1].openTime - klines[0].openTime) / 86400000)
+        : 0,
+    }, 'dca-backtest: klines truncated by SAFETY_LIMIT');
+  }
+
+  if (klines.length < 50) {
+    throw new Error(`Not enough klines: got ${klines.length}, need >= 50`);
+  }
+
+  // Symbol info for stepSize + minNotional
+  let stepSizeStr = null;
+  let minNotional = new Decimal('10');
+  try {
+    const info = await symbolInfo.loadSymbol(symbol);
+    if (info.lotSize) stepSizeStr = info.lotSize.stepSize.toString();
+    if (info.notional && info.notional.minNotional) {
+      minNotional = info.notional.minNotional instanceof Decimal
+        ? info.notional.minNotional
+        : new Decimal(info.notional.minNotional.toString());
+    }
+  } catch (err) {
+    logger.warn({ err: err.message }, 'dca-backtest: symbol info load failed (using defaults)');
+  }
+
+  // Signals + KC arrays for SL-UKC
+  const signalOpts = {
+    mult: parseFloat(kcMult),
+    xs1Enabled: xs1Enabled !== false,
+    cbEnabled: false, // DCA mode disables CB (per design — no panic-sell)
+  };
+  const sigResult = signalEngine.detectS1Signals(klines, signalOpts);
+  const { signals, upper: upperKC, lower: lowerKC } = sigResult;
+  // Note: lowerKC unused in DCA mode (CB disabled). Kept here for parity / future use.
+
+  logger.info({
+    symbol, timeframe, klines: klines.length, signals: signals.length,
+    dcaMaxLayers, stepSize: stepSizeStr, minNotional: minNotional.toString(),
+  }, 'dca-backtest: signals detected');
+
+  const feeRate = fees.getMakerRate({ useBnbForFees });
+  const stepMs = klines.length >= 2 ? (klines[1].openTime - klines[0].openTime) : 0;
+
+  // ─── Simulate DCA stack flow per signal ────────────────────────
+  // Active stack: at most 1 stack per bot at any time.
+  // Each signal either opens a new stack or adds a layer (until maxLayers).
+  const trades = []; // one entry per SIGNAL (records add attempts + max-hit skips)
+  const stacks = []; // one entry per CLOSED stack (the primary "trade" unit for stats)
+  let openStack = null; // { stackId, layers: [{price, qty, filledAtMs}], layerCount, totalQty, totalSpent, stackBep, targetSellPrice, sellFilled, sellFilledAtMs, exitReason, exitPrice }
+  let stackCounter = 0;
+
+  // helper: compute TP target from stackBep (same fee buffer as non-DCA path)
+  const computeDcaTpTarget = (stackBep) => {
+    return new Decimal(stackBep).mul(1 + tpPercent / 100 + 2 * feeRate).toNumber();
+  };
+
+  for (const sig of signals) {
+    const idx = sig.index;
+    const buyPrice = sig.close;
+
+    // ─── Layer 1: open new stack ───────────────────────
+    if (!openStack) {
+      const buyCandleResult = await tryFillBuy({
+        klines, sigIdx: idx, buyPrice, maxBuyWait, stepMs,
+      });
+      if (!buyCandleResult.filled) {
+        trades.push({
+          signalTime: new Date(sig.openTime),
+          candleCloseTime: new Date(sig.closeTime),
+          buyPrice,
+          layerIndex: 1,
+          layerCountAfter: 0,
+          buyFilled: false,
+          sellFilled: false,
+          qty: 0,
+          notional: 0,
+          exitReason: 'no_buy_fill',
+          bgState: sig.bgState,
+        });
+        continue;
+      }
+      const qty = computeLayerQty(buyPrice, computeLayerNotional(1), stepSizeStr);
+      const notional = new Decimal(buyPrice).mul(new Decimal(qty));
+      if (notional.lessThan(minNotional)) {
+        trades.push({
+          signalTime: new Date(sig.openTime),
+          candleCloseTime: new Date(sig.closeTime),
+          buyPrice,
+          layerIndex: 1,
+          layerCountAfter: 0,
+          buyFilled: false,
+          sellFilled: false,
+          qty: qty.toNumber(),
+          notional: notional.toNumber(),
+          exitReason: 'below_min_notional',
+          bgState: sig.bgState,
+        });
+        continue;
+      }
+      const stackId = `dca_${++stackCounter}`;
+      const layer = { price: buyPrice, qty: qty.toNumber(), filledAtMs: buyCandleResult.filledAtMs };
+      const layers = [layer];
+      const { bep } = computeBEP(layers);
+      const targetSellPrice = computeDcaTpTarget(bep);
+      openStack = {
+        stackId,
+        botId: 'dca',
+        symbol,
+        timeframe,
+        openedAtMs: sig.openTime,
+        signalCloseTimeMs: sig.closeTime,
+        layers,
+        layerCount: 1,
+        totalQty: qty.toNumber(),
+        totalSpent: notional.toNumber(),
+        stackBep: bep,
+        targetSellPrice,
+        // exit fields
+        sellFilled: false,
+        sellFilledAtMs: null,
+        exitReason: null,
+        exitPrice: null,
+        sellCandleIdx: null,
+        candlesHeld: 0,
+      };
+      trades.push({
+        signalTime: new Date(sig.openTime),
+        candleCloseTime: new Date(sig.closeTime),
+        buyPrice,
+        layerIndex: 1,
+        layerCountAfter: 1,
+        buyFilled: true,
+        sellFilled: false,
+        qty: qty.toNumber(),
+        notional: notional.toNumber(),
+        exitReason: 'layer_added',
+        stackId,
+        bgState: sig.bgState,
+      });
+      continue;
+    }
+
+    // ─── Layer 2+: try add to existing stack ────────────
+    if (openStack.layerCount >= dcaMaxLayers) {
+      // max layers reached → skip
+      trades.push({
+        signalTime: new Date(sig.openTime),
+        candleCloseTime: new Date(sig.closeTime),
+        buyPrice,
+        layerIndex: openStack.layerCount + 1,
+        layerCountAfter: openStack.layerCount,
+        buyFilled: false,
+        sellFilled: false,
+        qty: 0,
+        notional: 0,
+        exitReason: 'dca_max_layers_hit',
+        stackId: openStack.stackId,
+        bgState: sig.bgState,
+      });
+      continue;
+    }
+
+    // Try to fill new layer BUY at sig.close
+    const buyCandleResult = await tryFillBuy({
+      klines, sigIdx: idx, buyPrice, maxBuyWait, stepMs,
+    });
+    if (!buyCandleResult.filled) {
+      trades.push({
+        signalTime: new Date(sig.openTime),
+        candleCloseTime: new Date(sig.closeTime),
+        buyPrice,
+        layerIndex: openStack.layerCount + 1,
+        layerCountAfter: openStack.layerCount,
+        buyFilled: false,
+        sellFilled: false,
+        qty: 0,
+        notional: 0,
+        exitReason: 'no_buy_fill',
+        stackId: openStack.stackId,
+        bgState: sig.bgState,
+      });
+      continue;
+    }
+    const layerIndex = openStack.layerCount + 1;
+    const qty = computeLayerQty(buyPrice, computeLayerNotional(layerIndex), stepSizeStr);
+    const notional = new Decimal(buyPrice).mul(new Decimal(qty));
+    if (notional.lessThan(minNotional)) {
+      trades.push({
+        signalTime: new Date(sig.openTime),
+        candleCloseTime: new Date(sig.closeTime),
+        buyPrice,
+        layerIndex,
+        layerCountAfter: openStack.layerCount,
+        buyFilled: false,
+        sellFilled: false,
+        qty: qty.toNumber(),
+        notional: notional.toNumber(),
+        exitReason: 'below_min_notional',
+        stackId: openStack.stackId,
+        bgState: sig.bgState,
+      });
+      continue;
+    }
+
+    // Append layer + recompute BEP + new aggregate target
+    openStack.layers.push({ price: buyPrice, qty: qty.toNumber(), filledAtMs: buyCandleResult.filledAtMs });
+    openStack.layerCount += 1;
+    const { totalQty, totalSpent, bep } = computeBEP(openStack.layers);
+    openStack.totalQty = totalQty;
+    openStack.totalSpent = totalSpent;
+    openStack.stackBep = bep;
+    openStack.targetSellPrice = computeDcaTpTarget(bep);
+
+    trades.push({
+      signalTime: new Date(sig.openTime),
+      candleCloseTime: new Date(sig.closeTime),
+      buyPrice,
+      layerIndex: openStack.layerCount,
+      layerCountAfter: openStack.layerCount,
+      buyFilled: true,
+      sellFilled: false,
+      qty: qty.toNumber(),
+      notional: notional.toNumber(),
+      exitReason: 'layer_added',
+      stackId: openStack.stackId,
+      bgState: sig.bgState,
+    });
+  }
+
+  // ─── After all signals: walk candles for exit (SL-UKC or TP) for open stack ──
+  // Find each stack's first-layer BUY candle idx (approx by buyPrice match in stack.layers[0])
+  // For simplicity, scan from each layer's filledAtMs onward.
+  if (openStack) {
+    closeOpenStack({
+      openStack, klines, stepMs, feeRate,
+      stopLossOnUpperKC, autoArmStopLossOnUKC,
+      upperKC,
+    });
+    stacks.push(openStack);
+    openStack = null;
+  }
+
+  // ─── Build stack-level trades[] for stats ──────────────
+  // Each stack that closes becomes one Trade-shaped entry.
+  const stackTrades = stacks.map((s) => buildStackTradeRecord(s, feeRate));
+
+  // Aggregate stats from stackTrades + signal-level trades for skip counts
+  const stats = buildDcaStats({ stackTrades, signalTrades: trades });
+
+  // Store result (cap to 500 stacks)
+  const storedStacks = stackTrades.length > 500
+    ? stackTrades.slice(0, 250).concat(stackTrades.slice(-250))
+    : stackTrades;
+
+  let savedId = null;
+  try {
+    const doc = await BacktestResult.create({
+      symbol,
+      timeframe,
+      from: new Date(fromMs),
+      to: new Date(toMs),
+      executionModel: 'v4_maker_fill_dca',
+      params: {
+        tpPercent,
+        capitalPerTrade,
+        dcaMaxLayers,
+        feeRate,
+        maxBuyWait,
+        stepSize: stepSizeStr,
+        minNotional: minNotional.toString(),
+        kcMult: parseFloat(kcMult),
+        xs1Enabled: xs1Enabled !== false,
+        stopLossOnUpperKC: stopLossOnUpperKC === true,
+        autoArmStopLossOnUKC: autoArmStopLossOnUKC === true,
+        // FIX-2026-08-03: persist Martingale params for reproducibility
+        martingaleEnabled: martingaleEnabled === true,
+        martingaleMultiplier: parseFloat(martingaleMultiplier) || 1.5,
+        martingaleMaxLayerNotional: parseFloat(martingaleMaxLayerNotional) || 100,
+        model: 'realistic_v3_dca_nostoploss',
+      },
+      signalsCount: signals.length,
+      tradesSimulated: stackTrades.length,
+      ...stats,
+      trades: storedStacks,
+    });
+    savedId = doc._id.toString();
+  } catch (e) {
+    logger.warn({ err: e.message }, 'dca-backtest: failed to save result (non-fatal)');
+  }
+
+  logger.info({
+    id: savedId,
+    symbol, timeframe,
+    signals: signals.length,
+    stacks: stackTrades.length,
+    layers: trades.filter((t) => t.exitReason === 'layer_added').length,
+    dcaTargetHits: stats.dcaTargetHitCount,
+    stillHolding: stats.dcaStillHoldingCount,
+  }, 'dca-backtest: complete');
+
+  // stillHoldingPositions = DCA stacks still open at end of range (mark-to-market)
+  // For now: if openStack is null at end, all stacks closed → empty list
+  // (openStack already pushed in closeOpenStack above when present)
+  const stillHoldingPositions = [];
+
+  return {
+    id: savedId,
+    executionModel: 'v4_maker_fill_dca',
+    symbol,
+    timeframe,
+    from: new Date(fromMs),
+    to: new Date(toMs),
+    signalsCount: signals.length,
+    stacksCount: stackTrades.length,
+    stats,
+    stacks: storedStacks,
+    signalTrades: trades, // per-signal record (layer adds + skips)
+    truncated,
+    requestedDays: Math.round((toMs - fromMs) / 86400000),
+    actualDays: klines.length > 1
+      ? Math.round((klines[klines.length - 1].openTime - klines[0].openTime) / 86400000)
+      : 0,
+    candlesFetched: klines.length,
+    stillHoldingPositions,
+  };
+}
+
+// ─── DCA helpers (local) ──────────────────────────────────────
+
+/**
+ * Try to fill a LIMIT_MAKER BUY at buyPrice within maxBuyWait candles after sigIdx.
+ * Returns { filled, filledAtMs, candleIdx }.
+ */
+async function tryFillBuy({ klines, sigIdx, buyPrice, maxBuyWait, stepMs }) {
+  const buyEnd = Math.min(klines.length, sigIdx + 1 + maxBuyWait);
+  for (let j = sigIdx + 1; j < buyEnd; j += 1) {
+    const c = klines[j];
+    if (c.low <= buyPrice && c.close >= buyPrice && c.volume > 0) {
+      const filledAtMs = stepMs > 0 ? c.openTime + Math.floor(stepMs / 2) : c.closeTime;
+      return { filled: true, filledAtMs, candleIdx: j };
+    }
+  }
+  return { filled: false, filledAtMs: null, candleIdx: null };
+}
+
+function computeLayerQty(buyPrice, capitalPerTrade, stepSizeStr) {
+  try {
+    const rawQty = new Decimal(capitalPerTrade).div(new Decimal(buyPrice));
+    return floorQtyToStep(rawQty, stepSizeStr);
+  } catch (_) {
+    return new Decimal(capitalPerTrade / buyPrice);
+  }
+}
+
+/**
+ * Walk forward from stack's first layer fill, looking for SL-UKC or TP hit.
+ * Mutates openStack: sets sellFilled, sellFilledAtMs, exitReason, exitPrice, sellCandleIdx, candlesHeld.
+ */
+function closeOpenStack({ openStack, klines, stepMs, feeRate, stopLossOnUpperKC, autoArmStopLossOnUKC, upperKC }) {
+  // Start scanning from layer 1's candle (approx by layers[0].filledAtMs → candle idx)
+  // Use layers[0].filledAtMs to find the candle
+  const firstLayerAtMs = openStack.layers[0].filledAtMs;
+  let startCandleIdx = 0;
+  for (let i = 0; i < klines.length; i += 1) {
+    if (klines[i].closeTime >= firstLayerAtMs) {
+      startCandleIdx = i;
+      break;
+    }
+  }
+  const armed = stopLossOnUpperKC || autoArmStopLossOnUKC;
+
+  for (let j = startCandleIdx + 1; j < klines.length; j += 1) {
+    const candle = klines[j];
+    const candleClose = parseFloat(candle.close);
+    const candleHigh = parseFloat(candle.high);
+    // 1) SL-UKC: only when armed + close > upperKC[j] + stackBep > close (loss only)
+    if (armed && upperKC && upperKC[j] != null
+        && candleClose > upperKC[j] && openStack.stackBep > candleClose) {
+      openStack.sellFilled = true;
+      openStack.sellFilledAtMs = stepMs > 0 ? candle.openTime + Math.floor(stepMs / 2) : candle.closeTime;
+      openStack.exitReason = 'dca_stack_stop_loss';
+      openStack.exitPrice = candleClose;
+      openStack.sellCandleIdx = j;
+      openStack.candlesHeld = j - startCandleIdx;
+      return;
+    }
+    // 2) TP hit (candle.high >= targetSellPrice)
+    if (candleHigh >= openStack.targetSellPrice) {
+      openStack.sellFilled = true;
+      openStack.sellFilledAtMs = stepMs > 0 ? candle.openTime + Math.floor(stepMs / 2) : candle.closeTime;
+      openStack.exitReason = 'dca_target_hit';
+      openStack.exitPrice = openStack.targetSellPrice;
+      openStack.sellCandleIdx = j;
+      openStack.candlesHeld = j - startCandleIdx;
+      return;
+    }
+  }
+
+  // No exit found → still_holding
+  openStack.sellFilled = false;
+  openStack.sellFilledAtMs = null;
+  openStack.exitReason = 'dca_still_holding';
+  openStack.exitPrice = null;
+  openStack.sellCandleIdx = null;
+  openStack.candlesHeld = klines.length - 1 - startCandleIdx;
+}
+
+/**
+ * Convert a closed stack to a Trade-shaped record (mirror non-DCA shape).
+ */
+function buildStackTradeRecord(stack, feeRate) {
+  let pnl = 0, gross = 0, fees = 0, unrealizedPnl = 0;
+  if (stack.exitReason === 'dca_target_hit' || stack.exitReason === 'dca_stack_stop_loss') {
+    const grossD = new Decimal(stack.exitPrice).minus(new Decimal(stack.stackBep)).mul(new Decimal(stack.totalQty));
+    const feeBuy = new Decimal(stack.stackBep).mul(new Decimal(stack.totalQty)).mul(feeRate);
+    const feeSell = new Decimal(stack.exitPrice).mul(new Decimal(stack.totalQty)).mul(feeRate);
+    gross = grossD.toNumber();
+    fees = feeBuy.plus(feeSell).toNumber();
+    pnl = grossD.minus(feeBuy).minus(feeSell).toNumber();
+  } else if (stack.exitReason === 'dca_still_holding') {
+    // mark-to-market using last close — caller passes lastClose via stack.lastClose? Not needed here.
+    // (For brevity, leave unrealizedPnl=0 — UI can recompute if needed)
+    unrealizedPnl = 0;
+  }
+  const lastLayerSignalMs = stack.signalCloseTimeMs;
+  return {
+    stackId: stack.stackId,
+    botId: stack.botId,
+    symbol: stack.symbol,
+    timeframe: stack.timeframe,
+    layerCount: stack.layerCount,
+    layers: stack.layers,
+    buyPrice: stack.stackBep, // mirror for parity
+    buyQty: stack.totalQty,
+    totalSpent: stack.totalSpent,
+    stackBep: stack.stackBep,
+    targetSellPrice: stack.targetSellPrice,
+    sellPrice: stack.exitPrice,
+    buyFilled: true,
+    sellFilled: stack.sellFilled,
+    candlesHeld: stack.candlesHeld,
+    grossPnl: gross,
+    fees,
+    realizedPnl: pnl,
+    unrealizedPnl,
+    pnlPercent: stack.totalSpent > 0 ? (pnl / stack.totalSpent) * 100 : 0,
+    exitReason: stack.exitReason,
+    openedAt: new Date(stack.openedAtMs),
+    closedAt: stack.sellFilledAtMs != null ? new Date(stack.sellFilledAtMs) : null,
+    signalCloseTime: new Date(lastLayerSignalMs),
+    isDcaStack: true,
+  };
+}
+
+/**
+ * Build aggregate stats from closed stacks + signal-level skip records.
+ */
+function buildDcaStats({ stackTrades, signalTrades }) {
+  const stacks = stackTrades.length;
+  const dcaTargetHit = stackTrades.filter((s) => s.exitReason === 'dca_target_hit').length;
+  const dcaStopLoss = stackTrades.filter((s) => s.exitReason === 'dca_stack_stop_loss').length;
+  const dcaStillHolding = stackTrades.filter((s) => s.exitReason === 'dca_still_holding').length;
+
+  const wins = stackTrades.filter((s) => s.realizedPnl > 0).length;
+  const losses = stackTrades.filter((s) => s.realizedPnl < 0).length;
+
+  const totalPnl = stackTrades.reduce((s, t) => s + (t.realizedPnl || 0), 0);
+  const totalFees = stackTrades.reduce((s, t) => s + (t.fees || 0), 0);
+  const totalNotional = stackTrades.reduce((s, t) => s + (t.totalSpent || 0), 0);
+  const totalLayers = signalTrades.filter((t) => t.exitReason === 'layer_added').length;
+  const maxLayerHits = signalTrades.filter((t) => t.exitReason === 'dca_max_layers_hit').length;
+  const noBuyFills = signalTrades.filter((t) => t.exitReason === 'no_buy_fill').length;
+  const belowMin = signalTrades.filter((t) => t.exitReason === 'below_min_notional').length;
+
+  return {
+    signalsCount: signalTrades.length,
+    stacksCount: stacks,
+    layersCount: totalLayers,
+    dcaTargetHitCount: dcaTargetHit,
+    dcaStackStopLossCount: dcaStopLoss,
+    dcaStillHoldingCount: dcaStillHolding,
+    dcaMaxLayersHitCount: maxLayerHits,
+    noBuyFillCount: noBuyFills,
+    belowMinNotionalCount: belowMin,
+    wins,
+    losses,
+    winRate: (wins + losses) > 0 ? (wins / (wins + losses)) * 100 : 0,
+    stackSuccessRate: stacks > 0 ? (dcaTargetHit / stacks) * 100 : 0,
+    totalPnl,
+    totalFees,
+    totalNotional,
+    totalPnlPercent: totalNotional > 0 ? (totalPnl / totalNotional) * 100 : 0,
+    avgPnlPerStack: stacks > 0 ? totalPnl / stacks : 0,
+    avgLayersPerStack: stacks > 0 ? totalLayers / stacks : 0,
+  };
+}
+
 module.exports = {
   fetchKlines,
   intervalToMs,
   simulateTrades,
   summarize,
   runBacktest,
+  runDcaBacktest, // FIX-2026-08-02: DCA + BEP stack backtest simulator
   runMultiBacktest, // FIX-2026-07-30: multi-bot backtest with shared capital pool
 };
 
@@ -611,11 +1231,19 @@ async function runMultiBacktest(params) {
     if (klines.length < 50) throw new Error(`${b.symbol}: not enough klines (${klines.length})`);
     // FIX-2026-07-30: per-bot KC multiplier — ส่ง opts.mult เข้า detectS1Signals
     //   detectS1Signals(klines, opts) returns { signals, basis, upper, lower, bg }
+    // FIX-2026-07-31: cache upperKC/lowerKC arrays + opens/closes ไว้ใน botInputs
+    //   ใช้ใน Phase 2 SELL scan loop สำหรับ CB pattern + upper-KC stop-loss
     const signalOpts = {
       mult: b.kcMult != null ? parseFloat(b.kcMult) : 1.5,
       xs1Enabled: b.xs1Enabled !== false, // default true
+      // FIX-2026-08-02: DCA mode forces CB off (no panic-sell in DCA mode per design)
+      cbEnabled: b.dcaEnabled === true ? false : (b.cbEnabled !== false), // default true (parity กับ live bot)
+      stopLossOnUpperKC: b.stopLossOnUpperKC === true, // FIX-2026-07-31: default false (per user choice)
     };
-    const { signals } = signalEngine.detectS1Signals(klines, signalOpts);
+    const sigResult = signalEngine.detectS1Signals(klines, signalOpts);
+    const { signals, upper: upperKC, lower: lowerKC, bg: bgArr } = sigResult;
+    const opensArr = klines.map((k) => parseFloat(k.open));
+    const closesArr = klines.map((k) => parseFloat(k.close));
     let stepSizeStr = null;
     let minNotional = new Decimal('10');
     try {
@@ -642,18 +1270,51 @@ async function runMultiBacktest(params) {
         stepSize: stepSizeStr,
         minNotional,
         kcMult: signalOpts.mult,
+        // FIX-2026-07-31: per-bot toggles ใช้ใน Phase 2 SELL scan
+        xs1Enabled: signalOpts.xs1Enabled,
+        cbEnabled: signalOpts.cbEnabled,
+        stopLossOnUpperKC: signalOpts.stopLossOnUpperKC,
+        // FIX-2026-08-02: DCA per-bot toggles
+        dcaEnabled: b.dcaEnabled === true,
+        dcaMaxLayers: b.dcaMaxLayers != null ? parseInt(b.dcaMaxLayers, 10) : 3,
+        autoArmStopLossOnUKC: b.autoArmStopLossOnUKC === true,
+        // FIX-2026-08-03: Martingale per-bot toggles (parity with live trader._computeDcaLayerNotional)
+        //   - default off (false) → ทุก DCA layer ใช้ capitalPerTrade เท่ากัน
+        //   - ใช้เฉพาะเมื่อ dcaEnabled=true (validated ใน bot.routes.js + backtest.routes.js)
+        martingaleEnabled: b.martingaleEnabled === true,
+        martingaleMultiplier: b.martingaleMultiplier != null ? parseFloat(b.martingaleMultiplier) : 1.5,
+        martingaleMaxLayerNotional: b.martingaleMaxLayerNotional != null ? parseFloat(b.martingaleMaxLayerNotional) : 100,
       },
       klines,
       signals: signals.map((s) => ({ ...s, botId })),
+      // FIX-2026-07-31: เก็บ arrays เพิ่มเพื่อใช้ตรวจ CB + upper-KC ใน Phase 2
+      upperKC,
+      lowerKC,
+      bgArr,
+      opensArr,
+      closesArr,
       truncated,
       candlesFetched: klines.length,
     };
   }));
 
   // 2) Merge signals across bots + sort by openTime asc
+  // FIX-2026-07-31 (BUG): ต้องแนบ upperKC/lowerKC/opensArr/closesArr ลงใน merged signal
+  //   เพราะ Phase 2 SELL scan อ่าน sig.lowerKC / sig.opensArr / sig.closesArr — ถ้าไม่แนบมา CB/SL-UKC จะไม่ทำงานเลย
+  //   (ก่อนหน้านี้ใส่แค่ _cfg + _klines → sig.lowerKC เป็น undefined → check ตกไปที่ TP เท่านั้น)
   const merged = [];
   for (const bi of botInputs) {
-    for (const s of bi.signals) merged.push({ ...s, _cfg: bi.cfg, _klines: bi.klines });
+    for (const s of bi.signals) {
+      merged.push({
+        ...s,
+        _cfg: bi.cfg,
+        _klines: bi.klines,
+        _upperKC: bi.upperKC,
+        _lowerKC: bi.lowerKC,
+        _opensArr: bi.opensArr,
+        _closesArr: bi.closesArr,
+      });
+    }
   }
   merged.sort((a, b) => a.openTime - b.openTime);
 
@@ -677,6 +1338,14 @@ async function runMultiBacktest(params) {
     const cfg = sig._cfg;
     const idx = sig.index;
     const buyPrice = sig.close;
+
+    // FIX-2026-08-02: DCA bots are simulated separately (per-bot stack).
+    // The non-DCA simulator below is for per-trade (maxConcurrentTrades) flow only.
+    // We collect DCA signals and process them in a dedicated pass after this loop.
+    if (cfg.dcaEnabled) {
+      continue;
+    }
+
     const target = new Decimal(buyPrice).mul(1 + cfg.tpPercent / 100 + 2 * cfg.feeRate).toNumber();
     const stepMs = sig._klines.length >= 2 ? (sig._klines[1].openTime - sig._klines[0].openTime) : 0;
 
@@ -801,32 +1470,72 @@ async function runMultiBacktest(params) {
       continue;
     }
 
-    // ─── Phase 2: SELL fill check (FIX 2026-07-30: scan to end of data, NO maxBuyWait break) ─
-    // เดิม break ที่ j-idx >= maxBuyWait ทำให้ sell สแกนแค่ 5–6 แท่ง → TP 0.1% มักไม่ทัน → still_holding หมด
-    // โมเดลจริงไม่มี stop loss → รอจน TP หรือจบข้อมูล
+    // ─── Phase 2: SELL fill check (FIX-2026-07-31: priority-ordered exits) ─────────
+    // Priority (earliest exit wins):
+    //   1. CB panic-sell (unconditional, allow profit) — match live _checkCBPanicClose
+    //   2. Stop loss on upper-KC (only at loss) — match live _checkStopLossOnUpperKC
+    //   3. TP hit (existing)
+    // FIX-2026-07-31 (BUG): อ่าน sig._lowerKC/_upperKC/_opensArr/_closesArr (ไม่ใช่ sig.lowerKC แบบเดิมที่ไม่ได้แนบ)
     let sellFilled = false;
     let sellCandleIdx = null;
+    let exitMode = 'tp'; // 'tp' | 'cb_panic' | 'stop_loss_upper_kc'
+    let exitPrice = null;
     for (let j = buyCandleIdx + 1; j < sig._klines.length; j += 1) {
-      if (sig._klines[j].high >= target) {
+      const candle = sig._klines[j];
+      const candleClose = parseFloat(candle.close);
+      const candleOpen = parseFloat(candle.open);
+      const candleHigh = parseFloat(candle.high);
+      // 1) CB pattern (3 red candles below lowerKC) → panic-close at close (unconditional)
+      if (cfg.cbEnabled && sig._lowerKC && sig._lowerKC[j] != null
+          && signalEngine.isCBAt(j, sig._opensArr, sig._closesArr, sig._lowerKC)) {
         sellFilled = true;
         sellCandleIdx = j;
+        exitMode = 'cb_panic';
+        exitPrice = candleClose;
+        break;
+      }
+      // 2) Upper-KC stop-loss (close > upperKC + buyPrice > close) → close at close (loss only)
+      if (cfg.stopLossOnUpperKC && sig._upperKC && sig._upperKC[j] != null
+          && candleClose > sig._upperKC[j] && buyPrice > candleClose) {
+        sellFilled = true;
+        sellCandleIdx = j;
+        exitMode = 'stop_loss_upper_kc';
+        exitPrice = candleClose;
+        break;
+      }
+      // 3) TP hit (existing)
+      if (candleHigh >= target) {
+        sellFilled = true;
+        sellCandleIdx = j;
+        exitMode = 'tp';
+        exitPrice = target;
         break;
       }
     }
 
     const exitIdx = sellCandleIdx != null ? sellCandleIdx : sig._klines.length;
-    const exitPrice = sellFilled ? target : null;
+    // FIX-2026-07-31: exitPrice อาจเป็น target (TP) หรือ candleClose (CB/UpperKC SL) หรือ null (still_holding)
+    const finalExitPrice = sellFilled ? exitPrice : null;
 
     let pnl = null;
     let grossVal = 0;
     let feesVal = 0;
+    // FIX 2026-07-30: still_holding — mark-to-market ด้วย last close เพื่อให้ UI แสดง unrealized ได้
+    let lastClose = sellFilled ? finalExitPrice : (sig._klines[sig._klines.length - 1] ? sig._klines[sig._klines.length - 1].close : buyPrice);
+    let unrealizedPnlVal = 0;
     if (sellFilled) {
-      const gross = new Decimal(target).minus(new Decimal(buyPrice)).mul(qty);
+      const gross = new Decimal(finalExitPrice).minus(new Decimal(buyPrice)).mul(qty);
       const feeBuy = new Decimal(buyPrice).mul(qty).mul(cfg.feeRate);
-      const feeSell = new Decimal(target).mul(qty).mul(cfg.feeRate);
+      const feeSell = new Decimal(finalExitPrice).mul(qty).mul(cfg.feeRate);
       pnl = gross.minus(feeBuy).minus(feeSell).toNumber();
       grossVal = gross.toNumber();
       feesVal = feeBuy.plus(feeSell).toNumber();
+    } else {
+      // still_holding — unrealized vs last close (รวม round-trip fee buffer ที่เหลือต้องจ่ายตอนขาย)
+      const gross = new Decimal(lastClose).minus(new Decimal(buyPrice)).mul(qty);
+      const feeBuy = new Decimal(buyPrice).mul(qty).mul(cfg.feeRate);
+      const feeSell = new Decimal(lastClose).mul(qty).mul(cfg.feeRate);
+      unrealizedPnlVal = gross.minus(feeBuy).minus(feeSell).toNumber();
     }
 
     // BUY/SELL fill timestamp = กลางแท่ง (openTime + stepMs/2) — ตรงกับ single-bot
@@ -834,6 +1543,9 @@ async function runMultiBacktest(params) {
     const sellFilledAtMs = sellCandleIdx != null
       ? (stepMs > 0 ? sig._klines[sellCandleIdx].openTime + Math.floor(stepMs / 2) : sig._klines[sellCandleIdx].closeTime)
       : null;
+
+    // FIX-2026-07-31: exitReason รวมใหม่ — cb_panic / stop_loss_upper_kc / tp_hit / still_holding
+    const exitReason = sellFilled ? exitMode : 'still_holding';
 
     const trade = {
       botId: sig.botId,
@@ -845,7 +1557,8 @@ async function runMultiBacktest(params) {
       sellFilledAt: sellFilledAtMs != null ? new Date(sellFilledAtMs) : null,
       buyPrice,
       targetSellPrice: target,
-      sellPrice: exitPrice,
+      sellPrice: finalExitPrice,
+      lastClose: sellFilled ? null : lastClose, // FIX 2026-07-30: only for still_holding
       buyFilled: true,
       sellFilled,
       qty: qty.toNumber(),
@@ -853,9 +1566,13 @@ async function runMultiBacktest(params) {
       grossPnl: grossVal,
       fees: feesVal,
       realizedPnl: pnl,
+      unrealizedPnl: sellFilled ? 0 : unrealizedPnlVal,
       pnlPercent: pnl != null ? (pnl / notional.toNumber()) * 100 : 0,
-      exitReason: sellFilled ? 'tp_hit' : 'still_holding',
+      unrealizedPnlPercent: !sellFilled && notional.toNumber() > 0 ? (unrealizedPnlVal / notional.toNumber()) * 100 : 0,
+      exitReason,
       capitalUsed: cfg.capitalPerTrade,
+      // FIX 2026-07-30: candles held = candles ตั้งแต่ BUY fill จนถึงแท่งสุดท้ายของข้อมูล
+      candlesHeld: sellFilled ? (sellCandleIdx - buyCandleIdx) : (sig._klines.length - 1 - buyCandleIdx),
     };
     allTrades.push(trade);
     perBotTrades[sig.botId].push(trade);
@@ -868,13 +1585,294 @@ async function runMultiBacktest(params) {
     if (newActiveForBot > perBotPeak[sig.botId]) perBotPeak[sig.botId] = newActiveForBot;
   }
 
+  // 3b) FIX-2026-08-02: DCA stack simulator pass — per bot, single-stack mode.
+  //   DCA bots bypass the per-trade simulator above. Here we simulate each DCA bot's stack
+  //   using the same helpers as runDcaBacktest (tryFillBuy, computeBEP, closeOpenStack).
+  //   DCA capital still respects the shared pool: each layer = cfg.capitalPerTrade reserved.
+  // FIX-2026-08-03: DCA + Martingale sizing (parity with runDcaBacktest + trader._computeDcaLayerNotional)
+  //   - layerNotional(layerIdx) helper applies multiplier^(idx-1) when cfg.martingaleEnabled=true
+  //   - capital pool reservation uses layerNotional per layer (not flat cfg.capitalPerTrade)
+  const dcaBots = botInputs.filter((bi) => bi.cfg.dcaEnabled);
+  if (dcaBots.length > 0) {
+    for (const bi of dcaBots) {
+      const cfg = bi.cfg;
+      const klines = bi.klines;
+      const stepMs = klines.length >= 2 ? (klines[1].openTime - klines[0].openTime) : 0;
+      let stackCounter = 0;
+      let openStack = null;
+      // FIX-2026-08-03: per-bot layer notional helper (mirrors runDcaBacktest.computeLayerNotional)
+      const layerNotional = (idx) => {
+        if (!cfg.martingaleEnabled) return parseFloat(cfg.capitalPerTrade) || 0;
+        const i = Math.max(1, parseInt(idx, 10) || 1);
+        const mult = parseFloat(cfg.martingaleMultiplier) || 1.5;
+        const raw = (parseFloat(cfg.capitalPerTrade) || 0) * Math.pow(mult, i - 1);
+        return Math.min(raw, parseFloat(cfg.martingaleMaxLayerNotional) || 100);
+      };
+
+      // Sort signals ascending by index for deterministic order
+      const sortedSignals = [...bi.signals].sort((a, b) => a.index - b.index);
+
+      for (const sig of sortedSignals) {
+        const buyPrice = sig.close;
+
+        // ─── Layer 1: open new stack ───────────────────────────
+        if (!openStack) {
+          const buyRes = await tryFillBuy({
+            klines, sigIdx: sig.index, buyPrice,
+            maxBuyWait: cfg.maxBuyWait, stepMs,
+          });
+          if (!buyRes.filled) {
+            perBotTrades[bi.botId].push({
+              signalTime: new Date(sig.openTime),
+              candleCloseTime: new Date(sig.closeTime),
+              buyPrice,
+              layerIndex: 1,
+              layerCountAfter: 0,
+              buyFilled: false,
+              sellFilled: false,
+              qty: 0,
+              notional: 0,
+              exitReason: 'no_buy_fill',
+              stackId: null,
+            });
+            continue;
+          }
+          // Shared capital pool check (each layer costs layerNotional(1) — fixed or Martingale-scaled)
+          const capBefore = activeExits.reduce((s, e) => s + e.capitalUsed, 0);
+          if (capBefore + layerNotional(1) > totalCap.toNumber()) {
+            capitalExhaustedSkips++;
+            perBotTrades[bi.botId].push({
+              signalTime: new Date(sig.openTime),
+              candleCloseTime: new Date(sig.closeTime),
+              buyPrice,
+              layerIndex: 1,
+              layerCountAfter: 0,
+              buyFilled: false,
+              sellFilled: false,
+              qty: 0,
+              notional: 0,
+              exitReason: 'capital_exhausted_skip',
+              stackId: null,
+            });
+            continue;
+          }
+          const qty = computeLayerQty(buyPrice, layerNotional(1), cfg.stepSize);
+          const notional = new Decimal(buyPrice).mul(new Decimal(qty));
+          if (notional.lessThan(cfg.minNotional)) {
+            perBotTrades[bi.botId].push({
+              signalTime: new Date(sig.openTime),
+              candleCloseTime: new Date(sig.closeTime),
+              buyPrice,
+              layerIndex: 1,
+              layerCountAfter: 0,
+              buyFilled: false,
+              sellFilled: false,
+              qty: qty.toNumber(),
+              notional: notional.toNumber(),
+              exitReason: 'below_min_notional',
+              stackId: null,
+            });
+            continue;
+          }
+          const stackId = `dca_${bi.botId}_${++stackCounter}`;
+          const layer = { price: buyPrice, qty: qty.toNumber(), filledAtMs: buyRes.filledAtMs };
+          const { bep } = computeBEP([layer]);
+          const targetSellPrice = new Decimal(bep)
+            .mul(1 + cfg.tpPercent / 100 + 2 * cfg.feeRate).toNumber();
+          openStack = {
+            stackId,
+            botId: bi.botId,
+            symbol: cfg.symbol,
+            timeframe: cfg.timeframe,
+            openedAtMs: sig.openTime,
+            signalCloseTimeMs: sig.closeTime,
+            layers: [layer],
+            layerCount: 1,
+            totalQty: qty.toNumber(),
+            totalSpent: notional.toNumber(),
+            stackBep: bep,
+            targetSellPrice,
+            sellFilled: false,
+            sellFilledAtMs: null,
+            exitReason: null,
+            exitPrice: null,
+            sellCandleIdx: null,
+            candlesHeld: 0,
+          };
+          // Reserve shared capital for this stack
+          activeExits.push({
+            botId: bi.botId,
+            exitIdx: klines.length, // will update on close
+            capitalUsed: layerNotional(1),
+            isDcaStack: true,
+            stackId,
+          });
+          if (activeExits.length > peakConcurrentTrades) peakConcurrentTrades = activeExits.length;
+          const newUsed = activeExits.reduce((s, e) => s + e.capitalUsed, 0);
+          if (newUsed > peakCapitalUsed.toNumber()) peakCapitalUsed = new Decimal(newUsed);
+          perBotTrades[bi.botId].push({
+            signalTime: new Date(sig.openTime),
+            candleCloseTime: new Date(sig.closeTime),
+            buyPrice,
+            layerIndex: 1,
+            layerCountAfter: 1,
+            buyFilled: true,
+            sellFilled: false,
+            qty: qty.toNumber(),
+            notional: notional.toNumber(),
+            exitReason: 'layer_added',
+            stackId,
+          });
+          continue;
+        }
+
+        // ─── Layer 2+: try add layer ────────────────────────────
+        if (openStack.layerCount >= cfg.dcaMaxLayers) {
+          perBotTrades[bi.botId].push({
+            signalTime: new Date(sig.openTime),
+            candleCloseTime: new Date(sig.closeTime),
+            buyPrice,
+            layerIndex: openStack.layerCount + 1,
+            layerCountAfter: openStack.layerCount,
+            buyFilled: false,
+            sellFilled: false,
+            qty: 0,
+            notional: 0,
+            exitReason: 'dca_max_layers_hit',
+            stackId: openStack.stackId,
+          });
+          continue;
+        }
+        // Shared capital check (each layer costs layerNotional(layerIdx) — Martingale-scaled)
+        const layerIdx = openStack.layerCount + 1;
+        const capBeforeLayer = activeExits.reduce((s, e) => s + e.capitalUsed, 0);
+        if (capBeforeLayer + layerNotional(layerIdx) > totalCap.toNumber()) {
+          capitalExhaustedSkips++;
+          perBotTrades[bi.botId].push({
+            signalTime: new Date(sig.openTime),
+            candleCloseTime: new Date(sig.closeTime),
+            buyPrice,
+            layerIndex: layerIdx,
+            layerCountAfter: openStack.layerCount,
+            buyFilled: false,
+            sellFilled: false,
+            qty: 0,
+            notional: 0,
+            exitReason: 'capital_exhausted_skip',
+            stackId: openStack.stackId,
+          });
+          continue;
+        }
+        const buyRes = await tryFillBuy({
+          klines, sigIdx: sig.index, buyPrice,
+          maxBuyWait: cfg.maxBuyWait, stepMs,
+        });
+        if (!buyRes.filled) {
+          perBotTrades[bi.botId].push({
+            signalTime: new Date(sig.openTime),
+            candleCloseTime: new Date(sig.closeTime),
+            buyPrice,
+            layerIndex: layerIdx,
+            layerCountAfter: openStack.layerCount,
+            buyFilled: false,
+            sellFilled: false,
+            qty: 0,
+            notional: 0,
+            exitReason: 'no_buy_fill',
+            stackId: openStack.stackId,
+          });
+          continue;
+        }
+        const qty = computeLayerQty(buyPrice, layerNotional(layerIdx), cfg.stepSize);
+        const notional = new Decimal(buyPrice).mul(new Decimal(qty));
+        if (notional.lessThan(cfg.minNotional)) {
+          perBotTrades[bi.botId].push({
+            signalTime: new Date(sig.openTime),
+            candleCloseTime: new Date(sig.closeTime),
+            buyPrice,
+            layerIndex: openStack.layerCount + 1,
+            layerCountAfter: openStack.layerCount,
+            buyFilled: false,
+            sellFilled: false,
+            qty: qty.toNumber(),
+            notional: notional.toNumber(),
+            exitReason: 'below_min_notional',
+            stackId: openStack.stackId,
+          });
+          continue;
+        }
+        // Append layer + recompute BEP + new target
+        openStack.layers.push({ price: buyPrice, qty: qty.toNumber(), filledAtMs: buyRes.filledAtMs });
+        openStack.layerCount += 1;
+        const { totalQty, totalSpent, bep } = computeBEP(openStack.layers);
+        openStack.totalQty = totalQty;
+        openStack.totalSpent = totalSpent;
+        openStack.stackBep = bep;
+        openStack.targetSellPrice = new Decimal(bep)
+          .mul(1 + cfg.tpPercent / 100 + 2 * cfg.feeRate).toNumber();
+        // Reserve additional capital for the new layer (Martingale-scaled notional)
+        activeExits.push({
+          botId: bi.botId,
+          exitIdx: klines.length,
+          capitalUsed: layerNotional(layerIdx),
+          isDcaStack: true,
+          stackId: openStack.stackId,
+        });
+        if (activeExits.length > peakConcurrentTrades) peakConcurrentTrades = activeExits.length;
+        const newUsed = activeExits.reduce((s, e) => s + e.capitalUsed, 0);
+        if (newUsed > peakCapitalUsed.toNumber()) peakCapitalUsed = new Decimal(newUsed);
+        perBotTrades[bi.botId].push({
+          signalTime: new Date(sig.openTime),
+          candleCloseTime: new Date(sig.closeTime),
+          buyPrice,
+          layerIndex: openStack.layerCount,
+          layerCountAfter: openStack.layerCount,
+          buyFilled: true,
+          sellFilled: false,
+          qty: qty.toNumber(),
+          notional: notional.toNumber(),
+          exitReason: 'layer_added',
+          stackId: openStack.stackId,
+        });
+      }
+
+      // ─── Close any open stack at end of range ────────────────
+      if (openStack) {
+        closeOpenStack({
+          openStack, klines, stepMs, feeRate: cfg.feeRate,
+          stopLossOnUpperKC: cfg.stopLossOnUpperKC,
+          autoArmStopLossOnUKC: cfg.autoArmStopLossOnUKC,
+          upperKC: bi.upperKC,
+        });
+        // Remove from activeExits (stack closed)
+        const idx = activeExits.findIndex((e) => e.stackId === openStack.stackId);
+        if (idx >= 0) activeExits.splice(idx, 1);
+        // Append the closed stack as a Trade-shaped record
+        const stackTrade = buildStackTradeRecord(openStack, cfg.feeRate);
+        allTrades.push(stackTrade);
+        perBotTrades[bi.botId].push(stackTrade);
+        // Update perBotPeak — DCA stack holds 1 slot
+        const activeForBot = activeExits.filter((e) => e.botId === bi.botId).length;
+        if (activeForBot > perBotPeak[bi.botId]) perBotPeak[bi.botId] = activeForBot;
+      }
+    }
+  }
+
   // 4) Per-bot stats + combined stats
   // FIX 2026-07-30: ส่ง trades ทั้งหมด (รวม skip types) เข้า summarize() — เพื่อให้นับ no_buy_fill,
   //   below_min_notional, max_concurrent_skip, capital_exhausted_skip ได้ครบ
+  // FIX-2026-07-31: opened/closed trades include cb_panic + stop_loss_upper_kc exits
+  const openedExitReasons = new Set([
+    'tp_hit', 'still_holding', 'cb_panic', 'stop_loss_upper_kc',
+    // FIX-2026-08-02: DCA stack exit reasons — counted as opened "stacks"
+    'dca_target_hit', 'dca_stack_stop_loss', 'dca_still_holding',
+  ]);
   const perBot = botInputs.map((bi) => {
     const allBotTrades = perBotTrades[bi.botId];
     const stats = summarize(allBotTrades);
-    const openedTrades = allBotTrades.filter((t) => t.exitReason === 'tp_hit' || t.exitReason === 'still_holding');
+    const openedTrades = allBotTrades.filter((t) => openedExitReasons.has(t.exitReason));
+    const dcaStacks = allBotTrades.filter((t) => t.isDcaStack === true);
+    const isDca = bi.cfg.dcaEnabled === true;
     return {
       botId: bi.botId,
       symbol: bi.cfg.symbol,
@@ -883,19 +1881,87 @@ async function runMultiBacktest(params) {
       kcMult: bi.cfg.kcMult,
       capitalPerTrade: bi.cfg.capitalPerTrade,
       maxConcurrentTrades: bi.cfg.maxConcurrentTrades,
+      xs1Enabled: bi.cfg.xs1Enabled != null ? bi.cfg.xs1Enabled : true,
+      cbEnabled: bi.cfg.cbEnabled != null ? bi.cfg.cbEnabled : true,
+      stopLossOnUpperKC: bi.cfg.stopLossOnUpperKC === true,
+      // FIX-2026-08-02: DCA mode params + stats
+      dcaEnabled: isDca,
+      dcaMaxLayers: bi.cfg.dcaMaxLayers || 3,
+      autoArmStopLossOnUKC: bi.cfg.autoArmStopLossOnUKC === true,
       candlesFetched: bi.candlesFetched,
       truncated: bi.truncated,
       signalsCount: bi.signals.length,
-      tradesCount: openedTrades.length,        // FIX: opened (tp_hit + still_holding) เท่านั้น
-      skippedCount: allBotTrades.length - openedTrades.length,
-      maxConcurrentTradesUsed: perBotPeak[bi.botId] || 0, // FIX: peak slot usage ต่อบอท
+      // DCA bots: count stacks (not layers). Non-DCA: count trades.
+      tradesCount: isDca ? dcaStacks.length : openedTrades.length,
+      stacksCount: isDca ? dcaStacks.length : null, // null for non-DCA bots
+      skippedCount: allBotTrades.length - (isDca ? dcaStacks.length : openedTrades.length),
+      maxConcurrentTradesUsed: perBotPeak[bi.botId] || 0,
       stats,
     };
   });
 
-  const closedTrades = allTrades.filter((t) => t.exitReason === 'tp_hit' || t.exitReason === 'still_holding');
+  const closedTrades = allTrades.filter((t) => openedExitReasons.has(t.exitReason));
   // FIX 2026-07-30: combinedStats = summarize over ALL trades (รวม skip) เพื่อให้นับ skip types ได้
   const combinedStats = summarize(allTrades);
+
+  // FIX 2026-07-30: รายละเอียดทุก position ที่ยังถืออยู่ที่จบ window — ให้ UI backtest แสดงเป็นตารางได้
+  //   ใช้สำหรับ "ยังไม่ถึง TP แต่ยังไม่ปิด" → mark-to-market ด้วย last close + bots list
+  // FIX-2026-08-02: รวม DCA still_holding stacks (unrealizedPnl vs last close)
+  const lastCloseBySymbol = {};
+  for (const bi of botInputs) {
+    if (bi.klines.length > 0) {
+      lastCloseBySymbol[bi.cfg.symbol] = parseFloat(bi.klines[bi.klines.length - 1].close);
+    }
+  }
+  const stillHoldingPositions = allTrades
+    .filter((t) => t.exitReason === 'still_holding' || t.exitReason === 'dca_still_holding')
+    .map((t) => {
+      const isDca = t.isDcaStack === true;
+      const entry = isDca ? (t.stackBep || 0) : (t.buyPrice || 0);
+      const tp = isDca ? (t.targetSellPrice || 0) : (t.targetSellPrice || 0);
+      const lastC = isDca ? (lastCloseBySymbol[t.symbol] || 0) : (t.lastClose || 0);
+      // mark-to-market for DCA stacks using stackBep + totalQty
+      let unrealizedPnl = t.unrealizedPnl || 0;
+      let unrealizedPnlPct = t.unrealizedPnlPercent || 0;
+      if (isDca && lastC > 0 && t.totalSpent > 0) {
+        // rough PnL vs stackBep at last close (no fee buffer on unrealized)
+        unrealizedPnl = (lastC - entry) * (t.totalQty || 0);
+        unrealizedPnlPct = t.totalSpent > 0 ? (unrealizedPnl / t.totalSpent) * 100 : 0;
+      }
+      const pnlPct = entry > 0 ? ((lastC - entry) / entry) * 100 : 0;
+      const totalPathPct = entry > 0 && tp > 0 ? ((tp - entry) / entry) * 100 : 0;
+      const pctToTp = tp > 0 && lastC > 0 && lastC < tp ? ((tp - lastC) / lastC) * 100 : 0;
+      const tpReached = tp > 0 && lastC >= tp;
+      return {
+        botId: t.botId,
+        botIndex: bots.findIndex((b) => (b.botId || `bot_${bots.indexOf(b)}`) === t.botId),
+        symbol: t.symbol,
+        timeframe: t.timeframe,
+        signalTime: t.signalTime,
+        candleCloseTime: t.candleCloseTime,
+        buyFilledAt: t.buyFilledAt,
+        buyPrice: entry,
+        targetSellPrice: tp,
+        qty: t.qty,
+        notional: t.notional,
+        capitalUsed: t.capitalUsed,
+        lastClose: lastC,
+        unrealizedPnl,
+        unrealizedPnlPercent: unrealizedPnlPct,
+        pnlPercent: pnlPct,
+        totalPathPct,
+        pctToTp,
+        tpReached,
+        candlesHeld: t.candlesHeld,
+        // DCA-specific fields (null for non-DCA)
+        isDcaStack: isDca,
+        stackId: t.stackId || null,
+        stackBep: isDca ? t.stackBep : null,
+        layerCount: isDca ? t.layerCount : null,
+        totalQty: isDca ? t.totalQty : null,
+        totalSpent: isDca ? t.totalSpent : null,
+      };
+    });
 
   // Store result
   const storedTrades = closedTrades.length > 500 ? closedTrades.slice(0, 250).concat(closedTrades.slice(-250)) : closedTrades;
@@ -912,7 +1978,15 @@ async function runMultiBacktest(params) {
         totalCapital,
         bots: bots.map((b) => ({
           symbol: b.symbol, timeframe: b.timeframe, tpPercent: b.tpPercent,
+          kcMult: b.kcMult,
           capitalPerTrade: b.capitalPerTrade, maxConcurrentTrades: b.maxConcurrentTrades,
+          xs1Enabled: b.xs1Enabled !== false,
+          cbEnabled: b.cbEnabled !== false,
+          stopLossOnUpperKC: b.stopLossOnUpperKC === true,
+          // FIX-2026-08-02: persist DCA params per bot
+          dcaEnabled: b.dcaEnabled === true,
+          dcaMaxLayers: b.dcaMaxLayers != null ? parseInt(b.dcaMaxLayers, 10) : 3,
+          autoArmStopLossOnUKC: b.autoArmStopLossOnUKC === true,
         })),
         model: 'realistic_v3_multi',
       },
@@ -946,6 +2020,10 @@ async function runMultiBacktest(params) {
       peakConcurrentTrades,
       stats: combinedStats,
       trades: storedTrades,
+      // FIX 2026-07-30: รายละเอียด positions ที่ยังถืออยู่ (mark-to-market ด้วย last close)
+      stillHoldingPositions,
+      stillHoldingCount: stillHoldingPositions.length,
+      stillHoldingTotalUnrealized: stillHoldingPositions.reduce((s, p) => s + (p.unrealizedPnl || 0), 0),
     },
   };
 }

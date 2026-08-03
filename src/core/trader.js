@@ -694,6 +694,28 @@ class Trader {
     return this.bot && this.bot.dcaEnabled === true;
   }
 
+  // FIX-2026-08-03: DCA + Martingale layer sizing
+  //   - Returns the per-layer notional (USDT) for the upcoming DCA layer
+  //   - When martingaleEnabled=false OR dcaEnabled=false → capitalPerTrade (unchanged, backward compat)
+  //   - When martingaleEnabled=true AND dcaEnabled=true → capitalPerTrade × mult^(layerIndex-1)
+  //     - layerIndex = stack.dcaLayerIndex (1 for first layer, 2 for second, ...)
+  //     - applied with per-layer cap (martingaleMaxLayerNotional) for safety
+  //   - Returns { notional, isMartingale, multiplier, layerIndex, capped }
+  //   - Pure function — does NOT mutate state or place orders
+  _computeDcaLayerNotional(stack) {
+    const base = parseFloat(this.bot.capitalPerTrade) || 0;
+    if (!this._isDcaMode() || !this.bot.martingaleEnabled) {
+      return { notional: base, isMartingale: false, multiplier: 1, layerIndex: 1, capped: false };
+    }
+    const layerIndex = Number(stack && stack.dcaLayerIndex) || 1;
+    const multiplier = parseFloat(this.bot.martingaleMultiplier) || 1.5;
+    const cap = parseFloat(this.bot.martingaleMaxLayerNotional) || 100;
+    const raw = base * Math.pow(multiplier, layerIndex - 1);
+    const capped = raw > cap;
+    const notional = capped ? cap : raw;
+    return { notional, isMartingale: true, multiplier, layerIndex, capped };
+  }
+
   _computeStackBEP(trade) {
     // Priority 1: walk buyLayers (canonical for DCA stacks)
     if (Array.isArray(trade.buyLayers) && trade.buyLayers.length > 0) {
@@ -2195,9 +2217,28 @@ class Trader {
       }
 
       // 3. คำนวณ qty
+      // FIX-2026-08-03: DCA + Martingale scaling — when DCA mode + martingaleEnabled,
+      //   per-layer notional scales by multiplier^(layerIndex-1), capped by martingaleMaxLayerNotional.
+      //   When martingaleEnabled=false (default) OR non-DCA → uses capitalPerTrade (unchanged).
+      let buyNotionalUSDT = this.bot.capitalPerTrade;
+      if (this._isDcaMode() && this.currentTrade) {
+        const layerInfo = this._computeDcaLayerNotional(this.currentTrade);
+        buyNotionalUSDT = layerInfo.notional;
+        if (layerInfo.isMartingale) {
+          logger.info({
+            botId: this.bot._id.toString(),
+            symbol: this.bot.symbol,
+            stackId: String(this.currentTrade.stackId || this.currentTrade._id),
+            layerIndex: layerInfo.layerIndex,
+            multiplier: layerInfo.multiplier,
+            layerNotionalUSDT: layerInfo.notional.toFixed(4),
+            capped: layerInfo.capped,
+          }, 'trader: DCA Martingale layer sizing');
+        }
+      }
       const { qty } = symbolInfo.calcQtyFromCapital({
         symbol: this.bot.symbol,
-        capitalUSDT: this.bot.capitalPerTrade,
+        capitalUSDT: buyNotionalUSDT,
         price: parseFloat(refPrice.toString()),
       });
 

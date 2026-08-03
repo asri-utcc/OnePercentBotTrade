@@ -61,6 +61,19 @@ async function init() {
   setupButtons();
   setupCharts();
 
+  // FIX-2026-08-01: Bot Quality Indicator pill click → open modal
+  const hq = document.getElementById('hero-quality');
+  if (hq) {
+    hq.addEventListener('click', () => {
+      if (detail && detail.bot && window.qualityModal) {
+        window.qualityModal.openQualityModal(detail.bot);
+      }
+    });
+  }
+
+  // FIX-2026-07-31: preload Binance tickSize precision สำหรับ PriceFormat
+  if (window.PriceFormat) await window.PriceFormat.load();
+
   await refresh();
 
   // live updates
@@ -85,6 +98,14 @@ async function init() {
     }
   });
   WSClient.on('bot:updated', () => refresh());
+  // FIX-2026-08-02: signal:new → re-render price chart ทันที (sync กับ mini-chart ของหน้า /bots.html)
+  //   - เดิม bot-detail chart รอ 15s polling หรือ bar-close countdown → ทำให้ S1 marker ใหม่ไม่ขึ้นทันที
+  //   - กรณี signal ไม่ได้ place trade (maxTrades ถึง limit / safe-trade block) ไม่มี trade:update → อาจไม่ refresh เลย
+  WSClient.on('signal:new', (p) => {
+    if (!p || !p.signal || !detail) return;
+    if (String(p.signal.botId) !== String(BOT_ID)) return;
+    if (priceChart) renderPriceChart();
+  });
   WSClient.on('kline:update', (p) => {
     if (!detail || !p.kline || !candleSeries) return;
     if (p.kline.symbol !== detail.bot.symbol || p.interval !== detail.bot.timeframe) return;
@@ -158,13 +179,61 @@ function setupButtons() {
 }
 
 async function onPositionListClick(ev) {
-  const btn = ev.target.closest('.btn-force-close');
+  // FIX-2026-08-02: support both regular .btn-force-close (PositionCard) + .btn-force-close-dca (StackCard)
+  const btn = ev.target.closest('.btn-force-close, .btn-force-close-dca');
   if (!btn) return;
   const tradeId = btn.dataset.tradeId;
   if (!tradeId) return;
   const trade = (detail.trades || []).find((t) => String(t._id) === String(tradeId));
   if (!trade) return;
-  await forceClosePositionFlow(trade);
+  if (trade.isDcaStack === true) {
+    await forceCloseDcaStackFlow(trade);
+  } else {
+    await forceClosePositionFlow(trade);
+  }
+}
+
+async function forceCloseDcaStackFlow(stack) {
+  const layerCount = Number(stack.dcaLayerCount) || (stack.buyLayers?.length || 0);
+  const totalQty = Number(stack.stackTotalQty) || 0;
+  const totalSpent = Number(stack.stackTotalSpent) || 0;
+  const target = {
+    name: stack.symbol || '-',
+    symbol: stack.symbol || '-',
+    timeframe: stack.timeframe || '-',
+  };
+  const pw = await LUX_CONFIRM.luxConfirm({
+    variant: 'danger',
+    icon: '📚',
+    title: 'ยืนยันบังคับปิด DCA stack',
+    sub: `จะยกเลิก aggregate SELL (ถ้ามี) แล้ว MARKET SELL ${totalQty.toFixed(6)} (ทั้ง stack)`,
+    message: `Stack ${stack._id} (${stack.symbol}, state=${stack.state}, layers=${layerCount}, total spent=${totalSpent.toFixed(2)} USDT, BEP=${Number(stack.stackBep || 0).toFixed(8)}) — ปิดทั้ง stack เลยหรือไม่?`,
+    target, requirePassword: true,
+    dangerNote: 'บอทยังคงทำงานต่อ — เฉพาะ stack นี้ที่ถูกปิด (sellReason=dca_stack_force_close)',
+    confirmLabel: 'บังคับปิด stack', confirmGlyph: '📚',
+  });
+  if (pw === null) return;
+  try {
+    const resp = await LUX_CONFIRM.callBotWithPassword(
+      'POST',
+      `/api/bots/${BOT_ID}/trades/${stack._id}/force-close`,
+      { password: pw || undefined },
+      `force-close DCA stack ${stack._id}`,
+    );
+    const mode = resp && resp.result && resp.result.mode;
+    const layers = (resp.result && resp.result.layerCount) || layerCount;
+    await LUX_CONFIRM.luxAlert({
+      variant: 'success',
+      icon: '✅',
+      title: 'บังคับปิด DCA stack สำเร็จ',
+      message: `mode=${mode || 'unknown'} · layers=${layers} · pnl=${(resp.result && resp.result.pnl != null) ? resp.result.pnl.toFixed(4) : '-'} USDT`,
+    });
+    await refresh();
+  } catch (err) {
+    await LUX_CONFIRM.luxAlert({
+      variant: 'danger', icon: '⚠️', title: 'บังคับปิด stack ไม่สำเร็จ', message: err.message,
+    });
+  }
 }
 
 async function forceClosePositionFlow(trade) {
@@ -344,6 +413,21 @@ function renderMetaChips() {
       uptimeEl.style.color = 'var(--text-4)';
     }
     document.getElementById('hero-id').textContent = `id: ${b._id.slice(-8)}`;
+
+    // FIX-2026-08-01: Bot Quality Indicator pill (mirror buildQualityBadge logic in bots.js)
+    const hq = document.getElementById('hero-quality');
+    if (hq) {
+      if (b.qualityEnabled === false || b.qualityScore == null) {
+        hq.className = 'quality-pill is-gray';
+        hq.textContent = '—';
+        hq.title = 'Quality Indicator ถูกปิดหรือยังโหลดไม่เสร็จ';
+      } else {
+        hq.className = `quality-pill is-${b.qualityColor || 'gray'}`;
+        hq.textContent = `${b.qualityScore}/4`;
+        const updated = b.qualityUpdatedAt ? new Date(b.qualityUpdatedAt).toLocaleTimeString('th-TH') : '-';
+        hq.title = `คลิกเพื่อดู breakdown · อัปเดตล่าสุด: ${updated}`;
+      }
+    }
   } catch (err) {
     console.error('renderMetaChips', err);
   }
@@ -474,227 +558,27 @@ function renderActiveTrade() {
   const buyStatusClass = STATE_COLORS[(t.buyStatus || '').toLowerCase()] || '';
 
   content.innerHTML = `
-    <div class="row"><span class="k">State</span><span class="v"><span class="status-pill is-${stateClass}">${t.state}</span></span></div>
+    <div class="row"><span class="k">State</span><span class="v"><span class="status-pill is-${stateClass}">${t.state}</span>${t.state === 'sold' ? SellReasons.renderSellReasonPill(t.sellReason, t.sellReasonDetail) : ''}</span></div>
     <div class="row"><span class="k">Symbol · TF</span><span class="v">${t.symbol} · ${t.timeframe}</span></div>
     <div class="row"><span class="k">BUY OrderId</span><span class="v code" style="font-size:0.75rem;">${t.buyOrderId || '-'}</span></div>
-    <div class="row"><span class="k">BUY Price</span><span class="v">${t.buyPrice != null ? t.buyPrice.toFixed(4) : '-'}</span></div>
+    <div class="row"><span class="k">BUY Price</span><span class="v">${t.buyPrice != null ? PriceFormat.format(t.buyPrice, t.symbol) : '-'}</span></div>
     <div class="row"><span class="k">BUY Qty</span><span class="v">${t.buyQty != null ? t.buyQty.toFixed(6) : '-'}</span></div>
     <div class="row"><span class="k">BUY Status</span><span class="v"><span class="status-pill is-${buyStatusClass}">${t.buyStatus || '-'}</span></span></div>
     <div class="row"><span class="k">BUY Placed</span><span class="v" style="font-size:0.78rem;">${t.buyPlacedAt ? fmtTime(t.buyPlacedAt) : '-'}</span></div>
     <div class="row"><span class="k">SELL OrderId</span><span class="v code" style="font-size:0.75rem;">${t.sellOrderId || '-'}</span></div>
-    <div class="row"><span class="k">Target Sell</span><span class="v">${t.targetSellPrice != null ? t.targetSellPrice.toFixed(4) : '-'}</span></div>
+    <div class="row"><span class="k">Target Sell</span><span class="v">${t.targetSellPrice != null ? PriceFormat.format(t.targetSellPrice, t.symbol) : '-'}</span></div>
     <div class="row"><span class="k">Retry</span><span class="v">${t.retryCount ?? 0} / ${detail.bot.retryMax ?? 1}</span></div>
     ${t.error ? `<div class="row"><span class="k">Note</span><span class="v" style="color:var(--bear-1);font-size:0.78rem;">${escapeHtml(t.error)}</span></div>` : ''}
     <div class="retry-bar" title="Slots: ${usedSlots}/${retryMax}">${segs.join('')}</div>`;
 }
 
-/* ── Positions tab (open trades) ─────────────────────── */
+/* ── Positions tab (open trades) ───────────────────────
+ * 2026-07-30: computePositionMetrics / renderPositionCard / renderPositionCardMobile
+ *   ถูก extract ไปยัง public/js/partials/positionCard.js (shared partial)
+ *   ใช้ซ้ำได้ทั้ง bot-detail page นี้ + modal ในหน้า /bots.html
+ *   - OPEN_TRADE_STATES ยังคงอยู่ที่นี่เพราะใช้เฉพาะ bot-detail
+ */
 const OPEN_TRADE_STATES = ['placed', 'filled', 'holding', 'selling', 'retrying'];
-
-function computePositionMetrics(t) {
-  const entry = Number(t.buyPrice) || 0;
-  const qty   = Number(t.buyQty)   || 0;
-  const tp    = Number(t.targetSellPrice) || 0;
-  const px    = (currentPrice && currentPrice > 0) ? currentPrice : entry;
-
-  // % PnL on the position (mark-to-market)
-  const pnlPct = entry > 0 ? ((px - entry) / entry) * 100 : 0;
-  // Unrealized PnL = mark-to-market vs entry × qty
-  const unrealizedUsdt = (px - entry) * qty;
-
-  // % to TP = how much the CURRENT PRICE must go UP to reach TP
-  //   e.g. entry 100, current 100.10, TP 100.25 → pctToTp = (0.15/100.10)*100 ≈ 0.1499%
-  //   if current ≥ tp → already at/over TP → 0% (bar empty)
-  //   if tp not yet set (waiting for BUY fill) → null
-  let pctToTp = null;
-  let tpReached = false;
-  if (tp > 0 && px > 0) {
-    if (px >= tp) {
-      pctToTp = 0;
-      tpReached = true;
-    } else {
-      pctToTp = ((tp - px) / px) * 100;
-    }
-  }
-
-  // Bar fill = % of total TP-distance still remaining from current price
-  //   total = ((tp - entry) / entry) * 100  (e.g. +0.25%)
-  //   remaining = pctToTp
-  //   bar = remaining / total * 100, clamped 0..100
-  //   → 100% bar = just entered, 0% = at TP. Bar shrinks as price climbs.
-  let barPct = 0;
-  const totalPathPct = (tp > 0 && entry > 0) ? ((tp - entry) / entry) * 100 : 0;
-  if (pctToTp != null && totalPathPct > 0) {
-    barPct = (pctToTp / totalPathPct) * 100;
-    if (barPct < 0) barPct = 0;
-    if (barPct > 100) barPct = 100;
-  }
-
-  // Duration since buyFilledAt (or buyPlacedAt if not yet filled)
-  const startAt = t.buyFilledAt || t.buyPlacedAt || t.createdAt;
-  const durMs = startAt ? (Date.now() - new Date(startAt).getTime()) : 0;
-
-  return {
-    entry, qty, tp, px,
-    pnlPct, unrealizedUsdt,
-    pctToTp, tpReached, barPct, totalPathPct,
-    durMs,
-  };
-}
-
-function renderPositionCard(t) {
-  const m = computePositionMetrics(t);
-  const ageTxt = m.durMs > 0 ? formatDuration(m.durMs) : '—';
-  const thbUpnl = window.usdtToThb ? window.usdtToThb(m.unrealizedUsdt) : '';
-  const thbPx   = window.usdtToThb ? window.usdtToThb(m.px) : '';
-  const thbVal  = window.usdtToThb ? window.usdtToThb(m.entry * m.qty) : '';
-  const pnlCls  = m.pnlPct >= 0 ? 'pnl-bull' : 'pnl-bear';
-  const pnlSign = m.pnlPct >= 0 ? '+' : '';
-  const barPct  = Math.round(m.barPct || 0);
-
-  // Label: "% to TP" = how much current price must go UP to reach TP
-  //   e.g. entry 100, current 100.10, TP 100.25 → "ต้องขึ้นอีก 0.150%"
-  let tpLabel;
-  if (m.pctToTp == null) {
-    tpLabel = '⚠️ รอ BUY fill';
-  } else if (m.tpReached) {
-    tpLabel = '🎯 ถึง TP แล้ว!';
-  } else {
-    tpLabel = `ต้องขึ้นอีก ${m.pctToTp.toFixed(3)}% ถึง TP`;
-  }
-
-  // progress section sub-label = "TP at X.XXXX · path เดิม +Y.YY%"
-  let progressSub;
-  if (m.tp > 0) {
-    progressSub = `TP at ${m.tp.toFixed(4)} · path เดิม ${m.totalPathPct >= 0 ? '+' : ''}${m.totalPathPct.toFixed(3)}%`;
-  } else {
-    progressSub = 'TP ยังไม่ตั้ง';
-  }
-
-  // TP cell sub-line
-  let tpSub;
-  if (m.tp > 0) {
-    if (m.tpReached) {
-      tpSub = `เกิน TP แล้ว +${(-((m.px - m.tp) / m.tp) * 100).toFixed(3)}%`;
-    } else {
-      tpSub = `${m.totalPathPct >= 0 ? '+' : ''}${m.totalPathPct.toFixed(3)}% above entry`;
-    }
-  } else {
-    tpSub = 'ยังไม่ได้ตั้ง (รอ BUY fill)';
-  }
-
-  // entry sub-line
-  const entrySub = t.buyFilledAt
-    ? `filled ${fmtDateTime(t.buyFilledAt)}`
-    : (t.buyPlacedAt ? `placed ${fmtDateTime(t.buyPlacedAt)}` : 'placed');
-
-  return `
-    <div class="position-card ${pnlCls}" data-trade-id="${escapeHtml(String(t._id || ''))}">
-      <div class="pos-head">
-        <div class="left">
-          <span class="sym-tag">${escapeHtml(t.symbol || '-')}</span>
-          <span class="tf-tag">${escapeHtml(t.timeframe || '-')}</span>
-          <span class="status-pill is-${STATE_COLORS[t.state] || ''}">${escapeHtml(t.state || '-')}</span>
-          <span class="retry-pill" title="retry slots">🔄 ${t.retryCount ?? 0}/${detail.bot.retryMax ?? 1}</span>
-        </div>
-        <div class="right">
-          <span class="pos-age" title="เปิดมานาน"><span class="age-icon">⏱</span> ${ageTxt}</span>
-        </div>
-      </div>
-
-      <div class="pos-grid">
-        <div class="cell">
-          <span class="k">Entry</span>
-          <span class="v mono">${m.entry > 0 ? m.entry.toFixed(4) : '-'}</span>
-          <span class="sub">${entrySub}</span>
-        </div>
-        <div class="cell">
-          <span class="k">Qty</span>
-          <span class="v mono">${m.qty > 0 ? m.qty.toFixed(6) : '-'}</span>
-          <span class="sub">${thbVal ? `≈ ${thbVal} (THB)` : `≈ ${(m.qty * m.entry).toFixed(2)} USDT`}</span>
-        </div>
-        <div class="cell">
-          <span class="k">Current</span>
-          <span class="v mono ${pnlCls}">${m.px > 0 ? m.px.toFixed(4) : '-'}</span>
-          ${thbPx ? `<span class="sub thb-eq">${thbPx}</span>` : ''}
-        </div>
-        <div class="cell">
-          <span class="k">TP Target</span>
-          <span class="v mono">${m.tp > 0 ? m.tp.toFixed(4) : '—'}</span>
-          <span class="sub">${tpSub}</span>
-        </div>
-        <div class="cell">
-          <span class="k">Unrealized PnL</span>
-          <span class="v mono ${pnlCls}">${pnlSign}${m.unrealizedUsdt.toFixed(4)} USDT</span>
-          ${thbUpnl ? `<span class="sub thb-eq">${thbUpnl}</span>` : ''}
-        </div>
-        <div class="cell">
-          <span class="k">% PnL</span>
-          <span class="v mono ${pnlCls}">${pnlSign}${m.pnlPct.toFixed(3)}%</span>
-        </div>
-      </div>
-
-      <div class="pos-progress">
-        <div class="pos-progress-label ${m.tpReached ? 'tp-reached' : ''}">
-          <span>${tpLabel}</span>
-          ${m.tp > 0 ? `<span class="text-muted-3" style="font-size:0.7rem;">${progressSub}</span>` : ''}
-        </div>
-        <div class="pct-bar" title="bar = % ระยะที่เหลือจากราคาปัจจุบันไปยัง TP (100% = เพิ่งเปิด, 0% = ถึง TP)">
-          <div class="pct-bar-fill ${pnlCls}" style="width:${barPct}%;"></div>
-        </div>
-      </div>
-
-      <div class="pos-foot">
-        <span class="pair"><span>Order:</span><strong class="code">${t.buyOrderId || '—'}</strong></span>
-        ${t.sellOrderId ? `<span class="pair"><span>SELL:</span><strong class="code">${t.sellOrderId}</strong></span>` : ''}
-        ${t.error ? `<span class="last-err">⚠️ ${escapeHtml(t.error)}</span>` : ''}
-        <button type="button" class="btn-lux btn-bear btn-sm btn-force-close" data-trade-id="${escapeHtml(String(t._id || ''))}" title="บังคับปิดไม้นี้ (ยกเลิก SELL + MARKET SELL หรือ synthetic close)">🛑 Force Close</button>
-      </div>
-    </div>`;
-}
-
-function renderPositionCardMobile(t) {
-  const m = computePositionMetrics(t);
-  const ageTxt = m.durMs > 0 ? formatDuration(m.durMs) : '—';
-  const thbUpnl = window.usdtToThb ? window.usdtToThb(m.unrealizedUsdt) : '';
-  const pnlCls  = m.pnlPct >= 0 ? 'pnl-bull' : 'pnl-bear';
-  const pnlSign = m.pnlPct >= 0 ? '+' : '';
-  const barPct  = Math.round(m.barPct || 0);
-
-  let tpLabel;
-  if (m.pctToTp == null) {
-    tpLabel = '⚠️ รอ BUY fill';
-  } else if (m.tpReached) {
-    tpLabel = '🎯 ถึง TP แล้ว!';
-  } else {
-    tpLabel = `ต้องขึ้นอีก ${m.pctToTp.toFixed(3)}%`;
-  }
-
-  return `
-    <div class="mob-card position-mob">
-      <div class="top">
-        <span class="status-pill is-${STATE_COLORS[t.state] || ''}">${escapeHtml(t.state || '-')}</span>
-        <span class="ts" style="color:var(--text-3);font-size:0.72rem;">⏱ ${ageTxt} · 🔄 ${t.retryCount ?? 0}/${detail.bot.retryMax ?? 1}</span>
-      </div>
-      <div class="row"><span class="k">Entry</span><span class="v">${m.entry > 0 ? m.entry.toFixed(4) : '-'}</span></div>
-      <div class="row"><span class="k">Qty</span><span class="v">${m.qty > 0 ? m.qty.toFixed(6) : '-'}</span></div>
-      <div class="row"><span class="k">Current</span><span class="v ${pnlCls}">${m.px > 0 ? m.px.toFixed(4) : '-'}</span></div>
-      <div class="row"><span class="k">TP Target</span><span class="v">${m.tp > 0 ? m.tp.toFixed(4) : '—'}</span></div>
-      <div class="row"><span class="k">% PnL</span><span class="v ${pnlCls}">${pnlSign}${m.pnlPct.toFixed(3)}%</span></div>
-      <div class="row"><span class="k">Unrealized</span><span class="v ${pnlCls}">${pnlSign}${m.unrealizedUsdt.toFixed(4)} USDT${thbUpnl ? ` (${thbUpnl})` : ''}</span></div>
-      <div class="row"><span class="k">Order</span><span class="v code">${t.buyOrderId || '—'}</span></div>
-      <div class="row"><span class="k">% to TP</span><span class="v ${m.tpReached ? 'tp-reached' : ''}">${m.pctToTp == null ? '—' : `${m.pctToTp.toFixed(3)}%`}</span></div>
-      <div class="pos-progress" style="margin-top:0.5rem;">
-        <div class="pct-bar"><div class="pct-bar-fill ${pnlCls}" style="width:${barPct}%;"></div></div>
-        <div class="pos-progress-label ${m.tpReached ? 'tp-reached' : ''}" style="margin-top:0.25rem;font-size:0.72rem;">
-          ${tpLabel}
-        </div>
-      </div>
-      <div style="margin-top:0.5rem;text-align:right;">
-        <button type="button" class="btn-lux btn-bear btn-sm btn-force-close" data-trade-id="${escapeHtml(String(t._id || ''))}" title="บังคับปิดไม้นี้">🛑 Force Close</button>
-      </div>
-    </div>`;
-}
 
 function renderPositions() {
   const desk = document.getElementById('positions-list');
@@ -702,13 +586,47 @@ function renderPositions() {
   const meta = document.getElementById('positions-price-meta');
   if (!desk) return;
 
-  const open = (detail.trades || []).filter((t) => OPEN_TRADE_STATES.includes(t.state));
+  const isDcaBot = detail.bot && detail.bot.dcaEnabled === true;
+  const allTrades = detail.trades || [];
+
+  // FIX-2026-08-02: DCA mode — render stack card for the open DCA stack (single-stack mode)
+  //   Non-DCA bots fall through to existing per-trade PositionCard rendering (no change).
+  if (isDcaBot && window.StackCard) {
+    const openStack = allTrades.find((t) => t.isDcaStack === true
+      && StackCard.OPEN_DCA_STATES.includes(t.state));
+    document.getElementById('positions-count-label').textContent = openStack ? '1 stack' : '0 stack';
+    document.getElementById('tab-positions-badge').textContent = openStack ? 1 : 0;
+
+    if (meta) {
+      if (currentPrice && currentPrice > 0) {
+        meta.textContent = `ราคา: ${PriceFormat.format(currentPrice, detail.bot.symbol)}`;
+      } else {
+        meta.textContent = 'รอข้อมูลราคา…';
+      }
+    }
+
+    if (!openStack) {
+      desk.innerHTML = `<div class="empty-positions">ไม่มี DCA stack ที่เปิดอยู่ — เมื่อ S1 signal มา layer แรกจะเปิด stack ทันที จากนั้น layer ถัดไปจะถูกเพิ่มเข้า stack เดิมจนถึง ${detail.bot.dcaMaxLayers || 3} layers</div>`;
+      if (mob) mob.innerHTML = '';
+      return;
+    }
+
+    const stackOpts = {
+      maxLayers: detail.bot.dcaMaxLayers || 3,
+      forceCloseBtnClass: 'btn-force-close',
+    };
+    desk.innerHTML = window.StackCard.renderCard(openStack, currentPrice, stackOpts);
+    if (mob) mob.innerHTML = window.StackCard.renderCardMobile(openStack, currentPrice, stackOpts);
+    return;
+  }
+
+  const open = allTrades.filter((t) => OPEN_TRADE_STATES.includes(t.state));
   document.getElementById('positions-count-label').textContent = `${open.length} ไม้`;
   document.getElementById('tab-positions-badge').textContent = open.length;
 
   if (meta) {
     if (currentPrice && currentPrice > 0) {
-      meta.textContent = `ราคา: ${currentPrice.toFixed(4)}`;
+      meta.textContent = `ราคา: ${PriceFormat.format(currentPrice, detail.bot.symbol)}`;
     } else {
       meta.textContent = 'รอข้อมูลราคา…';
     }
@@ -723,8 +641,13 @@ function renderPositions() {
   // sort by createdAt desc (newest first)
   open.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
 
-  desk.innerHTML = open.map(renderPositionCard).join('');
-  if (mob) mob.innerHTML = open.map(renderPositionCardMobile).join('');
+  // 2026-07-30: ใช้ shared partial (positionCard.js) — markup เหมือนกันกับ modal ในหน้า /bots.html
+  //   - showRetry: false  → ไม่โชว์ retry pill (สำหรับ single bot ไม่ต้องการ)
+  //   - forceCloseBtnClass: 'btn-force-close' → ใช้กับ handler เดิมใน onPositionListClick
+  //   - ไม่ใส่ botName / botLink (อยู่ในหน้าบอทนี้อยู่แล้ว)
+  const cardOpts = { showRetry: false, forceCloseBtnClass: 'btn-force-close' };
+  desk.innerHTML = open.map((t) => window.PositionCard.renderCard(t, currentPrice, cardOpts)).join('');
+  if (mob) mob.innerHTML = open.map((t) => window.PositionCard.renderCardMobile(t, currentPrice, cardOpts)).join('');
 }
 
 /* ── Config grids ─────────────────────────────────────── */
@@ -770,7 +693,7 @@ function renderTrades() {
   document.getElementById('tab-trades-badge').textContent = count;
 
   if (count === 0) {
-    tbody.innerHTML = '<tr><td colspan="10" class="empty">ยังไม่มี trades</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="11" class="empty">ยังไม่มี trades</td></tr>';
     mob.innerHTML = '<div class="text-muted-3 text-center py-4">ยังไม่มี trades</div>';
     return;
   }
@@ -783,13 +706,14 @@ function renderTrades() {
       <tr>
         <td><span class="ts">${fmtDateTime(t.createdAt)}</span></td>
         <td><span class="status-pill is-${sc}">${t.state}</span></td>
-        <td>${t.buyPrice != null ? `BUY ${t.buyPrice.toFixed(4)}` : '-'}${t.sellPrice != null ? ` → SELL ${t.sellPrice.toFixed(4)}` : ''}</td>
-        <td class="num">${t.buyPrice?.toFixed(4) ?? '-'}</td>
+        <td>${t.buyPrice != null ? `BUY ${PriceFormat.format(t.buyPrice, t.symbol)}` : '-'}${t.sellPrice != null ? ` → SELL ${PriceFormat.format(t.sellPrice, t.symbol)}` : ''}</td>
+        <td class="num">${t.buyPrice != null ? PriceFormat.format(t.buyPrice, t.symbol) : '-'}</td>
         <td class="num">${t.buyQty?.toFixed(6) ?? '-'}</td>
         <td style="font-size:0.75rem;">${t.buyStatus || ''}${t.sellStatus ? ` → ${t.sellStatus}` : ''}</td>
         <td class="num">${t.retryCount ?? 0}</td>
-        <td class="num">${t.sellPrice?.toFixed(4) ?? '-'}</td>
+        <td class="num">${t.sellPrice != null ? PriceFormat.format(t.sellPrice, t.symbol) : '-'}</td>
         <td class="num ${pnlCls}">${pnlTxt}</td>
+        <td>${SellReasons.renderSellReasonPill(t.sellReason, t.sellReasonDetail)}</td>
         <td><span class="code">${t.buyOrderId || '-'}</span></td>
       </tr>`;
   }).join('');
@@ -805,11 +729,12 @@ function renderTrades() {
           <span class="status-pill is-${sc}">${t.state}</span>
           <span class="ts" style="color:var(--text-3);font-size:0.72rem;">${fmtDateTime(t.createdAt)}</span>
         </div>
-        <div class="row"><span class="k">Side</span><span class="v">${t.buyPrice ? `BUY ${t.buyPrice.toFixed(4)}` : '-'}${t.sellPrice ? ` → SELL ${t.sellPrice.toFixed(4)}` : ''}</span></div>
+        <div class="row"><span class="k">Side</span><span class="v">${t.buyPrice ? `BUY ${PriceFormat.format(t.buyPrice, t.symbol)}` : '-'}${t.sellPrice ? ` → SELL ${PriceFormat.format(t.sellPrice, t.symbol)}` : ''}</span></div>
         <div class="row"><span class="k">Qty</span><span class="v">${t.buyQty?.toFixed(6) ?? '-'}</span></div>
         <div class="row"><span class="k">Status</span><span class="v" style="font-size:0.75rem;">${t.buyStatus || ''}${t.sellStatus ? ` → ${t.sellStatus}` : ''}</span></div>
         <div class="row"><span class="k">Retry</span><span class="v">${t.retryCount ?? 0}</span></div>
         <div class="row"><span class="k">PnL</span><span class="v ${pnlCls}">${pnlTxt}</span></div>
+        <div class="row"><span class="k">Reason</span><span class="v">${SellReasons.renderSellReasonPill(t.sellReason, t.sellReasonDetail)}</span></div>
       </div>`;
   }).join('');
 }
@@ -837,10 +762,10 @@ function renderSignals() {
       <tr>
         <td><span class="ts">${fmtDateTime(s.createdAt)}</span></td>
         <td><span class="status-pill is-${dir === 'bull' ? 'success' : dir === 'bear' ? 'failed' : 'idle'}">${s.type}</span></td>
-        <td class="num">${s.closePrice?.toFixed(4) ?? '-'}</td>
+        <td class="num">${s.closePrice != null ? PriceFormat.format(s.closePrice, s.symbol) : '-'}</td>
         <td style="font-size:0.78rem;">${s.bgPrev} → ${s.bgState}</td>
-        <td class="num">${s.upperKC?.toFixed(4) ?? '-'}</td>
-        <td class="num">${s.lowerKC?.toFixed(4) ?? '-'}</td>
+        <td class="num">${s.upperKC != null ? PriceFormat.format(s.upperKC, s.symbol) : '-'}</td>
+        <td class="num">${s.lowerKC != null ? PriceFormat.format(s.lowerKC, s.symbol) : '-'}</td>
         <td><span class="status-pill is-${oc}">${s.outcome}</span></td>
         <td style="font-size:0.75rem;color:var(--text-3);">${escapeHtml(s.note || '')}</td>
       </tr>`;
@@ -857,9 +782,9 @@ function renderSignals() {
           <span class="status-pill is-${dir === 'bull' ? 'success' : dir === 'bear' ? 'failed' : 'idle'}">${s.type}</span>
           <span class="ts" style="color:var(--text-3);font-size:0.72rem;">${fmtDateTime(s.createdAt)}</span>
         </div>
-        <div class="row"><span class="k">Close</span><span class="v">${s.closePrice?.toFixed(4) ?? '-'}</span></div>
+        <div class="row"><span class="k">Close</span><span class="v">${s.closePrice != null ? PriceFormat.format(s.closePrice, s.symbol) : '-'}</span></div>
         <div class="row"><span class="k">BG</span><span class="v">${s.bgPrev} → ${s.bgState}</span></div>
-        <div class="row"><span class="k">KC range</span><span class="v">${s.lowerKC?.toFixed(4) ?? '-'} → ${s.upperKC?.toFixed(4) ?? '-'}</span></div>
+        <div class="row"><span class="k">KC range</span><span class="v">${s.lowerKC != null ? PriceFormat.format(s.lowerKC, s.symbol) : '-'} → ${s.upperKC != null ? PriceFormat.format(s.upperKC, s.symbol) : '-'}</span></div>
         <div class="row"><span class="k">Outcome</span><span class="v"><span class="status-pill is-${oc}">${s.outcome}</span></span></div>
         ${s.note ? `<div class="row"><span class="k">Note</span><span class="v" style="font-size:0.72rem;color:var(--text-3);">${escapeHtml(s.note)}</span></div>` : ''}
       </div>`;
@@ -882,7 +807,7 @@ function renderRecentSignals() {
       <div class="signal-row">
         <span class="type-dot ${dir}"></span>
         <span class="ts">${fmtDateTime(s.createdAt)}</span>
-        <span class="price">${s.closePrice?.toFixed(4) ?? '-'}</span>
+        <span class="price">${s.closePrice != null ? PriceFormat.format(s.closePrice, s.symbol) : '-'}</span>
         <span class="bg">bg ${s.bgPrev}→${s.bgState}</span>
         <span class="outcome"><span class="status-pill is-${oc}">${s.outcome}</span></span>
         ${s.note ? `<span class="note">${escapeHtml(s.note)}</span>` : ''}
@@ -914,10 +839,14 @@ function drawSpark(targetId, series, kind) {
 /* ── Charts (lightweight-charts) ──────────────────────── */
 let lastKline = null;
 
-// Adaptive price-axis formatter — ปรับจำนวนทศนิยมตามขนาดราคา
-//   ≥1000 → 2,  ≥1 → 4,  ≥0.01 → 4,  ≥0.0001 → 5,  <0.0001 → 6
+// FIX-2026-07-31: ใช้ Binance tickSize precision (authoritative) — fallback heuristic
+//   ZILUSDT tickSize = 0.000001 → 6 ตำแหน่ง (ตรงกับ Binance UI)
+//   detail.bot.symbol คือ symbol ของบอทปัจจุบัน
 function chartPriceFormatter(price) {
   if (price === null || price === undefined || !Number.isFinite(price)) return '';
+  const symbol = detail && detail.bot ? detail.bot.symbol : null;
+  if (window.PriceFormat) return window.PriceFormat.format(price, symbol);
+  // fallback heuristic (เดิม)
   const abs = Math.abs(price);
   if (abs >= 1000) return price.toFixed(2);
   if (abs >= 1) return price.toFixed(4);
@@ -1198,7 +1127,7 @@ function _drawPriceChart({ fit = false } = {}) {
           position: 'inBar',
           color: '#f5b800',                 // gold — แยกจาก S1 (blue) และ SELL-win (green)
           shape: 'arrowUp',
-          text: t.buyPrice != null ? `B ${t.buyPrice.toFixed(4)}` : 'B',
+          text: t.buyPrice != null ? `B ${PriceFormat.format(t.buyPrice, t.symbol)}` : 'B',
         });
       }
     }

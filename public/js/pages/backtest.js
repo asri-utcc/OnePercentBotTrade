@@ -19,8 +19,134 @@ function fmtDate(d)     { return d ? _btDateFmt.format(new Date(d)) : '-'; }
 // ─── State สำหรับ pagination ของ trades table ────
 let tradesState = { all: [], page: 0, pageSize: 20 };
 
+// ─── State สำหรับ sort ของ Still Holding Positions table ────
+let stillSortState = { key: 'candlesHeld', dir: 'desc' };
+let stillPositionsCache = [];  // raw positions array (sortable)
+
 function setTradesState(all) {
   tradesState = { all: all || [], page: 0, pageSize: 20 };
+}
+
+// ─── Still Holding Positions table — sort + render helpers ────────
+function stillSortValue(p, key, type) {
+  if (type === 'date') {
+    const v = p[key];
+    return v ? new Date(v).getTime() : 0;
+  }
+  const raw = p[key];
+  if (raw == null) return 0;
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : 0;
+}
+
+function renderStillTbody() {
+  const tbody = document.getElementById('mb-still-tbody');
+  if (!tbody) return;
+  const { key, dir } = stillSortState;
+  // Determine sort type from header (defaults to num for safety)
+  const th = document.querySelector(`#mb-still-holding th[data-sort-key="${key}"]`);
+  const type = th ? th.getAttribute('data-sort-type') : 'num';
+  const mult = dir === 'asc' ? 1 : -1;
+  const sorted = stillPositionsCache.slice().sort((a, b) => {
+    const va = stillSortValue(a, key, type);
+    const vb = stillSortValue(b, key, type);
+    if (va < vb) return -1 * mult;
+    if (va > vb) return 1 * mult;
+    // tiebreak: botIndex asc กัน row order เรียงไม่สม่ำเสมอ
+    const ai = (a.botIndex != null) ? a.botIndex : 999;
+    const bi = (b.botIndex != null) ? b.botIndex : 999;
+    if (ai < bi) return -1;
+    if (ai > bi) return 1;
+    return 0;
+  });
+  tbody.innerHTML = sorted.map(stillRowHtml).join('');
+}
+
+function stillRowHtml(p) {
+  const upnlCls = p.unrealizedPnl > 0 ? 'pnl-positive' : (p.unrealizedPnl < 0 ? 'pnl-negative' : '');
+  const barPct = stillBarPct(p);
+  const tpLabel = p.tpReached
+    ? `<span class="pnl-positive">🎯 ถึง TP แล้ว</span>`
+    : `ขึ้นอีก ${(p.pctToTp || 0).toFixed(3)}%`;
+  const botIndexLabel = (p.botIndex != null && p.botIndex >= 0) ? `#${p.botIndex + 1}` : '';
+  return `<tr>
+    <td><span class="text-muted-3" style="font-family:var(--mono);font-size:0.78em;">${escapeHtml(botIndexLabel)}</span></td>
+    <td><strong>${escapeHtml(p.symbol || '')}</strong><br><span class="text-muted-3" style="font-size:0.78em;">${escapeHtml(p.timeframe || '')}</span></td>
+    <td>${stillFmtDt(p.signalTime)}</td>
+    <td>${stillFmtDt(p.buyFilledAt)}</td>
+    <td class="mono">${PriceFormat.format(p.buyPrice, p.symbol)}</td>
+    <td class="mono">${PriceFormat.format(p.targetSellPrice, p.symbol)}</td>
+    <td class="mono">${(p.qty || 0).toFixed(6)}</td>
+    <td class="mono">$${(p.notional || 0).toFixed(2)}</td>
+    <td class="mono">${stillDurLabel(p.candlesHeld)}</td>
+    <td class="mono">${PriceFormat.format(p.lastClose, p.symbol)}</td>
+    <td>
+      <div class="${upnlCls}" style="font-weight:700;">${(p.unrealizedPnl >= 0 ? '+' : '') + (p.unrealizedPnl || 0).toFixed(4)} <small>USDT</small></div>
+      <div class="${upnlCls}" style="font-size:0.78em;">${(p.unrealizedPnlPercent >= 0 ? '+' : '') + (p.unrealizedPnlPercent || 0).toFixed(3)}%</div>
+    </td>
+    <td style="min-width:140px;">
+      <div class="mb-tp-text" style="font-size:0.78em;color:var(--text-3);margin-bottom:2px;">${tpLabel}</div>
+      <div class="mb-tp-bar"><div class="mb-tp-fill ${upnlCls}" style="width:${Math.round(barPct)}%;"></div></div>
+    </td>
+  </tr>`;
+}
+
+function stillFmtDt(d) {
+  if (!d) return '—';
+  try {
+    return new Date(d).toLocaleString('th-TH', {
+      year: 'numeric', month: 'short', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'Asia/Bangkok',
+    });
+  } catch (_) { return String(d); }
+}
+
+function stillDurLabel(n) {
+  if (n == null) return '—';
+  if (n < 60) return `${n} แท่ง`;
+  const h = Math.floor(n / 60);
+  const m = n % 60;
+  if (h < 24) return m > 0 ? `${h}h ${m}m` : `${h}h`;
+  const d2 = Math.floor(h / 24);
+  return `${d2}d ${h % 24}h`;
+}
+
+function stillBarPct(p) {
+  if (p.totalPathPct == null || p.totalPathPct <= 0) return 0;
+  const lastC = p.lastClose || 0;
+  const entry = p.buyPrice || 0;
+  const tp = p.targetSellPrice || 0;
+  if (!tp || !entry) return 0;
+  if (p.tpReached) return 100;
+  const left = (tp - lastC) / tp;
+  const total = (tp - entry) / entry;
+  return total > 0 ? Math.max(0, Math.min(100, (1 - left / total) * 100)) : 0;
+}
+
+function onStillHeaderClick(ev) {
+  const th = ev.target.closest('th.mb-sortable');
+  if (!th) return;
+  const key = th.getAttribute('data-sort-key');
+  if (!key) return;
+  if (stillSortState.key === key) {
+    stillSortState.dir = stillSortState.dir === 'asc' ? 'desc' : 'asc';
+  } else {
+    stillSortState.key = key;
+    stillSortState.dir = 'desc';
+  }
+  // re-render header arrows + body
+  const table = th.closest('table');
+  if (table) {
+    table.querySelectorAll('th.mb-sortable').forEach((h) => {
+      const active = h.getAttribute('data-sort-key') === stillSortState.key;
+      const arrow = active ? (stillSortState.dir === 'asc' ? ' ▲' : ' ▼') : '';
+      h.classList.toggle('is-active', active);
+      // Strip any trailing arrow from current label (keep label + hint), then append fresh arrow
+      const raw = h.textContent.replace(/[▲▼]\s*$/, '').trimEnd();
+      h.textContent = raw + arrow;
+    });
+  }
+  renderStillTbody();
 }
 
 function renderTradesPage() {
@@ -40,10 +166,10 @@ function renderTradesPage() {
       ${isMultiBot ? `<td><small class="text-muted-3">${escapeHtml(t.symbol || '')} <span style="opacity:0.6;">${t.timeframe || ''}</span></small></td>` : ''}
       <td>${fmtDateTime(t.signalTime)}</td>
       <td>${t.buyFilledAt ? fmtDateTime(t.buyFilledAt) : '<span class="text-muted">—</span>'}</td>
-      <td>${(t.buyPrice || 0).toFixed(4)}</td>
+      <td>${PriceFormat.format(t.buyPrice, t.symbol)}</td>
       <td>${t.sellFilledAt ? fmtDateTime(t.sellFilledAt) : '<span class="text-muted">—</span>'}</td>
-      <td>${(t.targetSellPrice || 0).toFixed(4)}</td>
-      <td>${t.sellPrice ? t.sellPrice.toFixed(4) : '-'}</td>
+      <td>${PriceFormat.format(t.targetSellPrice, t.symbol)}</td>
+      <td>${t.sellPrice != null ? PriceFormat.format(t.sellPrice, t.symbol) : '-'}</td>
       <td>${t.buyFilled ? '✅' : '❌'}</td>
       <td>${t.sellFilled ? '✅' : (t.buyFilled ? '⏱' : '—')}</td>
       <td class="${(t.realizedPnl || 0) >= 0 ? 'pnl-positive' : 'pnl-negative'}">${(t.realizedPnl || 0).toFixed(4)}</td>
@@ -76,6 +202,8 @@ async function init() {
     return;
   }
 
+  // FIX-2026-07-31: preload tickSize cache (ZILUSDT ต้องแสดง 6 dp ไม่ใช่ 4)
+  await window.PriceFormat.load().catch(() => {});
   await loadSymbols();
   setDefaultDates();
   document.getElementById('b-run').onclick = runBacktest;
@@ -196,11 +324,11 @@ function renderResult(resp, params) {
 
         <div class="row g-2 mb-3">
           <div class="col-md-2"><div class="stat-tile small-tile"><div class="value">${s.tpHitCount}</div><div class="label">TP hit ✓</div></div></div>
+          <div class="col-md-2"><div class="stat-tile small-tile"><div class="value">${s.cbPanicCount || 0}</div><div class="label">CB panic</div></div></div>
+          <div class="col-md-2"><div class="stat-tile small-tile"><div class="value">${s.stopLossUpperKcCount || 0}</div><div class="label">SL-UKC</div></div></div>
           <div class="col-md-2"><div class="stat-tile small-tile"><div class="value">${s.stillHoldingCount || 0}</div><div class="label">ยังถืออยู่</div></div></div>
           <div class="col-md-2"><div class="stat-tile small-tile"><div class="value">${s.noBuyFillCount}</div><div class="label">No buy fill</div></div></div>
-          <div class="col-md-2"><div class="stat-tile small-tile"><div class="value">${s.maxConcurrentSkipCount || 0}</div><div class="label">Skip (เต็ม)</div></div></div>
           <div class="col-md-2"><div class="stat-tile small-tile"><div class="value">${s.belowMinNotionalCount || 0}</div><div class="label">Below min</div></div></div>
-          <div class="col-md-2"><div class="stat-tile small-tile"><div class="value">${s.wins}/${s.losses}</div><div class="label">W/L</div></div></div>
         </div>
 
         <div class="row g-2 mb-3 text-muted small">
@@ -337,8 +465,10 @@ const mbState = {
 
 function mbDefaultRows() {
   return [
-    { symbol: 'BTCUSDT', timeframe: '5m', tpPercent: 0.1, kcMult: 1.5, capitalPerTrade: 10, maxConcurrentTrades: 10 },
-    { symbol: 'ETHUSDT', timeframe: '5m', tpPercent: 0.1, kcMult: 1.5, capitalPerTrade: 10, maxConcurrentTrades: 10 },
+    { symbol: 'BTCUSDT', timeframe: '5m', tpPercent: 0.1, kcMult: 1.5, capitalPerTrade: 10, maxConcurrentTrades: 10,
+      xs1Enabled: true, cbEnabled: true, stopLossOnUpperKC: false },
+    { symbol: 'ETHUSDT', timeframe: '5m', tpPercent: 0.1, kcMult: 1.5, capitalPerTrade: 10, maxConcurrentTrades: 10,
+      xs1Enabled: true, cbEnabled: true, stopLossOnUpperKC: false },
   ];
 }
 
@@ -372,6 +502,20 @@ function mbRenderRows() {
       <input type="number" step="0.1" min="0.5" max="5" value="${row.kcMult ?? 1.5}" data-i="${idx}" data-k="kcMult" title="KC Multiplier (default 1.5)" />
       <input type="number" step="0.01" min="1" value="${row.capitalPerTrade}" data-i="${idx}" data-k="capitalPerTrade" title="ทุน/ไม้" />
       <input type="number" step="1" min="1" max="100" value="${row.maxConcurrentTrades}" data-i="${idx}" data-k="maxConcurrentTrades" title="Max ไม้" />
+      <div class="mb-toggles" title="XS1 = กรองสัญญาณเทียม, CB = panic-sell เมื่อทะลุ lowerKC, SL-UKC = หยุดขาดทุนเมื่อปิดทะลุ upper-KC">
+        <label class="mb-toggle" title="XS1 (candle-wide dump filter)">
+          <input type="checkbox" data-i="${idx}" data-k="xs1Enabled" ${row.xs1Enabled !== false ? 'checked' : ''} />
+          <span>XS1</span>
+        </label>
+        <label class="mb-toggle" title="CB (panic-sell 3 red below lowerKC)">
+          <input type="checkbox" data-i="${idx}" data-k="cbEnabled" ${row.cbEnabled !== false ? 'checked' : ''} />
+          <span>CB</span>
+        </label>
+        <label class="mb-toggle" title="StopLoss on upper-KC (close &gt; upperKC + loss only)">
+          <input type="checkbox" data-i="${idx}" data-k="stopLossOnUpperKC" ${row.stopLossOnUpperKC === true ? 'checked' : ''} />
+          <span>SL-UKC</span>
+        </label>
+      </div>
       <button class="mb-del" data-i="${idx}" title="ลบบอท">✕</button>
     `;
     container.appendChild(el);
@@ -380,7 +524,10 @@ function mbRenderRows() {
     el.addEventListener('change', (e) => {
       const i = parseInt(e.target.dataset.i, 10);
       const k = e.target.dataset.k;
-      const v = e.target.type === 'number' ? parseFloat(e.target.value) : e.target.value;
+      let v;
+      if (e.target.type === 'checkbox') v = e.target.checked;
+      else if (e.target.type === 'number') v = parseFloat(e.target.value);
+      else v = e.target.value;
       mbState.rows[i][k] = v;
       // FIX-2026-07-30: hint ทุนรวมขั้นต่ำ
       const hint = document.getElementById('mb-capital-hint');
@@ -479,10 +626,10 @@ function mbRenderResult(resp, ms) {
 
         <div class="row g-2 mb-3">
           <div class="col-md-2"><div class="stat-tile small-tile"><div class="value">${s.tpHitCount || 0}</div><div class="label">TP hit ✓</div></div></div>
+          <div class="col-md-2"><div class="stat-tile small-tile"><div class="value">${s.cbPanicCount || 0}</div><div class="label">CB panic</div></div></div>
+          <div class="col-md-2"><div class="stat-tile small-tile"><div class="value">${s.stopLossUpperKcCount || 0}</div><div class="label">SL-UKC</div></div></div>
           <div class="col-md-2"><div class="stat-tile small-tile"><div class="value">${s.stillHoldingCount || 0}</div><div class="label">ยังถืออยู่</div></div></div>
           <div class="col-md-2"><div class="stat-tile small-tile"><div class="value">${s.noBuyFillCount || 0}</div><div class="label">No buy fill</div></div></div>
-          <div class="col-md-2"><div class="stat-tile small-tile"><div class="value">${s.maxConcurrentSkipCount || 0}</div><div class="label">Skip (เต็ม)</div></div></div>
-          <div class="col-md-2"><div class="stat-tile small-tile"><div class="value">${combined.skippedCapitalCount || 0}</div><div class="label">Skip (ทุนเต็ม)</div></div></div>
           <div class="col-md-2"><div class="stat-tile small-tile"><div class="value">${s.belowMinNotionalCount || 0}</div><div class="label">Below min</div></div></div>
         </div>
 
@@ -505,8 +652,16 @@ function mbRenderResult(resp, ms) {
     const peakUsed = b.maxConcurrentTradesUsed || 0;
     const peakBotRatio = (b.maxConcurrentTrades || 0) > 0 ? (peakUsed / b.maxConcurrentTrades) * 100 : 0;
     const peakBotCls = peakBotRatio >= 80 ? 'pnl-negative' : (peakBotRatio >= 50 ? 'pnl-warning' : 'pnl-positive');
+    // FIX-2026-07-31: per-bot toggles badge (XS1 / CB / SL-UKC)
+    const togBadge = (on, label) => `<span class="mb-toggle-badge ${on ? 'is-on' : 'is-off'}" title="${label} ${on ? 'เปิด' : 'ปิด'}">${label}</span>`;
+    const badges = [
+      togBadge(b.xs1Enabled !== false, 'XS1'),
+      togBadge(b.cbEnabled !== false, 'CB'),
+      togBadge(b.stopLossOnUpperKC === true, 'SL-UKC'),
+    ].join(' ');
     return `<div class="mb-bot-row">
-      <div><strong>${escapeHtml(b.symbol)}</strong> <span class="text-muted-3" style="font-size:0.85em;">${b.timeframe} · TP ${b.tpPercent}% · KC×${b.kcMult ?? 1.5} · $${b.capitalPerTrade}/ไม้ · max ${b.maxConcurrentTrades}</span></div>
+      <div><strong>${escapeHtml(b.symbol)}</strong> <span class="text-muted-3" style="font-size:0.85em;">${b.timeframe} · TP ${b.tpPercent}% · KC×${b.kcMult ?? 1.5} · $${b.capitalPerTrade}/ไม้ · max ${b.maxConcurrentTrades}</span>
+        <div class="mb-badges">${badges}</div></div>
       <div class="${cls}">${(bs.totalPnl || 0).toFixed(4)}</div>
       <div>${b.tradesCount || 0} <span class="mb-skip-note">(${b.skippedCount || 0} skip)</span></div>
       <div>${bs.wins || 0}W/${bs.losses || 0}L</div>
@@ -515,6 +670,54 @@ function mbRenderResult(resp, ms) {
       <div>${(bs.avgPnlPerSignal || 0).toFixed(4)}</div>
     </div>`;
   }).join('');
+
+  // FIX 2026-07-30: ตาราง positions ที่ยังถืออยู่ — mark-to-market ด้วย last close
+  stillPositionsCache = (combined.stillHoldingPositions || []).slice();
+  const stillTotalUnrealized = combined.stillHoldingTotalUnrealized || 0;
+  const stillTotalCls = stillTotalUnrealized > 0 ? 'pnl-positive' : (stillTotalUnrealized < 0 ? 'pnl-negative' : '');
+  const themeHeader = (key, label, type) => {
+    const active = stillSortState.key === key;
+    const arrow = active ? (stillSortState.dir === 'asc' ? ' ▲' : ' ▼') : '';
+    const cls = active ? 'mb-sortable is-active' : 'mb-sortable';
+    const hint = type === 'num' ? ' 🔢' : (type === 'date' ? ' 🕒' : '');
+    return `<th class="${cls}" data-sort-key="${key}" data-sort-type="${type}" style="cursor:pointer;user-select:none;" title="คลิกเพื่อเรียงลำดับ">${label}${hint}${arrow}</th>`;
+  };
+  const stillSection = `
+    <div class="lux-card mb-3" id="mb-still-holding">
+      <div class="lux-header">
+        <span class="title">📂 Positions ที่ยังถืออยู่ (${stillPositionsCache.length} ไม้)</span>
+        <span class="text-muted-3" style="font-size:0.8rem;">
+          Mark-to-market @ last close · Unrealized รวม:
+          <strong class="${stillTotalCls}">${stillTotalUnrealized >= 0 ? '+' : ''}${stillTotalUnrealized.toFixed(4)} USDT</strong>
+        </span>
+      </div>
+      <div class="lux-body">
+        ${stillPositionsCache.length === 0
+          ? `<div class="text-muted small" style="padding:1rem 0;">ไม่มี position ค้าง — ทุกไม้ปิดที่ TP แล้วหรือถูก skip ก่อน buy fill</div>`
+          : `<div class="table-responsive">
+            <table class="table table-sm table-striped mb-still-table">
+              <thead>
+                <tr>
+                  ${themeHeader('botIndex', '#', 'num')}
+                  ${themeHeader('symbol', 'Symbol / TF', 'text')}
+                  ${themeHeader('signalTime', 'Signal Time', 'date')}
+                  ${themeHeader('buyFilledAt', 'BUY Time', 'date')}
+                  ${themeHeader('buyPrice', 'BUY Price', 'num')}
+                  ${themeHeader('targetSellPrice', 'TP Target', 'num')}
+                  ${themeHeader('qty', 'Qty', 'num')}
+                  ${themeHeader('notional', 'Capital', 'num')}
+                  ${themeHeader('candlesHeld', 'Candles Held', 'num')}
+                  ${themeHeader('lastClose', 'Last Close', 'num')}
+                  ${themeHeader('unrealizedPnl', 'Unrealized PnL', 'num')}
+                  ${themeHeader('pctToTp', 'ระยะถึง TP', 'num')}
+                </tr>
+              </thead>
+              <tbody id="mb-still-tbody"></tbody>
+            </table>
+          </div>`}
+      </div>
+    </div>
+  `;
 
   // Trades table (paginated, mirror single-bot render)
   const tradesAll = (combined.trades || []).slice();
@@ -536,6 +739,8 @@ function mbRenderResult(resp, ms) {
         ${botRows}
       </div>
     </div>
+
+    ${stillSection}
 
     <div id="trades-table-wrap" class="lux-card">
       <div class="lux-header">
@@ -584,6 +789,13 @@ function mbRenderResult(resp, ms) {
   `;
 
   renderTradesPage();
+  renderStillTbody();
+  // FIX 2026-07-30: wire sortable header clicks (delegated on the table since it's rebuilt every run)
+  const stillTable = out.querySelector('#mb-still-holding table.mb-still-table');
+  if (stillTable && !stillTable.dataset.sortWired) {
+    stillTable.addEventListener('click', onStillHeaderClick);
+    stillTable.dataset.sortWired = '1';
+  }
 }
 
 async function mbInit() {

@@ -110,6 +110,7 @@ function createApp() {
   // FIX-2026-07-29: register pnl (calendar + series)
   app.use('/api/pnl', pnlRoutes);
   app.use('/api/history', historyRoutes);
+  app.use('/api/coins', require('./api/routes/coin.routes')); // FIX-2026-08-01: coin info aggregator
 
   // Health
   app.get('/health', (req, res) => {

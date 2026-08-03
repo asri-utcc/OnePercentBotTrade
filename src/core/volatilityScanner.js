@@ -92,7 +92,16 @@ const TREND_KLINE_LIMIT = 30;
 function classifyTrend(klines, window) {
   const slice = klines.slice(-window);
   if (slice.length < 4) return 'sideways';
-  const closes = slice.map((k) => k.close);
+  // FIX-2026-08-02: same normalization as computeTrend — handle both raw arrays + objects
+  const closes = slice.map((k) => {
+    if (k == null) return null;
+    if (typeof k === 'object' && k !== 'string') {
+      if (k.close != null) return parseFloat(k.close);
+      if (Array.isArray(k) || k.length != null) return parseFloat(k[4]);
+    }
+    return null;
+  }).filter((v) => v != null && Number.isFinite(v));
+  if (closes.length < 4) return 'sideways';
   const half = Math.max(2, Math.floor(closes.length / 2));
   const sma = (arr) => arr.reduce((s, v) => s + v, 0) / arr.length;
   const firstSMA = sma(closes.slice(0, half));
@@ -122,7 +131,24 @@ const VALID_TRENDS = ['uptrend', 'downtrend', 'sideways'];
 function computeTrend(klines, trendTF) {
   const base = { trendTF: trendTF || null, trendEma20: null, trendLastClose: null, trendGapPct: null, trendState: 'warmup' };
   if (!klines || klines.length < 20 || !trendTF) return base;
-  const closes = klines.map((k) => k.close);
+  // FIX-2026-08-02: normalize raw Binance klines (array format [ts, o, h, l, c, ...]) to { close }
+  //   - volatilityScanner.scan() pre-normalizes (line ~280)
+  //   - trader._getTrendState() calls binanceRest.getKlines() DIRECTLY → raw arrays
+  //   - Without this fix, k.close is undefined on raw arrays → all NaN → trendState stuck 'warmup'
+  //   - This bug made tpTrendMultiplier never apply (warmup ≠ 'upper' guard) → bots only got
+  //     tpPercent without ×N boost → profit per trade ≈ half of expected
+  const closes = klines.map((k) => {
+    if (k == null) return null;
+    if (typeof k === 'object' && k !== 'string') {
+      // object form: { close, open, high, ... }
+      if (k.close != null) return parseFloat(k.close);
+      // array-like object: k[4] = close (Binance raw format)
+      if (Array.isArray(k) || k.length != null) return parseFloat(k[4]);
+      return null;
+    }
+    return null;
+  }).filter((v) => v != null && Number.isFinite(v));
+  if (closes.length < 20) return base;
   const emaArr = ema(closes, 20);
   const lastIdx = emaArr.length - 1;
   const ema20 = emaArr[lastIdx];

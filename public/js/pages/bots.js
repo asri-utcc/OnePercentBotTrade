@@ -8,6 +8,66 @@
 
 let bots = [];
 
+// ── 2026-07-31: View mode toggle (compact | expand) — persisted in localStorage ────────
+const BOT_VIEW_MODE_KEY = 'botsListViewMode';
+function getBotViewMode() {
+  try {
+    const v = localStorage.getItem(BOT_VIEW_MODE_KEY);
+    return v === 'expand' ? 'expand' : 'compact'; // default = compact (per user)
+  } catch (_) { return 'compact'; }
+}
+function setBotViewMode(mode) {
+  try { localStorage.setItem(BOT_VIEW_MODE_KEY, mode); } catch (_) { /* ignore */ }
+  const compactBtn = document.getElementById('vm-compact');
+  const expandBtn = document.getElementById('vm-expand');
+  if (compactBtn) compactBtn.classList.toggle('is-active', mode === 'compact');
+  if (expandBtn) expandBtn.classList.toggle('is-active', mode === 'expand');
+}
+function wireViewModeToggle() {
+  const compactBtn = document.getElementById('vm-compact');
+  const expandBtn = document.getElementById('vm-expand');
+  if (!compactBtn || !expandBtn) return;
+  setBotViewMode(getBotViewMode()); // sync initial UI state
+  // FIX-2026-08-02: if user prefers expand mode, load volatility snapshot on init (cold cache may take ~1.5s)
+  const initMode = getBotViewMode();
+  if (initMode === 'expand') {
+    loadBots({ expand: true }).catch(() => {});
+  }
+  compactBtn.addEventListener('click', () => {
+    if (getBotViewMode() === 'compact') return;
+    setBotViewMode('compact');
+    renderBots(); // re-render with is-compact class — skip chart load
+  });
+  expandBtn.addEventListener('click', () => {
+    if (getBotViewMode() === 'expand') return;
+    setBotViewMode('expand');
+    // FIX-2026-08-02: re-fetch with ?expand=1 to get volatility snapshot (for tiles)
+    //   - cached snapshot reused if recent (60s server-side)
+    loadBots({ expand: true }).catch(() => {});
+    renderBots(); // re-render with is-expand — load mini charts
+  });
+}
+
+// ── 2026-07-30: Open Positions (cross-bot) state ─────────
+let openPositionsData = null;       // { asOf, count, totalCostUsdt, totalUnrealizedUsdt, positions: [...] }
+let openPositionsAsOf = null;       // last fetch timestamp
+let tradeIdToBotId = new Map();     // tradeId -> botId (used by WS trade:update handler)
+let modalPriceOverrides = new Map();// tradeId -> live close price (from WS kline:update)
+let currentModalOp = null;          // bootstrap.Modal instance for #openPositionsModal
+
+// ── FIX-2026-08-01: Bot Quality Indicator pill (badge for bot card) ─────
+//   - HTML returned by buildQualityBadge — string template (uses escapeHtml from below)
+//   - คลิก → delegated ใน init() → qualityModal.openQualityModal(bot)
+function buildQualityBadge(b) {
+  if (b.qualityEnabled === false || b.qualityScore == null) {
+    return '<span class="quality-pill is-gray" title="Quality Indicator ถูกปิดหรือยังโหลดไม่เสร็จ">—</span>';
+  }
+  const updated = b.qualityUpdatedAt ? new Date(b.qualityUpdatedAt).toLocaleTimeString('th-TH') : '-';
+  const tip = `คลิกเพื่อดู breakdown · อัปเดตล่าสุด: ${updated}`;
+  return `<span class="quality-pill is-${b.qualityColor || 'gray'}" data-quality-trigger="${escapeHtml(String(b._id))}" title="${escapeHtml(tip)}">${b.qualityScore}/4</span>`;
+}
+
+
 async function init() {
   const me = await API.get('/api/auth/me').catch(() => null);
   if (!me || !me.authenticated) {
@@ -17,11 +77,71 @@ async function init() {
 
   WSClient.start();
   setupEventHandlers();
-  await loadSymbols();
-  await loadBots();
-  await loadBalance();
-  await loadApiKeysStatus();
-  await refreshPnlShortcut(); // FIX-2026-07-29: shortcut label "PnL $X.XX"
+  // FIX-2026-08-02: parallelize — 6 independent loads run concurrently (was sequential ~3s, now ~1.7s)
+  //   - loadSymbols → /api/bots/symbols (used for "New Bot" modal only)
+  //   - PriceFormat.load → /api/bots/symbols (precision tickSize for price formatting)
+  //   - loadBots → /api/bots (compact mode = no volatility snapshot, fast)
+  //   - loadBalance → /api/account/balance
+  //   - loadApiKeysStatus → /api/auth/api-keys/status
+  //   - refreshPnlShortcut → /api/pnl/summary/today (label only)
+  //   - loadOpenPositions → /api/bots/positions (cross-bot open positions tile)
+  await Promise.all([
+    loadSymbols(),
+    window.PriceFormat ? window.PriceFormat.load() : Promise.resolve(),
+    loadBots(),
+    loadBalance(),
+    loadApiKeysStatus(),
+    refreshPnlShortcut(),
+    loadOpenPositions(),
+  ]);
+
+  // FIX-2026-08-02: kick off slow quality compute in background — first paint shows pills "—"
+  //   - server returns getCachedOnly() which is 0ms if cached, null otherwise
+  //   - this background fetch forces full compute + warms cache for next loads
+  setTimeout(() => {
+    API.get('/api/bots?quality=1').then((resp) => {
+      if (resp && resp.bots) {
+        // merge quality scores into local bots array
+        for (const fresh of resp.bots) {
+          const local = bots.find((b) => String(b._id) === String(fresh._id));
+          if (local) {
+            local.qualityScore = fresh.qualityScore;
+            local.qualityColor = fresh.qualityColor;
+            local.qualityUpdatedAt = fresh.qualityUpdatedAt;
+            local.qualityCached = fresh.qualityCached;
+          }
+        }
+        renderBots();
+      }
+    }).catch(() => { /* fail-safe — pill stays "—" */ });
+  }, 1500); // 1.5s after first paint — กัน Binance weight contention
+
+  // FIX-2026-07-31: wire Compact/Expand toggle (default = compact)
+  wireViewModeToggle();
+
+  // FIX-2026-07-31: deep-link จาก scan-volatility — ?newBot=1&symbol=BTCUSDT&tf=5m
+  //   - pre-fill symbol/timeframe ใน create modal แล้วเปิดอัตโนมัติ
+  //   - ลบ query params ออกจาก URL หลังเปิด modal (back/refresh ไม่ trigger ซ้ำ)
+  const params = new URLSearchParams(location.search);
+  if (params.get('newBot') === '1') {
+    const symbol = params.get('symbol');
+    const tf = params.get('tf');
+    if (symbol) document.getElementById('nb-symbol').value = String(symbol).toUpperCase();
+    if (tf) document.getElementById('nb-timeframe').value = tf;
+    // suggest name = "<symbol> <tf>"
+    const nameEl = document.getElementById('nb-name');
+    if (nameEl && !nameEl.value && symbol && tf) nameEl.value = `${symbol} ${tf}`;
+    // ลบ query ออกจาก URL
+    const cleanUrl = location.pathname;
+    history.replaceState(null, '', cleanUrl);
+    // เปิด modal (delay เล็กน้อยเพื่อให้ Bootstrap init เสร็จ)
+    setTimeout(() => {
+      const modalEl = document.getElementById('newBotModal');
+      if (modalEl && window.bootstrap && bootstrap.Modal) {
+        bootstrap.Modal.getOrCreateInstance(modalEl).show();
+      }
+    }, 200);
+  }
 
   // re-render once nav.js publishes the FX rate (so THB equivalents appear)
   document.addEventListener('fx:updated', () => {
@@ -29,12 +149,14 @@ async function init() {
       renderBots();
       renderStats();
     }
+    if (openPositionsData) renderOpenPositionsModalBody(); // 2026-07-30: refresh THB in modal
   });
   // also re-render if FX was already cached by nav.js before this script ran
   if (window.__fxReady && bots.length > 0) {
     renderBots();
     renderStats();
   }
+  if (window.__fxReady && openPositionsData) renderOpenPositionsModalBody();
 
   WSClient.on('bot:status', (p) => {
     const bot = bots.find((b) => b._id === p.botId);
@@ -61,6 +183,15 @@ async function init() {
     }
     // FIX-2026-07-29: refresh PnL shortcut label เมื่อมี SELL fill (today's PnL เปลี่ยน)
     if (p && p.state === 'sold') refreshPnlShortcut();
+    // 2026-07-30: refetch open positions when any relevant trade transitions
+    //   - always refresh on sold/cancelled/failed (positions count drops)
+    //   - refresh when known tradeId transitions (BUY→filled, SELL→selling/stopping)
+    //   - refresh when payload has no tradeId (defensive — global event)
+    const isExitState = p && ['sold', 'cancelled', 'failed'].includes(p.state);
+    const isKnown = p && p.tradeId && tradeIdToBotId.has(p.tradeId);
+    if (!p || !p.tradeId || isKnown || isExitState) {
+      loadOpenPositions();
+    }
   });
   WSClient.on('health:update', (s) => renderHeartbeat(s));
 
@@ -75,6 +206,35 @@ async function init() {
     // หา bot ที่ตรงกัน — ใช้ data-symbol/data-timeframe attribute
     const cards = document.querySelectorAll(`.bot-card-v2[data-symbol="${symbol}"][data-timeframe="${interval}"]`);
     cards.forEach((card) => updateCardEma(card, close));
+    // 2026-07-30: live mark-to-market for Open Positions modal (mark open positions in matching symbol/tf)
+    if (openPositionsData && openPositionsData.positions) {
+      let touched = false;
+      for (const pos of openPositionsData.positions) {
+        if (pos.symbol === symbol && pos.timeframe === interval) {
+          modalPriceOverrides.set(pos.tradeId, close);
+          touched = true;
+        }
+      }
+      if (touched && currentModalOp && currentModalOp._isShown) renderOpenPositionsModalBody();
+    }
+  });
+
+  // 2026-07-30: fallback poll ทุก 30s (กรณี WS ตกหล่น) — ensures tile + modal stay in sync
+  setInterval(() => { loadOpenPositions(); }, 30_000);
+
+  // FIX-2026-08-01: re-fetch bot list (with quality scores) ทุก 60s
+  //   - หลังจากที่ qualityIndicator.setInterval tick แล้ว top50Cache refresh
+  //   - next loadBots() จะได้ score ใหม่ทันที (no WS event เพราะ score change ไม่ trigger bot:updated)
+  //   - 60s พอสมควร — ลด flicker เมื่อ user กำลังดูอยู่
+  setInterval(() => { loadBots().catch(() => {}); }, 60_000);
+
+  // FIX-2026-08-01: click delegation สำหรับ Quality Indicator pill — เปิด modal
+  document.getElementById('bots-list').addEventListener('click', (e) => {
+    const el = e.target.closest('[data-quality-trigger]');
+    if (!el) return;
+    const id = el.getAttribute('data-quality-trigger');
+    const bot = bots.find((b) => String(b._id) === String(id));
+    if (bot && window.qualityModal) window.qualityModal.openQualityModal(bot);
   });
 
   // โหลด health ครั้งแรก (กรณี WS ยังไม่ติด)
@@ -96,6 +256,9 @@ function setupEventHandlers() {
     document.getElementById('nb-password').value = '';
     updateNewBotTotal();
   };
+  // FIX-2026-08-01: Master Config — bulk-edit หลายบอทพร้อมกัน
+  const masterBtn = document.getElementById('btn-master-config');
+  if (masterBtn) masterBtn.onclick = () => window.masterConfigModal && window.masterConfigModal.openMasterConfigModal();
 
   ['nb-capital', 'nb-maxtrades'].forEach((id) => {
     document.getElementById(id).addEventListener('input', updateNewBotTotal);
@@ -107,6 +270,36 @@ function setupEventHandlers() {
   document.getElementById('nb-tp-recommend').onclick = recommendNewBotTp;
   // FIX-2026-07-29: shortcut → /pnl.html
   document.getElementById('pnl-shortcut-btn').onclick = () => { location.href = '/pnl.html'; };
+
+  // 2026-07-30: Open Positions modal lifecycle + force-close handler
+  const opModalEl = document.getElementById('openPositionsModal');
+  if (opModalEl) {
+    currentModalOp = bootstrap.Modal.getOrCreateInstance(opModalEl);
+    opModalEl.addEventListener('show.bs.modal', () => {
+      // always refetch fresh data when opening (so user sees the latest)
+      loadOpenPositions().then(() => renderOpenPositionsModalBody());
+    });
+    opModalEl.addEventListener('shown.bs.modal', () => {
+      currentModalOp._isShown = true;
+      // re-render once to apply price overrides + final state
+      renderOpenPositionsModalBody();
+    });
+    opModalEl.addEventListener('hidden.bs.modal', () => {
+      currentModalOp._isShown = false;
+    });
+  }
+  const refreshBtn = document.getElementById('opm-refresh');
+  if (refreshBtn) refreshBtn.onclick = () => {
+    // FIX-2026-08-03: refresh button now hits /api/bots/positions?fresh=1
+    //   - bypasses klineCache (in-memory, may be stale when WS dropped)
+    //   - fetches latest bookTicker per symbol directly from Binance
+    //   - shows loading state on the button + sub line
+    loadOpenPositions({ fresh: true }).then(() => renderOpenPositionsModalBody());
+  };
+  const opList = document.getElementById('opm-list');
+  if (opList) opList.addEventListener('click', onOpenPositionsClick);
+  const opMob = document.getElementById('opm-mob');
+  if (opMob) opMob.addEventListener('click', onOpenPositionsClick);
 }
 
 // FIX-2026-07-29: label = "PnL $X.XX" (today's realized PnL across all bots) — refresh on load + 60s + WS
@@ -193,16 +386,122 @@ async function loadSymbols() {
   }
 }
 
-async function loadBots() {
+async function loadBots(opts = {}) {
   try {
-    const resp = await API.get('/api/bots');
+    // FIX-2026-08-02: ?expand=1 → server includes volatility snapshot (1.5s on cold cache)
+    //   - default (compact) = skip vol → fast first paint (~200ms)
+    //   - expand mode = need vol tiles, so pass expand=1
+    const viewMode = getBotViewMode();
+    const expand = opts.expand != null ? opts.expand : (viewMode === 'expand' && !opts.skipVol);
+    const url = expand ? '/api/bots?expand=1' : '/api/bots';
+    const resp = await API.get(url);
     bots = resp.bots;
     seedBotsEmaCache(bots); // FIX-2026-07-23: seed EMA cache for realtime updates
+    // FIX-2026-08-01: prefetch coin info for all unique symbols (cache 5min server-side)
+    prefetchCoinInfos(bots).catch((e) => console.warn('coinInfo prefetch', e));
     renderBots();
     renderStats();
   } catch (err) {
     console.error('loadBots', err);
   }
+}
+
+// FIX-2026-08-01: prefetch coin info per unique symbol + cache in window.coinInfoCache
+//   - dedupe by symbol (multiple bots same symbol → 1 fetch)
+//   - skip symbols already in cache (TTL 5min server-side → align client cache)
+//   - fail-safe: if fetch fails, card shows "—" instead of crashing
+const coinInfoCache = new Map(); // symbol -> { data, ts }
+async function prefetchCoinInfos(bots) {
+  const symbols = [...new Set(bots.map((b) => b.symbol).filter(Boolean))];
+  const now = Date.now();
+  const toFetch = symbols.filter((s) => !coinInfoCache.has(s) || (now - coinInfoCache.get(s).ts) > 5 * 60 * 1000);
+  await Promise.all(toFetch.map(async (sym) => {
+    try {
+      const r = await API.get(`/api/coins/info/${encodeURIComponent(sym)}`);
+      coinInfoCache.set(sym, { data: r.coin, ts: now });
+    } catch (err) {
+      // cache failure so we don't retry every render
+      coinInfoCache.set(sym, { data: null, ts: now, error: err.message });
+    }
+  }));
+}
+function getCoinInfo(symbol) {
+  const e = coinInfoCache.get(symbol);
+  return e ? e.data : null;
+}
+
+/**
+ * FIX-2026-08-01: renderCoinChip(coin, symbol)
+ *   - แสดง chips: status (🟢/🔴), 24h % (สีเขียว/แดง), baseAsset + lot/tick summary
+ *   - ใช้บน bot card + scan-volatility rows
+ *   - ถ้า coin=null → แสดง "⏳ กำลังโหลด..."
+ */
+function renderCoinChip(coin, symbol) {
+  if (!coin) {
+    return `<span class="coin-chip coin-chip-loading" title="กำลังโหลด coin info">⏳ ${escapeHtml(symbol)}</span>`;
+  }
+  const statusEmoji = coin.status === 'TRADING' ? '🟢' : (coin.status === 'BREAK' ? '🟡' : '🔴');
+  const statusTitle = `Binance: ${coin.status} · base=${coin.baseAsset} · quote=${coin.quoteAsset}`;
+
+  // FIX-2026-08-01: full name (จาก BAPI marketing list) — ถ้ามีแสดง tooltip + ข้อความเพิ่ม
+  const fullName = coin.fullName || '';
+  const logoUrl = coin.logo || '';
+  const logoHtml = logoUrl
+    ? `<img class="coin-chip-logo" src="${escapeHtml(logoUrl)}" alt="${escapeHtml(fullName)}" loading="lazy" onerror="this.style.display='none'">`
+    : '';
+  const fullNameHtml = fullName && fullName !== coin.baseAsset
+    ? ` <span class="coin-chip-fullname" title="${escapeHtml(fullName)}">${escapeHtml(fullName)}</span>`
+    : '';
+
+  // 24h change color
+  const pct = coin.priceChangePct;
+  let pctHtml = '<span class="muted">—</span>';
+  if (pct != null && Number.isFinite(pct)) {
+    const cls = pct >= 0 ? 'pct-up' : 'pct-down';
+    const sign = pct >= 0 ? '+' : '';
+    pctHtml = `<span class="${cls}">${sign}${pct.toFixed(2)}%</span>`;
+  }
+
+  // lot/tick summary (truncate)
+  const lot = coin.lotSize ? `min ${formatTick(coin.lotSize.minQty)}` : '';
+  const tick = coin.priceFilter ? `tick ${formatTick(coin.priceFilter.tickSize)}` : '';
+
+  // FIX-2026-08-01: tooltip รวม fullName + CMC rank + circulating supply
+  const cmcLine = (coin.cmcRank != null)
+    ? ` · CMC#${coin.cmcRank}`
+    : '';
+  const supplyLine = (coin.circulatingSupply != null)
+    ? ` · circ ${formatSupplyShort(coin.circulatingSupply)}`
+    : '';
+
+  return `
+    <span class="coin-chip" title="${escapeHtml(statusTitle)} · ${escapeHtml(fullName || coin.baseAsset)}${cmcLine} · lot ${lot} · ${tick} · vol24h ${coin.quoteVolume ? Number(coin.quoteVolume).toLocaleString('en-US', { maximumFractionDigits: 0 }) : '?'} USDT${supplyLine}">
+      ${logoHtml}
+      ${statusEmoji} <strong>${escapeHtml(coin.baseAsset)}</strong>${fullNameHtml}
+      <span class="coin-chip-sep">·</span>
+      24h ${pctHtml}
+    </span>
+  `;
+}
+
+// FIX-2026-08-01: format supply ให้อ่านง่าย (1.2M / 850K / 12.5B)
+function formatSupplyShort(v) {
+  if (v == null || !Number.isFinite(v)) return '';
+  const n = Number(v);
+  if (n >= 1e9) return (n / 1e9).toFixed(2) + 'B';
+  if (n >= 1e6) return (n / 1e6).toFixed(2) + 'M';
+  if (n >= 1e3) return (n / 1e3).toFixed(2) + 'K';
+  return String(n);
+}
+
+function formatTick(v) {
+  if (v == null) return '—';
+  const n = Number(v);
+  if (!Number.isFinite(n) || n === 0) return String(v);
+  // ตัด trailing zeros
+  let s = n.toString();
+  if (s.includes('.')) s = s.replace(/0+$/, '').replace(/\.$/, '');
+  return s;
 }
 
 async function loadBalance() {
@@ -235,6 +534,195 @@ async function loadApiKeysStatus() {
   } catch (err) { /* ignore */ }
 }
 
+/* ════════════════════════════════════════════════════════════════════
+ * 2026-07-30: Open Positions (cross-bot) — load + render + force close
+ *   - tile count ในแถว KPI (อัปเดตจาก /api/bots/positions)
+ *   - modal รายละเอียดแต่ละ position + summary tiles + Force Close
+ *   - WS handlers: trade:update → refetch ; kline:update → live mark-to-market
+ * ════════════════════════════════════════════════════════════════════ */
+
+async function loadOpenPositions(opts = {}) {
+  // FIX-2026-08-03: opts.fresh = true → ?fresh=1 → bypass klineCache, fetch Binance bookTicker directly
+  //   - ปุ่ม Refresh ใน modal ใช้ fresh mode (ไม่พึ่ง WS kline cache)
+  //   - WS-driven paths (trade:update, fallback poll) ใช้ default (cache) — เร็วและทันที
+  const url = opts.fresh ? '/api/bots/positions?fresh=1' : '/api/bots/positions';
+  const btn = document.getElementById('opm-refresh');
+  let prevLabel = null;
+  if (opts.fresh && btn) {
+    prevLabel = btn.innerHTML;
+    btn.disabled = true;
+    btn.classList.add('is-loading');
+    btn.innerHTML = '⏳ กำลังโหลด…';
+  }
+  try {
+    const resp = await API.get(url);
+    openPositionsData = resp;
+    openPositionsAsOf = resp.asOf;
+    // rebuild tradeId → botId map (used by trade:update handler to detect relevant events)
+    tradeIdToBotId = new Map((resp.positions || []).map((p) => [p.tradeId, p.botId]));
+    // FIX-2026-08-03: เมื่อ refresh แบบ fresh → ลบ modalPriceOverrides ทั้งหมด
+    //   (ใช้ราคา Binance ตรงๆ ไม่ต้อง merge กับ WS tick)
+    if (opts.fresh) modalPriceOverrides.clear();
+    // clean up stale price overrides (positions ที่ปิดไปแล้ว)
+    const liveIds = new Set((resp.positions || []).map((p) => p.tradeId));
+    for (const id of Array.from(modalPriceOverrides.keys())) {
+      if (!liveIds.has(id)) modalPriceOverrides.delete(id);
+    }
+    renderStatOpenPositions();
+    if (currentModalOp && currentModalOp._isShown) renderOpenPositionsModalBody();
+  } catch (err) {
+    console.error('loadOpenPositions', err);
+  } finally {
+    if (opts.fresh && btn) {
+      btn.disabled = false;
+      btn.classList.remove('is-loading');
+      if (prevLabel != null) btn.innerHTML = prevLabel;
+    }
+  }
+}
+
+function renderStatOpenPositions() {
+  const count = openPositionsData ? openPositionsData.count : 0;
+  const tile = document.getElementById('stat-open-positions');
+  if (tile) tile.textContent = String(count);
+  const sub = document.getElementById('stat-open-positions-sub');
+  if (sub) {
+    sub.textContent = count === 0
+      ? 'ไม่มี position ที่เปิดอยู่ · คลิกเพื่อดู'
+      : `${count} ไม้ · คลิกเพื่อดูรายละเอียด`;
+  }
+}
+
+/**
+ * Get live price for a position:
+ *   1. WS kline:update override (most recent, tick-by-tick)
+ *   2. server-side currentPrice from /api/bots/positions (snapshot ตอน fetch)
+ *   3. fallback → entry price (PnL = 0, no crash)
+ */
+function getLivePriceForPosition(p) {
+  const ovr = modalPriceOverrides.get(p.tradeId);
+  if (ovr && ovr > 0) return ovr;
+  if (p.currentPrice && p.currentPrice > 0) return p.currentPrice;
+  return Number(p.buyPrice) || 0;
+}
+
+function renderOpenPositionsModalBody() {
+  if (!openPositionsData) return;
+  const open = openPositionsData.positions || [];
+  const fmt2 = (d) => new Date(d || Date.now()).toLocaleTimeString('th-TH', {
+    timeZone: 'Asia/Bangkok', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
+  });
+  // FIX-2026-08-03: show price source badge in sub line — Binance vs cache
+  //   - fresh=true → "Binance bookTicker" badge (authoritative)
+  //   - fresh=false → "cache" badge (may be stale)
+  //   - freshFailedSymbols → show warning note
+  const sub = document.getElementById('opm-sub');
+  if (sub) {
+    const botIds = new Set(open.map((p) => p.botId));
+    const sourceBadge = openPositionsData.fresh
+      ? '<span class="lux-badge lux-badge-bull" title="ดึงราคาตรงจาก Binance bookTicker — แม่นยำที่สุด">🟢 Binance</span>'
+      : '<span class="lux-badge lux-badge-gray" title="ราคาจาก klineCache in-memory — อาจเก่า ถ้า WS dropped กด Refresh">⚪ cache</span>';
+    const failed = openPositionsData.freshFailedSymbols || [];
+    const failedNote = failed.length > 0
+      ? ` · <span class="text-warning" title="${escapeHtml(failed.join(','))}">⚠️ ${failed.length} sym fallback</span>`
+      : '';
+    sub.innerHTML = `${open.length} ไม้ · จาก ${botIds.size} บอท · อัปเดต ${fmt2(openPositionsAsOf)} · ${sourceBadge}${failedNote}`;
+  }
+
+  // compute aggregates (cost + unrealized) using live price
+  let totalCost = 0;
+  let totalUpnl = 0;
+  for (const p of open) {
+    const cost = Number(p.buyQuoteQty) || ((Number(p.buyPrice) || 0) * (Number(p.buyQty) || 0));
+    const entry = Number(p.buyPrice) || 0;
+    const px = getLivePriceForPosition(p);
+    const qty = Number(p.buyQty) || 0;
+    totalCost += cost;
+    totalUpnl += (px - entry) * qty;
+  }
+
+  const set = (id, val) => { const e = document.getElementById(id); if (e) e.textContent = val; };
+  set('opm-count', String(open.length));
+  set('opm-cost', `${totalCost.toFixed(2)} USDT`);
+  const upnlSign = totalUpnl >= 0 ? '+' : '';
+  set('opm-upnl', `${upnlSign}${totalUpnl.toFixed(4)} USDT`);
+  const upnlEl = document.getElementById('opm-upnl');
+  if (upnlEl) {
+    upnlEl.className = 'v mono ' + (totalUpnl > 0 ? 'pnl-bull' : totalUpnl < 0 ? 'pnl-bear' : '');
+  }
+  set('opm-cost-thb', window.usdtToThb ? window.usdtToThb(totalCost) : '');
+  set('opm-upnl-thb', window.usdtToThb ? window.usdtToThb(totalUpnl) : '');
+  set('opm-asof', fmt2(openPositionsAsOf));
+
+  const listEl = document.getElementById('opm-list');
+  const mobEl = document.getElementById('opm-mob');
+  if (!listEl) return;
+  if (open.length === 0) {
+    listEl.innerHTML = '<div class="empty-positions">ไม่มี position ที่เปิดอยู่ตอนนี้ — เมื่อ BUY fill หรือวาง SELL แล้วจะปรากฏที่นี่ทันที พร้อม % PnL และอายุแบบ realtime</div>';
+    if (mobEl) mobEl.innerHTML = '';
+    return;
+  }
+  // ใช้ shared partial — แสดง bot name + link + retry pill (ต่างจาก bot-detail ที่ซ่อน retry)
+  const opts = { botLink: true, showRetry: true, forceCloseBtnClass: 'btn-force-close-opm' };
+  listEl.innerHTML = open
+    .map((p) => window.PositionCard.renderCard({ ...p, _id: p.tradeId }, getLivePriceForPosition(p), { ...opts, botName: p.botName || p.symbol }))
+    .join('');
+  if (mobEl) {
+    mobEl.innerHTML = open
+      .map((p) => window.PositionCard.renderCardMobile({ ...p, _id: p.tradeId }, getLivePriceForPosition(p), { ...opts, botName: p.botName || p.symbol }))
+      .join('');
+  }
+}
+
+/**
+ * Click handler for #opm-list / #opm-mob — handle "🛑 Force Close" per card
+ *   - ใช้ LUX_CONFIRM.luxConfirm + callBotWithPassword (ตามที่ bot-detail ใช้)
+ *   - ต่างจาก btn-force-close ปกติ: ใช้ class `.btn-force-close-opm` เพื่อแยก event scope
+ */
+async function onOpenPositionsClick(ev) {
+  const btn = ev.target.closest('.btn-force-close-opm');
+  if (!btn) return;
+  ev.preventDefault();
+  ev.stopPropagation();
+  const tradeId = btn.dataset.tradeId;
+  const botId = btn.dataset.botId;
+  if (!tradeId || !botId) return;
+  const pos = openPositionsData && openPositionsData.positions.find((p) => p.tradeId === tradeId);
+  if (!pos) return;
+
+  // confirm prompt
+  const pw = await window.LUX_CONFIRM.luxConfirm({
+    variant: 'danger',
+    icon: '🛑',
+    title: 'ยืนยันบังคับปิด position',
+    sub: 'จะยกเลิก SELL (ถ้ามี) แล้ว MARKET SELL freeQty (หรือ synthetic close ถ้า asset หายไปแล้ว)',
+    message: `ไม้ ${tradeId.slice(-8)} (${pos.symbol}, ${pos.timeframe}, state=${pos.state}) — ปิดเลยหรือไม่?`,
+    target: { name: pos.botName || pos.symbol, symbol: pos.symbol, timeframe: pos.timeframe },
+    requirePassword: true,
+    dangerNote: 'บอทยังคงทำงานต่อ — เฉพาะไม้นี้ที่ถูกปิด',
+    confirmLabel: 'บังคับปิดไม้นี้',
+    confirmGlyph: '🛑',
+  });
+  if (pw === null) return; // cancelled
+  try {
+    await window.LUX_CONFIRM.callBotWithPassword(
+      'POST',
+      `/api/bots/${botId}/trades/${tradeId}/force-close`,
+      { password: pw || undefined },
+      `force-close ${pos.symbol}`
+    );
+    // refetch ทันที — card จะหายไปเมื่อ backend เปลี่ยน state เป็น sold
+    await loadOpenPositions();
+  } catch (err) {
+    await window.LUX_CONFIRM.luxAlert({
+      variant: 'danger',
+      icon: '⚠️',
+      title: 'บังคับปิดไม่สำเร็จ',
+      message: err.message || String(err),
+    });
+  }
+}
+
 function renderBots() {
   const container = document.getElementById('bots-list');
   if (bots.length === 0) {
@@ -242,10 +730,15 @@ function renderBots() {
     return;
   }
   // FIX-2026-07-24: cleanup เก่าก่อน — ป้องกัน memory leak จาก lightweight-charts instances ค้าง
+// FIX-2026-08-02: unify limit=40 ทั้ง initial load + refresh (เดิม refresh ใช้ 30 ทำให้ S1 markers
+//   ที่อยู่ใน bars ที่ 31-40 หายไปหลัง refresh ครั้งแรก)
   teardownMiniCharts();
   container.innerHTML = bots.map(renderBotCard).join('');
-  // FIX-2026-07-24: วาด mini charts หลัง DOM พร้อม — เฉพาะบอทที่ enabled
-  setupMiniCharts();
+  // FIX-2026-07-31: ในโหมด compact ไม่ต้องโหลด mini chart (ลด REST load + memory)
+  //   CSS ซ่อน .bc-minichart-wrap + .bc-tiles อยู่แล้ว — ก็ skip fetch ด้วยเลย
+  if (getBotViewMode() === 'expand') {
+    setupMiniCharts();
+  }
 }
 
 /**
@@ -259,6 +752,7 @@ function renderBots() {
  *       .is-disabled — dimmed, บอทที่หยุดอยู่
  *       .has-position — orange/gold accent, บอทที่กำลังถือ position อยู่
  *       .has-error — red accent, บอทที่มี lastError
+ *       .has-warning — amber accent, บอทที่มี warning (e.g. SELL partial-fill latched 1h)
  *       .ema-above / .ema-below — tile color (green/red) สำหรับ price vs EMA
  */
 function renderBotCard(b) {
@@ -266,12 +760,17 @@ function renderBotCard(b) {
   const isRunning = !!b.enabled;
   const hasPosition = (b.activePositionsCount || 0) > 0;
   const hasError = !!b.lastError;
+  const hasWarning = !!b.warning;
 
   // class flags for highlight
   const classes = ['bot-card-v2'];
   if (isRunning) classes.push('is-running'); else classes.push('is-disabled');
   if (hasPosition) classes.push('has-position');
   if (hasError) classes.push('has-error');
+  if (hasWarning) classes.push('has-warning');
+  // FIX-2026-07-31: view mode (compact | expand) — drives CSS visibility of chart + tiles
+  const viewMode = getBotViewMode();
+  classes.push(viewMode === 'compact' ? 'is-compact' : 'is-expand');
 
   // ── Stats
   const todayPnl = b.todayPnl || 0;
@@ -291,7 +790,8 @@ function renderBotCard(b) {
   const ema20 = b.ema20;
   const emaGap = b.emaGapPct;
   const emaState = b.emaState || 'warmup'; // 'above' | 'below' | 'warmup'
-  const priceDigits = computePriceDigits(lastClose);
+  // FIX-2026-07-31: use Binance tickSize precision (authoritative) — fallback heuristic
+  const priceDigits = window.PriceFormat ? window.PriceFormat.digits(b.symbol, lastClose) : window.PriceFormat.heuristicDigits(lastClose);
   let emaTileContent;
   if (emaState === 'warmup' || lastClose == null) {
     emaTileContent = `
@@ -353,6 +853,86 @@ function renderBotCard(b) {
     `;
   }
 
+  // ── 2026-07-31: Volatility row (Min-%KC + %TP suggested + 24h volume)
+  //   - server enrich ส่ง volKcMinPct / volSuggestedTpPct / volQuoteVolume24h + display strings
+  //   - highlight: Min-%KC < 1.2% → is-low (warn), 24h vol < 1,000,000 USDT → is-low (warn)
+  //   - tile แสดงเฉพาะ expand mode (CSS ซ่อนเมื่อ .is-compact)
+  const KC_MIN_LOW_THRESHOLD_PCT = 1.2;   // %
+  const VOL24H_LOW_THRESHOLD_USDT = 1e6;  // 1,000,000 USDT
+  const kcMinPctNum = b.volKcMinPct != null ? Number(b.volKcMinPct) : null; // already percent (e.g. 1.23 = 1.23%)
+  const kcMinLow = kcMinPctNum != null && kcMinPctNum < KC_MIN_LOW_THRESHOLD_PCT;
+  const vol24hLow = b.volQuoteVolume24h != null && Number(b.volQuoteVolume24h) < VOL24H_LOW_THRESHOLD_USDT;
+  const trendArrow = b.volTrendState === 'upper' ? '↑' : b.volTrendState === 'lower' ? '↓' : '•';
+  const trendWord  = b.volTrendState === 'upper' ? 'up' : b.volTrendState === 'lower' ? 'lo' : '—';
+  // FIX-2026-08-02: TP floor override badge — threshold bumped 0.1% → 0.281%, override 0.111% → 0.281%
+  const tpOverrideBadge = b.volTpOverridden ? ' <span class="lux-badge lux-badge-warn" title="NET TP ต่ำกว่า 0.281% — auto-floor ใช้ 0.281% แทน">⚙️ floor</span>' : '';
+
+  // Min-%KC tile
+  let kcMinTileContent;
+  if (!b.volOk || kcMinPctNum == null) {
+    kcMinTileContent = `
+      <div class="tile-label">Min-%KC (${b.suggestTpWindow || 500})</div>
+      <div class="tile-value muted">—</div>
+      <div class="tile-sub muted" title="${escapeHtml(b.volError || 'warming up')}">${b.volError ? 'API error' : 'warming up'}</div>
+    `;
+  } else {
+    kcMinTileContent = `
+      <div class="tile-label">Min-%KC (${b.suggestTpWindow || 500} bars)</div>
+      <div class="tile-value">${kcMinPctNum.toFixed(2)}%</div>
+      <div class="tile-sub muted">lower window · ${trendArrow} ${trendWord}</div>
+    `;
+  }
+
+  // %TP suggested tile (NET, x.xx1) — trend-aware
+  let tpSuggTileContent;
+  if (!b.volOk || b.volSuggestedTpPct == null) {
+    tpSuggTileContent = `
+      <div class="tile-label">TP แนะนำ %</div>
+      <div class="tile-value muted">—</div>
+      <div class="tile-sub muted">${b.volError ? 'API error' : 'trend warm-up'}</div>
+    `;
+  } else {
+    const trendCls = b.volTrendState === 'upper' ? 'pnl-bull' : b.volTrendState === 'lower' ? 'pnl-bear' : '';
+    const trendLabel = b.volTrendState === 'upper' ? 'upper TF' : b.volTrendState === 'lower' ? 'lower TF' : 'warmup';
+    const tfLabel = b.volTrendTF ? ` · ${b.volTrendTF}` : '';
+    tpSuggTileContent = `
+      <div class="tile-label">TP แนะนำ % (NET)</div>
+      <div class="tile-value">${b.volSuggestedTpPct.toFixed(3)}%${tpOverrideBadge}</div>
+      <div class="tile-sub ${trendCls}">${trendArrow} ${trendLabel}${tfLabel}</div>
+    `;
+  }
+
+  // 24h volume tile
+  let vol24hTileContent;
+  if (b.volQuoteVolume24h == null || !b.volQuoteVolume24hDisplay) {
+    vol24hTileContent = `
+      <div class="tile-label">24h Volume</div>
+      <div class="tile-value muted">—</div>
+      <div class="tile-sub muted">${b.volError ? 'API error' : '—'}</div>
+    `;
+  } else {
+    const usdtLabel = ` (${b.volQuoteVolume24h.toLocaleString('en-US', { maximumFractionDigits: 0 })} USDT)`;
+    vol24hTileContent = `
+      <div class="tile-label">24h Volume (USDT)</div>
+      <div class="tile-value">${b.volQuoteVolume24hDisplay} USDT</div>
+      <div class="tile-sub muted">quoteVol${usdtLabel}</div>
+    `;
+  }
+
+  // FIX-2026-08-01: coin-info chips (status + 24h % + lot/tick) — ใช้ getCoinInfo()
+  //   - ดึงจาก window.coinInfoCache ที่ prefetch ใน loadBots()
+  //   - ถ้ายังโหลดไม่เสร็จ → fallback '—'
+  const ci = (typeof getCoinInfo === 'function') ? getCoinInfo(b.symbol) : null;
+  const coinChip = renderCoinChip(ci, b.symbol);
+
+  // FIX-2026-08-01: Bot Quality Indicator pill (between statusBadge + coinChip)
+  const qualityBadge = buildQualityBadge(b);
+
+  // FIX-2026-08-02: DCA mode badge — แสดงเมื่อเปิด DCA stack mode
+  const dcaBadge = b.dcaEnabled
+    ? `<span class="dca-pill" title="DCA + BEP Stack Mode — max ${b.dcaMaxLayers || 3} layers">📚 DCA${b.dcaMaxLayers ? `/${b.dcaMaxLayers}` : ''}</span>`
+    : '';
+
   return `
     <div class="${classes.join(' ')}" data-bot-id="${b._id}" data-symbol="${b.symbol}" data-timeframe="${b.timeframe}">
       <div class="bc-head">
@@ -362,6 +942,9 @@ function renderBotCard(b) {
             <span class="sym-tag">${b.symbol}</span>
             <span class="tf-tag">${b.timeframe}</span>
             ${statusBadge}
+            ${qualityBadge}
+            ${dcaBadge}
+            ${coinChip}
           </div>
         </div>
         <div class="bc-head-right">
@@ -393,9 +976,18 @@ function renderBotCard(b) {
         <div class="bc-tile bc-tile-pnl">
           ${todayTileContent}
         </div>
+        <div class="bc-tile bc-tile-kcmin ${kcMinLow ? 'is-low' : ''}" title="${kcMinLow ? 'Min-%KC < 1.2% — volatility ต่ำ TP แนะนำจะน้อย' : 'Min %KC ตลอด suggestTpWindow'}">
+          ${kcMinTileContent}
+        </div>
+        <div class="bc-tile bc-tile-tpsugg ${b.volTpOverridden ? 'is-floor' : ''}" title="%TP NET ที่คำนวณจาก minKC + trend (NET = หัก fee แล้ว)">
+          ${tpSuggTileContent}
+        </div>
+        <div class="bc-tile bc-tile-vol24h ${vol24hLow ? 'is-low' : ''}" title="${vol24hLow ? '24h volume < 1,000,000 USDT — liquidity ต่ำ' : '24h quote volume (USDT)'}">
+          ${vol24hTileContent}
+        </div>
       </div>
       <div class="bc-stats">
-        <span class="stat"><span class="lbl">TP</span><strong>${b.tpPercent}%${b.tpOnFloor ? ' <span class="lux-badge lux-badge-warn" title="NET TP ต่ำกว่า 0.1% — auto-floor ใช้ 0.111% แทน">⚙️ floor</span>' : ''}</strong></span>
+        <span class="stat"><span class="lbl">TP</span><strong>${b.tpPercent}%${b.tpOnFloor ? ' <span class="lux-badge lux-badge-warn" title="NET TP ต่ำกว่า 0.281% — auto-floor ใช้ 0.281% แทน">⚙️ floor</span>' : ''}</strong></span>
         <span class="stat"><span class="lbl">ทุน</span><strong>$${b.capitalPerTrade} × ${b.maxTrades} = $${b.totalCapital.toFixed(2)}</strong></span>
         <span class="stat"><span class="lbl">Retry</span><strong>${formatRetryTime(b.retryTimeMin)} × ${b.retryMax ?? 1}</strong></span>
         <span class="stat"><span class="lbl">⏱ Uptime</span><strong>${uptime}</strong></span>
@@ -404,6 +996,7 @@ function renderBotCard(b) {
         <span class="stat"><span class="lbl">Trades</span><strong>${b.totalTrades || 0} (W ${b.winTrades || 0})</strong></span>
       </div>
       ${b.lastError ? `<div class="bc-err"><span class="bc-err-msg">⚠️ ${escapeHtml(b.lastError)}</span><button class="bc-err-dismiss" type="button" title="ปิดการแจ้งเตือนนี้" aria-label="dismiss" onclick="dismissBotError('${b._id}', this)">×</button></div>` : ''}
+      ${b.warning ? `<div class="bc-warn"><span class="bc-warn-msg">⏰ ${escapeHtml(b.warning)}</span><button class="bc-warn-dismiss" type="button" title="ปิดการแจ้งเตือนนี้" aria-label="dismiss" onclick="dismissBotWarning('${b._id}', this)">×</button></div>` : ''}
       <div class="bc-actions">
         <a href="/bot-detail.html?id=${b._id}" class="btn-lux btn-info btn-sm">📊 Detail</a>
         <a href="/bot-edit.html?id=${b._id}" class="btn-lux btn-gold btn-sm">⚙️ Edit</a>
@@ -414,19 +1007,6 @@ function renderBotCard(b) {
       </div>
     </div>
   `;
-}
-
-/**
- * จำนวนทศนิยมที่เหมาะสมกับราคา (เหมือน chartPriceFormatter)
- */
-function computePriceDigits(price) {
-  if (price == null || !Number.isFinite(price)) return 4;
-  const abs = Math.abs(price);
-  if (abs >= 1000) return 2;
-  if (abs >= 1) return 4;
-  if (abs >= 0.01) return 4;
-  if (abs >= 0.0001) return 5;
-  return 6;
 }
 
 /**
@@ -482,7 +1062,8 @@ function updateCardEma(cardEl, newClose) {
   const emaState = newClose >= ema ? 'above' : 'below';
   const gapPct = ((newClose - ema) / ema) * 100;
   const gapSign = gapPct >= 0 ? '+' : '';
-  const priceDigits = computePriceDigits(newClose);
+  // FIX-2026-07-31: ใช้ PriceFormat (Binance tickSize) — ส่ง symbol มาด้วย
+  const priceDigits = window.PriceFormat ? window.PriceFormat.digits(symbol, newClose) : window.PriceFormat.heuristicDigits(newClose);
 
   // update DOM (lightweight — no re-render)
   const tileEl = cardEl.querySelector('.bc-tile-ema');
@@ -508,6 +1089,23 @@ function statusPillHtml(status) {
 function renderStats() {
   const enabled = bots.filter((b) => b.enabled).length;
   document.getElementById('stat-active').textContent = enabled;
+
+  // FIX-2026-07-31: ทุนแนะนำรวม — ผลรวม capitalPerTrade * maxTrades ของ "บอทที่เปิดอยู่" เท่านั้น
+  //   ตามที่ user ขอ: นับเฉพาะบอทที่ enabled เพราะบอทที่ปิด/stopped ไม่ได้ใช้ทุน
+  //   ถ้าไม่มีบอทเปิดอยู่เลย → แสดง 0.00 + "ยังไม่มีบอททำงาน"
+  const enabledBots = bots.filter((b) => b.enabled);
+  const totalCapital = enabledBots.reduce((s, b) => s + (b.totalCapital || ((b.capitalPerTrade || 0) * (b.maxTrades || 0))), 0);
+  const capEl = document.getElementById('stat-recommended-capital');
+  const capSubEl = document.getElementById('stat-recommended-capital-sub');
+  if (capEl) {
+    const capThb = window.usdtToThb ? window.usdtToThb(totalCapital) : '';
+    capEl.innerHTML = `${totalCapital.toFixed(2)}${capThb ? `<span class="thb-eq" style="display:block;font-size:0.85rem;opacity:0.8;font-weight:500;">${capThb}</span>` : ''}`;
+    if (capSubEl) {
+      capSubEl.textContent = enabledBots.length > 0
+        ? `จากบอทที่เปิดอยู่ ${enabledBots.length} บอท`
+        : 'ยังไม่มีบอททำงาน';
+    }
+  }
 
   const totalTrades = bots.reduce((s, b) => s + (b.totalTrades || 0), 0);
   const totalWins = bots.reduce((s, b) => s + (b.winTrades || 0), 0);
@@ -582,8 +1180,24 @@ async function createBot() {
     retryTimeMin: parseFloat(document.getElementById('nb-retry').value),
     retryMax: parseInt(document.getElementById('nb-retry-max').value, 10),
     kcMult: parseFloat(document.getElementById('nb-kc-mult').value) || 1.5, // FIX-2026-07-24: per-bot KC multiplier
+    minSpreadTicks: parseInt(document.getElementById('nb-min-spread').value, 10) || 1, // FIX-2026-07-24: per-bot min spread (ticks)
+    suggestTpWindow: parseInt(document.getElementById('nb-suggest-tp-window').value, 10) || 500, // FIX-2026-07-25: per-bot TP suggestion window
+    // FIX-2026-08-02: DCA + BEP stack mode (opt-in, default off — backward compatible)
+    dcaEnabled: document.getElementById('nb-dca-enabled') ? document.getElementById('nb-dca-enabled').checked : false,
+    dcaMaxLayers: document.getElementById('nb-dca-max-layers') ? parseInt(document.getElementById('nb-dca-max-layers').value, 10) || 3 : 3,
     stopLossOnUpperKC: document.getElementById('nb-stop-loss-upper-kc').checked, // FIX-2026-07-23
+    s1OnlyDown: document.getElementById('nb-s1-only-down').checked, // FIX-2026-07-24: skip bg 2→1
+    xs1Enabled: document.getElementById('nb-xs1-enabled').checked, // FIX-2026-07-25: per-bot XS1 anti-dump toggle (default true)
+    cbEnabled: document.getElementById('nb-cb-enabled').checked, // FIX-2026-08-01: per-bot Circuit-breaker panic-sell toggle (default true) — เดิมชื่อ sls1Enabled
+    safeTradeEnabled: document.getElementById('nb-safe-trade-enabled').checked, // FIX-2026-08-01: per-bot safe-trade filter (default ON)
+    autoPauseEnabled: document.getElementById('nb-auto-pause-enabled').checked, // FIX-2026-08-01: per-bot auto-pause on low Min-%KC (default ON)
+    autoPauseMinKcPct: parseFloat(document.getElementById('nb-auto-pause-min-kc').value) || 2, // FIX-2026-08-01: auto-pause threshold %
+    autoArmStopLossOnUKC: document.getElementById('nb-auto-arm-stop-loss-ukc').checked, // FIX-2026-07-31 (F1): per-bot auto-arm SL-on-UKC toggle (default true)
+    tpTrendEnabled: document.getElementById('nb-tp-trend-enabled').checked, // FIX-2026-08-01: per-bot TP trend ×N master toggle (default true)
+    tpTrendMultiplier: parseFloat(document.getElementById('nb-tp-trend-multiplier').value) || 2, // FIX-2026-07-31 (F2): per-bot TP ×N multiplier (1..10, default 2)
     autoUpdateTp: document.getElementById('nb-auto-update-tp').checked, // FIX-2026-07-23: TP auto-update toggle
+    // FIX-2026-07-31: ส่ง enabled ตาม checkbox — atomic create + enable ใน 1 round-trip
+    enabled: document.getElementById('nb-auto-enable').checked === true,
     password: document.getElementById('nb-password').value || undefined, // up-front pw if user typed it
   };
   const btn = document.getElementById('nb-create');
@@ -592,9 +1206,19 @@ async function createBot() {
   btn.classList.add('is-loading');
   btn.disabled = true;
   try {
-    await callBotWithPassword('POST', '/api/bots', data, 'สร้างบอท');
+    const resp = await callBotWithPassword('POST', '/api/bots', data, 'สร้างบอท');
+    // FIX-2026-07-31: ถ้า auto-enable ล้มเหลว → แสดง warning แต่ไม่ block (bot ถูกสร้างแล้ว)
+    let warn = '';
+    if (resp && resp.autoEnabled === false && resp.autoEnableError) {
+      warn = `\n⚠️ บอทถูกสร้างแล้ว แต่เริ่มเทรดไม่สำเร็จ: ${resp.autoEnableError}`;
+    }
     bootstrap.Modal.getInstance(document.getElementById('newBotModal')).hide();
     await loadBots();
+    if (warn) {
+      // แสดง warning ใน toast/alert zone (ถ้ามี) หรือ console
+      console.warn('createBot auto-enable warning:', warn);
+      try { alert(warn.trim()); } catch (_) { /* ignore */ }
+    }
   } catch (err) {
     errEl.textContent = err.message;
   } finally {
@@ -627,6 +1251,31 @@ window.dismissBotError = async (botId, btnEl) => {
     if (banner) banner.style.display = '';
     if (bot && err && err.response) {
       // re-fetch bots to restore correct state
+      await loadBots().catch(() => {});
+    }
+  }
+};
+
+// FIX-2026-08-01: dismiss warning banner (mirror dismissBotError)
+//   - ใช้เมื่อ user กดปิด warning (1h latched alert) → POST /api/bots/:id/clear-warning
+//   - optimistic UI: ซ่อน banner ทันที + ลบ .has-warning class
+//   - ถ้า API fail → restore + re-fetch
+window.dismissBotWarning = async (botId, btnEl) => {
+  const banner = btnEl && btnEl.closest('.bc-warn');
+  if (banner) banner.style.display = 'none';
+  const bot = bots.find((b) => b._id === botId);
+  if (bot) {
+    bot.warning = '';
+    bot.warningAt = null;
+  }
+  const card = btnEl && btnEl.closest('.bot-card-v2');
+  if (card) card.classList.remove('has-warning');
+  try {
+    await API.post(`/api/bots/${botId}/clear-warning`, {});
+  } catch (err) {
+    console.error('dismissBotWarning', err);
+    if (banner) banner.style.display = '';
+    if (bot && err && err.response) {
       await loadBots().catch(() => {});
     }
   }
@@ -1026,7 +1675,7 @@ async function loadMiniChart(botId, el, symbol, timeframe) {
 async function refreshMiniChartMarkers(botId) {
   const entry = _miniCharts.get(botId);
   if (!entry) return;
-  const resp = await API.get(`/api/bots/${botId}/mini-chart?limit=30`);
+  const resp = await API.get(`/api/bots/${botId}/mini-chart?limit=40`);
   const s1Markers = (resp.signals || []).map((s) => ({
     time: Math.floor(s.openTime / 1000),
     position: 'belowBar',
@@ -1085,6 +1734,17 @@ async function refreshMiniChartMarkers(botId) {
         // (cheap path: refresh markers ของทุกบอทที่มี chart อยู่ — N<=10 ก็ไม่เปลือง API)
         for (const botId of _miniCharts.keys()) {
           refreshMiniChartMarkers(botId).catch(() => {});
+        }
+      });
+      // FIX-2026-08-02: signal:new → re-fetch markers ทันที (เดิมพึ่ง trade:update ซึ่งจะมาหลังจาก trade ถูก place)
+      //   - ทำให้ bot-detail chart (ซึ่ง subscribe signal:new) sync กับ mini-chart ได้ทันที
+      //   - กรณี signal ไม่ได้ place trade (เช่น maxTrades ถึง limit, safe-trade block) mini-chart ก็ยัง update marker
+      WSClient.on('signal:new', (p) => {
+        if (!p || !p.signal) return;
+        const signalBotId = String(p.signal.botId || '');
+        if (!signalBotId) return;
+        if (_miniCharts.has(signalBotId)) {
+          refreshMiniChartMarkers(signalBotId).catch(() => {});
         }
       });
       WSClient.on('bot:updated', () => loadBots());
