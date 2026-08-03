@@ -245,22 +245,185 @@ function render() {
             · <strong>เปิด</strong>: stack mode — เหมาะกับ "no cut loss" strategy
           </small>
         </div>
+
+        <!-- FIX-2026-08-03: TP% mirror — read-only, sourced from Classic tab -->
+        <div class="card border-info mb-3" id="dca-tp-mirror">
+          <div class="card-body py-2">
+            <div class="d-flex justify-content-between align-items-center flex-wrap gap-2">
+              <div>
+                <strong>🎯 TP% (จาก Classic tab)</strong>
+                <code class="ms-2" id="dca-tp-value">—</code>
+              </div>
+              <button type="button" class="btn btn-sm btn-outline-info" id="dca-tp-edit-link">
+                ✏️ แก้ที่ Classic tab
+              </button>
+            </div>
+            <small class="text-muted d-block mt-2">
+              DCA ใช้ <code>TP% × tpTrendMultiplier</code> × <strong>stack BEP</strong>
+              · SELL target = <code>stackBEP × (1 + TP%/100 + 2×fee)</code>
+              · TP% เปลี่ยนใน Classic tab → มีผล layer ถัดไป (ไม่ retroactive)
+            </small>
+          </div>
+        </div>
+
         <div class="mb-3">
           <label for="f-dca-max-layers" class="form-label">📊 <strong>DCA max layers</strong></label>
           <input type="number" class="form-control" id="f-dca-max-layers" value="${bot.dcaMaxLayers ?? 3}" step="1" min="1" max="100" />
           <small class="text-muted d-block mt-1">
             จำนวน layer สูงสุดต่อ stack (default 3, range 1-100)
-            · max capital = <strong id="dca-max-cap">${((bot.capitalPerTrade || 10) * (bot.dcaMaxLayers || 3)).toFixed(2)} USDT</strong> (capitalPerTrade × maxLayers)
           </small>
         </div>
+
+        <!-- FIX-2026-08-03: Max-capital card (prominent) -->
+        <div class="card border-warning mb-3">
+          <div class="card-body py-2">
+            <div class="d-flex justify-content-between align-items-center flex-wrap gap-2">
+              <div>
+                <strong>💰 Max capital ต่อ stack</strong>
+                <code class="ms-2" id="dca-max-cap-prominent">—</code>
+              </div>
+              <small class="text-muted">
+                <span id="dca-mc-capital">—</span> (capitalPerTrade) × <span id="dca-mc-layers">—</span> (maxLayers)
+              </small>
+            </div>
+          </div>
+        </div>
+
+        <!-- FIX-2026-08-03: Exit-policy summary banner (computed from flags) -->
+        <div class="alert alert-primary mb-3" id="dca-exit-policy" style="font-size:0.85rem;">
+          <strong>🛡️ Exit policy:</strong> <span id="dca-exit-text">กำลังโหลด…</span>
+        </div>
+
+        <!-- FIX-2026-08-03: Feature compatibility matrix -->
+        <div class="mb-3">
+          <label class="form-label"><strong>🧩 Feature compatibility ในโหมด DCA</strong></label>
+          <div class="row g-2 small">
+            <div class="col-md-6">
+              <ul class="list-unstyled mb-0">
+                <li class="mb-1">✅ <strong>TP% / TP trend ×N</strong> — ใช้กับ stack BEP</li>
+                <li class="mb-1">✅ <strong>Auto-update TP</strong> — เปลี่ยน TP% อัตโนมัติทุกชั่วโมง</li>
+                <li class="mb-1">✅ <strong>suggest-tp-window</strong> — Min %KC window</li>
+                <li class="mb-1">✅ <strong>XS1, S1-only-down, safe-trade</strong> — per-layer</li>
+                <li class="mb-1">✅ <strong>auto-pause, kcMult, minSpread, retry</strong> — per-layer</li>
+              </ul>
+            </div>
+            <div class="col-md-6">
+              <ul class="list-unstyled mb-0">
+                <li class="mb-1">⚠️ <strong>SL-UKC</strong> — ใช้ <em>stack BEP</em> (ต้องเปิดจาก Classic)</li>
+                <li class="mb-1">⚠️ <strong>autoArm SL-UKC</strong> — gate ต่อ stack (loss&gt;10% + age&gt;4h หลัง layer สุดท้าย)</li>
+                <li class="mb-1">❌ <strong>CB panic-sell</strong> — ปิดอัตโนมัติใน DCA mode</li>
+                <li class="mb-1">❌ <strong>maxTrades</strong> — ไม่ cap DCA (ใช้ dcaMaxLayers แทน)</li>
+              </ul>
+            </div>
+          </div>
+        </div>
+
+        <!-- FIX-2026-08-03: Example flow diagram -->
+        <div class="alert alert-secondary mb-3" style="font-size:0.85rem;">
+          <strong>📖 ตัวอย่าง flow (capitalPerTrade=10, dcaMaxLayers=3):</strong>
+          <ol class="mb-0 mt-2 ps-3">
+            <li>S1 #1 → <strong>layer 1</strong> BUY 10 USDT @ $100 → BEP=$100 → SELL ที่ BEP+TP</li>
+            <li>S1 #2 → <strong>layer 2</strong> BUY 10 USDT @ $90 → BEP=$95 → cancel SELL เดิม, place SELL ใหม่ที่ BEP=$95+TP</li>
+            <li>S1 #3 → <strong>layer 3</strong> BUY 10 USDT @ $80 → BEP=$90 → cancel SELL เดิม, place SELL ใหม่ที่ BEP=$90+TP</li>
+            <li>S1 #4 → <strong>skip</strong> (dcaMaxLayersHit) — รอ SELL fill ที่ BEP+TP</li>
+          </ol>
+        </div>
+
+        <!-- FIX-2026-08-03: Backtest quick-link -->
+        <div class="d-flex gap-2 mb-3 flex-wrap">
+          <a href="/backtest.html?botId=${botId}&dcaMode=1" class="btn btn-sm btn-outline-primary">
+            🧪 รัน DCA Backtest
+          </a>
+          <button type="button" class="btn btn-sm btn-outline-secondary" id="dca-show-stats-btn">
+            📊 คำอธิบาย backtest stats
+          </button>
+        </div>
+        <div class="collapse mb-3" id="dca-stats-info">
+          <div class="card card-body bg-light small">
+            <strong>สถิติที่ดูได้จาก DCA backtest:</strong>
+            <ul class="mb-0 mt-1">
+              <li><code>stacksCount</code> — total stacks opened</li>
+              <li><code>dcaTargetHitCount</code> — TP fills closing whole stack</li>
+              <li><code>dcaStackStopLossCount</code> — SL-UKC force-closes</li>
+              <li><code>dcaMaxLayersHitCount</code> — signals skipped ที่ layer cap</li>
+              <li><code>avgLayersPerStack</code> — fill efficiency</li>
+              <li><code>stackSuccessRate</code> — (dcaTargetHit / stacksCount)</li>
+            </ul>
+          </div>
+        </div>
+
         <div class="mb-3" id="dca-cb-warning" style="display:${bot.dcaEnabled ? '' : 'none'};">
           <div class="alert alert-warning small mb-0">
             ⚠️ <strong>เมื่อเปิด DCA:</strong>
-            CB panic-sell จะถูก disable อัตโนมัติ &nbsp;·&nbsp;
-            SL-UKC จะใช้ <strong>stack BEP</strong> แทนราคาเดี่ยว
+            CB panic-sell จะถูก disable อัตโนมัติ (no cut loss) &nbsp;·&nbsp;
+            SL-UKC จะใช้ <strong>stack BEP</strong> แทนราคาเดี่ยว &nbsp;·&nbsp;
+            ต้องเปิด SL-UKC จาก Classic tab + แนะนำให้เปิด <strong>autoArm SL-UKC</strong> ด้วย
           </div>
         </div>
       </section>
+
+      <!-- FIX-2026-08-03: Confirmation modal — toggle DCA ON -->
+      <div class="modal fade" id="dca-enable-modal" tabindex="-1" aria-hidden="true">
+        <div class="modal-dialog">
+          <div class="modal-content">
+            <div class="modal-header bg-warning-subtle">
+              <h5 class="modal-title">📚 เปิด DCA + BEP Stack Mode</h5>
+              <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+              <p><strong>สิ่งที่จะเปลี่ยน (เริ่มจาก S1 ตัวถัดไป หลัง save):</strong></p>
+              <ul>
+                <li>S1 ตัวถัดไปจะ <strong>เปิด DCA stack ใหม่</strong> (1 BUY = 1 layer)</li>
+                <li>S1 ตัวถัดไปๆ จะ <strong>เพิ่ม layer</strong> เข้า stack เดิม (สูงสุด <code id="dca-modal-max-layers">3</code> layers)</li>
+                <li>SELL จะถูก cancel + replace ทุกครั้งที่ BEP เปลี่ยน</li>
+                <li>CB panic-sell จะ <strong>ปิดอัตโนมัติ</strong> (no cut loss)</li>
+              </ul>
+              <p><strong>สิ่งที่ไม่เปลี่ยน:</strong></p>
+              <ul>
+                <li>🟢 <strong>trade (classic) ที่เปิดอยู่ตอนนี้</strong> จะ flow ต่อเป็น 1 BUY → 1 SELL ตามเดิม</li>
+                <li>🟢 TP% / TP trend / SL-UKC / safe-trade ฯลฯ ทำงานเหมือนเดิม</li>
+              </ul>
+              <div class="alert alert-info small mb-0">
+                ℹ️ เริ่มมีผล <strong>ตั้งแต่ S1 ตัวถัดไป</strong> หลัง save — ไม่กระทบ trade ที่เปิดอยู่
+              </div>
+            </div>
+            <div class="modal-footer">
+              <button type="button" class="btn btn-secondary" data-bs-dismiss="modal" id="dca-enable-cancel">ยกเลิก</button>
+              <button type="button" class="btn btn-primary" id="dca-enable-confirm">✅ เข้าใจแล้ว — เปิด DCA</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- FIX-2026-08-03: Confirmation modal — toggle DCA OFF (with open stack) -->
+      <div class="modal fade" id="dca-disable-modal" tabindex="-1" aria-hidden="true">
+        <div class="modal-dialog">
+          <div class="modal-content">
+            <div class="modal-header bg-warning-subtle">
+              <h5 class="modal-title">📚 ปิด DCA + BEP Stack Mode</h5>
+              <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+              <div class="alert alert-warning">
+                ⚠️ บอทนี้มี <strong>DCA stack ที่ยังเปิดอยู่</strong>
+              </div>
+              <p><strong>สิ่งที่จะเกิดขึ้น:</strong></p>
+              <ul>
+                <li>🟢 <strong>Stack ปัจจุบันจะ flow ต่อเป็น DCA</strong> จนกว่าจะปิด (TP hit / SL-UKC / force-close)</li>
+                <li>🔄 S1 ตัวถัดไป (หลัง stack ปิด) จะกลับเป็น <strong>classic mode</strong> — 1 BUY = 1 SELL</li>
+                <li>🔄 CB panic-sell จะ <strong>กลับมาเปิด</strong> หลัง stack ปิด</li>
+              </ul>
+              <div class="alert alert-info small mb-0">
+                ℹ️ การเปลี่ยนแปลง <strong>มีผลตั้งแต่ S1 ตัวถัดไป</strong> — ไม่กระทบ stack ที่กำลังเปิดอยู่
+              </div>
+            </div>
+            <div class="modal-footer">
+              <button type="button" class="btn btn-secondary" data-bs-dismiss="modal" id="dca-disable-cancel">ยกเลิก</button>
+              <button type="button" class="btn btn-warning" id="dca-disable-confirm">ปิด DCA (current stack จะ flow ต่อ)</button>
+            </div>
+          </div>
+        </div>
+      </div>
 
       <!-- FOOTER — outside any panel, always visible -->
       <div class="alert alert-info" id="f-total"></div>
@@ -294,16 +457,74 @@ function render() {
   });
   document.getElementById('f-tp-recommend').onclick = recommendTp;
 
-  // FIX-2026-08-03: live-update DCA max-capital formula + DCA ↔ CB toggle interaction
+  // FIX-2026-08-03: live-update DCA max-capital formula + max-capital card
   function updateDcaMaxCap() {
     const cap = parseFloat(document.getElementById('f-capital').value) || 0;
     const layers = parseInt(document.getElementById('f-dca-max-layers').value, 10) || 3;
-    const el = document.getElementById('dca-max-cap');
-    if (el) el.textContent = `${(cap * layers).toFixed(2)} USDT`;
+    const total = (cap * layers).toFixed(2);
+    const elProminent = document.getElementById('dca-max-cap-prominent');
+    const elMc = document.getElementById('dca-mc-capital');
+    const elLy = document.getElementById('dca-mc-layers');
+    if (elProminent) elProminent.textContent = `${total} USDT`;
+    if (elMc) elMc.textContent = cap.toFixed(2);
+    if (elLy) elLy.textContent = layers;
   }
   const _dcaMaxLayers = document.getElementById('f-dca-max-layers');
   if (_dcaMaxLayers) _dcaMaxLayers.addEventListener('input', updateDcaMaxCap);
 
+  // FIX-2026-08-03: TP% mirror — read-only display, sourced from Classic tab inputs
+  function updateDcaTpMirror() {
+    const tp = parseFloat(document.getElementById('f-tp').value) || 0;
+    const trendOn = document.getElementById('f-tp-trend-enabled').checked;
+    const mult = parseFloat(document.getElementById('f-tp-trend-multiplier').value) || 1;
+    const effective = trendOn ? tp * mult : tp;
+    const el = document.getElementById('dca-tp-value');
+    if (el) {
+      el.textContent = trendOn
+        ? `${tp.toFixed(3)}% (effective ${effective.toFixed(3)}% เมื่อ trend=upper × ${mult})`
+        : `${tp.toFixed(3)}%`;
+    }
+    updateDcaExitPolicy();
+  }
+  ['f-tp', 'f-tp-trend-enabled', 'f-tp-trend-multiplier'].forEach((id) => {
+    const el = document.getElementById(id);
+    if (el) el.addEventListener('input', updateDcaTpMirror);
+  });
+  const _tpEditLink = document.getElementById('dca-tp-edit-link');
+  if (_tpEditLink) {
+    _tpEditLink.addEventListener('click', () => {
+      switchTab('classic');
+      const tpInput = document.getElementById('f-tp');
+      if (tpInput) {
+        tpInput.focus();
+        tpInput.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }
+    });
+  }
+
+  // FIX-2026-08-03: exit-policy banner — compute from SL-UKC + auto-arm flags
+  function updateDcaExitPolicy() {
+    const dcaOn = document.getElementById('f-dca-enabled').checked;
+    const slUkc = document.getElementById('f-stop-loss-upper-kc').checked;
+    const autoArm = document.getElementById('f-auto-arm-stop-loss-ukc').checked;
+    const el = document.getElementById('dca-exit-text');
+    if (!el) return;
+    if (!dcaOn) {
+      el.textContent = 'DCA ปิดอยู่ — ใช้ logic เดิม (TP + CB panic-sell)';
+      return;
+    }
+    if (slUkc && autoArm) {
+      el.innerHTML = '<strong>TP</strong> + <strong>SL-UKC</strong> (จะ trigger เมื่อ stack BEP ขาดทุน &gt; 10% และอายุ &gt; 4h หลัง layer สุดท้าย + candle ปิดเหนือ upper-KC)';
+    } else if (slUkc && !autoArm) {
+      el.innerHTML = '<strong>TP</strong> + <strong>SL-UKC</strong> (immediate — จะ trigger ทันทีที่ขาดทุน + candle &gt; upper-KC) — ⚠️ ปิด autoArm = SL ไวกว่า TP เสมอ';
+    } else if (!slUkc && autoArm) {
+      el.innerHTML = '<strong>TP</strong> เท่านั้น (auto-arm = false เพราะ SL-UKC ปิด) — ⚠️ ไม่มี loss exit!';
+    } else {
+      el.innerHTML = '<strong>TP</strong> เท่านั้น — ⚠️ ไม่มี loss exit! เปิด SL-UKC จาก Classic tab ถ้าอยากมี stop loss';
+    }
+  }
+
+  // FIX-2026-08-03: DCA toggle — show confirmation modal when state changes
   function refreshDcaUi({ autoSwitchTab = false } = {}) {
     const dcaOn = document.getElementById('f-dca-enabled').checked;
     const cbEl = document.getElementById('f-cb-enabled');
@@ -316,11 +537,80 @@ function render() {
     }
     if (warn) warn.style.display = dcaOn ? '' : 'none';
     if (badge) badge.textContent = dcaOn ? 'ON' : 'OFF';
+    updateDcaExitPolicy();
     if (autoSwitchTab && dcaOn) switchTab('dca'); // user-confirmed: jump to DCA tab when enabled
   }
   const _dcaToggle = document.getElementById('f-dca-enabled');
-  if (_dcaToggle) _dcaToggle.addEventListener('change', () => refreshDcaUi({ autoSwitchTab: true }));
+  if (_dcaToggle) {
+    _dcaToggle.addEventListener('change', async (e) => {
+      const wasDcaOn = !!bot.dcaEnabled; // DB state
+      const isDcaOnNow = e.target.checked;
+      if (isDcaOnNow && !wasDcaOn) {
+        // Toggle ON — show confirmation modal
+        const modalMaxLayers = document.getElementById('dca-modal-max-layers');
+        if (modalMaxLayers) modalMaxLayers.textContent = bot.dcaMaxLayers ?? 3;
+        const modal = bootstrap.Modal.getOrCreateInstance(document.getElementById('dca-enable-modal'));
+        modal.show();
+      } else if (!isDcaOnNow && wasDcaOn) {
+        // Toggle OFF — check if open DCA stack exists
+        try {
+          const resp = await API.get(`/api/trades?botId=${botId}&isDcaStack=true&state=selling`);
+          const openStack = (resp.trades || []).find((t) => t.isDcaStack);
+          if (openStack) {
+            const modal = bootstrap.Modal.getOrCreateInstance(document.getElementById('dca-disable-modal'));
+            modal.show();
+          } else {
+            refreshDcaUi({ autoSwitchTab: false });
+          }
+        } catch (err) {
+          // If API fails, just proceed without modal
+          refreshDcaUi({ autoSwitchTab: false });
+        }
+      } else {
+        refreshDcaUi({ autoSwitchTab: false });
+      }
+    });
+    // Modal confirm/cancel buttons
+    document.getElementById('dca-enable-confirm').addEventListener('click', () => {
+      bootstrap.Modal.getInstance(document.getElementById('dca-enable-modal'))?.hide();
+      refreshDcaUi({ autoSwitchTab: true });
+    });
+    document.getElementById('dca-enable-cancel').addEventListener('click', () => {
+      document.getElementById('f-dca-enabled').checked = false;
+      bootstrap.Modal.getInstance(document.getElementById('dca-enable-modal'))?.hide();
+      refreshDcaUi({ autoSwitchTab: false });
+    });
+    document.getElementById('dca-disable-confirm').addEventListener('click', () => {
+      bootstrap.Modal.getInstance(document.getElementById('dca-disable-modal'))?.hide();
+      refreshDcaUi({ autoSwitchTab: false });
+    });
+    document.getElementById('dca-disable-cancel').addEventListener('click', () => {
+      document.getElementById('f-dca-enabled').checked = true;
+      bootstrap.Modal.getInstance(document.getElementById('dca-disable-modal'))?.hide();
+      refreshDcaUi({ autoSwitchTab: false });
+    });
+  }
   refreshDcaUi();
+
+  // FIX-2026-08-03: Backtest stats toggle
+  const _statsBtn = document.getElementById('dca-show-stats-btn');
+  if (_statsBtn) {
+    _statsBtn.addEventListener('click', () => {
+      const collapse = bootstrap.Collapse.getOrCreateInstance(document.getElementById('dca-stats-info'));
+      collapse.toggle();
+    });
+  }
+
+  // Initialize mirror + max-capital + exit-policy
+  updateDcaMaxCap();
+  updateDcaTpMirror();
+  updateDcaExitPolicy();
+
+  // FIX-2026-08-03: live-update exit-policy when SL-UKC / auto-arm changes
+  ['f-stop-loss-upper-kc', 'f-auto-arm-stop-loss-ukc'].forEach((id) => {
+    const el = document.getElementById(id);
+    if (el) el.addEventListener('change', updateDcaExitPolicy);
+  });
 
   updateTotal();
 }
