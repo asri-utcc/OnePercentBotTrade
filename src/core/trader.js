@@ -155,11 +155,12 @@ class Trader {
 
     // FIX-2026-07-31 (BUG-9): periodic reconcileAccountBalance — previously fired only on startup
     //   (one-shot L166) so SELL-orphan cross-check + balance reconciliation never ran after first
-    //   4s post-start. Now runs every 5min per bot. Stagger by botId to spread REST load across
-    //   the fleet (each trader spawns at slightly different time → interval drifts naturally).
+    //   4s post-start. Now runs every 15min per bot (FIX-2026-08-04: 5min → 15min เพื่อลด Binance account API load).
+    //   - logic เดิม 100% — reconcileAccountBalance() ยังทำงานเหมือนเดิม
+    //   - orphan detection ยังครบถ้วน แค่ห่างขึ้น
     this.reconcileBalanceTimer = null;
     this._reconcileBalanceInFlight = false;
-    const RECONCILE_BALANCE_MS = 5 * 60 * 1000;
+    const RECONCILE_BALANCE_MS = 15 * 60 * 1000;
     this.reconcileBalanceTimer = setInterval(() => {
       if (!this.running || this._reconcileBalanceInFlight) return;
       this._reconcileBalanceInFlight = true;
@@ -552,23 +553,25 @@ class Trader {
   // ─── FIX-2026-07-31: F1 auto-arm SL-on-UKC for stuck losing positions ───────
   // เรียกจาก onCandleClosed entry-point (ก่อน CB check)
   //   - gate: bot.autoArmStopLossOnUKC ต้องเปิดอยู่ (per-bot toggle, default true)
-  //   - ค้นหา trades ที่ state='selling' + buyFilledAt > 4h ago + loss > 10%
-  //   - ถ้า match → set trade.useStopLossOnUKC=true (per-trade flag)
+  //   - ค้นหา trades ที่ state='selling' + buyFilledAt > autoArmAgeHours ago + loss > autoArmLossPct
+  //   - ถ้า match → set trade.useStopLossOnUKC=true (per-trade flag) + snapshot thresholds
   //   - _checkStopLossOnUpperKC ใช้ flag นี้เป็น gate (1D)
   //   - ล้าง flag เมื่อ trade ออกจาก selling (1E)
+  // FIX-2026-08-03 (Option B): ลบ M2 config asymmetry guard — F1 arm ทำงานแม้ bot.stopLossOnUpperKC=false
+  //   - เดิม audit 2026-08-01 ใส่ guard กัน arm flag ที่ไม่มี trigger → แต่ทำให้ live กับ DCA backtest diverge
+  //   - ตอนนี้ _checkStopLossOnUpperKC ใช้ per-trade flag เป็น gate เดียว (ไม่สน global toggle) → live = DCA backtest
   async _autoArmStopLossOnUKC(candle) {
     if (!this.running) return;
     if (!this.bot.autoArmStopLossOnUKC) return; // bot toggle off
-    // FIX-2026-08-01 (audit M2): config asymmetry guard
-    //   - ถ้า user ปิด stopLossOnUpperKC → F1 ก็ไม่ควร arm (ไม่มีทาง trigger อยู่แล้ว)
-    //   - กัน arm flag ที่ไม่มีประโยชน์ + audit log spam
-    if (this.bot.stopLossOnUpperKC === false) return;
     if (this._autoArmInFlight) return;
     this._autoArmInFlight = true;
     try {
-      const fourHoursAgo = new Date(Date.now() - 4 * 60 * 60 * 1000);
+      // FIX-2026-08-03: per-bot configurable thresholds (default 4h + 10% to preserve original behavior)
+      const lossPct = (this.bot.autoArmLossPct ?? 10) / 100;
+      const ageHours = this.bot.autoArmAgeHours ?? 4;
+      const ageThresholdAgo = new Date(Date.now() - ageHours * 60 * 60 * 1000);
       const closePrice = parseFloat(candle.close);
-      // FIX-2026-07-31: $expr คำนวณ (buyPrice - close) / buyPrice > 0.10 ใน DB
+      // FIX-2026-07-31: $expr คำนวณ (buyPrice - close) / buyPrice > lossPct ใน DB
       //   - buyPrice > 0 → กัน divide by zero
       //   - index { botId: 1, state: 1 } → match state='selling' filter ได้เร็ว
       // FIX-2026-08-01 (audit H2): state เป็น exact 'selling' (ไม่ใช่ stopping/partial_wait/filled/holding)
@@ -579,11 +582,11 @@ class Trader {
         botId: this.bot._id,
         state: 'selling',
         useStopLossOnUKC: { $ne: true }, // not yet armed
-        buyFilledAt: { $lte: fourHoursAgo },
+        buyFilledAt: { $lte: ageThresholdAgo },
         $expr: {
           $and: [
             { $gt: ['$buyPrice', 0] },
-            { $gt: [{ $divide: [{ $subtract: ['$buyPrice', closePrice] }, '$buyPrice'] }, 0.10] },
+            { $gt: [{ $divide: [{ $subtract: ['$buyPrice', closePrice] }, '$buyPrice'] }, lossPct] },
           ],
         },
       }).lean();
@@ -592,17 +595,25 @@ class Trader {
         // FIX-2026-08-01 (audit M2 from agent 1): tighten updateMany filter
         //   - กัน race: race-loser reset flag → F1 overwrites back to true
         //   - เพิ่ม state filter เพื่อให้แน่ใจว่า state ยังเป็น 'selling' ตอน update commit
+        // FIX-2026-08-03: snapshot thresholds ไว้บน trade เพื่อ positionCard.js แสดงผลตรงกับตอน arm (กันเคส user เปลี่ยนค่าทีหลัง)
         await Trade.updateMany(
           { _id: { $in: ids }, state: 'selling', useStopLossOnUKC: { $ne: true } },
-          { $set: { useStopLossOnUKC: true, autoArmedAt: new Date() } }
+          {
+            $set: {
+              useStopLossOnUKC: true,
+              autoArmedAt: new Date(),
+              autoArmLossPct: this.bot.autoArmLossPct ?? 10,
+              autoArmAgeHours: this.bot.autoArmAgeHours ?? 4,
+            },
+          }
         );
         logger.warn({
           botId: this.bot._id.toString(),
           symbol: this.bot.symbol,
           timeframe: this.bot.timeframe,
           candleClose: closePrice,
-          ageThreshold: '4h',
-          lossThreshold: '10%',
+          autoArmLossPct: this.bot.autoArmLossPct ?? 10,
+          autoArmAgeHours: this.bot.autoArmAgeHours ?? 4,
           armedCount: ids.length,
           tradeIds: ids.map(i => String(i)),
         }, 'trader: auto-arm SL-on-UKC for stuck losing positions');
@@ -758,9 +769,14 @@ class Trader {
   //   - ถ้า candle.close > upperKC → scan active trades ที่ state='selling' + buyPrice > close (ขาดทุน) + useStopLossOnUKC=true
   //   - force close ทีละ trade (cancel SELL + MARKET SELL)
   async _checkStopLossOnUpperKC(candle) {
-    // FIX E7: gate running + flag
+    // FIX E7: gate running
     if (!this.running) return;
-    if (!this.bot.stopLossOnUpperKC) return;
+    // FIX-2026-08-03 (Option B): ลบ global gate `if (!this.bot.stopLossOnUpperKC) return;`
+    //   - เดิม: require bot.stopLossOnUpperKC=true (ทุก candle ต้องผ่าน global toggle)
+    //   - ใหม่: per-trade useStopLossOnUKC flag เป็น gate เดียว (F1 arm เท่านั้นที่ทำให้ SL-UKC ทำงาน)
+    //   - เหตุผล: live-vs-DCA-backtest parity (backtester.js:1057 ใช้ OR semantic มาตั้งแต่แรก)
+    //     → เปิด bot ที่ AU=on, SL-UKC=off → DCA backtest เห็น SL-UKC exit แต่ live ไม่ trigger (เคส GIGGLEUSDT)
+    //   - behavior: ถ้าไม่มี trade ที่ useStopLossOnUKC=true → query return [] → early return (ไม่มี work)
 
     // FIX P2.5: mutex กัน concurrent invocation (WS + sweep อาจ trigger พร้อมกัน)
     //   ถ้า in-flight อยู่ → skip (อีก call จะจบเร็วๆ นี้อยู่แล้ว)
@@ -800,12 +816,18 @@ class Trader {
       try {
         // FIX-2026-08-03 (B6): include state='filled' so SL-UKC catches stacks that have BUY filled
         //   but SELL not yet placed (post-mirror, pre-cancel/replace, or post-startup reconcile)
+        // FIX-2026-08-03: bot.slUkcTriggerOnProfit toggle — DCA ใช้ stackBep แทน buyPrice
+        //   - false (default): stackBep > closePrice (loss only) — DCA mode is always loss-exit by design
+        //   - true: skip loss check → trigger ได้ทั้งกำไรและขาดทุน (rare; ใช้ strategy "exit DCA stack at upper band")
+        const dcaLossFilter = this.bot.slUkcTriggerOnProfit === true
+          ? { stackBep: { $exists: true, $ne: null } } // trigger on any close > upperKC (profit OR loss)
+          : { stackBep: { $gt: closePrice, $exists: true, $ne: null } }; // loss only (default)
         dcaTargets = await Trade.find({
           botId: this.bot._id,
           isDcaStack: true,
           state: { $in: ['selling', 'filled', 'partial_sell_wait'] },
-          stackBep: { $gt: closePrice, $exists: true, $ne: null },
           useStopLossOnUKC: true,
+          ...dcaLossFilter,
         }).lean();
       } catch (err) {
         logger.warn({ err: err.message }, 'trader: stop_loss_upper_kc DCA — Trade.find failed');
@@ -855,13 +877,19 @@ class Trader {
     //   - trade.useStopLossOnUKC === true → trigger ได้
     //   - trade.useStopLossOnUKC === false (default) → ไม่ trigger (backward compatible)
     //   - $exists:false ใน DB เก่า → ก็ไม่ trigger (ต้อง arm ก่อน)
+    // FIX-2026-08-03: bot.slUkcTriggerOnProfit toggle — default false = loss only, true = any close>upperKC
+    //   - false (default): buyPrice > closePrice (loss only) — original behavior
+    //   - true: skip loss check → trigger ได้ทั้งกำไรและขาดทุน (strict upper-band exit strategy)
+    const lossFilter = this.bot.slUkcTriggerOnProfit === true
+      ? {} // trigger on any close > upperKC (profit OR loss)
+      : { buyPrice: { $gt: closePrice } }; // loss only (default — backward compat)
     let targets;
     try {
       targets = await Trade.find({
         botId: this.bot._id,
         state: 'selling',
-        buyPrice: { $gt: closePrice },
         useStopLossOnUKC: true,
+        ...lossFilter,
       }).lean();
     } catch (err) {
       logger.warn({ err: err.message }, 'trader: stop_loss_upper_kc — Trade.find failed');
@@ -1281,6 +1309,9 @@ class Trader {
                   // FIX-2026-07-31 (F1): reset SL-on-UKC auto-arm flag (trade ออกจาก selling แล้ว)
                   useStopLossOnUKC: false,
                   autoArmedAt: null,
+                  // FIX-2026-08-03: clear F1 threshold snapshots เมื่อ trade ออกจาก selling
+                  autoArmLossPct: null,
+                  autoArmAgeHours: null,
                   // FIX-2026-08-01: reset SELL partial-fill latch on state-out-of-selling
                   sellPartialDetectedAt: null,
                   sellPartialLatchedAt: null,
@@ -1352,6 +1383,9 @@ class Trader {
           // FIX-2026-07-31 (F1): reset SL-on-UKC auto-arm flag
           useStopLossOnUKC: false,
           autoArmedAt: null,
+          // FIX-2026-08-03: clear F1 threshold snapshots เมื่อ trade ออกจาก selling
+          autoArmLossPct: null,
+          autoArmAgeHours: null,
           // FIX-2026-08-01: reset SELL partial-fill latch
           sellPartialDetectedAt: null,
           sellPartialLatchedAt: null,
@@ -1501,6 +1535,9 @@ class Trader {
                   // FIX-2026-07-31 (F1): reset SL-on-UKC auto-arm flag
                   useStopLossOnUKC: false,
                   autoArmedAt: null,
+                  // FIX-2026-08-03: clear F1 threshold snapshots เมื่อ trade ออกจาก selling
+                  autoArmLossPct: null,
+                  autoArmAgeHours: null,
                   // FIX-2026-08-01: reset SELL partial-fill latch on state-out-of-selling
                   sellPartialDetectedAt: null,
                   sellPartialLatchedAt: null,
@@ -1589,6 +1626,9 @@ class Trader {
           // FIX-2026-07-31 (F1): reset SL-on-UKC auto-arm flag
           useStopLossOnUKC: false,
           autoArmedAt: null,
+          // FIX-2026-08-03: clear F1 threshold snapshots เมื่อ trade ออกจาก selling
+          autoArmLossPct: null,
+          autoArmAgeHours: null,
           // FIX-2026-08-01: reset SELL partial-fill latch
           sellPartialDetectedAt: null,
           sellPartialLatchedAt: null,
@@ -1717,7 +1757,7 @@ class Trader {
     }
 
     // FIX-2026-07-31 (F1): auto-arm SL-on-UKC for stuck losing positions
-    //   - trigger: position loss >10% AND age >4h AND state='selling'
+    //   - trigger: position loss > bot.autoArmLossPct (default 10%) AND age > bot.autoArmAgeHours (default 4h) AND state='selling'
     //   - sets trade.useStopLossOnUKC=true → _checkStopLossOnUpperKC จะยอม trigger
     //   - run ทุก candle (mirror CB pattern) — early return ภายใน helper ถ้า pattern ไม่ match
     //   - ต้อง call ก่อน S1 logic เพราะ arm ต้องเสร็จก่อน candle ถัดไป (sync เป็น async)
@@ -1977,6 +2017,62 @@ class Trader {
       } catch (err) {
         // fail-open on unexpected exception (defensive)
         logger.warn({ err: err.message, botId: this.bot._id.toString() }, 'trader: safe-trade check threw — allowing BUY');
+      }
+    }
+
+    // FIX-2026-08-03: Safe-trade filter #2 — LuxAlgo red pivot-low trendline support (opt-in, default OFF)
+    //   - หลัง ST#1 ผ่าน: ตรวจ upper-TF (TREND_TF_MAP) — current price > trendline?
+    //   - PASS = lastClose > trendline value at current bar → BUY
+    //   - FAIL-OPEN on Binance error / warmup / insufficient data (mirror ST#1)
+    //   - **ไม่แนะนำสำหรับ DCA bots** (DCA ซื้อ dip — filter นี้ block dip-buy → ขัดกับ DCA intent)
+    //   - ทำงานคู่กับ ST#1: ST#1 = "ขาขึ้นบน super-upper TF" + ST#2 = "ราคายังอยู่เหนือ support บน upper-TF"
+    if (this.bot.safeTradeTrendlineEnabled === true) {
+      try {
+        const trendTF = volatilityScanner.TREND_TF_MAP && volatilityScanner.TREND_TF_MAP[this.bot.timeframe];
+        const st2 = await signalEngine.checkSafeTradeTrendline(this.bot, trendTF, binanceRest);
+        if (st2.skip) {
+          logger.info({
+            botId: this.bot._id.toString(),
+            symbol: this.bot.symbol,
+            tf: this.bot.timeframe,
+            trendTF: st2.trendTF,
+            lastClose: st2.lastClose,
+            trendlineValue: st2.trendlineValue,
+            gapPct: st2.gapPct != null ? Number(st2.gapPct.toFixed(3)) : null,
+            pivotCount: st2.pivotCount,
+          }, 'trader: safe-trade trendline blocked BUY');
+          await Signal.updateOne({ _id: signalDoc._id }, { outcome: 'skipped', note: 'safe_trade_trendline_block' });
+          try {
+            eventBus.emit('safe_trade_trendline:blocked', {
+              botId: String(this.bot._id),
+              symbol: this.bot.symbol,
+              timeframe: this.bot.timeframe,
+              trendTF: st2.trendTF,
+              lastClose: st2.lastClose,
+              trendlineValue: st2.trendlineValue,
+              gapPct: st2.gapPct,
+            });
+          } catch (_) {}
+          return; // do NOT place buy
+        }
+        // trendline PASS or fail-open — log at debug for PASS, warn for fail-open
+        if (st2.reason === 'pass') {
+          logger.debug({
+            botId: this.bot._id.toString(),
+            trendTF: st2.trendTF,
+            gapPct: st2.gapPct,
+          }, 'trader: safe-trade trendline PASS');
+        } else if (st2.reason !== 'disabled' && st2.reason !== 'no_trend_tf') {
+          // fail-open reason (warmup, insufficient_data_open, api_error_open) — log warning
+          logger.warn({
+            botId: this.bot._id.toString(),
+            reason: st2.reason,
+            error: st2.error,
+          }, 'trader: safe-trade trendline fail-open — allowing BUY');
+        }
+      } catch (err) {
+        // fail-open on unexpected exception (defensive)
+        logger.warn({ err: err.message, botId: this.bot._id.toString() }, 'trader: safe-trade trendline check threw — allowing BUY');
       }
     }
 
@@ -3446,6 +3542,9 @@ class Trader {
           // FIX-2026-07-31 (F1): reset SL-on-UKC auto-arm flag
           useStopLossOnUKC: false,
           autoArmedAt: null,
+          // FIX-2026-08-03: clear F1 threshold snapshots เมื่อ trade ออกจาก selling
+          autoArmLossPct: null,
+          autoArmAgeHours: null,
           // FIX-2026-08-01: reset SELL partial-fill latch
           sellPartialDetectedAt: null,
           sellPartialLatchedAt: null,
@@ -3718,6 +3817,9 @@ class Trader {
               // FIX-2026-07-31 (F1): reset SL-on-UKC auto-arm flag
               useStopLossOnUKC: false,
               autoArmedAt: null,
+              // FIX-2026-08-03: clear F1 threshold snapshots เมื่อ trade ออกจาก selling
+              autoArmLossPct: null,
+              autoArmAgeHours: null,
               // FIX-2026-08-01: reset SELL partial-fill latch
               sellPartialDetectedAt: null,
               sellPartialLatchedAt: null,
@@ -5301,6 +5403,9 @@ class Trader {
             // FIX-2026-07-31 (F1): reset SL-on-UKC auto-arm flag
             useStopLossOnUKC: false,
             autoArmedAt: null,
+            // FIX-2026-08-03: clear F1 threshold snapshots เมื่อ trade ออกจาก selling
+            autoArmLossPct: null,
+            autoArmAgeHours: null,
             // FIX-2026-08-01: reset SELL partial-fill latch
             sellPartialDetectedAt: null,
             sellPartialLatchedAt: null,
@@ -5455,6 +5560,9 @@ class Trader {
           // FIX-2026-07-31 (F1): reset SL-on-UKC auto-arm flag
           useStopLossOnUKC: false,
           autoArmedAt: null,
+          // FIX-2026-08-03: clear F1 threshold snapshots เมื่อ trade ออกจาก selling
+          autoArmLossPct: null,
+          autoArmAgeHours: null,
           // FIX-2026-08-01: reset SELL partial-fill latch
           sellPartialDetectedAt: null,
           sellPartialLatchedAt: null,
@@ -6177,6 +6285,9 @@ function config_recvWindow() {
 // FIX-2026-07-15: periodic kline sweep interval (ms) — safety net against missed kline:closed events
 //   WS reconnect storms ดูดูดสังเกตได้ทุกๆ 1-2 วินาที, แต่ละครั้งทำให้ candle close อาจหายไป
 //   ดังนั้น sweep ทุก 90s → กลบ gap ภายใน 90s (เคสเดิมพลาดไป 1.5 ชม. ก่อน user เห็น)
-const SWEEP_INTERVAL_MS = 90 * 1000;
+// FIX-2026-08-04: 90s → 300s (5min) — ลด Binance kline API load — WS push จัดการ live candles
+//   - sweepTimer เป็น safety net เท่านั้น (กัน WS gap) — 5 min gap ยังยอมรับได้
+//   - bot operations ไม่กระทบ — reconcileKlines() logic เหมือนเดิม
+const SWEEP_INTERVAL_MS = 5 * 60 * 1000;
 
 module.exports = Trader;

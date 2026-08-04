@@ -99,13 +99,18 @@ window.PositionCard = {
     const barPct = Math.round(m.barPct || 0);
 
     // FIX-2026-08-01: SL-armed badge (F1) — แสดงเมื่อ trade.useStopLossOnUKC === true
-    //   - คำนวณจาก backend (trader.js _autoArmStopLossOnUKC) เมื่อ position ขาดทุน >10% + age >4h
+    //   - คำนวณจาก backend (trader.js _autoArmStopLossOnUKC) เมื่อ position ขาดทุน > loss% + age > age ชม.
     //   - แสดง 🛡️ Au pill + .is-sl-armed class (CSS border highlight)
     //   - threshold mirror ในฝั่ง client เพื่อ defensive UX: ถ้า threshold ตรง + flag ยังไม่มา → ก็ highlight รอ
+    // FIX-2026-08-03: per-trade snapshot fields (autoArmLossPct / autoArmAgeHours) override hardcoded defaults
+    //   - ก่อนหน้านี้ STUCK_LOSS_THRESHOLD_PCT = 10 + STUCK_AGE_THRESHOLD_MS = 4h ตายตัว
+    //   - ตอนนี้ backend snapshot thresholds ตอน arm (เก็บใน trade.autoArmLossPct / autoArmAgeHours) — fallback 10% / 4h ถ้า field ว่าง
     const armedAt = t.autoArmedAt ? new Date(t.autoArmedAt) : null;
     const isArmed = t.useStopLossOnUKC === true;
-    const STUCK_LOSS_THRESHOLD_PCT = 10;
-    const STUCK_AGE_THRESHOLD_MS = 4 * 60 * 60 * 1000;
+    const STUCK_LOSS_THRESHOLD_PCT = (typeof t.autoArmLossPct === 'number' && t.autoArmLossPct > 0)
+      ? t.autoArmLossPct : 10;
+    const STUCK_AGE_THRESHOLD_MS = (typeof t.autoArmAgeHours === 'number' && t.autoArmAgeHours > 0)
+      ? t.autoArmAgeHours * 60 * 60 * 1000 : 4 * 60 * 60 * 1000;
     const stuckLike = !isArmed
       && m.pnlPct <= -STUCK_LOSS_THRESHOLD_PCT
       && m.durMs >= STUCK_AGE_THRESHOLD_MS
@@ -148,6 +153,14 @@ window.PositionCard = {
     const stateColor = this.STATE_COLORS[t.state] || '';
     const fcCls = opts.forceCloseBtnClass || 'btn-force-close';
     const retryMax = (t.botRetryMax != null ? t.botRetryMax : (opts.retryMax != null ? opts.retryMax : 1));
+
+    // FIX-2026-08-03: Chart button — deep-link ไป /chart.html?symbol=XXX&tf=YYY
+    //   - target=_blank เปิดแท็บใหม่ (กัน modal ปิด/เปิดใหม่ + ให้ user ดูคู่กันได้)
+    //   - ใช้ในหน้า bots.html (cross-bot Open Positions modal) ผ่าน opts.chartBtnClass
+    const chartCls = opts.chartBtnClass || 'btn-chart-link';
+    const chartHref = (t.symbol && t.timeframe)
+      ? `/chart.html?symbol=${encodeURIComponent(t.symbol)}&tf=${encodeURIComponent(t.timeframe)}`
+      : '#';
 
     // FIX-2026-08-01: SL-armed pill — tooltip บอก armed-at + reason
     const slArmedPill = isArmed
@@ -215,6 +228,7 @@ window.PositionCard = {
           <span class="pair"><span>Order:</span><strong class="code">${this.escapeHtml(t.buyOrderId || '—')}</strong></span>
           ${t.sellOrderId ? `<span class="pair"><span>SELL:</span><strong class="code">${this.escapeHtml(t.sellOrderId)}</strong></span>` : ''}
           ${t.error ? `<span class="last-err">⚠️ ${this.escapeHtml(t.error)}</span>` : ''}
+          <a class="btn-lux btn-info btn-sm ${chartCls}" href="${this.escapeHtml(chartHref)}" target="_blank" rel="noopener" data-trade-id="${this.escapeHtml(tradeId)}" title="เปิดกราฟ ${this.escapeHtml(t.symbol || '')} ${this.escapeHtml(t.timeframe || '')} ในแท็บใหม่">📈 Chart</a>
           <button type="button" class="btn-lux btn-bear btn-sm ${fcCls}" data-trade-id="${this.escapeHtml(tradeId)}" data-bot-id="${this.escapeHtml(botId)}" title="บังคับปิดไม้นี้ (ยกเลิก SELL + MARKET SELL หรือ synthetic close)">🛑 Force Close</button>
         </div>
       </div>`;
@@ -253,6 +267,12 @@ window.PositionCard = {
     const fcCls = opts.forceCloseBtnClass || 'btn-force-close';
     const retryMax = (t.botRetryMax != null ? t.botRetryMax : (opts.retryMax != null ? opts.retryMax : 1));
 
+    // FIX-2026-08-03: Chart button (mobile) — mirror desktop
+    const chartCls = opts.chartBtnClass || 'btn-chart-link';
+    const chartHref = (t.symbol && t.timeframe)
+      ? `/chart.html?symbol=${encodeURIComponent(t.symbol)}&tf=${encodeURIComponent(t.timeframe)}`
+      : '#';
+
     const slArmedPill = isArmed
       ? `<span class="sl-armed-pill" title="Auto-armed SL-on-UKC — armed ${armedAt ? this.fmtDateTime(armedAt) : ''}">🛡️ Au</span>`
       : (stuckLike
@@ -283,6 +303,7 @@ window.PositionCard = {
           </div>
         </div>
         <div style="margin-top:0.5rem;text-align:right;">
+          <a class="btn-lux btn-info btn-sm ${chartCls}" href="${this.escapeHtml(chartHref)}" target="_blank" rel="noopener" data-trade-id="${this.escapeHtml(tradeId)}" title="เปิดกราฟ ${this.escapeHtml(t.symbol || '')} ${this.escapeHtml(t.timeframe || '')} ในแท็บใหม่">📈 Chart</a>
           <button type="button" class="btn-lux btn-bear btn-sm ${fcCls}" data-trade-id="${this.escapeHtml(tradeId)}" data-bot-id="${this.escapeHtml(botId)}" title="บังคับปิดไม้นี้">🛑 Force Close</button>
         </div>
       </div>`;

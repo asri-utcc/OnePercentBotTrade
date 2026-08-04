@@ -282,6 +282,134 @@ async function checkSafeTrade(bot, binanceRest, indicators) {
   }
 }
 
+// FIX-2026-08-03: Safe-trade filter #2 — LuxAlgo red pivot-low trendline (helper)
+//   - Ported from Pine "Trendlines with Breaks" by LuxAlgo (CC BY-NC-SA 4.0) — red dashed line only
+//   - Pine algorithm:
+//     length = 14
+//     mult   = 1.0
+//     pl     = ta.pivotlow(length, length)  // low[i] is strict min in [i-length, i+length]
+//     slope  = ta.atr(length) / length * mult  // ATR-based slope (price units per bar)
+//     var lower    = pl ? pl : lower + slope_pl    // trendline value (persists across bars)
+//     var slope_pl = pl ? slope : slope_pl          // slope from last pivot (persists)
+//   - On each bar: trendline value = pivotLowValue + slope * (barIndex - pivotBarIndex)
+//   - Returns null when n < 2*length+1 (can't form even one confirmed pivot)
+//
+//   Pivot detection tie-break matches Pine:
+//     - first occurrence wins (leftmost equal-low in window is the pivot)
+//     - if a stricter low exists anywhere in window → not a pivot
+//     - valid range: [length, n-length) — last `length` bars cannot be confirmed (need right-side data)
+//
+//   Returns:
+//     trendline: Array<number|null>  same length as klines
+//                null until first pivot (warmup), then extrapolated forward
+//                resets at each new pivot detection
+function computeTrendlinePivotLows(klines, opts = {}) {
+  const length = opts.length != null ? opts.length : 14;
+  const mult = opts.mult != null ? opts.mult : 1.0;
+  const n = klines.length;
+  if (n < 2 * length + 1) return null; // not enough data for a single confirmed pivot
+
+  const highs = klines.map((k) => parseFloat(k.high));
+  const lows = klines.map((k) => parseFloat(k.low));
+  const closes = klines.map((k) => parseFloat(k.close));
+
+  // FIX-2026-08-03: use Wilder RMA ATR (matches Pine ta.atr(length))
+  //   - atr() in indicators.js returns null-padded array (first length-1 entries = null)
+  //   - slope captured at pivot bar (Pine semantics — Pine evaluates `slope = ta.atr(length)` at bar i)
+  const atrArr = atr(highs, lows, closes, length);
+
+  // Build pivotAtIndex[i] = {index, value, slope} or null
+  //   - O(n × (2*length+1)) = acceptable for length=14 + n=200 (~5700 comparisons)
+  const pivotAtIndex = new Array(n).fill(null);
+  for (let i = length; i < n - length; i += 1) {
+    const low = lows[i];
+    if (low == null) continue;
+    let isLowest = true;
+    for (let j = i - length; j <= i + length; j += 1) {
+      if (j === i) continue;
+      const lj = lows[j];
+      if (lj == null || lj < low) { isLowest = false; break; }
+      if (lj === low && j < i) { isLowest = false; break; } // first-occurrence tie-break (matches Pine)
+    }
+    if (isLowest) {
+      const slope = (atrArr[i] != null ? atrArr[i] : 0) / length * mult;
+      pivotAtIndex[i] = { index: i, value: low, slope };
+    }
+  }
+
+  // Extend trendline forward from each pivot (Pine-style `var lower` + `var slope_pl`)
+  //   - before first pivot: null (caller fails-open)
+  //   - after pivot: trendline[i] = pivot.value + pivot.slope * (i - pivot.index)
+  //   - when new pivot fires: line resets to new pivot value + new slope
+  const trendline = new Array(n).fill(null);
+  let cur = null;
+  for (let i = 0; i < n; i += 1) {
+    if (pivotAtIndex[i] != null) cur = pivotAtIndex[i];
+    if (cur != null) trendline[i] = cur.value + cur.slope * (i - cur.index);
+  }
+  return trendline;
+}
+
+// FIX-2026-08-03: Safe-trade filter #2 — entry point (live trader)
+//   - On S1 BUY signal: check upper-TF price > LuxAlgo red pivot-low trendline
+//   - PASS = lastClose > trendline value at current bar → BUY
+//   - FAIL-OPEN on Binance error / warmup / insufficient data (never block on infrastructure issue)
+//   - trendTF passed in by caller (resolved via volatilityScanner.TREND_TF_MAP outside this module)
+//     — keeps signalEngine as a leaf module (no circular import with volatilityScanner)
+//   - returns: {skip, pass, reason, trendTF, lastClose, trendlineValue, gapPct, pivotCount, error?}
+//       reason ∈ 'disabled' | 'no_trend_tf' | 'warmup' | 'insufficient_data_open'
+//             | 'api_error_open' | 'pass' | 'blocked'
+//       skip=true ONLY when reason='blocked'
+async function checkSafeTradeTrendline(bot, trendTF, binanceRest) {
+  if (bot.safeTradeTrendlineEnabled !== true) {
+    return { skip: false, pass: true, reason: 'disabled', trendTF: null };
+  }
+  if (!trendTF) {
+    return { skip: false, pass: true, reason: 'no_trend_tf', trendTF: null };
+  }
+  try {
+    const raw = await binanceRest.getKlines({ symbol: bot.symbol, interval: trendTF, limit: 200 });
+    if (!Array.isArray(raw) || raw.length < 50) {
+      // FAIL-OPEN: insufficient data → allow buy + warn
+      return { skip: false, pass: true, reason: 'insufficient_data_open', trendTF };
+    }
+    // Binance raw tuple [openTime, open, high, low, close, volume, closeTime, ...] → object kline
+    const klines = raw.map((k) => ({
+      openTime: k[0],
+      open: parseFloat(k[1]),
+      high: parseFloat(k[2]),
+      low: parseFloat(k[3]),
+      close: parseFloat(k[4]),
+      closeTime: k[6],
+    }));
+    const trendline = computeTrendlinePivotLows(klines);
+    const lastIdx = klines.length - 1;
+    const trendlineValue = trendline ? trendline[lastIdx] : null;
+    if (trendlineValue == null || !Number.isFinite(trendlineValue)) {
+      // Warmup — no pivot yet (or trendline invalid). Fail-OPEN.
+      return { skip: false, pass: true, reason: 'warmup', trendTF, pivotCount: 0 };
+    }
+    const lastClose = klines[lastIdx].close;
+    const pass = lastClose > trendlineValue;
+    const gapPct = ((lastClose - trendlineValue) / trendlineValue) * 100;
+    // count pivots: trendline non-null count is a reasonable proxy (same as bars after first pivot)
+    const pivotCount = trendline ? trendline.filter((v) => v != null).length : 0;
+    return {
+      skip: !pass,
+      pass,
+      reason: pass ? 'pass' : 'blocked',
+      trendTF,
+      lastClose,
+      trendlineValue,
+      gapPct,
+      pivotCount,
+    };
+  } catch (err) {
+    // FAIL-OPEN: API error → allow buy + warn
+    return { skip: false, pass: true, reason: 'api_error_open', error: err.message, trendTF };
+  }
+}
+
 module.exports = {
   computeBgStates,
   isS1At,
@@ -295,4 +423,7 @@ module.exports = {
   // FIX-2026-08-01: Safe-trade filter exports
   SAFE_TRADE_SUPER_TF_MAP,
   checkSafeTrade,
+  // FIX-2026-08-03: Safe-trade filter #2 (trendline) exports
+  computeTrendlinePivotLows,
+  checkSafeTradeTrendline,
 };

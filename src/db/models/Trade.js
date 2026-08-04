@@ -107,11 +107,16 @@ const tradeSchema = new mongoose.Schema(
     orphanReason: { type: String, default: null },              // reason สำหรับ orphan (e.g. 'SELL PARTIALLY_FILLED')
 
     // FIX-2026-07-31: auto-arm SL-on-UKC flag (per-trade)
-    //   - set true เมื่อ position loss >10% AND age >4h AND bot.autoArmStopLossOnUKC=true
+    //   - set true เมื่อ position loss > autoArmLossPct AND age > autoArmAgeHours AND bot.autoArmStopLossOnUKC=true
     //   - _checkStopLossOnUpperKC filter: state='selling' AND useStopLossOnUKC===true
     //   - reset เป็น false เมื่อ trade ออกจาก selling state (sold/failed/cancelled)
     useStopLossOnUKC: { type: Boolean, default: false },
     autoArmedAt: { type: Date, default: null },                  // timestamp when armed (audit)
+    // FIX-2026-08-03: snapshot ของ bot thresholds ตอนที่ arm (per-trade)
+    //   - positionCard.js ใช้ค่านี้แสดง "stuck-like" highlight ที่ตรงกับ threshold ตอน arm (ไม่ใช่ค่าปัจจุบันของบอทที่อาจเปลี่ยนทีหลัง)
+    //   - reset เป็น null ตอน state ออกจาก selling (เหมือน useStopLossOnUKC)
+    autoArmLossPct: { type: Number, default: null },             // snapshot of bot.autoArmLossPct ตอน arm (1..90)
+    autoArmAgeHours: { type: Number, default: null },            // snapshot of bot.autoArmAgeHours ตอน arm (0.5..168)
 
     // FIX-2026-08-01: SELL partial-fill latching alert (1h after detection still partial)
     //   - sellPartialDetectedAt = timestamp แรกที่ตรวจเจอ SELL partial-fill (ไม่ reset ทุกครั้งที่ poll)
@@ -170,6 +175,21 @@ tradeSchema.index({ symbol: 1, createdAt: -1 });
 // FIX-2026-08-02: DCA stack indexes — find open stack for bot, find stack by stackId
 tradeSchema.index({ botId: 1, isDcaStack: 1, state: 1 });
 tradeSchema.index({ botId: 1, stackId: 1 });
+// FIX-2026-08-04: performance indexes — drives PnL/series/day, telegram aggregate, positionWatchdog, bot-detail
+//   - sellFilledAt_-1 + realizedPnl (partial) — pnl.calendar, pnl.series, pnl.day, telegram aggregateTrades
+//   - buyFilledAt_-1 + buyStatus — telegram BUY-fill handler (per BUY fill event)
+//   - botId + useStopLossOnUKC + state — positionWatchdog Phase 1+2 + trader F1 arm query
+//   - botId + sellFilledAt / buyFilledAt — bot-detail mini-chart $or, pnl endpoints
+//   - botId + createdAt — history/pnl list endpoints
+tradeSchema.index(
+  { sellFilledAt: -1, realizedPnl: 1 },
+  { partialFilterExpression: { realizedPnl: { $exists: true } } }
+);
+tradeSchema.index({ buyFilledAt: -1, buyStatus: 1 });
+tradeSchema.index({ botId: 1, useStopLossOnUKC: 1, state: 1 });
+tradeSchema.index({ botId: 1, sellFilledAt: -1 });
+tradeSchema.index({ botId: 1, buyFilledAt: -1 });
+tradeSchema.index({ botId: 1, createdAt: -1 });
 
 const Trade = mongoose.model('Trade', tradeSchema);
 module.exports = Trade;

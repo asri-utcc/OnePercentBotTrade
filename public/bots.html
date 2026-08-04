@@ -290,6 +290,19 @@
               </small>
             </div>
             <div class="form-check mt-2">
+              <input class="form-check-input" type="checkbox" id="nb-safe-trade-trendline-enabled" />
+              <label class="form-check-label" for="nb-safe-trade-trendline-enabled">
+                📐 <strong>Safe-trade filter #2 (trendline support)</strong> — ก่อนซื้อตรวจ upper-TF (TREND_TF_MAP) ว่าราคา "เหนือ" เส้น trendline support (LuxAlgo pivot-low, CC BY-NC-SA 4.0)
+              </label>
+              <small class="text-muted d-block mt-1">
+                · PASS = lastClose &gt; trendline value at current bar → BUY
+                · <strong>ปิด (default)</strong>: ไม่กรอง trendline — opt-in เท่านั้น
+                · <strong>เปิด</strong>: skip BUY ถ้าราคาตกต่ำกว่าเส้น support (กราฟหลุด support)
+                · <strong>⚠️ ไม่แนะนำสำหรับบอท DCA</strong> (DCA ซื้อ dip — filter นี้ block dip-buy)
+                · FAIL-OPEN on Binance error / warmup (ยังไม่มี pivot)
+              </small>
+            </div>
+            <div class="form-check mt-2">
               <input class="form-check-input" type="checkbox" id="nb-auto-pause-enabled" checked />
               <label class="form-check-label" for="nb-auto-pause-enabled">
                 ⏸️ <strong>Auto-pause on low Min-%KC</strong> — หยุดบอทอัตโนมัติเมื่อ Min-%KC (30 bars) ต่ำกว่า threshold (auto-resume เมื่อกลับมา)
@@ -317,13 +330,35 @@
             <div class="form-check mt-2">
               <input class="form-check-input" type="checkbox" id="nb-auto-arm-stop-loss-ukc" checked />
               <label class="form-check-label" for="nb-auto-arm-stop-loss-ukc">
-                🛡️ <strong>Auto-arm SL-on-UKC สำหรับ position ที่ขาดทุนค้างนาน</strong> (loss &gt; 10% + age &gt; 4h)
+                🛡️ <strong>Auto-arm SL-on-UKC สำหรับ position ที่ขาดทุนค้างนาน</strong> (loss% + age ตั้งค่าได้ด้านล่าง)
               </label>
               <small class="text-muted d-block mt-1">
-                เมื่อ position ในบอทนี้ <strong>ขาดทุน &gt; 10%</strong> + <strong>เปิดมา &gt; 4 ชั่วโมง</strong> → set <code>trade.useStopLossOnUKC = true</code> อัตโนมัติ
-                → <em>stop-loss on upper-KC</em> (toggle ด้านบน) จะยอม trigger
-                · <strong>เปิด (default)</strong>: auto-arm flag เพื่อป้องกัน position ค้างยาวขาดทุนต่อ
-                · <strong>ปิด</strong>: ไม่ arm flag — SL-on-UKC จะไม่ trigger แม้ toggle ด้านบนเปิดอยู่
+                เมื่อ position ในบอทนี้ <strong>ขาดทุน &gt; loss%</strong> + <strong>เปิดมา &gt; age ชม.</strong> → set <code>trade.useStopLossOnUKC = true</code> อัตโนมัติ
+                → <em>stop-loss on upper-KC</em> จะ trigger ทันทีที่ candle ปิดเหนือ upper-KC
+                · <strong>เปิด (default)</strong>: auto-arm flag เพื่อป้องกัน position ค้างยาวขาดทุนต่อ — <em>ทำงานแม้ global SL-UKC toggle ปิดอยู่</em>
+                · <strong>ปิด</strong>: ไม่ arm flag — SL-on-UKC จะไม่ trigger
+              </small>
+            </div>
+            <div class="row mt-2">
+              <div class="col-md-6">
+                <label class="form-label" for="nb-auto-arm-loss-pct">🛡️ <strong>Auto-arm loss threshold (%)</strong></label>
+                <input type="number" class="form-control" id="nb-auto-arm-loss-pct" step="0.5" min="1" max="90" value="10" />
+                <small class="text-muted">% ขาดทุนของ position ที่ trigger auto-arm (range 1-90, default 10)</small>
+              </div>
+              <div class="col-md-6">
+                <label class="form-label" for="nb-auto-arm-age-hours">⏰ <strong>Auto-arm age threshold (ชม.)</strong></label>
+                <input type="number" class="form-control" id="nb-auto-arm-age-hours" step="0.5" min="0.5" max="168" value="4" />
+                <small class="text-muted">อายุ position ขั้นต่ำ (range 0.5-168 ชม., default 4)</small>
+              </div>
+            </div>
+            <div class="form-check mt-2">
+              <input class="form-check-input" type="checkbox" id="nb-sl-ukc-trigger-on-profit" />
+              <label class="form-check-label" for="nb-sl-ukc-trigger-on-profit">
+                💰 <strong>ให้ SL-UKC trigger ตอนกำไรด้วย</strong> (default: ปิด — trigger เฉพาะตอนขาดทุน)
+              </label>
+              <small class="text-muted d-block mt-1">
+                เปิด: candle ปิดเหนือ upper-KC → force-close ทันที (ทั้งกำไรและขาดทุน) — เหมาะกับ "exit at upper band"
+                · ปิด (default): trigger เฉพาะตอน position ขาดทุน — ให้ TP ทำงานปกติตอนกำไร
               </small>
             </div>
             <div class="row mt-2">

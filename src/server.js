@@ -8,6 +8,7 @@ const { createApp } = require('./app');
 const dashboardWs = require('./realtime/dashboardWs');
 const botManager = require('./core/botManager');
 const healthMonitor = require('./services/healthMonitor');
+const positionWatchdog = require('./services/positionWatchdog');
 
 async function main() {
   logger.info({ env: config.env, port: config.port }, 'starting OnePercentBotTrade');
@@ -45,6 +46,10 @@ async function main() {
   // 6. Start health monitor immediately (so /api/health responds right away)
   healthMonitor.start();
 
+  // FIX-2026-08-03: Position Watchdog — F1 + SL-UKC for disabled bots (auto-paused etc.)
+  //   Runs independently of botManager/Trader so paused bots still get armed + force-closed
+  positionWatchdog.start();
+
   // Graceful shutdown
   let shuttingDown = false;
   const shutdown = async (signal) => {
@@ -52,6 +57,7 @@ async function main() {
     shuttingDown = true;
     logger.info({ signal }, 'shutting down');
     try { healthMonitor.stop(); } catch (e) { /* ignore */ }
+    try { positionWatchdog.stop(); } catch (e) { /* ignore */ }
     try { await botManager.flushActiveTimeOnShutdown(); } catch (e) { /* ignore */ }
     try { await botManager.stop(); } catch (e) { /* ignore */ }
     server.close(() => {

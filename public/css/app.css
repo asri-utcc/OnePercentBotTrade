@@ -1696,6 +1696,26 @@ small.text-muted {
 .quality-pill.is-green  { background: #1e8e3e; }
 .quality-pill.is-gray   { background: #7f8c8d; cursor: default; }
 
+/* FIX-2026-08-03: Safe-trade filter #2 (trendline) live badge — bot card status
+   - pass (✅ above) = green, blocked (❌ below) = red, warmup/data/api/no-tf = amber, pending = gray
+   - pill เหมือน quality-pill แต่ cursor: default (ไม่คลิก — แค่แสดงสถานะ)
+*/
+.trendline-pill {
+  display: inline-flex; align-items: center; gap: 0.25rem;
+  font-family: var(--font-mono); font-size: 0.72rem; font-weight: 600;
+  padding: 0.18rem 0.55rem; border-radius: 999px;
+  background: #555; color: #fff; margin-left: 0.3rem;
+  white-space: nowrap; cursor: default; vertical-align: middle;
+  letter-spacing: 0.02em; user-select: none;
+  transition: filter 0.15s ease;
+}
+.trendline-pill:hover { filter: brightness(1.15); }
+.trendline-pill.is-pass     { background: #1e8e3e; }  /* green — price above TL */
+.trendline-pill.is-blocked  { background: #c0392b; }  /* red — price below TL (BUY blocked) */
+.trendline-pill.is-warmup   { background: #16a085; }  /* teal — pivot not yet detected */
+.trendline-pill.is-warn     { background: #e67e22; }  /* amber — data/api/no-tf */
+.trendline-pill.is-pending  { background: #7f8c8d; cursor: default; }  /* gray — not yet scanned */
+
 /* FIX-2026-08-01: Quality breakdown modal — clone of .pnl-modal-* pattern */
 .quality-modal-overlay { position: fixed; inset: 0; z-index: 9999; background: rgba(0,0,0,0.7); backdrop-filter: blur(4px); display: none; align-items: flex-start; justify-content: center; padding: 5vh 1rem 1rem; overflow-y: auto; }
 .quality-modal-overlay.is-open { display: flex; }

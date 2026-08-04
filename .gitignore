@@ -15,3 +15,5 @@ tmp/
 *.tmp
 logs/
 .pm2/cookies.txt
+cookies.txt
+bots.json

@@ -12,18 +12,37 @@ const Trader = require('./trader');
 // FIX-2026-07-23: TP auto-updater (per-bot autoUpdateTp toggle → top-of-hour recompute)
 const tpUpdater = require('./tpUpdater');
 const indicators = require('./indicators'); // FIX-2026-08-01: keltnerChannel() for auto-pause Min-%KC scan
+// FIX-2026-08-03: Safe-trade filter #2 (trendline) — live status module for bot card badge
+//   - per-bot 60s cache + concurrency-6 batch scan (mirror volatilityForBot pattern)
+//   - botManager.scheduleTrendlineStatusScan() populates _trendlineStatusCache for /api/bots
+const trendlineForBot = require('./trendlineForBot');
 
 // FIX-2026-07-14: periodic reconcile interval (ms) — safety net กัน WS event หลุด
-//   2 นาที ตามที่ user ระบุ (1–3 นาที) — เร็วพอที่จะจับ SELL filled ภายใน 2 นาที,
-//   ช้าพอที่จะไม่ spam Binance API
-const RECONCILE_INTERVAL_MS = 2 * 60 * 1000;
+//   FIX-2026-08-04: 2 นาที → 5 นาที (ลด Binance account API load) — reconcilePendingTrades เป็น defensive WS-miss sweep
+//   ยังเร็วพอที่จะจับ SELL filled ที่หลุด และช้าพอที่จะลด Binance weight
+const RECONCILE_INTERVAL_MS = 5 * 60 * 1000;
 
 // FIX-2026-08-01: auto-pause on low Min-%KC (default ON per bot)
 //   - ทุก 5 นาที: scan Min-%KC(30 bars) — ถ้า < autoPauseMinKcPct → set enabled=false
 //   - ถ้า ≥ threshold (และเคยถูก auto-pause) → auto-resume (vol_recovered)
 //   - ตรวจเฉพาะบอทที่ autoPauseEnabled !== false (default true)
-const AUTO_PAUSE_INTERVAL_MS = 5 * 60 * 1000;
+// FIX-2026-08-04: 5min → 10min (auto-pause check เป็น read-only volatility scan — ไม่กระทบ bot operations)
+const AUTO_PAUSE_INTERVAL_MS = 10 * 60 * 1000;
 let autoPauseTimer = null;
+
+// FIX-2026-08-03: Safe-trade filter #2 (trendline) — live status scanner
+//   - every 60s (matches trendlineForBot CACHE_TTL_MS) for bots with safeTradeTrendlineEnabled=true
+//   - populates module-level _trendlineStatusCache Map for /api/bots response
+// FIX-2026-08-04: decouple scan interval from cache TTL — scan every 120s (ลด Binance kline API load)
+//   - cache TTL 60s ยังคงเดิม (trendlineForBot.CACHE_TTL_MS) — แค่ scan tick ห่างขึ้น
+//   - skip ALL work if no bots have the filter enabled (saves Binance calls)
+//   - **read-only** — never blocks BUY; trader.js path is the only place that blocks
+const TRENDLINE_SCAN_INTERVAL_MS = 2 * 60 * 1000;
+let trendlineScanTimer = null;
+// FIX-2026-08-03: in-memory cache: botId → {status, trendTF, lastClose, trendlineValue, gapPct, pivotCount, updatedAt}
+//   - keyed by botId string; refreshed every TRENDLINE_SCAN_INTERVAL_MS
+//   - cleared on bot delete; invalidated when timeframe changes (see botUpdate handler)
+const _trendlineStatusCache = new Map();
 
 /**
  * Bot Manager — spawn/stop Trader ต่อ bot, จัดการ WS subscriptions
@@ -94,6 +113,19 @@ class BotManager {
     if (autoPauseTimer && typeof autoPauseTimer.unref === 'function') autoPauseTimer.unref();
     logger.info({ intervalMs: AUTO_PAUSE_INTERVAL_MS }, 'botManager: auto-pause scanner scheduled');
 
+    // FIX-2026-08-03: Safe-trade #2 (trendline) live status scanner
+    //   - ทุก 60s scan บอทที่ safeTradeTrendlineEnabled=true → populate _trendlineStatusCache
+    //   - UI bot card badge reads from this cache via /api/bots response (sl fields)
+    //   - immediate first scan (non-blocking) so badge shows on page load
+    trendlineScanTimer = setInterval(() => {
+      checkTrendlineStatusBots().catch((err) => logger.warn({ err: err.message }, 'botManager: trendline status tick failed'));
+    }, TRENDLINE_SCAN_INTERVAL_MS);
+    if (trendlineScanTimer && typeof trendlineScanTimer.unref === 'function') trendlineScanTimer.unref();
+    setImmediate(() => {
+      checkTrendlineStatusBots().catch((err) => logger.warn({ err: err.message }, 'botManager: trendline status initial scan failed'));
+    });
+    logger.info({ intervalMs: TRENDLINE_SCAN_INTERVAL_MS }, 'botManager: trendline status scanner scheduled');
+
     // FIX-2026-07-24: start Telegram notifier (subscribe eventBus + periodic PnL scan)
     const telegramNotifier = require('../services/telegramNotifier');
     telegramNotifier.start().catch((e) => logger.warn({ err: e.message }, 'telegramNotifier start failed'));
@@ -115,6 +147,9 @@ class BotManager {
     tpUpdater.stopHourlyTpUpdate();
     // FIX-2026-08-01: หยุด auto-pause scanner timer
     if (autoPauseTimer) { clearInterval(autoPauseTimer); autoPauseTimer = null; }
+    // FIX-2026-08-03: หยุด trendline status scanner timer + clear cache
+    if (trendlineScanTimer) { clearInterval(trendlineScanTimer); trendlineScanTimer = null; }
+    _trendlineStatusCache.clear();
     // FIX-2026-07-24: หยุด Telegram notifier (clear listeners + timers)
     try { require('../services/telegramNotifier').stop(); } catch (e) { /* ignore */ }
     for (const [id, trader] of this.traders.entries()) {
@@ -707,3 +742,98 @@ async function checkAutoPauseBots() {
 }
 
 module.exports = new BotManager();
+
+// FIX-2026-08-03: Export helpers for routes (pattern mirrors module.exports = new BotManager() above)
+module.exports.getTrendlineStatusForBots = getTrendlineStatusForBots;
+module.exports.invalidateTrendlineCache = invalidateTrendlineCache;
+
+// FIX-2026-08-03: Trendline status scanner — refresh _trendlineStatusCache ทุก 60s
+//   - ตรวจเฉพาะบอทที่ safeTradeTrendlineEnabled === true (ลด Binance calls)
+//   - ใช้ trendlineForBot.mapWithConcurrency(6) กัน burst weight
+//   - **read-only** — ไม่มี side effect กับ trade state
+//   - emit 'bot:trendline_status_changed' event เมื่อ status เปลี่ยน (เพื่อให้ telegram notifier แจ้งได้)
+async function checkTrendlineStatusBots() {
+  let bots;
+  try {
+    bots = await Bot.find({ safeTradeTrendlineEnabled: true }).lean();
+  } catch (err) {
+    logger.warn({ err: err.message }, 'botManager: checkTrendlineStatusBots — Bot.find failed');
+    return;
+  }
+  if (!bots || bots.length === 0) {
+    // ลบ cache entries สำหรับบอทที่ปิด filter แล้ว (cleanup)
+    return;
+  }
+
+  const snapshots = await trendlineForBot.mapWithConcurrency(
+    bots, 6, (b) => trendlineForBot.computeBotTrendlineSnapshot(b)
+  );
+
+  const now = Date.now();
+  const telegramNotifier = require('../services/telegramNotifier');
+
+  for (let i = 0; i < bots.length; i += 1) {
+    const bot = bots[i];
+    const snap = snapshots[i] || {};
+    const botId = String(bot._id);
+    const prev = _trendlineStatusCache.get(botId);
+
+    // Cache result (always — even when filter was disabled mid-scan or API errored)
+    _trendlineStatusCache.set(botId, {
+      status: snap.status || 'unknown',
+      trendTF: snap.trendTF || null,
+      lastClose: snap.lastClose != null ? snap.lastClose : null,
+      trendlineValue: snap.trendlineValue != null ? snap.trendlineValue : null,
+      gapPct: snap.gapPct != null ? Number(snap.gapPct) : null,
+      pivotCount: snap.pivotCount || 0,
+      updatedAt: now,
+      cached: !!snap.cached,
+      ms: snap.ms != null ? snap.ms : null,
+      error: snap.error || null,
+    });
+
+    // Detect transition for telegram notification (only meaningful states: pass ↔ blocked)
+    if (prev && prev.status !== snap.status && (snap.status === 'pass' || snap.status === 'blocked')
+        && (prev.status === 'pass' || prev.status === 'blocked')) {
+      try {
+        await telegramNotifier.sendNow('trendlineStatusChanged', {
+          botId,
+          botName: bot.name || bot.symbol,
+          symbol: bot.symbol,
+          timeframe: bot.timeframe,
+          trendTF: snap.trendTF,
+          prevStatus: prev.status,
+          newStatus: snap.status,
+          lastClose: snap.lastClose,
+          trendlineValue: snap.trendlineValue,
+          gapPct: snap.gapPct,
+        });
+      } catch (_) { /* non-fatal */ }
+      eventBus.emit('bot:trendline_status_changed', {
+        botId, symbol: bot.symbol, prevStatus: prev.status, newStatus: snap.status,
+        lastClose: snap.lastClose, trendlineValue: snap.trendlineValue, gapPct: snap.gapPct,
+      });
+    }
+  }
+
+  logger.debug({ count: bots.length, ok: snapshots.filter((s) => s && s.ok).length }, 'botManager: trendline status scan done');
+}
+
+// FIX-2026-08-03: accessor for /api/bots route — returns slim fields for bot card badge
+function getTrendlineStatusForBots(botIds) {
+  const out = {};
+  for (const id of botIds) {
+    const s = _trendlineStatusCache.get(String(id));
+    if (s) out[String(id)] = s;
+  }
+  return out;
+}
+
+// FIX-2026-08-03: cache invalidation when timeframe changes (called from botUpdate + bulk-update routes)
+//   - mirrors volatilityForBot.invalidate(symbol, timeframe) pattern
+function invalidateTrendlineCache(symbol, timeframe) {
+  trendlineForBot.invalidate(symbol, timeframe);
+  // Also clear in-memory status cache for any bot with this symbol+tf
+  // (we don't have botId here so scan will rebuild on next tick — acceptable)
+  _trendlineStatusCache.clear();
+}

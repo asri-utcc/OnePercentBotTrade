@@ -164,6 +164,17 @@ function render() {
         </div>
         <div class="mb-3">
           <label class="form-check">
+            <input type="checkbox" class="form-check-input" id="f-safe-trade-trendline-enabled" ${bot.safeTradeTrendlineEnabled === true ? 'checked' : ''} />
+            <span class="form-check-label">📐 <strong>Safe-trade filter #2 (trendline support)</strong> — ก่อนซื้อตรวจ upper-TF (TREND_TF_MAP) ว่าราคา "เหนือ" เส้น LuxAlgo pivot-low trendline (⚠️ ไม่แนะนำสำหรับ DCA)</span>
+          </label>
+          <small class="text-muted d-block mt-1">
+            · PASS = lastClose &gt; trendline value → BUY
+            · FAIL-OPEN on Binance error / warmup
+            · <strong>default OFF</strong> (opt-in)
+          </small>
+        </div>
+        <div class="mb-3">
+          <label class="form-check">
             <input type="checkbox" class="form-check-input" id="f-auto-pause-enabled" ${bot.autoPauseEnabled !== false ? 'checked' : ''} />
             <span class="form-check-label">⏸️ <strong>Auto-pause on low Min-%KC</strong> — หยุดบอทอัตโนมัติเมื่อ Min-%KC ต่ำกว่า threshold</span>
           </label>
@@ -176,13 +187,38 @@ function render() {
         <div class="mb-3">
           <label class="form-check">
             <input type="checkbox" class="form-check-input" id="f-auto-arm-stop-loss-ukc" ${bot.autoArmStopLossOnUKC !== false ? 'checked' : ''} />
-            <span class="form-check-label">🛡️ <strong>Auto-arm SL-on-UKC สำหรับ position ที่ขาดทุนค้างนาน</strong> (loss &gt; 10% + age &gt; 4h)</span>
+            <span class="form-check-label">🛡️ <strong>Auto-arm SL-on-UKC สำหรับ position ที่ขาดทุนค้างนาน</strong> (ตั้ง loss % + age ได้ด้านล่าง)</span>
           </label>
           <small class="text-muted d-block mt-1">
-            ตรวจทุก <code>kline:closed</code>: ถ้า position ในบอทนี้อยู่ใน state <code>selling</code> และ <strong>ขาดทุน &gt; 10%</strong> + <strong>เปิดมา &gt; 4 ชั่วโมง</strong>
-            → ระบบจะ set <code>trade.useStopLossOnUKC = true</code> ให้อัตโนมัติ (per-trade flag) → จากนั้น <em>stop-loss on upper-KC</em> (toggle ด้านบน) จะยอม trigger
-            · <strong>เปิด (default)</strong>: auto-arm flag เพื่อป้องกัน position ค้างยาวขาดทุนต่อ
-            · <strong>ปิด</strong>: ไม่ arm flag — SL-on-UKC จะไม่ trigger แม้ toggle ด้านบนเปิดอยู่
+            ตรวจทุก <code>kline:closed</code>: ถ้า position ในบอทนี้อยู่ใน state <code>selling</code> และ <strong>ขาดทุน &gt; loss%</strong> + <strong>เปิดมา &gt; age ชม.</strong>
+            → ระบบจะ set <code>trade.useStopLossOnUKC = true</code> ให้อัตโนมัติ (per-trade flag) → จากนั้น <em>stop-loss on upper-KC</em> จะ trigger ทันทีที่ candle ปิดเหนือ upper-KC
+            · <strong>เปิด (default)</strong>: auto-arm flag เพื่อป้องกัน position ค้างยาวขาดทุนต่อ — <em>ทำงานแม้ global SL-UKC toggle ปิดอยู่</em> (F1 = per-position safety net)
+            · <strong>ปิด</strong>: ไม่ arm flag — SL-on-UKC จะไม่ trigger
+          </small>
+        </div>
+        <div class="row mb-3">
+          <div class="col-md-6">
+            <label class="form-label">🛡️ <strong>Auto-arm loss threshold (%)</strong></label>
+            <input type="number" class="form-control" id="f-auto-arm-loss-pct"
+                   value="${bot.autoArmLossPct ?? 10}" step="0.5" min="1" max="90" />
+            <small class="text-muted">% ขาดทุนของ position ที่จะ trigger auto-arm (range 1-90, default 10)</small>
+          </div>
+          <div class="col-md-6">
+            <label class="form-label">⏰ <strong>Auto-arm age threshold (ชม.)</strong></label>
+            <input type="number" class="form-control" id="f-auto-arm-age-hours"
+                   value="${bot.autoArmAgeHours ?? 4}" step="0.5" min="0.5" max="168" />
+            <small class="text-muted">อายุ position ขั้นต่ำ (range 0.5-168 ชม., default 4 — 168 = 1 สัปดาห์)</small>
+          </div>
+        </div>
+        <div class="mb-3">
+          <label class="form-check">
+            <input type="checkbox" class="form-check-input" id="f-sl-ukc-trigger-on-profit" ${bot.slUkcTriggerOnProfit ? 'checked' : ''} />
+            <span class="form-check-label">💰 <strong>ให้ SL-UKC trigger ตอนกำไรด้วย</strong> (default: ปิด — trigger เฉพาะตอนขาดทุน)</span>
+          </label>
+          <small class="text-muted d-block mt-1">
+            เปิด: candle ปิดเหนือ upper-KC → force-close ทันที (ทั้งกำไรและขาดทุน) — เหมาะกับ strategy "exit at upper band"
+            · ปิด (default): trigger เฉพาะตอน position ขาดทุน — ให้ TP ทำงานปกติตอนกำไร
+            · DCA mode ใช้ BEP loss-only เสมอ (toggle นี้มีผลเฉพาะ non-DCA)
           </small>
         </div>
         <div class="mb-3">
@@ -311,7 +347,7 @@ function render() {
             <div class="col-md-6">
               <ul class="list-unstyled mb-0">
                 <li class="mb-1">⚠️ <strong>SL-UKC</strong> — ใช้ <em>stack BEP</em> (ต้องเปิดจาก Classic)</li>
-                <li class="mb-1">⚠️ <strong>autoArm SL-UKC</strong> — gate ต่อ stack (loss&gt;10% + age&gt;4h หลัง layer สุดท้าย)</li>
+                <li class="mb-1">⚠️ <strong>autoArm SL-UKC</strong> — gate ต่อ stack (loss% + age ตั้งค่าได้ที่ Classic tab)</li>
                 <li class="mb-1">❌ <strong>CB panic-sell</strong> — �ปิดอัตโนมัติใน DCA mode</li>
                 <li class="mb-1">❌ <strong>maxTrades</strong> — ไม่ cap DCA (ใช้ dcaMaxLayers แทน)</li>
               </ul>
@@ -549,6 +585,11 @@ function render() {
     const el = document.getElementById(id);
     if (el) el.addEventListener('input', updateDcaTpMirror);
   });
+  // FIX-2026-08-03: re-compute DCA exit-policy banner when F1 thresholds change
+  ['f-auto-arm-loss-pct', 'f-auto-arm-age-hours'].forEach((id) => {
+    const el = document.getElementById(id);
+    if (el) el.addEventListener('input', updateDcaExitPolicy);
+  });
   const _tpEditLink = document.getElementById('dca-tp-edit-link');
   if (_tpEditLink) {
     _tpEditLink.addEventListener('click', () => {
@@ -566,6 +607,8 @@ function render() {
     const dcaOn = document.getElementById('f-dca-enabled').checked;
     const slUkc = document.getElementById('f-stop-loss-upper-kc').checked;
     const autoArm = document.getElementById('f-auto-arm-stop-loss-ukc').checked;
+    const lossPct = parseFloat(document.getElementById('f-auto-arm-loss-pct').value) || 10;
+    const ageHours = parseFloat(document.getElementById('f-auto-arm-age-hours').value) || 4;
     const el = document.getElementById('dca-exit-text');
     if (!el) return;
     if (!dcaOn) {
@@ -573,11 +616,11 @@ function render() {
       return;
     }
     if (slUkc && autoArm) {
-      el.innerHTML = '<strong>TP</strong> + <strong>SL-UKC</strong> (จะ trigger เมื่อ stack BEP ขาดทุน &gt; 10% และอายุ &gt; 4h หลัง layer สุดท้าย + candle ปิดเหนือ upper-KC)';
+      el.innerHTML = `<strong>TP</strong> + <strong>SL-UKC</strong> (จะ trigger เมื่อ stack BEP ขาดทุน &gt; ${lossPct}% และอายุ &gt; ${ageHours}h หลัง layer สุดท้าย + candle ปิดเหนือ upper-KC)`;
     } else if (slUkc && !autoArm) {
       el.innerHTML = '<strong>TP</strong> + <strong>SL-UKC</strong> (immediate — จะ trigger ทันทีที่ขาดทุน + candle &gt; upper-KC) — ⚠️ ปิด autoArm = SL ไวกว่า TP เสมอ';
     } else if (!slUkc && autoArm) {
-      el.innerHTML = '<strong>TP</strong> เท่านั้น (auto-arm = false เพราะ SL-UKC ปิด) — ⚠️ ไม่มี loss exit!';
+      el.innerHTML = '<strong>TP</strong> เท่านั้น (auto-arm จะถูกบล็อคเพราะ SL-UKC ปิด — ใช้ OR semantic ก็ยังไม่ trigger) — ⚠️ ไม่มี loss exit!';
     } else {
       el.innerHTML = '<strong>TP</strong> เท่านั้น — ⚠️ ไม่มี loss exit! เปิด SL-UKC จาก Classic tab ถ้าอยากมี stop loss';
     }
@@ -807,9 +850,13 @@ async function save(e) {
     xs1Enabled: document.getElementById('f-xs1-enabled').checked, // FIX-2026-07-25: per-bot XS1 anti-dump toggle (default true)
     cbEnabled: document.getElementById('f-cb-enabled').checked, // FIX-2026-08-01: per-bot Circuit-breaker panic-sell toggle (default true) — เดิมชื่อ sls1Enabled
     safeTradeEnabled: document.getElementById('f-safe-trade-enabled').checked, // FIX-2026-08-01: per-bot safe-trade filter (default ON)
+    safeTradeTrendlineEnabled: document.getElementById('f-safe-trade-trendline-enabled').checked, // FIX-2026-08-03: Safe-trade filter #2 (LuxAlgo trendline) — opt-in, default OFF
     autoPauseEnabled: document.getElementById('f-auto-pause-enabled').checked, // FIX-2026-08-01: per-bot auto-pause on low Min-%KC (default ON)
     autoPauseMinKcPct: parseFloat(document.getElementById('f-auto-pause-min-kc').value) || 2, // FIX-2026-08-01: auto-pause threshold %
     autoArmStopLossOnUKC: document.getElementById('f-auto-arm-stop-loss-ukc').checked, // FIX-2026-07-31 (F1): per-bot auto-arm SL-on-UKC toggle (default true)
+    autoArmLossPct: parseFloat(document.getElementById('f-auto-arm-loss-pct').value) || 10, // FIX-2026-08-03: per-bot F1 loss threshold (1..90, default 10)
+    autoArmAgeHours: parseFloat(document.getElementById('f-auto-arm-age-hours').value) || 4, // FIX-2026-08-03: per-bot F1 age threshold (0.5..168, default 4)
+    slUkcTriggerOnProfit: document.getElementById('f-sl-ukc-trigger-on-profit').checked, // FIX-2026-08-03: SL-UKC trigger on profit (default false)
     tpTrendEnabled: document.getElementById('f-tp-trend-enabled').checked, // FIX-2026-08-01: per-bot TP trend ×N master toggle (default true)
     tpTrendMultiplier: parseFloat(document.getElementById('f-tp-trend-multiplier').value), // FIX-2026-07-31 (F2): per-bot TP ×N multiplier (1..10, default 2)
     autoUpdateTp: document.getElementById('f-auto-update-tp').checked, // FIX-2026-07-23: TP auto-update toggle

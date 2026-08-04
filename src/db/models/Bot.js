@@ -122,6 +122,13 @@ const botSchema = new mongoose.Schema(
     //   - PASS = lastClose > open (green) OR lastClose > ema20 (uptrend) → ผ่านเข้า BUY
     //   - FAIL-OPEN on Binance error (API outage ไม่บล็อกการเทรด)
     safeTradeEnabled: { type: Boolean, default: true },
+    // FIX-2026-08-03: per-bot safe-trade filter #2 — LuxAlgo red pivot-low trendline (opt-in, default OFF)
+    //   - true: ก่อนวาง BUY ตรวจ upper-TF (TREND_TF_MAP) ว่าราคาปัจจุบัน "เหนือ" trendline support ที่ลากจาก pivot low ล่าสุด
+    //   - false (default): ปิด filter นี้ (พฤติกรรมเดิม — ไม่กรอง trendline)
+    //   - FAIL-OPEN on Binance error / warmup / insufficient data (mirror safeTradeEnabled)
+    //   - **ไม่แนะนำให้เปิดกับบอท DCA** (DCA ซื้อ dip โดยเฉพาะ — filter นี้ block dip-buy → ขัดกับ DCA intent)
+    //   - Ported from Pine "Trendlines with Breaks" by LuxAlgo (CC BY-NC-SA 4.0); slope=ATR(14)/14*1.0
+    safeTradeTrendlineEnabled: { type: Boolean, default: false },
     // FIX-2026-08-01: per-bot auto-pause on low Min-%KC (default ON)
     //   - ทุก 5 min: scan Min-%KC(30 bars) — ถ้า < autoPauseMinKcPct (default 2%) → set enabled=false
     //   - ถ้า ≥ threshold (และเคยถูก auto-pause) → auto-resume (vol_recovered)
@@ -132,9 +139,20 @@ const botSchema = new mongoose.Schema(
     autoPauseLastActionAt: { type: Date, default: null },
     autoPauseReason: { type: String, default: null }, // 'low_vol' | 'vol_recovered' | null
     // FIX-2026-07-31: auto-arm SL-on-UKC for stuck losing positions (per-bot toggle, default true)
-    //   - เมื่อ position ขาดทุน >10% + เปิดมา >4h → trader set trade.useStopLossOnUKC=true
+    //   - เมื่อ position ขาดทุน > autoArmLossPct + เปิดมา > autoArmAgeHours → trader set trade.useStopLossOnUKC=true
     //   - _checkStopLossOnUpperKC จะยอม trigger เฉพาะ trade ที่มี flag นี้
     autoArmStopLossOnUKC: { type: Boolean, default: true },
+    // FIX-2026-08-03: per-bot auto-arm loss threshold (%)
+    //   - paired with autoArmStopLossOnUKC — set trade.useStopLossOnUKC=true when position loss > X%
+    //   - default 10% (matches original hard-coded threshold); range 1..90
+    autoArmLossPct: { type: Number, default: 10, min: 1, max: 90 },
+    // FIX-2026-08-03: per-bot auto-arm age threshold (hours)
+    //   - default 4h (matches original hard-coded threshold); range 0.5..168 (1 week)
+    autoArmAgeHours: { type: Number, default: 4, min: 0.5, max: 168 },
+    // FIX-2026-08-03: SL-UKC trigger on profitable positions (default false — backward compat)
+    //   - false (default): SL-UKC only fires when buyPrice > close (loss only) — original behavior
+    //   - true: SL-UKC fires whenever candle.close > upperKC (profit OR loss) — strict upper-band exit
+    slUkcTriggerOnProfit: { type: Boolean, default: false },
     // FIX-2026-07-31: TP trend multiplier — เมื่อ upper-TF close > EMA20 → tpPercent *= tpTrendMultiplier
     //   - default 2 (0.2% → 0.4%)
     //   - range 1..10 (1 = no multiplier, 10 = aggressive)
@@ -177,6 +195,24 @@ botSchema.set('toJSON', { virtuals: true });
 botSchema.set('toObject', { virtuals: true });
 
 botSchema.index({ enabled: 1, symbol: 1 });
+// FIX-2026-08-04: performance indexes — drives bots list sort, auto-pause/trendline/tpUpdater scans
+//   - enabled + createdAt — GET /api/bots default sort (replaces COLLSCAN sort)
+//   - autoPauseEnabled (partial) — botManager.checkAutoPauseBots every 10min
+//   - safeTradeTrendlineEnabled (partial) — botManager.checkTrendlineStatusBots every 120s
+//   - autoUpdateTp (partial) — tpUpdater.scheduleHourlyTpUpdate every hour
+botSchema.index({ enabled: 1, createdAt: -1 });
+botSchema.index(
+  { autoPauseEnabled: 1 },
+  { partialFilterExpression: { autoPauseEnabled: true } }
+);
+botSchema.index(
+  { safeTradeTrendlineEnabled: 1 },
+  { partialFilterExpression: { safeTradeTrendlineEnabled: true } }
+);
+botSchema.index(
+  { autoUpdateTp: 1 },
+  { partialFilterExpression: { autoUpdateTp: true } }
+);
 
 module.exports = mongoose.model('Bot', botSchema);
 module.exports.BOT_STATUSES = BOT_STATUSES;

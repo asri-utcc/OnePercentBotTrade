@@ -27,6 +27,8 @@
     { id: 'mc-suggestTpWindow',  key: 'suggestTpWindow',   type: 'number', step: '10', min: '30', max: '1000', label: '🪟 Suggest TP window (bars)' },
     { id: 'mc-tpTrendMultiplier', key: 'tpTrendMultiplier', type: 'number', step: '1', min: '1', max: '10', label: '✖️ TP trend multiplier' },
     { id: 'mc-autoPauseMinKcPct', key: 'autoPauseMinKcPct', type: 'number', step: '0.1', min: '0.1', max: '50', label: '⏸️ Auto-pause Min-%KC threshold' },
+    { id: 'mc-autoArmLossPct',   key: 'autoArmLossPct',   type: 'number', step: '0.5', min: '1', max: '90', label: '🛡️ Auto-arm loss threshold (%)' },
+    { id: 'mc-autoArmAgeHours',  key: 'autoArmAgeHours',  type: 'number', step: '0.5', min: '0.5', max: '168', label: '⏰ Auto-arm age threshold (ชม.)' },
     { id: 'mc-timeframe',        key: 'timeframe',         type: 'select', options: TIMEFRAMES, label: '⏰ Timeframe (TF) · เปลี่ยนแล้ว restart trader' },
   ];
 
@@ -35,9 +37,11 @@
     { id: 'mc-xs1Enabled',          key: 'xs1Enabled',          label: '🛡️ XS1 anti-dump gate' },
     { id: 'mc-cbEnabled',           key: 'cbEnabled',           label: '🚨 Circuit-breaker panic-sell' },
     { id: 'mc-safeTradeEnabled',    key: 'safeTradeEnabled',    label: '🛡️ Safe-trade filter' },
+    { id: 'mc-safeTradeTrendlineEnabled', key: 'safeTradeTrendlineEnabled', label: '📐 Safe-trade trendline support (⚠️ ไม่แนะนำสำหรับ DCA)' },
     { id: 'mc-stopLossOnUpperKC',   key: 'stopLossOnUpperKC',   label: '🛑 Stop-loss on upper KC' },
     { id: 'mc-autoUpdateTp',        key: 'autoUpdateTp',        label: '⏰ Auto-update TP ทุกต้นชั่วโมง' },
     { id: 'mc-autoArmStopLossOnUKC', key: 'autoArmStopLossOnUKC', label: '🛡️ Auto-arm SL-on-UKC' },
+    { id: 'mc-slUkcTriggerOnProfit', key: 'slUkcTriggerOnProfit', label: '💰 SL-UKC trigger on profit' },
     { id: 'mc-tpTrendEnabled',      key: 'tpTrendEnabled',      label: '✖️ TP trend ×N enabled' },
     { id: 'mc-autoPauseEnabled',    key: 'autoPauseEnabled',    label: '⏸️ Auto-pause on low Min-%KC' },
   ];

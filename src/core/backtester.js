@@ -7,6 +7,7 @@ const fees = require('../binance/fees');
 const signalEngine = require('./signalEngine');
 const BacktestResult = require('../db/models/BacktestResult');
 const logger = require('../utils/logger');
+const volatilityScanner = require('./volatilityScanner'); // FIX-2026-08-03: TREND_TF_MAP for safe-trade #2 trendline
 
 /**
  * ดึง klines ย้อนหลังจาก Binance (loop ถ้าเกิน 1000 แท่ง)
@@ -64,6 +65,48 @@ async function fetchKlines({ symbol, interval, fromMs, toMs, onProgress = null }
 
   const truncated = all.length >= SAFETY_LIMIT && cursor < toMs;
   return { klines: all, truncated };
+}
+
+// FIX-2026-08-03: Safe-trade #2 (trendline) backtest support — pre-compute upper-TF trendline
+//   - ดึง upper-TF klines ครอบคลุม from/to range, คำนวณ trendline per upper-TF bar
+//   - return null ถ้า TREND_TF_MAP ไม่มี entry, fetch fail, หรือข้อมูลไม่พอ (fail-open)
+//   - trendTF = volatilityScanner.TREND_TF_MAP[timeframe] (เช่น 3m/5m→1h, 15m→4h)
+//   - ใช้ computeTrendlinePivotLows() ตัวเดียวกับ live trader (single source of truth)
+async function _computeBacktestTrendline({ symbol, timeframe, fromMs, toMs, fetchFn }) {
+  const trendTF = volatilityScanner.TREND_TF_MAP[timeframe];
+  if (!trendTF) return null;
+  try {
+    const result = await fetchFn({ symbol, interval: trendTF, fromMs, toMs });
+    const upperRaw = result.klines || result; // tolerate {klines, truncated} or array
+    if (!Array.isArray(upperRaw) || upperRaw.length < 50) return null;
+    const upperKlines = upperRaw.map((k) => ({
+      openTime: k.openTime,
+      open: parseFloat(k.open),
+      high: parseFloat(k.high),
+      low: parseFloat(k.low),
+      close: parseFloat(k.close),
+    }));
+    const upperTrendline = signalEngine.computeTrendlinePivotLows(upperKlines);
+    if (!upperTrendline) return null;
+    return { trendTF, upperKlines, upperTrendline };
+  } catch (err) {
+    logger.warn({ symbol, timeframe, trendTF, err: err.message }, 'backtest: trendline fetch failed — fail-open');
+    return null;
+  }
+}
+
+// FIX-2026-08-03: per-signal trendline lookup via binary search
+//   - หา rightmost upperKlines[j].openTime <= mainBarOpenTime → return upperTrendline[j]
+//   - return null ถ้า mainBarOpenTime < upperKlines[0].openTime (warmup)
+function _trendlineAt(mainBarOpenTime, upperKlines, upperTrendline) {
+  let lo = 0, hi = upperKlines.length - 1, ans = -1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (upperKlines[mid].openTime <= mainBarOpenTime) { ans = mid; lo = mid + 1; }
+    else { hi = mid - 1; }
+  }
+  if (ans < 0) return null;
+  return upperTrendline[ans];
 }
 
 function intervalToMs(interval) {
@@ -137,7 +180,27 @@ function simulateTrades({ klines, signals, opts }) {
     maxConcurrentTrades = 10,
     stepSize = null,
     minNotional = new Decimal('10'),
+    // FIX-2026-08-03: SL-UKC + F1 + profit toggle (Option B parity)
+    stopLossOnUpperKC = false,
+    autoArmStopLossOnUKC = false,
+    slUkcTriggerOnProfit = false,
+    // FIX-2026-08-03: Safe-trade filter #2 (trendline) — pre-computed upper-TF trendline data
+    //   - if null/undefined: filter disabled (skip the check)
+    //   - if {trendTF, upperKlines, upperTrendline}: filter enabled, check per-signal
+    trendlineData = null,
   } = opts;
+
+  // FIX-2026-08-03: build cfg object ที่ inner scope ใช้อ่าน (mirror DCA closeOpenStack pattern)
+  const cfg = {
+    stopLossOnUpperKC: stopLossOnUpperKC === true,
+    autoArmStopLossOnUKC: autoArmStopLossOnUKC === true,
+    slUkcTriggerOnProfit: slUkcTriggerOnProfit === true,
+  };
+
+  // FIX-2026-08-03: trendline filter enabled flag (truthy if data provided)
+  const trendlineEnabled = trendlineData != null
+    && Array.isArray(trendlineData.upperKlines)
+    && Array.isArray(trendlineData.upperTrendline);
 
   const trades = [];
   // Active trades: เรียงตาม exitIdx ascending (FIFO) เพื่อ clean up เร็ว
@@ -158,6 +221,39 @@ function simulateTrades({ klines, signals, opts }) {
     const idx = sig.index;
     const buyPrice = sig.close;
     const target = new Decimal(buyPrice).mul(1 + tpPercent / 100 + 2 * feeRate).toNumber();
+
+    // ─── FIX-2026-08-03: Safe-trade #2 (trendline) filter ───────────────
+    //   - check LuxAlgo red pivot-low trendline (pre-computed from upper-TF)
+    //   - ถ้า buyPrice <= trendline value at signal time → skip (record as safe_trade_trendline_block)
+    //   - FAIL-OPEN semantics: ถ้า trendline ไม่พร้อม (warmup, null) → ผ่าน (ไม่ block)
+    //   - ทำก่อน concurrent slot check เพื่อไม่ให้ filter consume slot
+    if (trendlineEnabled) {
+      const tlValue = _trendlineAt(sig.openTime, trendlineData.upperKlines, trendlineData.upperTrendline);
+      if (tlValue != null && Number.isFinite(tlValue) && buyPrice <= tlValue) {
+        const gapPct = ((buyPrice - tlValue) / tlValue) * 100;
+        trades.push({
+          signalTime: new Date(sig.openTime),
+          candleCloseTime: new Date(sig.closeTime),
+          buyPrice,
+          targetSellPrice: target,
+          sellPrice: null,
+          buyFilled: false,
+          sellFilled: false,
+          qty: 0,
+          notional: 0,
+          grossPnl: 0,
+          fees: 0,
+          realizedPnl: 0,
+          pnlPercent: 0,
+          exitReason: 'safe_trade_trendline_block',
+          bgState: sig.bgState,
+          // custom audit fields (kept on tradeSim via extra fields)
+          trendlineValue: Number(tlValue.toFixed(8)),
+          gapPct: Number(gapPct.toFixed(3)),
+        });
+        continue; // skip this signal — do NOT consume concurrent slot
+      }
+    }
 
     // ─── Calculate qty (floor to stepSize) ───────────────
     let qty;
@@ -472,6 +568,12 @@ async function runBacktest(params) {
     useBnbForFees = false,
     maxBuyWait = 6,
     maxConcurrentTrades = 10,
+    // FIX-2026-08-03: SL-UKC + F1 + profit toggle (Option B parity with live trader)
+    stopLossOnUpperKC = false,
+    autoArmStopLossOnUKC = false,
+    slUkcTriggerOnProfit = false,
+    // FIX-2026-08-03: Safe-trade filter #2 (trendline) — opt-in per-bar filter
+    safeTradeTrendlineEnabled = false,
   } = params;
 
   const fromMs = typeof from === 'string' ? new Date(from).getTime() : from;
@@ -513,10 +615,27 @@ async function runBacktest(params) {
 
   const { signals } = signalEngine.detectS1Signals(klines);
 
+  // FIX-2026-08-03: pre-compute trendline if filter enabled (single fetch for full range)
+  let trendlineData = null;
+  if (safeTradeTrendlineEnabled === true) {
+    trendlineData = await _computeBacktestTrendline({
+      symbol, timeframe, fromMs, toMs, fetchFn: fetchKlines,
+    });
+    if (trendlineData) {
+      logger.info({
+        symbol, trendTF: trendlineData.trendTF,
+        upperBars: trendlineData.upperKlines.length,
+      }, 'backtest: trendline pre-computed');
+    } else {
+      logger.warn({ symbol, timeframe }, 'backtest: trendline pre-compute failed — fail-open');
+    }
+  }
+
   logger.info({
     symbol, timeframe, klines: klines.length, signals: signals.length,
     stepSize: stepSizeStr, minNotional: minNotional.toString(),
     truncated,
+    safeTradeTrendlineEnabled: !!safeTradeTrendlineEnabled,
     actualDays: klines.length > 1
       ? Math.round((klines[klines.length - 1].openTime - klines[0].openTime) / 86400000)
       : 0,
@@ -535,12 +654,20 @@ async function runBacktest(params) {
       maxConcurrentTrades,
       stepSize: stepSizeStr,
       minNotional,
+      // FIX-2026-08-03: SL-UKC + F1 + profit toggle (Option B parity with live trader)
+      stopLossOnUpperKC,
+      autoArmStopLossOnUKC,
+      slUkcTriggerOnProfit,
+      // FIX-2026-08-03: Safe-trade filter #2 (trendline) — pre-computed upper-TF data
+      trendlineData,
     },
   });
 
   const stats = summarize(trades);
   // เพิ่ม peak concurrency เข้า stats (track ไว้ระหว่าง simulate)
   stats.maxConcurrentTradesUsed = maxConcurrentTradesUsed;
+  // FIX-2026-08-03: count Safe-trade trendline blocked signals (separate from noBuyFillCount)
+  stats.safeTradeTrendlineBlocked = trades.filter((t) => t.exitReason === 'safe_trade_trendline_block').length;
 
   const storedTrades = trades.length > 500 ? trades.slice(0, 250).concat(trades.slice(-250)) : trades;
 
@@ -633,12 +760,19 @@ async function runDcaBacktest(params) {
     xs1Enabled = true,
     stopLossOnUpperKC = false,
     autoArmStopLossOnUKC = false,
+    // FIX-2026-08-03: F1 thresholds + SL-UKC profit toggle (Option B parity)
+    autoArmLossPct = 10,
+    autoArmAgeHours = 4,
+    slUkcTriggerOnProfit = false,
     // FIX-2026-08-03: DCA + Martingale sizing (opt-in, default off — parity with trader.js)
     //   - martingaleEnabled=false (default) → ทุก layer ใช้ capitalPerTrade เท่ากัน (พฤติกรรมเดิม)
     //   - martingaleEnabled=true → layer N notional = capitalPerTrade × mult^(N-1) (capped by maxLayerNotional)
     martingaleEnabled = false,
     martingaleMultiplier = 1.5,
     martingaleMaxLayerNotional = 100,
+    // FIX-2026-08-03: Safe-trade filter #2 (trendline) — opt-in per-bar filter
+    //   - ไม่แนะนำสำหรับ DCA mode (DCA ซื้อ dip — filter นี้ block dip-buy)
+    safeTradeTrendlineEnabled = false,
   } = params;
 
   if (!symbol || !timeframe || !from || !to) {
@@ -720,13 +854,34 @@ async function runDcaBacktest(params) {
   const { signals, upper: upperKC, lower: lowerKC } = sigResult;
   // Note: lowerKC unused in DCA mode (CB disabled). Kept here for parity / future use.
 
+  // FIX-2026-08-03: pre-compute trendline if filter enabled (DCA single-stack mode)
+  let trendlineData = null;
+  if (safeTradeTrendlineEnabled === true) {
+    trendlineData = await _computeBacktestTrendline({
+      symbol, timeframe, fromMs, toMs, fetchFn: fetchKlines,
+    });
+    if (trendlineData) {
+      logger.info({
+        symbol, trendTF: trendlineData.trendTF,
+        upperBars: trendlineData.upperKlines.length,
+      }, 'dca-backtest: trendline pre-computed');
+    } else {
+      logger.warn({ symbol, timeframe }, 'dca-backtest: trendline pre-compute failed — fail-open');
+    }
+  }
+  const trendlineEnabled = trendlineData != null && Array.isArray(trendlineData.upperKlines);
+
   logger.info({
     symbol, timeframe, klines: klines.length, signals: signals.length,
     dcaMaxLayers, stepSize: stepSizeStr, minNotional: minNotional.toString(),
+    safeTradeTrendlineEnabled: !!safeTradeTrendlineEnabled,
   }, 'dca-backtest: signals detected');
 
   const feeRate = fees.getMakerRate({ useBnbForFees });
   const stepMs = klines.length >= 2 ? (klines[1].openTime - klines[0].openTime) : 0;
+
+  // FIX-2026-08-03: trendline blocked counter (separate stat for DCA)
+  let safeTradeTrendlineBlocked = 0;
 
   // ─── Simulate DCA stack flow per signal ────────────────────────
   // Active stack: at most 1 stack per bot at any time.
@@ -744,6 +899,34 @@ async function runDcaBacktest(params) {
   for (const sig of signals) {
     const idx = sig.index;
     const buyPrice = sig.close;
+
+    // ─── FIX-2026-08-03: Safe-trade #2 (trendline) filter ───────────────
+    //   - DCA mode: filter blocks layer-add when price < LuxAlgo trendline
+    //   - ⚠️ ไม่แนะนำเปิดกับ DCA (DCA intent = buy dips; filter = block dip-buys)
+    //   - FAIL-OPEN: trendline ไม่พร้อม → ผ่าน
+    if (trendlineEnabled) {
+      const tlValue = _trendlineAt(sig.openTime, trendlineData.upperKlines, trendlineData.upperTrendline);
+      if (tlValue != null && Number.isFinite(tlValue) && buyPrice <= tlValue) {
+        const gapPct = ((buyPrice - tlValue) / tlValue) * 100;
+        trades.push({
+          signalTime: new Date(sig.openTime),
+          candleCloseTime: new Date(sig.closeTime),
+          buyPrice,
+          layerIndex: openStack ? (openStack.layerCount + 1) : 1,
+          layerCountAfter: 0,
+          buyFilled: false,
+          sellFilled: false,
+          qty: 0,
+          notional: 0,
+          exitReason: 'safe_trade_trendline_block',
+          bgState: sig.bgState,
+          trendlineValue: Number(tlValue.toFixed(8)),
+          gapPct: Number(gapPct.toFixed(3)),
+        });
+        safeTradeTrendlineBlocked += 1;
+        continue; // skip this layer-add
+      }
+    }
 
     // ─── Layer 1: open new stack ───────────────────────
     if (!openStack) {
@@ -959,6 +1142,10 @@ async function runDcaBacktest(params) {
         xs1Enabled: xs1Enabled !== false,
         stopLossOnUpperKC: stopLossOnUpperKC === true,
         autoArmStopLossOnUKC: autoArmStopLossOnUKC === true,
+        // FIX-2026-08-03: F1 thresholds + SL-UKC profit toggle (Option B parity)
+        autoArmLossPct: parseFloat(autoArmLossPct) || 10,
+        autoArmAgeHours: parseFloat(autoArmAgeHours) || 4,
+        slUkcTriggerOnProfit: slUkcTriggerOnProfit === true,
         // FIX-2026-08-03: persist Martingale params for reproducibility
         martingaleEnabled: martingaleEnabled === true,
         martingaleMultiplier: parseFloat(martingaleMultiplier) || 1.5,
@@ -1009,6 +1196,8 @@ async function runDcaBacktest(params) {
       : 0,
     candlesFetched: klines.length,
     stillHoldingPositions,
+    // FIX-2026-08-03: Safe-trade trendline filter blocked count (per-bar stat for DCA mode)
+    safeTradeTrendlineBlocked,
   };
 }
 
@@ -1244,6 +1433,14 @@ async function runMultiBacktest(params) {
     const { signals, upper: upperKC, lower: lowerKC, bg: bgArr } = sigResult;
     const opensArr = klines.map((k) => parseFloat(k.open));
     const closesArr = klines.map((k) => parseFloat(k.close));
+
+    // FIX-2026-08-03: pre-compute trendline if this bot enabled the filter
+    let trendlineData = null;
+    if (b.safeTradeTrendlineEnabled === true) {
+      trendlineData = await _computeBacktestTrendline({
+        symbol: b.symbol.toUpperCase(), timeframe: b.timeframe, fromMs, toMs, fetchFn: fetchKlines,
+      });
+    }
     let stepSizeStr = null;
     let minNotional = new Decimal('10');
     try {
@@ -1278,6 +1475,10 @@ async function runMultiBacktest(params) {
         dcaEnabled: b.dcaEnabled === true,
         dcaMaxLayers: b.dcaMaxLayers != null ? parseInt(b.dcaMaxLayers, 10) : 3,
         autoArmStopLossOnUKC: b.autoArmStopLossOnUKC === true,
+        // FIX-2026-08-03: F1 thresholds + SL-UKC profit toggle (Option B parity)
+        autoArmLossPct: b.autoArmLossPct != null ? parseFloat(b.autoArmLossPct) : 10,
+        autoArmAgeHours: b.autoArmAgeHours != null ? parseFloat(b.autoArmAgeHours) : 4,
+        slUkcTriggerOnProfit: b.slUkcTriggerOnProfit === true,
         // FIX-2026-08-03: Martingale per-bot toggles (parity with live trader._computeDcaLayerNotional)
         //   - default off (false) → ทุก DCA layer ใช้ capitalPerTrade เท่ากัน
         //   - ใช้เฉพาะเมื่อ dcaEnabled=true (validated ใน bot.routes.js + backtest.routes.js)
@@ -1293,6 +1494,8 @@ async function runMultiBacktest(params) {
       bgArr,
       opensArr,
       closesArr,
+      // FIX-2026-08-03: pre-computed LuxAlgo trendline for per-bot safe-trade #2 filter
+      trendlineData,
       truncated,
       candlesFetched: klines.length,
     };
@@ -1313,6 +1516,8 @@ async function runMultiBacktest(params) {
         _lowerKC: bi.lowerKC,
         _opensArr: bi.opensArr,
         _closesArr: bi.closesArr,
+        // FIX-2026-08-03: propagate trendline data per-signal (may be null if filter off)
+        _trendlineData: bi.trendlineData,
       });
     }
   }
@@ -1344,6 +1549,38 @@ async function runMultiBacktest(params) {
     // We collect DCA signals and process them in a dedicated pass after this loop.
     if (cfg.dcaEnabled) {
       continue;
+    }
+
+    // FIX-2026-08-03: Safe-trade #2 (trendline) filter — multi-bot per-signal check
+    //   - ใช้ per-bot pre-computed trendline (sig._trendlineData)
+    //   - FAIL-OPEN: trendline ไม่พร้อม → ผ่าน
+    //   - ทำก่อน concurrent slot check เพื่อไม่ให้ filter consume slot
+    if (sig._trendlineData && Array.isArray(sig._trendlineData.upperKlines)) {
+      const tlValue = _trendlineAt(sig.openTime, sig._trendlineData.upperKlines, sig._trendlineData.upperTrendline);
+      if (tlValue != null && Number.isFinite(tlValue) && buyPrice <= tlValue) {
+        const targetForRecord = new Decimal(buyPrice).mul(1 + cfg.tpPercent / 100 + 2 * cfg.feeRate).toNumber();
+        const gapPct = ((buyPrice - tlValue) / tlValue) * 100;
+        perBotTrades[sig.botId].push({
+          signalTime: new Date(sig.openTime),
+          candleCloseTime: new Date(sig.closeTime),
+          buyPrice,
+          targetSellPrice: targetForRecord,
+          sellPrice: null,
+          buyFilled: false,
+          sellFilled: false,
+          qty: 0,
+          notional: 0,
+          grossPnl: 0,
+          fees: 0,
+          realizedPnl: 0,
+          pnlPercent: 0,
+          exitReason: 'safe_trade_trendline_block',
+          bgState: sig.bgState,
+          trendlineValue: Number(tlValue.toFixed(8)),
+          gapPct: Number(gapPct.toFixed(3)),
+        });
+        continue; // skip this signal — do NOT consume slot or capital
+      }
     }
 
     const target = new Decimal(buyPrice).mul(1 + cfg.tpPercent / 100 + 2 * cfg.feeRate).toNumber();
@@ -1495,8 +1732,14 @@ async function runMultiBacktest(params) {
         break;
       }
       // 2) Upper-KC stop-loss (close > upperKC + buyPrice > close) → close at close (loss only)
-      if (cfg.stopLossOnUpperKC && sig._upperKC && sig._upperKC[j] != null
-          && candleClose > sig._upperKC[j] && buyPrice > candleClose) {
+      // FIX-2026-08-03: Option B parity — non-DCA backtester ใช้ OR semantic (armed = stopLossOnUpperKC || autoArmStopLossOnUKC)
+      //   - เดิม: เช็คแค่ cfg.stopLossOnUpperKC → bug! บอทที่ AU=on, SL-UKC=off backtest ไม่ trigger (ต่างจาก DCA backtest)
+      //   - ใหม่: armed = stopLossOnUpperKC OR autoArmStopLossOnUKC → live == backtest
+      // FIX-2026-08-03: slUkcTriggerOnProfit — default false = loss only, true = any close>upperKC
+      const armed = cfg.stopLossOnUpperKC || cfg.autoArmStopLossOnUKC;
+      const profitOk = cfg.slUkcTriggerOnProfit === true || buyPrice > candleClose;
+      if (armed && sig._upperKC && sig._upperKC[j] != null
+          && candleClose > sig._upperKC[j] && profitOk) {
         sellFilled = true;
         sellCandleIdx = j;
         exitMode = 'stop_loss_upper_kc';
@@ -1614,6 +1857,32 @@ async function runMultiBacktest(params) {
 
       for (const sig of sortedSignals) {
         const buyPrice = sig.close;
+
+        // FIX-2026-08-03: Safe-trade #2 (trendline) filter — DCA per-signal check (multi-bot)
+        //   - mirror runDcaBacktest pattern
+        //   - ⚠️ ไม่แนะนำเปิดกับ DCA (DCA ซื้อ dip — filter นี้ block dip-buy)
+        if (bi.trendlineData && Array.isArray(bi.trendlineData.upperKlines)) {
+          const tlValue = _trendlineAt(sig.openTime, bi.trendlineData.upperKlines, bi.trendlineData.upperTrendline);
+          if (tlValue != null && Number.isFinite(tlValue) && buyPrice <= tlValue) {
+            const gapPct = ((buyPrice - tlValue) / tlValue) * 100;
+            perBotTrades[bi.botId].push({
+              signalTime: new Date(sig.openTime),
+              candleCloseTime: new Date(sig.closeTime),
+              buyPrice,
+              layerIndex: openStack ? (openStack.layerCount + 1) : 1,
+              layerCountAfter: 0,
+              buyFilled: false,
+              sellFilled: false,
+              qty: 0,
+              notional: 0,
+              exitReason: 'safe_trade_trendline_block',
+              stackId: null,
+              trendlineValue: Number(tlValue.toFixed(8)),
+              gapPct: Number(gapPct.toFixed(3)),
+            });
+            continue; // skip this layer-add
+          }
+        }
 
         // ─── Layer 1: open new stack ───────────────────────────
         if (!openStack) {
@@ -1873,6 +2142,8 @@ async function runMultiBacktest(params) {
     const openedTrades = allBotTrades.filter((t) => openedExitReasons.has(t.exitReason));
     const dcaStacks = allBotTrades.filter((t) => t.isDcaStack === true);
     const isDca = bi.cfg.dcaEnabled === true;
+    // FIX-2026-08-03: Safe-trade trendline blocked count per-bot
+    const safeTradeTrendlineBlocked = allBotTrades.filter((t) => t.exitReason === 'safe_trade_trendline_block').length;
     return {
       botId: bi.botId,
       symbol: bi.cfg.symbol,
@@ -1888,6 +2159,13 @@ async function runMultiBacktest(params) {
       dcaEnabled: isDca,
       dcaMaxLayers: bi.cfg.dcaMaxLayers || 3,
       autoArmStopLossOnUKC: bi.cfg.autoArmStopLossOnUKC === true,
+      // FIX-2026-08-03: F1 thresholds + SL-UKC profit toggle (Option B parity)
+      autoArmLossPct: bi.cfg.autoArmLossPct ?? 10,
+      autoArmAgeHours: bi.cfg.autoArmAgeHours ?? 4,
+      slUkcTriggerOnProfit: bi.cfg.slUkcTriggerOnProfit === true,
+      // FIX-2026-08-03: Safe-trade #2 (trendline) filter — per-bot block count
+      safeTradeTrendlineEnabled: bi.trendlineData != null,
+      safeTradeTrendlineBlocked,
       candlesFetched: bi.candlesFetched,
       truncated: bi.truncated,
       signalsCount: bi.signals.length,
@@ -1987,6 +2265,10 @@ async function runMultiBacktest(params) {
           dcaEnabled: b.dcaEnabled === true,
           dcaMaxLayers: b.dcaMaxLayers != null ? parseInt(b.dcaMaxLayers, 10) : 3,
           autoArmStopLossOnUKC: b.autoArmStopLossOnUKC === true,
+          // FIX-2026-08-03: persist F1 thresholds + SL-UKC profit toggle for reproducibility
+          autoArmLossPct: b.autoArmLossPct != null ? parseFloat(b.autoArmLossPct) : 10,
+          autoArmAgeHours: b.autoArmAgeHours != null ? parseFloat(b.autoArmAgeHours) : 4,
+          slUkcTriggerOnProfit: b.slUkcTriggerOnProfit === true,
         })),
         model: 'realistic_v3_multi',
       },

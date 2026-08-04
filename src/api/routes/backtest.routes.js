@@ -27,12 +27,21 @@ router.post('/', requireAuth, async (req, res) => {
       xs1Enabled = true,
       stopLossOnUpperKC = false,
       autoArmStopLossOnUKC = false,
+      // FIX-2026-08-03: F1 thresholds + SL-UKC profit toggle (Option B parity)
+      autoArmLossPct = 10,
+      autoArmAgeHours = 4,
+      slUkcTriggerOnProfit = false,
       // FIX-2026-08-03: DCA + Martingale sizing (opt-in, default off — backward compat 100%)
       //   - martingaleEnabled requires dcaEnabled=true (validated below)
       //   - layer N notional = capitalPerTrade × mult^(N-1), capped by martingaleMaxLayerNotional
       martingaleEnabled = false,
       martingaleMultiplier = 1.5,
       martingaleMaxLayerNotional = 100,
+      // FIX-2026-08-03: Safe-trade filter #2 (LuxAlgo red pivot-low trendline) — opt-in, default OFF
+      //   - when true: backtester pre-fetches upper-TF (TREND_TF_MAP) klines + computes trendline;
+      //     signal skipped if lastClose <= trendline value at signal time
+      //   - when false (default): no trendline pre-fetch — backward compatible
+      safeTradeTrendlineEnabled = false,
     } = req.body || {};
 
     if (!symbol || !timeframe || !from || !to) {
@@ -68,10 +77,16 @@ router.post('/', requireAuth, async (req, res) => {
         xs1Enabled: xs1Enabled !== false,
         stopLossOnUpperKC: stopLossOnUpperKC === true,
         autoArmStopLossOnUKC: autoArmStopLossOnUKC === true,
+        // FIX-2026-08-03: F1 thresholds + SL-UKC profit toggle (Option B parity)
+        autoArmLossPct: parseFloat(autoArmLossPct) || 10,
+        autoArmAgeHours: parseFloat(autoArmAgeHours) || 4,
+        slUkcTriggerOnProfit: slUkcTriggerOnProfit === true,
         // FIX-2026-08-03: pass-through Martingale params (parity with trader._computeDcaLayerNotional)
         martingaleEnabled: martingaleEnabled === true,
         martingaleMultiplier: parseFloat(martingaleMultiplier) || 1.5,
         martingaleMaxLayerNotional: parseFloat(martingaleMaxLayerNotional) || 100,
+        // FIX-2026-08-03: Safe-trade filter #2 (trendline) — forward flag to DCA backtest
+        safeTradeTrendlineEnabled: safeTradeTrendlineEnabled === true,
       });
       return res.json({
         id: result.id,
@@ -98,6 +113,16 @@ router.post('/', requireAuth, async (req, res) => {
       capitalPerTrade: parseFloat(capitalPerTrade),
       useBnbForFees: !!useBnbForFees,
       maxConcurrentTrades: parseInt(maxConcurrentTrades, 10),
+      // FIX-2026-08-03: F1 thresholds + SL-UKC profit toggle (Option B parity)
+      kcMult: parseFloat(kcMult),
+      xs1Enabled: xs1Enabled !== false,
+      stopLossOnUpperKC: stopLossOnUpperKC === true,
+      autoArmStopLossOnUKC: autoArmStopLossOnUKC === true,
+      autoArmLossPct: parseFloat(autoArmLossPct) || 10,
+      autoArmAgeHours: parseFloat(autoArmAgeHours) || 4,
+      slUkcTriggerOnProfit: slUkcTriggerOnProfit === true,
+      // FIX-2026-08-03: Safe-trade filter #2 (trendline) — forward flag to non-DCA backtest
+      safeTradeTrendlineEnabled: safeTradeTrendlineEnabled === true,
     });
 
     res.json({
@@ -187,6 +212,12 @@ router.post('/multi', requireAuth, async (req, res) => {
         dcaEnabled: b.dcaEnabled === true,
         dcaMaxLayers: parseInt(b.dcaMaxLayers != null ? b.dcaMaxLayers : 3, 10),
         autoArmStopLossOnUKC: b.autoArmStopLossOnUKC === true,
+        // FIX-2026-08-03: F1 thresholds + SL-UKC profit toggle (Option B parity)
+        autoArmLossPct: b.autoArmLossPct != null ? parseFloat(b.autoArmLossPct) : 10,
+        autoArmAgeHours: b.autoArmAgeHours != null ? parseFloat(b.autoArmAgeHours) : 4,
+        slUkcTriggerOnProfit: b.slUkcTriggerOnProfit === true,
+        // FIX-2026-08-03: Safe-trade filter #2 (trendline) — forward per-bot flag
+        safeTradeTrendlineEnabled: b.safeTradeTrendlineEnabled === true,
       })),
     });
 

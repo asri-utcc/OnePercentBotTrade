@@ -55,6 +55,11 @@ const backtestResultSchema = new mongoose.Schema(
     maxConcurrentSkipCount: { type: Number, default: 0 },
     belowMinNotionalCount: { type: Number, default: 0 },
     tpHitCount: { type: Number, default: 0 },
+    // FIX-2026-08-03: Safe-trade filter #2 (trendline) blocked signal count
+    //   - จำนวน S1 signals ที่ถูก skip เพราะ lastClose <= LuxAlgo red pivot-low trendline
+    //   - track แยกจาก noBuyFillCount (which is "signal passed filter but couldn't fill")
+    //   - = 0 เมื่อ safeTradeTrendlineEnabled=false
+    safeTradeTrendlineBlocked: { type: Number, default: 0 },
     // จำนวนไม้ที่เปิดพร้อมกันสูงสุดตลอด simulation (peak concurrency)
     // ใช้ดูว่า maxConcurrentTrades ต้องตั้ง ≥ เท่าไหร่ถึงจะรองรับช่วง downtrend ที่ไม่ TP
     maxConcurrentTradesUsed: { type: Number, default: 0 },

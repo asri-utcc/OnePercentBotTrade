@@ -16,6 +16,7 @@ const signalEngine = require('../../core/signalEngine');
 const fees = require('../../binance/fees');
 const tpUpdater = require('../../core/tpUpdater'); // FIX-2026-07-28: applyMinNetTpFloor (single source of truth)
 const volatilityForBot = require('../../core/volatilityForBot'); // 2026-07-31: per-bot volatility snapshot (KC + TP + 24h vol)
+const trendlineForBot = require('../../core/trendlineForBot'); // FIX-2026-08-03: Safe-trade #2 (trendline) live status for bot card badge
 const qualityIndicator = require('../../core/qualityIndicator'); // FIX-2026-08-01: Bot Quality Indicator (0-4 score)
 const logger = require('../../utils/logger');
 const eventBus = require('../../services/eventBus');
@@ -243,6 +244,11 @@ router.get('/', requireAuth, async (req, res) => {
     const qualitySnaps = includeQuality
       ? await qualityIndicator.computeBotsQuality(bots)
       : bots.map((b) => qualityIndicator.getCachedOnly(b) || {});
+    // FIX-2026-08-03: Safe-trade #2 (trendline) — read in-memory status cache populated by botManager
+    //   - ไม่เรียก Binance ที่นี่ (พึ่ง botManager's 60s scan) — เพื่อ /api/bots response time คงที่
+    //   - ถ้าบอทปิด filter → status=null (UI แสดง "off")
+    //   - ถ้ายังไม่ scan (cold start) → status=null → UI แสดง "—"
+    const trendlineStatusMap = botManager.getTrendlineStatusForBots(bots.map((b) => String(b._id)));
     // เพิ่ม totalCapital virtual + today/month stats + price/EMA indicator + volatility snapshot
     const enriched = bots.map((b, idx) => {
       const t = todayMap.get(String(b._id)) || { todayTrades: 0, todayPnl: 0 };
@@ -250,6 +256,9 @@ router.get('/', requireAuth, async (req, res) => {
       const indicator = computeBotIndicator(b);
       const vol = volSnapshots[idx] || {};
       const q = qualitySnaps[idx] || {};
+      // FIX-2026-08-03: trendline status — null when filter OFF, null when not yet scanned
+      const tlEnabled = b.safeTradeTrendlineEnabled === true;
+      const tl = tlEnabled ? trendlineStatusMap[String(b._id)] : null;
       return {
         ...b,
         totalCapital: (b.capitalPerTrade || 0) * (b.maxTrades || 0),
@@ -286,6 +295,21 @@ router.get('/', requireAuth, async (req, res) => {
         qualityUpdatedAt: q.updatedAt || null,
         qualityCached: !!q.cached,
         qualityEnabled: q.enabled !== false,
+        // FIX-2026-08-03: Safe-trade filter #2 (trendline) — live badge fields
+        //   - tlEnabled: ค่าจากบอท (bot.safeTradeTrendlineEnabled)
+        //   - tlStatus: 'pass' | 'blocked' | 'warmup' | 'insufficient_data' | 'api_error' | 'no_trend_tf' | null (when disabled or not yet scanned)
+        //   - tlGapPct: ((lastClose - trendlineValue) / trendlineValue) * 100  (null when warmup/error)
+        //   - tlUpdatedAt: ms epoch when cache was refreshed (null when not yet scanned)
+        //   - UI ใช้สร้าง badge: tlEnabled=false → "off", tlStatus='pass' → "✅", 'blocked' → "❌", etc.
+        tlEnabled,
+        tlStatus: tl ? tl.status : null,
+        tlTrendTF: tl ? tl.trendTF : null,
+        tlLastClose: tl ? tl.lastClose : null,
+        tlTrendlineValue: tl ? tl.trendlineValue : null,
+        tlGapPct: tl ? tl.gapPct : null,
+        tlPivotCount: tl ? tl.pivotCount : 0,
+        tlUpdatedAt: tl ? tl.updatedAt : null,
+        tlCached: tl ? !!tl.cached : false,
       };
     });
     res.json({ bots: enriched });
@@ -302,6 +326,52 @@ router.get('/', requireAuth, async (req, res) => {
 //   ใช้ในหน้า /bots.html สำหรับ Open Positions tile + modal รายละเอียด
 // IMPORTANT: declare BEFORE /:id route เพื่อหลีกเลี่ยง Express match "positions" เป็น id
 const OPEN_POSITIONS_STATES_FOR_API = ['placed', 'partial_wait', 'filled', 'retrying', 'holding', 'selling', 'stopping'];
+
+// FIX-2026-08-03: Safe-trade filter #2 (trendline) — live status endpoint
+//   - GET /api/bots/safe-trade-trendline → returns map of botId → status (all bots)
+//   - GET /api/bots/safe-trade-trendline/:botId → returns single bot status (force refresh on ?fresh=1)
+//   - data from in-memory cache (populated by botManager 60s scan) — fast, no Binance call
+//   - when ?fresh=1 on per-bot route: bypass cache and recompute (single Binance fetch)
+router.get('/safe-trade-trendline', requireAuth, async (req, res) => {
+  try {
+    const bots = await Bot.find({ safeTradeTrendlineEnabled: true }, { _id: 1 }).lean();
+    const botIds = bots.map((b) => String(b._id));
+    const statusMap = botManager.getTrendlineStatusForBots(botIds);
+    res.json({ asOf: Date.now(), count: botIds.length, statuses: statusMap });
+  } catch (err) {
+    logger.error({ err: err.message }, 'bots: GET /safe-trade-trendline failed');
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.get('/safe-trade-trendline/:botId', requireAuth, async (req, res) => {
+  try {
+    const { botId } = req.params;
+    if (req.query.fresh === '1') {
+      // Bypass cache — single Binance fetch
+      const bot = await Bot.findById(botId).lean();
+      if (!bot) return res.status(404).json({ error: 'bot not found' });
+      const snap = await trendlineForBot.computeBotTrendlineSnapshot(bot);
+      return res.json({ asOf: Date.now(), botId, snapshot: snap });
+    }
+    // Cached path — read from botManager's in-memory map
+    const statusMap = botManager.getTrendlineStatusForBots([botId]);
+    const snapshot = statusMap[botId] || null;
+    if (!snapshot) {
+      // bot may have filter disabled, not yet scanned, or doesn't exist
+      const bot = await Bot.findById(botId).lean();
+      if (!bot) return res.status(404).json({ error: 'bot not found' });
+      if (bot.safeTradeTrendlineEnabled !== true) {
+        return res.json({ asOf: Date.now(), botId, snapshot: { status: 'disabled' } });
+      }
+      return res.json({ asOf: Date.now(), botId, snapshot: null, hint: 'not yet scanned (wait up to 60s after botManager start)' });
+    }
+    res.json({ asOf: Date.now(), botId, snapshot });
+  } catch (err) {
+    logger.error({ err: err.message, botId: req.params.botId }, 'bots: GET /safe-trade-trendline/:botId failed');
+    res.status(500).json({ error: err.message });
+  }
+});
 
 router.get('/positions', requireAuth, async (req, res) => {
   try {
@@ -396,10 +466,13 @@ router.get('/positions', requireAuth, async (req, res) => {
         botRetryMax: bot.retryMax ?? 1,
         error: t.error || '',
         // FIX-2026-08-01: SL-armed flags (F1) — exposed for position card badge (🛡️ Au)
-        //   - useStopLossOnUKC=true = trader._autoArmStopLossOnUKC armed (loss>10% + age>4h)
+        //   - useStopLossOnUKC=true = trader._autoArmStopLossOnUKC armed (loss>autoArmLossPct + age>autoArmAgeHours)
         //   - autoArmedAt = timestamp when armed (audit)
+        // FIX-2026-08-03: expose per-trade snapshot ของ thresholds ตอน arm — positionCard.js ใช้แสดง "stuck-like" highlight
         useStopLossOnUKC: t.useStopLossOnUKC === true,
         autoArmedAt: t.autoArmedAt || null,
+        autoArmLossPct: t.autoArmLossPct ?? null,
+        autoArmAgeHours: t.autoArmAgeHours ?? null,
         createdAt: t.createdAt,
         currentPrice,
         priceSource, // FIX-2026-08-03: 'binance-bookTicker' | 'klineCache' | 'buyPrice' — exposed for UI badge
@@ -582,15 +655,26 @@ router.post('/', requireAuth, requireBotActionPassword, async (req, res) => {
       //   - true (default): ก่อนวาง BUY ให้เช็ค super-upper TF (4h/1d/1w ตาม bot TF) ว่าเป็นแท่งเขียว/เหนือ EMA20
       //   - false: ซื้อทันที (พฤติกรรมเดิม)
       safeTradeEnabled: data.safeTradeEnabled !== false,
+      // FIX-2026-08-03: safeTradeTrendlineEnabled (default false) — opt-in LuxAlgo red trendline filter
+      //   - true: BUY gate ตรวจราคา "เหนือ" trendline support บน upper-TF (TREND_TF_MAP)
+      //   - false (default): ไม่กรอง trendline — opt-in เท่านั้น
+      //   - ⚠️ ไม่แนะนำสำหรับบอท DCA (DCA ซื้อ dip — filter นี้ block dip-buy)
+      safeTradeTrendlineEnabled: data.safeTradeTrendlineEnabled === true,
       // FIX-2026-08-01: autoPauseEnabled (default true) — per-bot auto-pause on low Min-%KC toggle
       //   - true (default): ทุก 5 min ตรวจ Min-%KC(30 bars) — ถ้า < autoPauseMinKcPct → set enabled=false + auto-resume เมื่อกลับมา
       //   - false: ไม่ตรวจ (พฤติกรรมเดิม)
       autoPauseEnabled: data.autoPauseEnabled !== false,
       autoPauseMinKcPct: Math.min(50, Math.max(0.1, parseFloat(data.autoPauseMinKcPct ?? 2))),
       // FIX-2026-07-31: autoArmStopLossOnUKC (default true) — per-bot auto-arm SL-on-UKC toggle
-      //   - true (default): auto-arm trade.useStopLossOnUKC=true เมื่อ position loss >10% + age >4h
-      //   - false: ไม่ auto-arm (SL-on-UKC จะไม่ trigger แม้ bot.stopLossOnUpperKC=true)
+      //   - true (default): auto-arm trade.useStopLossOnUKC=true เมื่อ position loss > autoArmLossPct + age > autoArmAgeHours
+      //   - false: ไม่ auto-arm (SL-on-UKC จะไม่ trigger)
       autoArmStopLossOnUKC: data.autoArmStopLossOnUKC !== false,
+      // FIX-2026-08-03: per-bot auto-arm loss threshold % (1..90, default 10)
+      autoArmLossPct: Math.min(90, Math.max(1, parseFloat(data.autoArmLossPct ?? 10))),
+      // FIX-2026-08-03: per-bot auto-arm age threshold hours (0.5..168, default 4)
+      autoArmAgeHours: Math.min(168, Math.max(0.5, parseFloat(data.autoArmAgeHours ?? 4))),
+      // FIX-2026-08-03: SL-UKC trigger on profitable positions (default false — loss only)
+      slUkcTriggerOnProfit: data.slUkcTriggerOnProfit === true,
       // FIX-2026-07-31: tpTrendMultiplier (default 2, clamp 1..10) — TP ×N when upper-TF trend=upper
       //   - 1 = off (no multiplier)
       //   - 2 = double (default: 0.2% → 0.4%)
@@ -639,7 +723,7 @@ router.put('/:id', requireAuth, async (req, res) => {
     if (!bot) return res.status(404).json({ error: 'Bot not found' });
 
     const data = req.body || {};
-    const allowed = ['name', 'capitalPerTrade', 'maxTrades', 'tpPercent', 'retryTimeMin', 'retryMax', 'timeframe', 'stopLossOnUpperKC', 'autoUpdateTp', 'kcMult', 'minSpreadTicks', 's1OnlyDown', 'xs1Enabled', 'cbEnabled', 'safeTradeEnabled', 'autoPauseEnabled', 'autoPauseMinKcPct', 'suggestTpWindow', 'autoArmStopLossOnUKC', 'tpTrendMultiplier', 'tpTrendEnabled', 'dcaEnabled', 'dcaMaxLayers', 'martingaleEnabled', 'martingaleMultiplier', 'martingaleMaxLayerNotional'];
+    const allowed = ['name', 'capitalPerTrade', 'maxTrades', 'tpPercent', 'retryTimeMin', 'retryMax', 'timeframe', 'stopLossOnUpperKC', 'autoUpdateTp', 'kcMult', 'minSpreadTicks', 's1OnlyDown', 'xs1Enabled', 'cbEnabled', 'safeTradeEnabled', 'safeTradeTrendlineEnabled', 'autoPauseEnabled', 'autoPauseMinKcPct', 'suggestTpWindow', 'autoArmStopLossOnUKC', 'autoArmLossPct', 'autoArmAgeHours', 'slUkcTriggerOnProfit', 'tpTrendMultiplier', 'tpTrendEnabled', 'dcaEnabled', 'dcaMaxLayers', 'martingaleEnabled', 'martingaleMultiplier', 'martingaleMaxLayerNotional'];
 
     for (const k of allowed) {
       if (data[k] !== undefined) {
@@ -648,6 +732,15 @@ router.put('/:id', requireAuth, async (req, res) => {
         } else if (k === 'tpTrendMultiplier') {
           // FIX-2026-07-31 (F2): TP ×N multiplier clamp 1..10
           bot[k] = Math.min(10, Math.max(1, parseFloat(data[k])));
+        } else if (k === 'autoArmLossPct') {
+          // FIX-2026-08-03: per-bot auto-arm loss threshold % (1..90, default 10)
+          bot[k] = Math.min(90, Math.max(1, parseFloat(data[k])));
+        } else if (k === 'autoArmAgeHours') {
+          // FIX-2026-08-03: per-bot auto-arm age threshold hours (0.5..168, default 4)
+          bot[k] = Math.min(168, Math.max(0.5, parseFloat(data[k])));
+        } else if (k === 'slUkcTriggerOnProfit') {
+          // FIX-2026-08-03: SL-UKC trigger on profitable positions (default false)
+          bot[k] = data[k] === true || data[k] === 'true';
         } else if (k === 'tpTrendEnabled') {
           // FIX-2026-08-01: per-bot toggle for TP trend multiplier (default true)
           bot[k] = data[k] === true || data[k] === 'true';
@@ -725,6 +818,16 @@ router.put('/:id', requireAuth, async (req, res) => {
     if (data.timeframe !== undefined || data.suggestTpWindow !== undefined) {
       try {
         volatilityForBot.invalidate(bot.symbol, bot.timeframe);
+      } catch (_) { /* non-fatal */ }
+    }
+
+    // FIX-2026-08-03: invalidate Safe-trade #2 (trendline) cache เมื่อ timeframe เปลี่ยน
+    //   - TREND_TF_MAP[timeframe] resolves different upper-TF → must re-fetch
+    //   - also clears botManager's in-memory status cache so next scan rebuilds immediately
+    if (data.timeframe !== undefined) {
+      try {
+        trendlineForBot.invalidate(bot.symbol, bot.timeframe);
+        botManager.invalidateTrendlineCache(bot.symbol, bot.timeframe);
       } catch (_) { /* non-fatal */ }
     }
 
@@ -967,6 +1070,12 @@ router.post('/suggest-tp', requireAuth, async (req, res) => {
 //   - klines (default 30 แท่ง) + keltner (basis/upper/lower) + signals (S1 markers)
 //   - tradeMarkers (BUY/SELL markers) จาก Trade collection ภายใน window
 //   - ใช้ในหน้า /bots.html วาด lightweight-charts ในแต่ละ enabled bot card (~280x120 px)
+// FIX-2026-08-04: ใช้ klineCache (server-side, populated by WS) ก่อน fall back ไป Binance REST
+//   - cache hit: 0 Binance weight (KC + signal values match bot trader's exactly — same data source)
+//   - cache miss: fall back 1 REST call (cold start / disabled bot / insufficient history)
+//   - สำคัญ: คำนวณ KC + signals จาก FULL cached klines (ไม่ใช่ slice ก่อน) แล้ว slice ผลลัพธ์ทีหลัง
+//     เพื่อให้ EMA seed (SMA 20 แรก) ใช้ประวัติยาวเหมือนที่ bot trader ใช้ → signals ตรงกัน 100%
+//   - klineCache ถูก seed ตอน spawnTrader() (limit=200) → mini-chart default limit=40 cache hit เกือบ 100%
 router.get('/:id/mini-chart', requireAuth, async (req, res) => {
   try {
     const bot = await Bot.findById(req.params.id).lean();
@@ -974,39 +1083,75 @@ router.get('/:id/mini-chart', requireAuth, async (req, res) => {
 
     const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 30, 5), 200);
 
-    const raw = await binanceRest.getKlines({
-      symbol: bot.symbol,
-      interval: bot.timeframe,
-      limit,
-    });
-    const klines = raw.map((k) => {
-      const [openTime, open, high, low, close, volume, closeTime] = k;
-      return {
-        openTime,
-        open: parseFloat(open),
-        high: parseFloat(high),
-        low: parseFloat(low),
-        close: parseFloat(close),
-        volume: parseFloat(volume),
-        closeTime,
-      };
-    });
-    if (klines.length === 0) {
+    // FIX-2026-08-04: try klineCache first (zero Binance weight)
+    //   - format already matches: openTime/open/high/low/close/volume/closeTime (epoch ms)
+    //   - includes in-progress candle (last entry = current if not closed)
+    let fullKlines;
+    let usedCache = false;
+    const cached = klineCache.getAll(bot.symbol, bot.timeframe);
+    if (cached.length >= Math.max(limit, 21)) {
+      // ต้องมีอย่างน้อย max(limit, 21) → เพื่อ EMA warmup + ตัด slice หลังคำนวณ KC
+      fullKlines = cached.map((c) => ({
+        openTime: c.openTime,
+        open: parseFloat(c.open),
+        high: parseFloat(c.high),
+        low: parseFloat(c.low),
+        close: parseFloat(c.close),
+        volume: parseFloat(c.volume),
+        closeTime: c.closeTime,
+      }));
+      usedCache = true;
+      logger.debug({ botId: req.params.id, symbol: bot.symbol, tf: bot.timeframe, limit, cacheSize: cached.length }, 'mini-chart: cache hit');
+    } else {
+      // FIX-2026-08-04: cache insufficient (cold start / disabled bot / WS not seeded yet) → fall back to REST
+      //   - fetch extra candles (limit + 20) เพื่อให้ EMA seed มี history พอ
+      const fetchLimit = Math.min(limit + 20, 500);
+      const raw = await binanceRest.getKlines({
+        symbol: bot.symbol,
+        interval: bot.timeframe,
+        limit: fetchLimit,
+      });
+      fullKlines = raw.map((k) => {
+        const [openTime, open, high, low, close, volume, closeTime] = k;
+        return {
+          openTime,
+          open: parseFloat(open),
+          high: parseFloat(high),
+          low: parseFloat(low),
+          close: parseFloat(close),
+          volume: parseFloat(volume),
+          closeTime,
+        };
+      });
+      logger.debug({ botId: req.params.id, symbol: bot.symbol, tf: bot.timeframe, limit, cacheSize: cached.length, fetched: fullKlines.length }, 'mini-chart: cache miss → REST fallback');
+    }
+    if (fullKlines.length === 0) {
       return res.json({ symbol: bot.symbol, timeframe: bot.timeframe, klines: [], keltner: { basis: [], upper: [], lower: [] }, signals: [], tradeMarkers: [] });
     }
 
-    // FIX-2026-07-24: compute KC + S1 signals ตาม per-bot kcMult + s1OnlyDown (default 1.5)
+    // FIX-2026-08-04: คำนวณ KC + S1 signals จาก FULL klines ก่อน → signals ตรงกับ bot trader
+    // FIX-2026-07-24: per-bot kcMult + s1OnlyDown (default 1.5, false)
     // FIX-2026-07-25: xs1Enabled (per-bot toggle) — match trader's behavior for scan-volatility preview
-    const { signals, basis, upper, lower } = signalEngine.detectS1Signals(klines, {
+    const { signals: allSignals, basis: fullBasis, upper: fullUpper, lower: fullLower } = signalEngine.detectS1Signals(fullKlines, {
       mult: bot.kcMult || 1.5,
       onlyDown: !!bot.s1OnlyDown,
       xs1Enabled: bot.xs1Enabled !== false,
     });
 
+    // FIX-2026-08-04: slice last `limit` candles (พร้อม parallel keltner + signals) สำหรับ response
+    const total = fullKlines.length;
+    const startIdx = Math.max(0, total - limit);
+    const klines = fullKlines.slice(startIdx);
+    const basis = fullBasis.slice(startIdx);
+    const upper = fullUpper.slice(startIdx);
+    const lower = fullLower.slice(startIdx);
+    // filter signals เฉพาะที่อยู่ใน slice
+    const earliestOpenTime = klines[0].openTime;
+    const signals = allSignals.filter((s) => s.openTime >= earliestOpenTime);
+
     // FIX-2026-07-24: ดึง BUY/SELL markers จาก Trade collection ภายใน window
     //   - เฉพาะ state ที่มีการเทรดจริง (filled/selling/sold — ไม่นับ placed/cancelled/failed)
     //   - ใช้ buyFilledAt + sellFilledAt เป็นเวลา (ถ้ามี)
-    const earliestOpenTime = klines[0].openTime;
     const trades = await Trade.find({
       botId: bot._id,
       state: { $in: ['filled', 'selling', 'sold', 'holding', 'stopping'] },
@@ -1195,8 +1340,11 @@ router.post('/bulk-update', requireAuth, async (req, res) => {
       'capitalPerTrade', 'maxTrades', 'tpPercent', 'retryTimeMin', 'retryMax',
       'timeframe', 'stopLossOnUpperKC', 'autoUpdateTp', 'kcMult', 'minSpreadTicks',
       's1OnlyDown', 'xs1Enabled', 'cbEnabled', 'safeTradeEnabled',
+      // FIX-2026-08-03: Safe-trade filter #2 (trendline) — bulk-update support
+      'safeTradeTrendlineEnabled',
       'autoPauseEnabled', 'autoPauseMinKcPct',
-      'suggestTpWindow', 'autoArmStopLossOnUKC', 'tpTrendMultiplier', 'tpTrendEnabled',
+      'suggestTpWindow', 'autoArmStopLossOnUKC', 'autoArmLossPct', 'autoArmAgeHours', 'slUkcTriggerOnProfit',
+      'tpTrendMultiplier', 'tpTrendEnabled',
       'dcaEnabled', 'dcaMaxLayers',
       // FIX-2026-08-03: Martingale fields (Master Config support)
       'martingaleEnabled', 'martingaleMultiplier', 'martingaleMaxLayerNotional',
@@ -1206,6 +1354,10 @@ router.post('/bulk-update', requireAuth, async (req, res) => {
       if (k in settings) update[k] = settings[k];
     }
     if (Number.isFinite(update.autoPauseMinKcPct)) update.autoPauseMinKcPct = Math.max(0.1, Math.min(50, update.autoPauseMinKcPct));
+    // FIX-2026-08-03: F1 auto-arm thresholds + profit trigger (bulk-update support)
+    if (Number.isFinite(update.autoArmLossPct)) update.autoArmLossPct = Math.max(1, Math.min(90, update.autoArmLossPct));
+    if (Number.isFinite(update.autoArmAgeHours)) update.autoArmAgeHours = Math.max(0.5, Math.min(168, update.autoArmAgeHours));
+    if ('slUkcTriggerOnProfit' in update) update.slUkcTriggerOnProfit = update.slUkcTriggerOnProfit === true || update.slUkcTriggerOnProfit === 'true';
     if (Number.isFinite(update.tpPercent)) update.tpPercent = Math.max(0.1, Math.min(100, update.tpPercent));
     if (Number.isFinite(update.kcMult)) update.kcMult = Math.max(0.5, Math.min(5, update.kcMult));
     if (Number.isFinite(update.capitalPerTrade)) update.capitalPerTrade = Math.max(0.00000001, update.capitalPerTrade);
@@ -1366,6 +1518,11 @@ router.post('/bulk-toggle', requireAuth, requireBotActionPassword, async (req, r
           if (b) {
             volatilityForBot.invalidate(b.symbol, b.timeframe);
             qualityIndicator.invalidate(b.symbol, b.timeframe);
+            // FIX-2026-08-03: invalidate Safe-trade #2 (trendline) cache after TF change
+            try {
+              trendlineForBot.invalidate(b.symbol, b.timeframe);
+              botManager.invalidateTrendlineCache(b.symbol, b.timeframe);
+            } catch (_) { /* ignore */ }
           }
         } catch (_) { /* ignore — non-fatal */ }
       }

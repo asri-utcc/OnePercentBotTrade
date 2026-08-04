@@ -29,6 +29,8 @@ const DEFAULT_EVENTS = {
   tpLowPnL: true,
   // FIX-2026-08-01: Circuit-breaker (CB) panic-sell — เดิมชื่อ sls1PanicClose (ไม่มีใน list มาก่อน)
   cbPanicClose: true,
+  // FIX-2026-08-03: Safe-trade filter #2 (trendline) status transitions pass↔blocked (anti-spam: เฉพาะ transition)
+  trendlineStatusChanged: true,
   // FIX-2026-08-02: DCA + BEP stack events (per user request: full notifications, not compact)
   dcaLayerAdded: true, dcaTargetHit: true, dcaMaxLayersHit: true,
 };
@@ -70,8 +72,9 @@ async function fetchUsdtBalance() {
   }
 }
 
-const PNL_SCAN_INTERVAL_MS = 30 * 1000;   // 30s
-const STUCK_SCAN_INTERVAL_MS = 60 * 1000; // 60s
+// FIX-2026-08-04: 30s → 120s (ลด DB load — telegram PnL scan เป็น read-only display)
+const PNL_SCAN_INTERVAL_MS = 120 * 1000;
+const STUCK_SCAN_INTERVAL_MS = 180 * 1000; // FIX-2026-08-04: 60s → 180s (read-only scan)
 const TELEGRAM_API_TIMEOUT_MS = 8000;
 const CONFIG_RELOAD_MS = 60 * 1000; // 60s in-memory config cache
 
@@ -255,6 +258,16 @@ function renderMessage(eventKey, p, cfg) {
       // FIX-2026-08-01: Circuit-breaker (CB) panic-sell — เดิมชื่อ case 'sls1PanicClose'
       case 'cbPanicClose':
         return `🚨 Circuit-breaker panic-sell — ปิดทุก position\nBot: ${p.botName}\nSymbol: ${p.symbol} (${p.timeframe || '?'})\n3 แท่งติด red + below lowerKC → กันกราฟไหล\nClosed: ${p.closedCount} ไม้\nLowerKC: ${p.lastLower || '?'}`;
+      // FIX-2026-08-03: Safe-trade filter #2 (trendline) status transition (pass ↔ blocked)
+      //   - แจ้งเฉพาะตอน transition (กัน spam) — first scan หรือ warmup ไม่ส่ง
+      //   - ตัวอย่าง: "📐 BNBUSDT 5m — trendline: pass → blocked (price 605 < TL 612.3, gap -1.20%)"
+      case 'trendlineStatusChanged': {
+        const prev = p.prevStatus || '?';
+        const curr = p.newStatus || '?';
+        const arrow = curr === 'pass' ? '✅ pass' : '❌ blocked';
+        const gap = p.gapPct != null ? p.gapPct.toFixed(2) : '?';
+        return `📐 Trendline status: ${prev} → ${arrow}\nBot: ${p.botName}\nSymbol: ${p.symbol} (${p.timeframe || '?'} → ${p.trendTF || '?'})\nLast close: ${p.lastClose != null ? p.lastClose.toFixed(6) : '?'}\nTrendline: ${p.trendlineValue != null ? p.trendlineValue.toFixed(6) : '?'}\nGap: ${gap}%`;
+      }
       // FIX-2026-07-30: SELL PARTIALLY_FILLED — บอทจะไม่ mark sold ทันที รอ fill ที่เหลือ
       case 'sellPartialFill':
         return `⚠️ SELL PARTIALLY_FILLED — ยังไม่ปิด position\nBot: ${p.botName}\nSymbol: ${p.symbol} (${p.timeframe || '?'})\nOrder: ${p.orderId}\nFilled: ${p.executedQty} / ${p.sellQty} (remaining ${p.remainingQty})\nAvg: ${p.avgPrice}\nกำลังรอ fill ที่เหลือ — deadline finalizer จะทำงานอัตโนมัติ`;
