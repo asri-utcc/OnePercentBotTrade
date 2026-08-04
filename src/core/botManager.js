@@ -609,10 +609,16 @@ class BotManager {
     eventBus.emit('bot:updated', { botId });
     // FIX-2026-07-24: action-specific event สำหรับ Telegram notifier (bot:updated payload ไม่มี verb)
     eventBus.emit('bot:enabled', { botId });
-    // FIX-2026-08-04 v2: invalidate trendline cache on re-enable (กัน stale badge หลัง enable)
-    //   - เดิม: enabled bot filter ใน checkTrendlineStatusBots → disabled bot cache freeze
-    //   - เมื่อ enable → invalidate → next scan fresh (แทนที่จะแสดง stale data นาน 10 min)
-    invalidateTrendlineCache(bot.symbol, bot.timeframe);
+    // FIX-2026-08-04 v3: invalidate trendline cache + scan immediately (fresh badge on re-enable)
+    //   - เดิม: only invalidate → stale นาน 10 นาที (รอ next 600s tick)
+    //   - ใหม่: invalidate + fire-and-forget scanSingleBot() → fresh badge ภายใน ~200ms
+    //   - หากไม่มี safeTradeTrendlineEnabled → skip (no Binance call wasted)
+    if (bot.safeTradeTrendlineEnabled === true) {
+      invalidateTrendlineCache(bot.symbol, bot.timeframe);
+      scanSingleBot(bot).catch((err) => {
+        logger.warn({ botId: String(bot._id), symbol: bot.symbol, err: err.message }, 'botManager: enableBot → scanSingleBot failed');
+      });
+    }
     return bot;
   }
 
@@ -759,13 +765,68 @@ module.exports.invalidateTrendlineCache = invalidateTrendlineCache;
 //   - ใช้ trendlineForBot.mapWithConcurrency(6) กัน burst weight
 //   - **read-only** — ไม่มี side effect กับ trade state
 //   - emit 'bot:trendline_status_changed' event เมื่อ status เปลี่ยน (เพื่อให้ telegram notifier แจ้งได้)
+// FIX-2026-08-04 v3: extract scanSingleBot() — reuse จาก enableBot() เพื่อ refresh badge ทันทีหลัง enable
+//   - เดิม enable → invalidate → รอ 600s scan tick → stale 10 นาที
+//   - ใหม่ enable → invalidate → scanSingleBot() ทันที (Binance ~200ms) → fresh badge
+//   - transition event: หาก scanSingleBot ครั้งแรกที่ prev=undefined → skip notification (กัน spam)
+async function scanSingleBot(bot, precomputedSnap) {
+  const botId = String(bot._id);
+  const prev = _trendlineStatusCache.get(botId);
+  let snap = precomputedSnap;
+  if (!snap) {
+    try {
+      snap = await trendlineForBot.computeBotTrendlineSnapshot(bot);
+    } catch (err) {
+      logger.warn({ botId, symbol: bot.symbol, err: err.message }, 'botManager: scanSingleBot — computeBotTrendlineSnapshot failed');
+      return;
+    }
+  }
+  const now = Date.now();
+  _trendlineStatusCache.set(botId, {
+    status: snap.status || 'unknown',
+    trendTF: snap.trendTF || null,
+    lastClose: snap.lastClose != null ? snap.lastClose : null,
+    trendlineValue: snap.trendlineValue != null ? snap.trendlineValue : null,
+    gapPct: snap.gapPct != null ? Number(snap.gapPct) : null,
+    pivotCount: snap.pivotCount || 0,
+    updatedAt: now,
+    cached: !!snap.cached,
+    ms: snap.ms != null ? snap.ms : null,
+    error: snap.error || null,
+  });
+  // Detect transition (only meaningful states: pass ↔ blocked) — skip if prev undefined (initial)
+  if (prev && prev.status !== snap.status && (snap.status === 'pass' || snap.status === 'blocked')
+      && (prev.status === 'pass' || prev.status === 'blocked')) {
+    try {
+      const telegramNotifier = require('../services/telegramNotifier');
+      await telegramNotifier.sendNow('trendlineStatusChanged', {
+        botId,
+        botName: bot.name || bot.symbol,
+        symbol: bot.symbol,
+        timeframe: bot.timeframe,
+        trendTF: snap.trendTF,
+        prevStatus: prev.status,
+        newStatus: snap.status,
+        lastClose: snap.lastClose,
+        trendlineValue: snap.trendlineValue,
+        gapPct: snap.gapPct,
+      });
+    } catch (_) { /* non-fatal */ }
+    eventBus.emit('bot:trendline_status_changed', {
+      botId, symbol: bot.symbol, prevStatus: prev.status, newStatus: snap.status,
+      lastClose: snap.lastClose, trendlineValue: snap.trendlineValue, gapPct: snap.gapPct,
+    });
+  }
+  logger.debug({ botId, symbol: bot.symbol, status: snap.status }, 'botManager: scanSingleBot done');
+}
+
 async function checkTrendlineStatusBots() {
   let bots;
   try {
     // FIX-2026-08-04 v2: filter enabled: true only — disabled bots freeze cache at last value
     //   - เหตุผล: disabled bot ไม่ทำการเทรดอยู่แล้ว → status แค่แสดง stale info ไม่มีประโยชน์
     //   - ลด Binance kline load ลง 5 เท่า (เฉพาะ enabled bots scan)
-    //   - เมื่อ enable bot ใหม่ → invalidateTrendlineCache() ใน enableBot() → next scan fresh
+    //   - เมื่อ enable bot ใหม่ → invalidateTrendlineCache() + scanSingleBot() ใน enableBot() → fresh ทันที
     bots = await Bot.find({ safeTradeTrendlineEnabled: true, enabled: true }).lean();
   } catch (err) {
     logger.warn({ err: err.message }, 'botManager: checkTrendlineStatusBots — Bot.find failed');
@@ -776,58 +837,18 @@ async function checkTrendlineStatusBots() {
     return;
   }
 
+  // FIX-2026-08-04 v3: parallel fetch snapshots (concurrency 6), then sequential cache update via scanSingleBot
+  //   - decoupling: scanSingleBot(bot, snap) handles cache-set + transition event (reusable from enableBot)
+  //   - single Binance call per bot per tick (no duplication)
+  const now = Date.now();
   const snapshots = await trendlineForBot.mapWithConcurrency(
     bots, 6, (b) => trendlineForBot.computeBotTrendlineSnapshot(b)
   );
-
-  const now = Date.now();
-  const telegramNotifier = require('../services/telegramNotifier');
-
   for (let i = 0; i < bots.length; i += 1) {
-    const bot = bots[i];
-    const snap = snapshots[i] || {};
-    const botId = String(bot._id);
-    const prev = _trendlineStatusCache.get(botId);
-
-    // Cache result (always — even when filter was disabled mid-scan or API errored)
-    _trendlineStatusCache.set(botId, {
-      status: snap.status || 'unknown',
-      trendTF: snap.trendTF || null,
-      lastClose: snap.lastClose != null ? snap.lastClose : null,
-      trendlineValue: snap.trendlineValue != null ? snap.trendlineValue : null,
-      gapPct: snap.gapPct != null ? Number(snap.gapPct) : null,
-      pivotCount: snap.pivotCount || 0,
-      updatedAt: now,
-      cached: !!snap.cached,
-      ms: snap.ms != null ? snap.ms : null,
-      error: snap.error || null,
-    });
-
-    // Detect transition for telegram notification (only meaningful states: pass ↔ blocked)
-    if (prev && prev.status !== snap.status && (snap.status === 'pass' || snap.status === 'blocked')
-        && (prev.status === 'pass' || prev.status === 'blocked')) {
-      try {
-        await telegramNotifier.sendNow('trendlineStatusChanged', {
-          botId,
-          botName: bot.name || bot.symbol,
-          symbol: bot.symbol,
-          timeframe: bot.timeframe,
-          trendTF: snap.trendTF,
-          prevStatus: prev.status,
-          newStatus: snap.status,
-          lastClose: snap.lastClose,
-          trendlineValue: snap.trendlineValue,
-          gapPct: snap.gapPct,
-        });
-      } catch (_) { /* non-fatal */ }
-      eventBus.emit('bot:trendline_status_changed', {
-        botId, symbol: bot.symbol, prevStatus: prev.status, newStatus: snap.status,
-        lastClose: snap.lastClose, trendlineValue: snap.trendlineValue, gapPct: snap.gapPct,
-      });
-    }
+    await scanSingleBot(bots[i], snapshots[i]);
   }
 
-  logger.debug({ count: bots.length, ok: snapshots.filter((s) => s && s.ok).length }, 'botManager: trendline status scan done');
+  logger.debug({ count: bots.length, ts: now }, 'botManager: trendline status scan done');
 }
 
 // FIX-2026-08-03: accessor for /api/bots route — returns slim fields for bot card badge
