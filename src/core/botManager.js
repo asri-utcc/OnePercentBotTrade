@@ -35,9 +35,12 @@ let autoPauseTimer = null;
 //   - populates module-level _trendlineStatusCache Map for /api/bots response
 // FIX-2026-08-04: decouple scan interval from cache TTL — scan every 120s (ลด Binance kline API load)
 //   - cache TTL 60s ยังคงเดิม (trendlineForBot.CACHE_TTL_MS) — แค่ scan tick ห่างขึ้น
-//   - skip ALL work if no bots have the filter enabled (saves Binance calls)
+// FIX-2026-08-04 v2: 120s → 600s (10 min) + filter enabled: true only (ลด Binance load อีก 5 เท่า)
+//   - trader.js path (BUY-time check) เป็น on-demand — ไม่กระทบ BUY
+//   - DISABLED bots: cache freeze ที่ค่าล่าสุด (แสดง stale data บน bot card pill)
+//   - Mitigated: invalidateTrendlineCache ใน enableBot() — clear cache on re-enable → next scan fresh
 //   - **read-only** — never blocks BUY; trader.js path is the only place that blocks
-const TRENDLINE_SCAN_INTERVAL_MS = 2 * 60 * 1000;
+const TRENDLINE_SCAN_INTERVAL_MS = 10 * 60 * 1000;
 let trendlineScanTimer = null;
 // FIX-2026-08-03: in-memory cache: botId → {status, trendTF, lastClose, trendlineValue, gapPct, pivotCount, updatedAt}
 //   - keyed by botId string; refreshed every TRENDLINE_SCAN_INTERVAL_MS
@@ -606,6 +609,10 @@ class BotManager {
     eventBus.emit('bot:updated', { botId });
     // FIX-2026-07-24: action-specific event สำหรับ Telegram notifier (bot:updated payload ไม่มี verb)
     eventBus.emit('bot:enabled', { botId });
+    // FIX-2026-08-04 v2: invalidate trendline cache on re-enable (กัน stale badge หลัง enable)
+    //   - เดิม: enabled bot filter ใน checkTrendlineStatusBots → disabled bot cache freeze
+    //   - เมื่อ enable → invalidate → next scan fresh (แทนที่จะแสดง stale data นาน 10 min)
+    invalidateTrendlineCache(bot.symbol, bot.timeframe);
     return bot;
   }
 
@@ -755,7 +762,11 @@ module.exports.invalidateTrendlineCache = invalidateTrendlineCache;
 async function checkTrendlineStatusBots() {
   let bots;
   try {
-    bots = await Bot.find({ safeTradeTrendlineEnabled: true }).lean();
+    // FIX-2026-08-04 v2: filter enabled: true only — disabled bots freeze cache at last value
+    //   - เหตุผล: disabled bot ไม่ทำการเทรดอยู่แล้ว → status แค่แสดง stale info ไม่มีประโยชน์
+    //   - ลด Binance kline load ลง 5 เท่า (เฉพาะ enabled bots scan)
+    //   - เมื่อ enable bot ใหม่ → invalidateTrendlineCache() ใน enableBot() → next scan fresh
+    bots = await Bot.find({ safeTradeTrendlineEnabled: true, enabled: true }).lean();
   } catch (err) {
     logger.warn({ err: err.message }, 'botManager: checkTrendlineStatusBots — Bot.find failed');
     return;
