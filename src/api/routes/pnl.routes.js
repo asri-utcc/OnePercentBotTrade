@@ -180,6 +180,8 @@ router.get('/series', requireAuth, async (req, res) => {
     const trades = await Trade.find(match)
       .select('_id botId symbol realizedPnl sellFilledAt')
       .sort({ sellFilledAt: 1 }) // ascending — chart builds cumulative left→right
+      // FIX-2026-08-04: cap with .limit() to prevent unbounded year-range queries (was 10k+ docs JSON-serialized)
+      .limit(5000)
       .lean();
 
     // enrich with bot name (สำหรับ tooltip / drill-down)
@@ -250,6 +252,8 @@ router.get('/day', requireAuth, async (req, res) => {
     const trades = await Trade.find(match)
       .select('_id botId symbol entryPrice exitPrice qty realizedPnl sellFilledAt side')
       .sort({ sellFilledAt: 1 })
+      // FIX-2026-08-04: cap with .limit() to prevent unbounded single-day queries
+      .limit(5000)
       .lean();
 
     const botIds = [...new Set(trades.map((t) => String(t.botId)))];

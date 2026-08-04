@@ -52,7 +52,7 @@ function wireViewModeToggle() {
 let openPositionsData = null;       // { asOf, count, totalCostUsdt, totalUnrealizedUsdt, positions: [...] }
 let openPositionsAsOf = null;       // last fetch timestamp
 let tradeIdToBotId = new Map();     // tradeId -> botId (used by WS trade:update handler)
-let modalPriceOverrides = new Map();// tradeId -> live close price (from WS kline:update)
+let modalPriceOverrides = new Map();// tradeId -> live close price (UNUSED 2026-08-03 — WS price auto-update ถูกปิดแล้ว)
 let currentModalOp = null;          // bootstrap.Modal instance for #openPositionsModal
 
 // ── FIX-2026-08-01: Bot Quality Indicator pill (badge for bot card) ─────
@@ -65,6 +65,56 @@ function buildQualityBadge(b) {
   const updated = b.qualityUpdatedAt ? new Date(b.qualityUpdatedAt).toLocaleTimeString('th-TH') : '-';
   const tip = `คลิกเพื่อดู breakdown · อัปเดตล่าสุด: ${updated}`;
   return `<span class="quality-pill is-${b.qualityColor || 'gray'}" data-quality-trigger="${escapeHtml(String(b._id))}" title="${escapeHtml(tip)}">${b.qualityScore}/4</span>`;
+}
+
+// ── FIX-2026-08-03: Safe-trade filter #2 (trendline) badge ─────────────
+//   - แสดงสถานะ live ว่าราคา last close อยู่เหนือเส้น trendline support บน upper-TF หรือไม่
+//   - อัปเดตทุก 60s จาก botManager scanner → /api/bots response มี tlStatus/tlGapPct/tlUpdatedAt
+//   - status ∈ 'pass' | 'blocked' | 'warmup' | 'insufficient_data' | 'api_error' | 'no_trend_tf'
+//   - เมื่อ filter ปิด (b.tlEnabled !== true) → ซ่อน badge ทั้งหมด (ไม่ให้รก UI)
+//   - เมื่อ filter เปิดแต่ยังไม่ scan (b.tlStatus == null) → แสดง ⏳ pending
+function buildTrendlineBadge(b) {
+  if (b.tlEnabled !== true) return ''; // filter OFF → ไม่แสดง
+  const status = b.tlStatus;
+  const tfUpper = b.tlTrendTF || '?';
+  const lastClose = b.tlLastClose;
+  const tlValue = b.tlTrendlineValue;
+  const gap = b.tlGapPct;
+  const updatedAt = b.tlUpdatedAt ? new Date(b.tlUpdatedAt).toLocaleTimeString('th-TH') : '-';
+
+  // Common: compose tooltip showing lastClose + trendline + gap + TF + updated time
+  const tipLines = [
+    `📐 Safe-trade filter #2 (trendline support)`,
+    `Upper-TF: ${tfUpper}`,
+    lastClose != null ? `Last close: ${Number(lastClose).toFixed(6)}` : null,
+    tlValue != null ? `Trendline: ${Number(tlValue).toFixed(6)}` : null,
+    gap != null ? `Gap: ${gap >= 0 ? '+' : ''}${Number(gap).toFixed(2)}%` : null,
+    `อัปเดตล่าสุด: ${updatedAt}`,
+  ].filter(Boolean).join('\n');
+
+  // Render per status
+  if (status === 'pass') {
+    const gapTxt = gap != null ? `+${Number(gap).toFixed(2)}%` : '';
+    return `<span class="trendline-pill is-pass" title="${escapeHtml(tipLines)}">📐 ✅ ${gapTxt}</span>`;
+  }
+  if (status === 'blocked') {
+    const gapTxt = gap != null ? `${Number(gap).toFixed(2)}%` : '';
+    return `<span class="trendline-pill is-blocked" title="${escapeHtml(tipLines)}">📐 ❌ ${gapTxt}</span>`;
+  }
+  if (status === 'warmup') {
+    return `<span class="trendline-pill is-warmup" title="${escapeHtml(tipLines)}">📐 ⏳ warmup</span>`;
+  }
+  if (status === 'insufficient_data') {
+    return `<span class="trendline-pill is-warn" title="${escapeHtml(tipLines)}">📐 ⚠️ data</span>`;
+  }
+  if (status === 'api_error') {
+    return `<span class="trendline-pill is-warn" title="${escapeHtml(tipLines)}">📐 ⚠️ api</span>`;
+  }
+  if (status === 'no_trend_tf') {
+    return `<span class="trendline-pill is-warn" title="${escapeHtml(tipLines)}">📐 ⚠️ no-tf</span>`;
+  }
+  // status == null (not yet scanned) or unknown
+  return `<span class="trendline-pill is-pending" title="Safe-trade #2 filter เปิดอยู่ — รอ scanner tick (≤ 60s)">📐 — pending</span>`;
 }
 
 
@@ -197,6 +247,9 @@ async function init() {
 
   // FIX-2026-07-23: realtime EMA + price update จาก WS kline
   //   - ฟัง kline:update ทุกตัว → match กับ bot card → update tile in-place (ไม่ re-render ทั้ง card)
+  //   - FIX-2026-08-03: ลบ live mark-to-market สำหรับ Open Positions modal ออก
+  //     (user ต้องการกด Refresh เอง — ไม่ให้ราคาใน modal เด้งตาม WS tick)
+  //     เก็บเฉพาะ bot card EMA update (ตัวเลขนั้นสำคัญกับ signal decision)
   WSClient.on('kline:update', (p) => {
     if (!p || !p.kline || !p.interval) return;
     const symbol = p.kline.symbol;
@@ -206,27 +259,20 @@ async function init() {
     // หา bot ที่ตรงกัน — ใช้ data-symbol/data-timeframe attribute
     const cards = document.querySelectorAll(`.bot-card-v2[data-symbol="${symbol}"][data-timeframe="${interval}"]`);
     cards.forEach((card) => updateCardEma(card, close));
-    // 2026-07-30: live mark-to-market for Open Positions modal (mark open positions in matching symbol/tf)
-    if (openPositionsData && openPositionsData.positions) {
-      let touched = false;
-      for (const pos of openPositionsData.positions) {
-        if (pos.symbol === symbol && pos.timeframe === interval) {
-          modalPriceOverrides.set(pos.tradeId, close);
-          touched = true;
-        }
-      }
-      if (touched && currentModalOp && currentModalOp._isShown) renderOpenPositionsModalBody();
-    }
+    // FIX-2026-08-03: modal price override ถูกปิด (เดิมอัปเดต modalPriceOverrides + re-render modal ทุก tick)
+    //   - ตอนนี้ modal จะ refresh ก็ต่อเมื่อ user กดปุ่ม "🔄 Refresh" (loadOpenPositions({ fresh: true }))
   });
 
-  // 2026-07-30: fallback poll ทุก 30s (กรณี WS ตกหล่น) — ensures tile + modal stay in sync
-  setInterval(() => { loadOpenPositions(); }, 30_000);
+  // FIX-2026-08-03: ลบ 30s fallback poll ออก — user ต้องการกด Refresh เองเท่านั้น
+  //   - เดิมตั้งใจไว้กัน WS ตกหล่น แต่ user บ่นว่าราคากระโดดบ่อย/อัปเดตไม่ทัน → ควบคุมเอง
+  //   - modal tile count ยังอัปเดตผ่าน trade:update WS handler (เมื่อ BUY/SELL fill → position count เปลี่ยน)
+  //   - modal price/PnL จะอยู่นิ่งจนกว่า user จะกดปุ่ม 🔄 Refresh ใน modal (loadOpenPositions({ fresh: true }))
 
-  // FIX-2026-08-01: re-fetch bot list (with quality scores) ทุก 60s
-  //   - หลังจากที่ qualityIndicator.setInterval tick แล้ว top50Cache refresh
-  //   - next loadBots() จะได้ score ใหม่ทันที (no WS event เพราะ score change ไม่ trigger bot:updated)
-  //   - 60s พอสมควร — ลด flicker เมื่อ user กำลังดูอยู่
-  setInterval(() => { loadBots().catch(() => {}); }, 60_000);
+  // FIX-2026-08-04: re-fetch bot list (with quality scores) ทุก 120s
+  //   - ลดจาก 60s → 120s (ลด DB load) — display อาจ delay 5-15s แต่ bot operations intact
+  //   - ยังได้ live updates ผ่าน WS kline:update (EMA tile) + trade:update (active positions)
+  //   - surgical renderBots() ไม่ rebuild DOM เว้นแต่ bot set เปลี่ยน
+  setInterval(() => { loadBots().catch(() => {}); }, 120_000);
 
   // FIX-2026-08-01: click delegation สำหรับ Quality Indicator pill — เปิด modal
   document.getElementById('bots-list').addEventListener('click', (e) => {
@@ -560,14 +606,7 @@ async function loadOpenPositions(opts = {}) {
     openPositionsAsOf = resp.asOf;
     // rebuild tradeId → botId map (used by trade:update handler to detect relevant events)
     tradeIdToBotId = new Map((resp.positions || []).map((p) => [p.tradeId, p.botId]));
-    // FIX-2026-08-03: เมื่อ refresh แบบ fresh → ลบ modalPriceOverrides ทั้งหมด
-    //   (ใช้ราคา Binance ตรงๆ ไม่ต้อง merge กับ WS tick)
-    if (opts.fresh) modalPriceOverrides.clear();
-    // clean up stale price overrides (positions ที่ปิดไปแล้ว)
-    const liveIds = new Set((resp.positions || []).map((p) => p.tradeId));
-    for (const id of Array.from(modalPriceOverrides.keys())) {
-      if (!liveIds.has(id)) modalPriceOverrides.delete(id);
-    }
+    // FIX-2026-08-03: modalPriceOverrides ถูกปิดแล้ว (ไม่มี WS price update เข้ามา) — no cleanup needed
     renderStatOpenPositions();
     if (currentModalOp && currentModalOp._isShown) renderOpenPositionsModalBody();
   } catch (err) {
@@ -595,13 +634,13 @@ function renderStatOpenPositions() {
 
 /**
  * Get live price for a position:
- *   1. WS kline:update override (most recent, tick-by-tick)
- *   2. server-side currentPrice from /api/bots/positions (snapshot ตอน fetch)
- *   3. fallback → entry price (PnL = 0, no crash)
+ *   - FIX-2026-08-03: ลบ WS kline:update override ออก (modalPriceOverrides ไม่ถูก update แล้ว)
+ *   - ตอนนี้ใช้ currentPrice จาก server snapshot เท่านั้น
+ *     → cache mode (klineCache) ตอน modal open / trade:update event
+ *     → fresh mode (Binance bookTicker) ตอน user กดปุ่ม "🔄 Refresh"
+ *   - fallback → buyPrice (PnL = 0, ไม่ crash)
  */
 function getLivePriceForPosition(p) {
-  const ovr = modalPriceOverrides.get(p.tradeId);
-  if (ovr && ovr > 0) return ovr;
   if (p.currentPrice && p.currentPrice > 0) return p.currentPrice;
   return Number(p.buyPrice) || 0;
 }
@@ -729,15 +768,152 @@ function renderBots() {
     container.innerHTML = '<div class="alert alert-secondary">ยังไม่มีบอท — คลิก <strong>+ New Bot</strong> เพื่อเริ่มต้น</div>';
     return;
   }
-  // FIX-2026-07-24: cleanup เก่าก่อน — ป้องกัน memory leak จาก lightweight-charts instances ค้าง
-// FIX-2026-08-02: unify limit=40 ทั้ง initial load + refresh (เดิม refresh ใช้ 30 ทำให้ S1 markers
-//   ที่อยู่ใน bars ที่ 31-40 หายไปหลัง refresh ครั้งแรก)
-  teardownMiniCharts();
-  container.innerHTML = bots.map(renderBotCard).join('');
-  // FIX-2026-07-31: ในโหมด compact ไม่ต้องโหลด mini chart (ลด REST load + memory)
-  //   CSS ซ่อน .bc-minichart-wrap + .bc-tiles อยู่แล้ว — ก็ skip fetch ด้วยเลย
-  if (getBotViewMode() === 'expand') {
-    setupMiniCharts();
+  const existingIds = new Set();
+  const existingCards = container.querySelectorAll('[data-bot-id]');
+  existingCards.forEach((el) => existingIds.add(el.dataset.botId));
+  const newIds = new Set(bots.map((b) => String(b._id)));
+
+  // FIX-2026-08-04: surgical update — only rebuild when bot set changes (add/remove/order)
+  //   - WS kline:update → updateCardEma() already mutates EMA tile in-place
+  //   - WS trade:update → updates active positions count + today PnL via in-place mutation
+  //   - on identical bot set → skip full rebuild to avoid teardown/recreate mini-charts + DOM thrash
+  const setChanged = existingIds.size !== newIds.size
+    || [...existingIds].some((id) => !newIds.has(id))
+    || [...newIds].some((id) => !existingIds.has(id));
+
+  if (setChanged) {
+    // Pool changed → full rebuild (once)
+    teardownMiniCharts();
+    container.innerHTML = bots.map(renderBotCard).join('');
+    if (getBotViewMode() === 'expand') {
+      setupMiniCharts();
+    }
+    return;
+  }
+
+  // Same bot set → surgical in-place mutation of frequently-changing fields
+  for (const b of bots) {
+    updateBotCardInPlace(b);
+  }
+}
+
+// FIX-2026-08-04: surgical in-place update for fields that change frequently
+//   - Active positions count + tile class
+//   - Today PnL ($ + count + class)
+//   - Total PnL (when changed)
+//   - Status pill (state change)
+//   - LastError / Warning text + visibility
+//   - run-badge (enabled toggle reflected elsewhere via reload, but defensive)
+function updateBotCardInPlace(b) {
+  const el = document.querySelector(`#bots-list [data-bot-id="${b._id}"]`);
+  if (!el) return;
+
+  // Active positions count
+  const activeCount = b.activePositionsCount || 0;
+  const activeTile = el.querySelector('.bc-tile-active');
+  if (activeTile) {
+    if (activeCount > 0) {
+      activeTile.classList.add('has-active');
+    } else {
+      activeTile.classList.remove('has-active');
+    }
+    const activeVal = activeTile.querySelector('[data-active-count]');
+    if (activeVal) {
+      const newText = `${activeCount} ไม้`;
+      if (activeVal.textContent !== newText) {
+        activeVal.textContent = newText;
+      }
+    }
+  }
+
+  // Today PnL
+  const todayPnl = b.todayPnl || 0;
+  const todayTrades = b.todayTrades || 0;
+  const pnlTile = el.querySelector('.bc-tile-pnl');
+  if (pnlTile) {
+    const pnlText = `${todayPnl >= 0 ? '+' : ''}${todayPnl.toFixed(4)}`;
+    const valueEl = pnlTile.querySelector('.tile-value');
+    const subEl = pnlTile.querySelector('.tile-sub');
+    if (valueEl && valueEl.textContent !== pnlText) {
+      valueEl.textContent = pnlText;
+    }
+    if (subEl) {
+      const subText = `${todayTrades} ไม้ · USDT`;
+      if (subEl.textContent !== subText) {
+        subEl.textContent = subText;
+      }
+    }
+    const wantClass = todayPnl > 0 ? 'pnl-bull' : todayPnl < 0 ? 'pnl-bear' : '';
+    if (valueEl && valueEl.className.indexOf(wantClass) === -1) {
+      valueEl.classList.remove('pnl-bull', 'pnl-bear');
+      if (wantClass) valueEl.classList.add(wantClass);
+    }
+  }
+
+  // Status pill (state change)
+  const statusBadge = el.querySelector('.bc-meta .status-pill');
+  if (statusBadge) {
+    const wantHtml = statusPillHtml(b.status);
+    const wrap = document.createElement('div');
+    wrap.innerHTML = wantHtml;
+    const newHtml = wrap.innerHTML;
+    if (statusBadge.outerHTML !== newHtml) {
+      statusBadge.outerHTML = newHtml;
+    }
+  }
+
+  // LastError: hide row if cleared, show if set
+  let errEl = el.querySelector('.bc-err');
+  if (b.lastError) {
+    if (!errEl) {
+      const statsEl = el.querySelector('.bc-stats');
+      if (statsEl) {
+        const div = document.createElement('div');
+        div.className = 'bc-err';
+        div.innerHTML = `<span class="bc-err-msg">⚠️ ${escapeHtml(b.lastError)}</span><button class="bc-err-dismiss" type="button" title="ปิดการแจ้งเตือนนี้" aria-label="dismiss" onclick="dismissBotError('${b._id}', this)">×</button>`;
+        statsEl.insertAdjacentHTML('afterend', div.outerHTML);
+      }
+    } else {
+      const msg = errEl.querySelector('.bc-err-msg');
+      if (msg && msg.textContent !== `⚠️ ${b.lastError}`) {
+        msg.textContent = `⚠️ ${b.lastError}`;
+      }
+    }
+  } else if (errEl) {
+    errEl.remove();
+  }
+
+  // Warning: same pattern
+  let warnEl = el.querySelector('.bc-warn');
+  if (b.warning) {
+    if (!warnEl) {
+      const errElAfter = el.querySelector('.bc-err') || el.querySelector('.bc-stats');
+      if (errElAfter) {
+        const div = document.createElement('div');
+        div.className = 'bc-warn';
+        div.innerHTML = `<span class="bc-warn-msg">⏰ ${escapeHtml(b.warning)}</span><button class="bc-warn-dismiss" type="button" title="ปิดการแจ้งเตือนนี้" aria-label="dismiss" onclick="dismissBotWarning('${b._id}', this)">×</button>`;
+        errElAfter.insertAdjacentHTML('afterend', div.outerHTML);
+      }
+    } else {
+      const msg = warnEl.querySelector('.bc-warn-msg');
+      if (msg && msg.textContent !== `⏰ ${b.warning}`) {
+        msg.textContent = `⏰ ${b.warning}`;
+      }
+    }
+  } else if (warnEl) {
+    warnEl.remove();
+  }
+
+  // Run/Stop badge (defensive — usually handled by page reload on toggle)
+  const runBadge = el.querySelector('.run-badge');
+  if (runBadge) {
+    const wantText = b.enabled ? '▶ RUNNING' : '⏸ STOPPED';
+    const wantClass = b.enabled ? 'on' : 'off';
+    if (runBadge.textContent !== wantText) runBadge.textContent = wantText;
+    if (runBadge.classList.contains('on') !== b.enabled) {
+      runBadge.classList.toggle('on', b.enabled);
+      runBadge.classList.toggle('off', !b.enabled);
+    }
   }
 }
 
@@ -933,6 +1109,9 @@ function renderBotCard(b) {
     ? `<span class="dca-pill" title="DCA + BEP Stack Mode — max ${b.dcaMaxLayers || 3} layers">📚 DCA${b.dcaMaxLayers ? `/${b.dcaMaxLayers}` : ''}</span>`
     : '';
 
+  // FIX-2026-08-03: Safe-trade filter #2 (trendline) live badge — แสดงเมื่อ filter เปิด
+  const trendlineBadge = buildTrendlineBadge(b);
+
   return `
     <div class="${classes.join(' ')}" data-bot-id="${b._id}" data-symbol="${b.symbol}" data-timeframe="${b.timeframe}">
       <div class="bc-head">
@@ -944,6 +1123,7 @@ function renderBotCard(b) {
             ${statusBadge}
             ${qualityBadge}
             ${dcaBadge}
+            ${trendlineBadge}
             ${coinChip}
           </div>
         </div>
@@ -1190,9 +1370,13 @@ async function createBot() {
     xs1Enabled: document.getElementById('nb-xs1-enabled').checked, // FIX-2026-07-25: per-bot XS1 anti-dump toggle (default true)
     cbEnabled: document.getElementById('nb-cb-enabled').checked, // FIX-2026-08-01: per-bot Circuit-breaker panic-sell toggle (default true) — เดิมชื่อ sls1Enabled
     safeTradeEnabled: document.getElementById('nb-safe-trade-enabled').checked, // FIX-2026-08-01: per-bot safe-trade filter (default ON)
+    safeTradeTrendlineEnabled: document.getElementById('nb-safe-trade-trendline-enabled').checked, // FIX-2026-08-03: Safe-trade filter #2 (LuxAlgo trendline) — opt-in, default OFF
     autoPauseEnabled: document.getElementById('nb-auto-pause-enabled').checked, // FIX-2026-08-01: per-bot auto-pause on low Min-%KC (default ON)
     autoPauseMinKcPct: parseFloat(document.getElementById('nb-auto-pause-min-kc').value) || 2, // FIX-2026-08-01: auto-pause threshold %
     autoArmStopLossOnUKC: document.getElementById('nb-auto-arm-stop-loss-ukc').checked, // FIX-2026-07-31 (F1): per-bot auto-arm SL-on-UKC toggle (default true)
+    autoArmLossPct: parseFloat(document.getElementById('nb-auto-arm-loss-pct').value) || 10, // FIX-2026-08-03: F1 loss threshold (1..90, default 10)
+    autoArmAgeHours: parseFloat(document.getElementById('nb-auto-arm-age-hours').value) || 4, // FIX-2026-08-03: F1 age threshold (0.5..168, default 4)
+    slUkcTriggerOnProfit: document.getElementById('nb-sl-ukc-trigger-on-profit').checked, // FIX-2026-08-03: SL-UKC trigger on profit (default false)
     tpTrendEnabled: document.getElementById('nb-tp-trend-enabled').checked, // FIX-2026-08-01: per-bot TP trend ×N master toggle (default true)
     tpTrendMultiplier: parseFloat(document.getElementById('nb-tp-trend-multiplier').value) || 2, // FIX-2026-07-31 (F2): per-bot TP ×N multiplier (1..10, default 2)
     autoUpdateTp: document.getElementById('nb-auto-update-tp').checked, // FIX-2026-07-23: TP auto-update toggle
@@ -1657,9 +1841,10 @@ async function loadMiniChart(botId, el, symbol, timeframe) {
   // re-fetch markers ทุก 60s (BUY/SELL ใหม่ที่ fill ระหว่างรอบ)
   // (WS kline:update จัดการ live candle, แต่ trade markers ต้อง re-fetch จาก DB)
   if (_miniChartRefreshTimers.has(botId)) clearInterval(_miniChartRefreshTimers.get(botId));
+  // FIX-2026-08-04: 60s → 120s (ลด kline API load — แต่ WS kline:update ยัง update candles real-time)
   _miniChartRefreshTimers.set(botId, setInterval(() => {
     refreshMiniChartMarkers(botId).catch((e) => console.debug(`mini-chart refresh ${botId}:`, e.message));
-  }, 60_000));
+  }, 120_000));
 
   // FIX-2026-07-24 v2: ResizeObserver — ปรับ width + barSpacing ใหม่ทั้งคู่ตาม container (responsive)
   const ro = new ResizeObserver(() => {

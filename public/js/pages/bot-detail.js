@@ -129,7 +129,8 @@ async function init() {
     }
   });
 
-  refreshTimer = setInterval(refresh, 15000);
+  // FIX-2026-08-04: 15s → 30s (ลด load — bot-detail page เป็น read-only display, WS push จัดการ live ticks)
+  refreshTimer = setInterval(refresh, 30000);
 }
 
 /* ── Tabs ─────────────────────────────────────────────── */

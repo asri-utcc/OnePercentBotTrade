@@ -14,7 +14,9 @@ router.get('/', requireAuth, async (req, res) => {
     if (timeframe) q.timeframe = timeframe;
     if (botId) q.botId = botId;
 
-    const signals = await Signal.find(q).sort({ candleCloseTime: -1 }).limit(parseInt(limit, 10)).lean();
+    // FIX-2026-08-04: cap limit at 500 to prevent unbounded queries from misbehaving clients
+    const safeLimit = Math.min(Math.max(parseInt(limit, 10) || 100, 1), 500);
+    const signals = await Signal.find(q).sort({ candleCloseTime: -1 }).limit(safeLimit).lean();
     res.json({ signals });
   } catch (err) {
     res.status(500).json({ error: err.message });

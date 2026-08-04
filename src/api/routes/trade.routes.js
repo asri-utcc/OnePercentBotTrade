@@ -16,7 +16,7 @@ router.get('/', requireAuth, async (req, res) => {
     // FIX-2026-08-03: filter by isDcaStack (used by bot-edit UI to detect open DCA stack when toggling off)
     if (isDcaStack !== undefined) q.isDcaStack = isDcaStack === 'true';
 
-    const trades = await Trade.find(q).sort({ createdAt: -1 }).limit(parseInt(limit, 10)).lean();
+    const trades = await Trade.find(q).sort({ createdAt: -1 }).limit(Math.min(Math.max(parseInt(limit, 10) || 100, 1), 500)).lean();
     res.json({ trades });
   } catch (err) {
     res.status(500).json({ error: err.message });

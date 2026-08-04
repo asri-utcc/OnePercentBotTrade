@@ -73,6 +73,13 @@ async function init() {
     return;
   }
 
+  // FIX-2026-08-03: deep-link support — รับ ?symbol=XXX&tf=YYY จาก URL
+  //   - ใช้ตอน user กดปุ่ม "📈 Chart" จาก Position card ในหน้า /bots.html → /chart.html
+  //   - apply หลัง symbols/timeframe options พร้อม (กัน select.value หาย)
+  const params = new URLSearchParams(location.search);
+  const dlSymbol = (params.get('symbol') || '').trim().toUpperCase();
+  const dlTf = (params.get('tf') || '').trim();
+
   setupChart();
   await loadSymbols();
   // FIX-2026-07-31: preload Binance tickSize precision สำหรับ PriceFormat
@@ -86,10 +93,30 @@ async function init() {
 
   bindSignalInfoPanel();
 
+  // FIX-2026-08-03: apply deep-link values (ถ้ามี) ก่อน loadChart()
+  //   - ถ้า symbol ไม่อยู่ใน dropdown (เช่น de-listed) → fallback เป็น BNBUSDT (default)
+  //   - ถ้า tf ไม่อยู่ในรายการ → fallback เป็น 5m (default)
+  if (dlSymbol) {
+    const symSel = document.getElementById('c-symbol');
+    const hasOption = Array.from(symSel.options).some((o) => o.value === dlSymbol);
+    if (hasOption) symSel.value = dlSymbol;
+  }
+  if (dlTf) {
+    const tfSel = document.getElementById('c-timeframe');
+    const hasOption = Array.from(tfSel.options).some((o) => o.value === dlTf);
+    if (hasOption) tfSel.value = dlTf;
+  }
+  // FIX-2026-08-03: อัปเดต document.title ให้แสดง symbol/tf ใน browser tab
+  const curSymbol = document.getElementById('c-symbol').value;
+  const curTf = document.getElementById('c-timeframe').value;
+  if (dlSymbol || dlTf) {
+    document.title = `📈 ${curSymbol} ${curTf} — Chart`;
+  }
+
   await loadChart();
 
-  // auto refresh ทุก 30 วินาที (เนื่องจาก WebSocket ส่งมาเองอยู่แล้ว แต่ historical แท่งเก่าต้อง refetch)
-  refreshTimer = setInterval(loadChart, 30000);
+  // FIX-2026-08-04: auto refresh 30s → 60s (ลด kline API load; WS push updates current candle real-time)
+  refreshTimer = setInterval(loadChart, 60000);
 
   WSClient.on('kline:update', (p) => {
     if (!currentData) return;
