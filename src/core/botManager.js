@@ -598,9 +598,57 @@ class BotManager {
   }
 
   // ─── Lifecycle handlers (called from API) ──────────
+
+  // FIX (GIGGLE incident 2026-08-05): stale-cursor reset on re-enable
+  //   - on manual enable OR auto-resume, if lastSignalCloseTime is older than STALE_CURSOR_THRESHOLD_MS
+  //     → re-seed to latestClosed BEFORE spawnTrader()
+  //   - ป้องกัน reconcileKlines('startup') ดึง historical candles 200 แท่ง (ช่วง pause/disable)
+  //     แล้ว S1 detector ยิง BUY บนแท่งเก่าหลายชั่วโมงก่อน (ghost BUY bug)
+  //   - safe: cursor advances monotonically ($max guard ใน trader reconcileKlines กันย้อนหลังอยู่แล้ว)
+  //   - mutate `bot.lastSignalCloseTime` ใน place + persist DB เพื่อให้ spawnTrader() ส่งค่าใหม่ให้ Trader ctor
+  async _resetStaleReplayCursorOnEnable(bot) {
+    const STALE_CURSOR_THRESHOLD_MS = 30 * 60 * 1000; // 30 นาที
+    const lastSignalCloseMs = bot.lastSignalCloseTime || 0;
+    const nowMs = Date.now();
+    const cursorAgeMs = nowMs - lastSignalCloseMs;
+    // fresh cursor (≤ 30 min) → ไม่ต้อง reset (reconcileKlines จะดึงแค่ 1-2 แท่งที่หายไป)
+    if (lastSignalCloseMs > 0 && cursorAgeMs <= STALE_CURSOR_THRESHOLD_MS) return;
+
+    let latestClosedMs = 0;
+    try {
+      const raw = await binanceRest.getKlines({
+        symbol: bot.symbol,
+        interval: bot.timeframe,
+        limit: 2,
+      });
+      for (const k of (raw || [])) {
+        const ct = k[6];
+        if (ct <= nowMs && ct > latestClosedMs) latestClosedMs = ct;
+      }
+    } catch (err) {
+      logger.warn({ botId: String(bot._id), symbol: bot.symbol, err: err.message },
+        'botManager: _resetStaleReplayCursorOnEnable — getKlines failed, skipping reset');
+      return;
+    }
+    if (latestClosedMs === 0) return; // ยังไม่มี closed candle (เดือนใหม่, exchange ปิด ฯลฯ)
+
+    await Bot.updateOne({ _id: bot._id }, { $set: { lastSignalCloseTime: latestClosedMs } });
+    bot.lastSignalCloseTime = latestClosedMs;
+    logger.info({
+      botId: String(bot._id),
+      symbol: bot.symbol,
+      timeframe: bot.timeframe,
+      prevCursorMs: lastSignalCloseMs,
+      cursorAgeMs,
+      newCursorMs: latestClosedMs,
+    }, 'botManager: stale replay cursor reset on re-enable (skip historical replay)');
+  }
+
   async enableBot(botId) {
     const bot = await Bot.findById(botId);
     if (!bot) throw new Error('Bot not found');
+    // FIX 2026-08-05: reset stale cursor ก่อน spawnTrader (กัน ghost BUY จาก reconcileKlines replay)
+    await this._resetStaleReplayCursorOnEnable(bot);
     bot.enabled = true;
     bot.enabledAt = new Date();
     bot.status = 'idle';
@@ -731,6 +779,9 @@ async function checkAutoPauseBots() {
           autoPauseReason: 'vol_recovered',
         });
         await Bot.updateOne({ _id: b._id }, { $set: update });
+        // FIX 2026-08-05 (GIGGLE): reset stale cursor ก่อน spawnTrader (กัน ghost BUY จาก reconcileKlines replay)
+        //   - b เป็น plain object จาก .find() → mutate directly แล้ว persist ผ่าน helper
+        await this._resetStaleReplayCursorOnEnable(b);
         eventBus.emit('bot:enabled', { botId: String(b._id), reason: 'auto_resume_vol_recovered', minKcPct });
         try {
           await telegramNotifier.sendNow('botEnabled', {
