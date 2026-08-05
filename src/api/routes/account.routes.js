@@ -64,11 +64,11 @@ router.get('/open-orders', requireAuth, async (req, res) => {
 const BNB_BANNER_THRESHOLD_USDT = 1.0;
 // FIX-2026-08-05: gauge zone thresholds (ไม่ซ้อนทับ alert threshold — แยกกันคนละชั้น)
 //   - pct = bnbValueUsdt / bnbGaugeTargetUsdt * 100
-//   - healthy: ≥ 70% → green
-//   - low: 30–70%     → gold
-//   - critical: < 30% → red (pulse)
-const GAUGE_HEALTHY_MIN_PCT = 70;
-const GAUGE_LOW_MIN_PCT = 30;
+//   - healthy: ≥ 40% → green
+//   - low: 10–40%     → gold
+//   - critical: < 10% → red (pulse)
+const GAUGE_HEALTHY_MIN_PCT = 40;
+const GAUGE_LOW_MIN_PCT = 10;
 const BNB_GAUGE_TARGET_DEFAULT = 10;
 
 router.get('/bnb-status', requireAuth, async (req, res) => {
