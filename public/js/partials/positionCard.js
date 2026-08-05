@@ -19,9 +19,16 @@ window.PositionCard = {
   },
 
   computeMetrics(t, currentPrice) {
-    const entry = Number(t.buyPrice) || 0;
-    const qty = Number(t.buyQty) || 0;
-    const tp = Number(t.targetSellPrice) || 0;
+    const isDcaStack = t.isDcaStack === true;
+    const entry = isDcaStack
+      ? (Number(t.stackBep) || 0)
+      : (Number(t.buyPrice) || 0);
+    const qty = isDcaStack
+      ? (Number(t.stackTotalQty) || 0)
+      : (Number(t.buyQty) || 0);
+    const tp = isDcaStack
+      ? (Number(t.stackTargetSellPrice) || 0)
+      : (Number(t.targetSellPrice) || 0);
     const px = (currentPrice && currentPrice > 0) ? currentPrice : entry;
 
     const pnlPct = entry > 0 ? ((px - entry) / entry) * 100 : 0;
@@ -35,22 +42,53 @@ window.PositionCard = {
     }
 
     const totalPathPct = (tp > 0 && entry > 0) ? ((tp - entry) / entry) * 100 : 0;
-    let barPct = 0;
+
+    // FIX-2026-08-05: friendly "tunnel" progress bar — fills FORWARD from entry → TP
+    //   - progressPct = (1 - pctToTp/totalPathPct) * 100 → 0% at entry, 100% at TP
+    //   - barPct (legacy inverse semantics) kept for back-compat with old CSS classes
+    let progressPct = 0;
     if (pctToTp != null && totalPathPct > 0) {
-      barPct = (pctToTp / totalPathPct) * 100;
-      if (barPct < 0) barPct = 0;
-      if (barPct > 100) barPct = 100;
+      progressPct = (1 - (pctToTp / totalPathPct)) * 100;
+      if (progressPct < 0) progressPct = 0;
+      if (progressPct > 100) progressPct = 100;
+    } else if (tpReached) {
+      progressPct = 100;
     }
+    let barPct = Math.max(0, Math.min(100, 100 - progressPct)); // legacy inverse fill
+
+    // % already traveled from entry — friendly "ขึ้นมาแล้ว X% ของทาง" label
+    const traveledPct = entry > 0 && px > 0
+      ? Math.max(-999, ((px - entry) / entry) * 100)
+      : 0;
 
     const startAt = t.buyFilledAt || t.buyPlacedAt || t.createdAt;
     const durMs = startAt ? (Date.now() - new Date(startAt).getTime()) : 0;
+
+    // FIX-2026-08-05: AU prediction (from server-side /api/bots/positions + /api/bots/:id/details)
+    //   - server pre-computes upperKC + predictedLossUsdt/Pct/Thb (zero Binance weight)
+    //   - on bot-detail page these come via detail endpoint; on modal via /positions
+    //   - DCA stacks: server uses stackBep + stackTotalQty (handled by prediction.computePredictionForTrade)
+    const upperKC = Number.isFinite(t.upperKC) ? Number(t.upperKC) : null;
+    const predictedSellPrice = Number.isFinite(t.predictedSellPrice) ? Number(t.predictedSellPrice) : null;
+    const predictedLossUsdt = Number.isFinite(t.predictedLossUsdt) ? Number(t.predictedLossUsdt) : null;
+    const predictedLossPct = Number.isFinite(t.predictedLossPct) ? Number(t.predictedLossPct) : null;
+    const predictedLossThb = Number.isFinite(t.predictedLossThb) ? Number(t.predictedLossThb) : null;
+    const predictionWarmup = t.predictionWarmup === true || upperKC == null;
+    const predictionComputedAt = t.predictionComputedAt || null;
+    const kcCachedCandles = Number.isFinite(t.kcCachedCandles) ? Number(t.kcCachedCandles) : 0;
 
     return {
       entry, qty, tp, px,
       symbol: t.symbol, // FIX-2026-07-31: thread symbol through for PriceFormat (was dropped → forced .toFixed(4) → ZILUSDT showed 4 dp instead of 6)
       pnlPct, unrealizedUsdt,
       pctToTp, tpReached, barPct, totalPathPct,
+      progressPct, traveledPct, // NEW friendly-progress fields
       durMs,
+      isDcaStack,
+      // AU prediction fields (used by .au-prediction block when isArmed || stuckLike)
+      upperKC, predictedSellPrice, predictedLossUsdt, predictedLossPct, predictedLossThb,
+      predictionWarmup, predictionComputedAt,
+      kcCachedCandles,
     };
   },
 
@@ -59,6 +97,136 @@ window.PositionCard = {
     if (ms < 60_000) return `${Math.floor(ms / 1000)}s`;
     if (ms < 3_600_000) return `${Math.floor(ms / 60_000)}m ${Math.floor((ms % 60_000) / 1000)}s`;
     return `${Math.floor(ms / 3_600_000)}h ${Math.floor((ms % 3_600_000) / 60_000)}m`;
+  },
+
+  /**
+   * FIX-2026-08-05: AU prediction panel — inline expanded card showing predicted exit at upper-KC
+   *   - rendered only when `isArmed || stuckLike` (mirrors Au pill logic in caller)
+   *   - reads pre-computed upperKC + predictedLoss* fields from server (zero Binance weight)
+   *   - handles 3 states: armed (🛡️), stuck-pending (⏳), warmup (⏳ upper-KC ยังไม่พร้อม)
+   *   - if upperKC > refPrice → swap "Predicted Loss" → "Predicted PnL" + bull color
+   *
+   * @param {object} m — output of computeMetrics (includes upperKC, predictedLoss*, predictionWarmup)
+   * @param {object} t — raw trade (for armedAt, autoArmLossPct, autoArmAgeHours)
+   * @param {boolean} isArmed — true when trade.useStopLossOnUKC === true (vs stuck-pending)
+   * @returns {string} HTML block to insert between pos-progress and pos-foot (empty when shouldHide)
+   */
+  renderAUPrediction(m, t, isArmed) {
+    if (!m || m.upperKC == null && m.predictionWarmup !== false) {
+      // Only render when we have a real AU condition + attempted compute.
+      // Caller decides visibility via isArmed || stuckLike — here we just render content.
+    }
+
+    const titleIcon = isArmed ? '🛡️' : '⏳';
+    const titleTxt = isArmed ? 'SL-UKC Armed — คาดการณ์จุดขาย' : 'Au-pending — คาดการณ์จุดขาย';
+    const titleCls = isArmed ? 'au-prediction is-armed' : 'au-prediction is-pending';
+    const armedAt = t && t.autoArmedAt ? new Date(t.autoArmedAt) : null;
+    const armedAtTxt = armedAt ? this.fmtDateTime(armedAt) : '';
+    const computedTxt = m.predictionComputedAt
+      ? `อัพเดทเมื่อ ${this.fmtDateTime(m.predictionComputedAt)}`
+      : '';
+
+    // Warmup state — upperKC not ready yet (<20 candles)
+    if (m.upperKC == null) {
+      const have = m.kcCachedCandles || 0;
+      const need = 20;
+      const pct = Math.min(100, Math.round((have / need) * 100));
+      // Estimate remaining time from timeframe string ("1m", "3m", "5m", "15m", "30m", "1h", ...)
+      let tfMin = 3; // sensible default
+      const tfStr = (t && t.timeframe) ? String(t.timeframe) : '';
+      const m1 = tfStr.match(/^(\d+)m$/);
+      const m2 = tfStr.match(/^(\d+)h$/);
+      if (m1) tfMin = parseInt(m1[1], 10);
+      else if (m2) tfMin = parseInt(m2[1], 10) * 60;
+      const candlesLeft = Math.max(0, need - have);
+      const etaMin = Math.max(1, Math.ceil(candlesLeft * tfMin));
+      const etaTxt = etaMin >= 60 ? `${Math.ceil(etaMin / 60)} ชม.` : `${etaMin} นาที`;
+      return `
+        <div class="${titleCls}">
+          <div class="au-head">
+            <span class="au-title">${titleIcon} ${titleTxt}</span>
+            ${armedAtTxt ? `<span class="au-when">armed ${armedAtTxt}</span>` : ''}
+          </div>
+          <div class="au-warmup">
+            <div class="au-warmup-text">⏳ กำลังโหลด upper-KC — ต้องการ ≥${need} แท่งเทียน</div>
+            <div class="au-warmup-meta">มี <strong>${have}</strong> แท่งแล้ว (${pct}% ของที่ต้องการ)</div>
+            <div class="au-warmup-bar"><div class="au-warmup-bar-fill" style="width:${pct}%;"></div></div>
+            <div class="au-warmup-hint">รอ ~${etaTxt} (TF ${tfStr || '—'}) — refresh อีกครั้งหลัง candle ปิด</div>
+          </div>
+          <div class="au-explainer">${isArmed
+            ? '⚠️ SL-on-UKC จะ trigger ทันทีที่ราคาทะลุ upper-KC (เมื่อพร้อม)'
+            : '⏳ รอ candle close ถัดไป → จะ arm SL-UKC อัตโนมัติ'}</div>
+        </div>`;
+    }
+
+    // Real prediction values
+    const sym = m.symbol;
+    const isProfit = (m.predictedLossUsdt || 0) >= 0;
+    const lossPnlCls = isProfit ? 'pnl-bull' : 'pnl-bear';
+    const lossPnlIcon = isProfit ? '🟢' : '💸';
+    const lossPnlLabel = isProfit ? 'Predicted PnL' : 'Predicted Loss';
+    const lossUsdtTxt = `${isProfit ? '+' : ''}${(m.predictedLossUsdt || 0).toFixed(4)} USDT`;
+    const lossPctTxt = `${isProfit ? '+' : ''}${(m.predictedLossPct || 0).toFixed(3)}%`;
+    // FIX-2026-08-05: window.usdtToThb returns formatted string ("≈ ฿XXX") by default.
+    //   Pass { raw: true } to get a number we can toFixed + check Number.isFinite on.
+    const thbUsdt = window.usdtToThb ? window.usdtToThb(m.predictedLossUsdt || 0, { raw: true }) : null;
+    const lossThbTxt = (thbUsdt != null && Number.isFinite(thbUsdt))
+      ? `≈ ${isProfit ? '+' : ''}${thbUsdt.toFixed(2)} THB`
+      : '';
+
+    const explainer = isArmed
+      ? '⚠️ จะขายทันทีที่ราคาทะลุ upper-KC · refresh เพื่ออัพเดท'
+      : '⏳ รอ candle close ถัดไป → จะ arm SL-UKC + ขายที่ upper-KC';
+
+    const thbBlock = lossThbTxt ? `<div class="au-sub thb-eq">${lossThbTxt}</div>` : '';
+
+    return `
+      <div class="${titleCls}">
+        <div class="au-head">
+          <span class="au-title">${titleIcon} ${titleTxt}</span>
+          ${armedAtTxt ? `<span class="au-when">armed ${armedAtTxt}</span>` : ''}
+        </div>
+        <div class="au-row">
+          <span class="au-k">🎯 Predicted Sell</span>
+          <span class="au-v mono">${PriceFormat.format(m.upperKC, sym)}</span>
+          <div class="au-sub">upper-KC ปัจจุบัน${computedTxt ? ' · ' + computedTxt : ''}</div>
+        </div>
+        <div class="au-row">
+          <span class="au-k">${lossPnlIcon} ${lossPnlLabel}</span>
+          <span class="au-v mono ${lossPnlCls}">${lossUsdtTxt}</span>
+          ${thbBlock}
+        </div>
+        <div class="au-row au-row-inline">
+          <span class="au-k">📊 Predicted %PnL</span>
+          <span class="au-v mono ${lossPnlCls}">${lossPctTxt}</span>
+        </div>
+        <div class="au-explainer">${explainer}</div>
+      </div>`;
+  },
+
+  /** FIX-2026-08-05: render the friendly "tunnel" TP progress bar markup
+   *   - forward-fills from entry → TP (progressPct), opposite of legacy inverse bar
+   *   - zone shading: red below entry (loss), gold near entry, green approaching TP
+   *   - marker dot at current price position pulses on live tick
+   *   - 🎯 marker at TP end
+   *   - returns HTML string
+   */
+  renderProgressTunnel(m, pnlCls) {
+    const progressPct = Math.round(m.progressPct || 0);
+    const traveled = m.traveledPct || 0; // signed % from entry (negative = loss)
+    const zoneCls = m.tpReached
+      ? 'zone-reached'
+      : (traveled < -1 ? 'zone-loss' : (traveled < 1 ? 'zone-flat' : 'zone-gain'));
+    const markerLeft = progressPct;
+    const tpReachedCls = m.tpReached ? 'tp-reached' : '';
+    return `
+      <div class="pct-bar-tunnel ${zoneCls}" title="bar = % ระยะที่ผ่านจาก entry ไปยัง TP (เติมเต็มเมื่อใกล้ถึงเป้า)">
+        <div class="pct-bar-tunnel-fill ${pnlCls}" style="width:${progressPct}%;"></div>
+        ${!m.tpReached && progressPct > 1 && progressPct < 99
+          ? `<div class="pct-bar-marker live-tick" style="left:${markerLeft}%;" title="ตำแหน่งปัจจุบัน"></div>`
+          : ''}
+        <div class="pct-bar-tp-marker" title="🎯 TP Target">🎯</div>
+      </div>`;
   },
 
   fmtDateTime(d) {
@@ -118,9 +286,20 @@ window.PositionCard = {
     const slArmedCls = isArmed ? 'is-sl-armed' : (stuckLike ? 'is-stuck-likely' : '');
 
     let tpLabel;
-    if (m.pctToTp == null) tpLabel = '⚠️ รอ BUY fill';
-    else if (m.tpReached) tpLabel = '🎯 ถึง TP แล้ว!';
-    else tpLabel = `ต้องขึ้นอีก ${m.pctToTp.toFixed(3)}% ถึง TP`;
+    if (m.pctToTp == null) {
+      tpLabel = '⚠️ รอ BUY fill';
+    } else if (m.tpReached) {
+      tpLabel = '🎯 ถึง TP แล้ว! 🎉';
+    } else if (m.pnlPct < 0) {
+      // below entry — friendlier copy + frame as recovery needed
+      tpLabel = `💔 ติดลบ ${Math.abs(m.pnlPct).toFixed(2)}% — ต้องขึ้นอีก ${m.pctToTp.toFixed(3)}% ถึง TP`;
+    } else if (m.pctToTp < 1) {
+      tpLabel = `🔥 ใกล้แล้ว! เหลืออีก ${m.pctToTp.toFixed(3)}% ก็ถึงเป้า`;
+    } else if (m.progressPct >= 50) {
+      tpLabel = `🚀 เกินครึ่งทางแล้ว! (${m.progressPct.toFixed(0)}%) — เหลืออีก ${m.pctToTp.toFixed(3)}%`;
+    } else {
+      tpLabel = `📈 ขึ้นมาแล้ว ${m.progressPct.toFixed(0)}% ของทาง — เหลืออีก ${m.pctToTp.toFixed(3)}% ก็ถึง TP`;
+    }
 
     let progressSub;
     if (m.tp > 0) {
@@ -133,6 +312,8 @@ window.PositionCard = {
     if (m.tp > 0) {
       if (m.tpReached) {
         tpSub = `เกิน TP แล้ว +${(-((m.px - m.tp) / m.tp) * 100).toFixed(3)}%`;
+      } else if (m.pnlPct < 0) {
+        tpSub = `${m.traveledPct.toFixed(3)}% below entry · ขาดทุนปัจจุบัน`;
       } else {
         tpSub = `${m.totalPathPct >= 0 ? '+' : ''}${m.totalPathPct.toFixed(3)}% above entry`;
       }
@@ -220,10 +401,9 @@ window.PositionCard = {
             <span>${tpLabel}</span>
             ${m.tp > 0 ? `<span class="text-muted-3" style="font-size:0.7rem;">${progressSub}</span>` : ''}
           </div>
-          <div class="pct-bar" title="bar = % ระยะที่เหลือจากราคาปัจจุบันไปยัง TP (100% = เพิ่งเปิด, 0% = ถึง TP)">
-            <div class="pct-bar-fill ${pnlCls}" style="width:${barPct}%;"></div>
-          </div>
+          ${this.renderProgressTunnel(m, pnlCls)}
         </div>
+        ${(isArmed || stuckLike) ? this.renderAUPrediction(m, t, isArmed) : ''}
         <div class="pos-foot">
           <span class="pair"><span>Order:</span><strong class="code">${this.escapeHtml(t.buyOrderId || '—')}</strong></span>
           ${t.sellOrderId ? `<span class="pair"><span>SELL:</span><strong class="code">${this.escapeHtml(t.sellOrderId)}</strong></span>` : ''}
@@ -248,18 +428,31 @@ window.PositionCard = {
     // FIX-2026-08-01: SL-armed detection (mirror desktop)
     const armedAt = t.autoArmedAt ? new Date(t.autoArmedAt) : null;
     const isArmed = t.useStopLossOnUKC === true;
-    const STUCK_LOSS_THRESHOLD_PCT = 10;
-    const STUCK_AGE_THRESHOLD_MS = 4 * 60 * 60 * 1000;
+    // FIX-2026-08-03: per-trade snapshot thresholds (mirror desktop logic)
+    const STUCK_LOSS_THRESHOLD_PCT = (typeof t.autoArmLossPct === 'number' && t.autoArmLossPct > 0)
+      ? t.autoArmLossPct : 10;
+    const STUCK_AGE_THRESHOLD_MS = (typeof t.autoArmAgeHours === 'number' && t.autoArmAgeHours > 0)
+      ? t.autoArmAgeHours * 60 * 60 * 1000 : 4 * 60 * 60 * 1000;
     const stuckLike = !isArmed
       && m.pnlPct <= -STUCK_LOSS_THRESHOLD_PCT
       && m.durMs >= STUCK_AGE_THRESHOLD_MS
-      && (t.state === 'selling' || t.state === 'holding' || t.state === 'filled');
+      && (t.state === 'selling' || t.state === 'holding' || t.state === 'filled' || t.state === 'placed');
     const slArmedCls = isArmed ? 'is-sl-armed' : (stuckLike ? 'is-stuck-likely' : '');
 
     let tpLabel;
-    if (m.pctToTp == null) tpLabel = '⚠️ รอ BUY fill';
-    else if (m.tpReached) tpLabel = '🎯 ถึง TP แล้ว!';
-    else tpLabel = `ต้องขึ้นอีก ${m.pctToTp.toFixed(3)}%`;
+    if (m.pctToTp == null) {
+      tpLabel = '⚠️ รอ BUY fill';
+    } else if (m.tpReached) {
+      tpLabel = '🎯 ถึง TP แล้ว! 🎉';
+    } else if (m.pnlPct < 0) {
+      tpLabel = `💔 ติดลบ ${Math.abs(m.pnlPct).toFixed(2)}% — เหลืออีก ${m.pctToTp.toFixed(3)}%`;
+    } else if (m.pctToTp < 1) {
+      tpLabel = `🔥 ใกล้แล้ว! เหลืออีก ${m.pctToTp.toFixed(3)}%`;
+    } else if (m.progressPct >= 50) {
+      tpLabel = `🚀 เกินครึ่งทาง! (${m.progressPct.toFixed(0)}%) — เหลืออีก ${m.pctToTp.toFixed(3)}%`;
+    } else {
+      tpLabel = `📈 ขึ้นมาแล้ว ${m.progressPct.toFixed(0)}% — เหลืออีก ${m.pctToTp.toFixed(3)}%`;
+    }
 
     const tradeId = String(t._id || t.tradeId || '');
     const botId = String(t.botId || '');
@@ -297,11 +490,12 @@ window.PositionCard = {
         <div class="row"><span class="k">Order</span><span class="v code">${this.escapeHtml(t.buyOrderId || '—')}</span></div>
         <div class="row"><span class="k">% to TP</span><span class="v ${m.tpReached ? 'tp-reached' : ''}">${m.pctToTp == null ? '—' : `${m.pctToTp.toFixed(3)}%`}</span></div>
         <div class="pos-progress" style="margin-top:0.5rem;">
-          <div class="pct-bar"><div class="pct-bar-fill ${pnlCls}" style="width:${barPct}%;"></div></div>
+          ${this.renderProgressTunnel(m, pnlCls)}
           <div class="pos-progress-label ${m.tpReached ? 'tp-reached' : ''}" style="margin-top:0.25rem;font-size:0.72rem;">
             ${tpLabel}
           </div>
         </div>
+        ${(isArmed || stuckLike) ? this.renderAUPrediction(m, t, isArmed) : ''}
         <div style="margin-top:0.5rem;text-align:right;">
           <a class="btn-lux btn-info btn-sm ${chartCls}" href="${this.escapeHtml(chartHref)}" target="_blank" rel="noopener" data-trade-id="${this.escapeHtml(tradeId)}" title="เปิดกราฟ ${this.escapeHtml(t.symbol || '')} ${this.escapeHtml(t.timeframe || '')} ในแท็บใหม่">📈 Chart</a>
           <button type="button" class="btn-lux btn-bear btn-sm ${fcCls}" data-trade-id="${this.escapeHtml(tradeId)}" data-bot-id="${this.escapeHtml(botId)}" title="บังคับปิดไม้นี้">🛑 Force Close</button>

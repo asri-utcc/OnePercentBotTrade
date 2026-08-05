@@ -18,6 +18,7 @@ const tpUpdater = require('../../core/tpUpdater'); // FIX-2026-07-28: applyMinNe
 const volatilityForBot = require('../../core/volatilityForBot'); // 2026-07-31: per-bot volatility snapshot (KC + TP + 24h vol)
 const trendlineForBot = require('../../core/trendlineForBot'); // FIX-2026-08-03: Safe-trade #2 (trendline) live status for bot card badge
 const qualityIndicator = require('../../core/qualityIndicator'); // FIX-2026-08-01: Bot Quality Indicator (0-4 score)
+const prediction = require('../../core/prediction'); // FIX-2026-08-05: upper-KC + predicted loss for AU prediction panel
 const logger = require('../../utils/logger');
 const eventBus = require('../../services/eventBus');
 
@@ -394,8 +395,36 @@ router.get('/positions', requireAuth, async (req, res) => {
       return res.json({ asOf: new Date().toISOString(), count: 0, totalCostUsdt: 0, totalUnrealizedUsdt: 0, positions: [] });
     }
     const botIds = [...new Set(trades.map((t) => String(t.botId)))];
-    const bots = await Bot.find({ _id: { $in: botIds } }).select('_id name symbol timeframe retryMax').lean();
+    // FIX-2026-08-05: include kcMult for upper-KC prediction (per-bot mult)
+    const bots = await Bot.find({ _id: { $in: botIds } }).select('_id name symbol timeframe retryMax kcMult').lean();
     const botMap = new Map(bots.map((b) => [String(b._id), b]));
+
+    // FIX-2026-08-05: pre-compute upper-KC for each unique (symbol, timeframe) pair
+    //   - primary: zero Binance weight (klineCache in-memory)
+    //   - fallback: REST getKlines when klineCache warmup (e.g. disabled bot / no trader running) — 1 call per unique pair
+    const uniqueKCItems = [];
+    const seenKCKeys = new Set();
+    for (const t of trades) {
+      const bot = botMap.get(String(t.botId));
+      if (!bot) continue;
+      const k = prediction.makeKey(t.symbol, t.timeframe);
+      if (seenKCKeys.has(k)) continue;
+      seenKCKeys.add(k);
+      uniqueKCItems.push({ symbol: t.symbol, timeframe: t.timeframe, kcMult: bot.kcMult });
+    }
+    const upperKCMap = await prediction.computeUpperKCPrices(uniqueKCItems, { restFallback: true });
+
+    // OPTIONAL: USDT→THB rate for predicted loss display (graceful fallback if not available)
+    let usdtToThbRate = null;
+    try {
+      const fxMod = require('../../services/fxService');
+      if (fxMod && typeof fxMod.getUsdtToThb === 'function') {
+        const rate = await fxMod.getUsdtToThb().catch(() => null);
+        if (typeof rate === 'number' && Number.isFinite(rate) && rate > 0) {
+          usdtToThbRate = rate;
+        }
+      }
+    } catch (_) { /* ignore — service may not exist */ }
 
     // FIX-2026-08-03: fetch fresh bookTicker per unique symbol (Promise.all — parallel)
     //   - ใช้ midPrice = (bidPrice + askPrice) / 2 (bookTicker ไม่มี lastPrice)
@@ -447,6 +476,14 @@ router.get('/positions', requireAuth, async (req, res) => {
       const entry = Number(t.buyPrice) || 0;
       const cost = Number(t.buyQuoteQty) || (entry * qty);
       const unrealizedUsdt = (currentPrice - entry) * qty;
+
+      // FIX-2026-08-05: upper-KC prediction — ใช้แสดงใน AU prediction panel (position card)
+      //   - zero Binance weight (อ่านจาก klineCache in-memory)
+      //   - DCA stacks: refPrice = stackBep, qty = stackTotalQty (handled in computePredictionForTrade)
+      const upperKCKey = prediction.makeKey(t.symbol, t.timeframe);
+      const upperKCInfo = upperKCMap.get(upperKCKey);
+      const pred = prediction.computePredictionForTrade(t, upperKCInfo, usdtToThbRate);
+
       return {
         tradeId: String(t._id),
         botId: String(t.botId),
@@ -476,6 +513,19 @@ router.get('/positions', requireAuth, async (req, res) => {
         createdAt: t.createdAt,
         currentPrice,
         priceSource, // FIX-2026-08-03: 'binance-bookTicker' | 'klineCache' | 'buyPrice' — exposed for UI badge
+        // FIX-2026-08-05: upper-KC + predicted exit fields (used by AU prediction panel)
+        //   - null = warmup (<20 cached candles) — UI shows "⏳ upper-KC ยังไม่พร้อม"
+        //   - predictedLossUsdt: positive = predicted profit, negative = predicted loss (aligned with realizedPnl semantics)
+        upperKC: pred && Number.isFinite(pred.upperKC) ? pred.upperKC : null,
+        predictedSellPrice: pred && Number.isFinite(pred.predictedSellPrice) ? pred.predictedSellPrice : null,
+        predictedLossUsdt: pred && Number.isFinite(pred.predictedLossUsdt) ? pred.predictedLossUsdt : null,
+        predictedLossPct: pred && Number.isFinite(pred.predictedLossPct) ? pred.predictedLossPct : null,
+        predictedLossThb: pred && Number.isFinite(pred.predictedLossThb) ? pred.predictedLossThb : null,
+        predictionWarmup: !!(pred && pred.warmup),
+        predictionComputedAt: upperKCInfo && upperKCInfo.computedAt ? upperKCInfo.computedAt : null,
+        kcCachedCandles: pred && Number.isFinite(pred.cachedCandles) ? pred.cachedCandles : 0,
+        predictionSource: upperKCInfo && upperKCInfo.source ? upperKCInfo.source : null, // 'klineCache' | 'binance-rest' | 'warmup'
+        kcMult: bot.kcMult ?? null,
         _costUsdt: cost,
         _unrealizedUsdt: unrealizedUsdt,
       };
@@ -1298,6 +1348,41 @@ router.get('/:id/details', requireAuth, async (req, res) => {
       ['placed', 'filled', 'holding', 'selling', 'retrying'].includes(t.state)
     ) || null;
 
+    // FIX-2026-08-05: decorate open trades with upper-KC + predicted exit (zero Binance weight via klineCache)
+    //   - single-bot detail page shows same AU prediction panel as cross-bot /api/bots/positions modal
+    //   - reuse the same prediction helper for consistency
+    let detailUsdtToThbRate = null;
+    try {
+      const fxMod = require('../../services/fxService');
+      if (fxMod && typeof fxMod.getUsdtToThb === 'function') {
+        const rate = await fxMod.getUsdtToThb().catch(() => null);
+        if (typeof rate === 'number' && Number.isFinite(rate) && rate > 0) {
+          detailUsdtToThbRate = rate;
+        }
+      }
+    } catch (_) { /* ignore */ }
+    const detailUpperKCMap = await prediction.computeUpperKCPrices([
+      { symbol: bot.symbol, timeframe: bot.timeframe, kcMult: bot.kcMult },
+    ], { restFallback: true });
+    const detailKCInfo = detailUpperKCMap.get(prediction.makeKey(bot.symbol, bot.timeframe));
+    const decorateWithPrediction = (t) => {
+      if (!t) return t;
+      const pred = prediction.computePredictionForTrade(t, detailKCInfo, detailUsdtToThbRate);
+      return {
+        ...t,
+        upperKC: pred && Number.isFinite(pred.upperKC) ? pred.upperKC : null,
+        predictedSellPrice: pred && Number.isFinite(pred.predictedSellPrice) ? pred.predictedSellPrice : null,
+        predictedLossUsdt: pred && Number.isFinite(pred.predictedLossUsdt) ? pred.predictedLossUsdt : null,
+        predictedLossPct: pred && Number.isFinite(pred.predictedLossPct) ? pred.predictedLossPct : null,
+        predictedLossThb: pred && Number.isFinite(pred.predictedLossThb) ? pred.predictedLossThb : null,
+        predictionWarmup: !!(pred && pred.warmup),
+        predictionComputedAt: detailKCInfo && detailKCInfo.computedAt ? detailKCInfo.computedAt : null,
+        kcCachedCandles: pred && Number.isFinite(pred.cachedCandles) ? pred.cachedCandles : 0,
+        predictionSource: detailKCInfo && detailKCInfo.source ? detailKCInfo.source : null,
+        kcMult: bot.kcMult ?? null,
+      };
+    };
+
     // today's stats for this bot (in server local time)
     const sinceToday = startOfTodayLocal();
     const todayStats = await Trade.aggregate([
@@ -1320,8 +1405,8 @@ router.get('/:id/details', requireAuth, async (req, res) => {
         totalCapital: (bot.capitalPerTrade || 0) * (bot.maxTrades || 0),
         activeDurationMs: computeActiveDurationMs(bot),
       },
-      activeTrade,
-      trades,
+      activeTrade: decorateWithPrediction(activeTrade),
+      trades: trades.map(decorateWithPrediction),
       signals,
       todayStats: { trades: today.todayTrades || 0, pnl: today.todayPnl || 0 },
       monthStats: { trades: month.monthTrades || 0, pnl: month.monthPnl || 0 },

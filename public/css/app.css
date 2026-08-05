@@ -1937,6 +1937,215 @@ small.text-muted {
 .position-card .pos-grid .v.live-tick { animation: pos-pulse 0.4s ease; }
 
 /* ============================================================
+   FIX-2026-08-05: Friendly TP progress "tunnel" bar
+   - forward-fills from entry → TP (progressPct)
+   - zone shading: red below entry, gold near entry, green approaching TP
+   - marker dot at current price position (pulses on live tick)
+   - 🎯 marker at TP end
+   - replaces old inverse .pct-bar / .pct-bar-fill semantic
+   ============================================================ */
+.position-card .pct-bar-tunnel {
+  position: relative;
+  width: 100%;
+  height: 14px;
+  border-radius: 999px;
+  background: linear-gradient(90deg,
+    rgba(255, 77, 109, 0.18) 0%,     /* loss zone (red, soft) */
+    rgba(255, 181, 71, 0.16) 45%,    /* neutral zone (gold, soft) */
+    rgba(0, 229, 184, 0.18) 100%);   /* gain zone (green, soft) */
+  border: 1px solid var(--border-soft);
+  overflow: visible; /* allow marker + TP-flag to protrude */
+  box-shadow: inset 0 1px 2px rgba(0,0,0,0.20);
+}
+.position-card .pct-bar-tunnel.zone-loss  { background: linear-gradient(90deg, rgba(255,77,109,0.22) 0%, rgba(255,77,109,0.10) 100%); }
+.position-card .pct-bar-tunnel.zone-flat  { background: linear-gradient(90deg, rgba(255,181,71,0.20) 0%, rgba(255,181,71,0.10) 100%); }
+.position-card .pct-bar-tunnel.zone-gain  { background: linear-gradient(90deg, rgba(0,229,184,0.18) 0%, rgba(0,229,184,0.08) 100%); }
+.position-card .pct-bar-tunnel.zone-reached {
+  background: linear-gradient(90deg, rgba(0,229,184,0.32) 0%, rgba(0,229,184,0.18) 100%);
+  border-color: rgba(0,229,184,0.55);
+  box-shadow: 0 0 12px rgba(0,229,184,0.25), inset 0 1px 2px rgba(0,0,0,0.20);
+}
+.position-card .pct-bar-tunnel-fill {
+  position: absolute; left: 0; top: 0; bottom: 0;
+  border-radius: 999px;
+  transition: width 0.35s cubic-bezier(.34,1.4,.64,1);
+  z-index: 1;
+}
+.position-card .pct-bar-tunnel-fill.pnl-bull { background: linear-gradient(90deg, rgba(0,229,184,0.65), rgba(0,229,184,0.95)); box-shadow: 0 0 10px rgba(0,229,184,0.55); }
+.position-card .pct-bar-tunnel-fill.pnl-bear { background: linear-gradient(90deg, rgba(255,77,109,0.65), rgba(255,77,109,0.95)); box-shadow: 0 0 10px rgba(255,77,109,0.55); }
+.position-card .pct-bar-marker {
+  position: absolute;
+  top: 50%; transform: translate(-50%, -50%);
+  width: 14px; height: 14px;
+  border-radius: 50%;
+  background: var(--gold-2);
+  border: 2px solid rgba(15, 23, 42, 0.85);
+  box-shadow: 0 0 0 2px rgba(245, 184, 0, 0.45), 0 0 10px rgba(245, 184, 0, 0.55);
+  z-index: 3;
+  cursor: help;
+  transition: left 0.35s cubic-bezier(.34,1.4,.64,1);
+}
+.position-card .pct-bar-marker.live-tick { animation: pos-pulse 1.2s ease infinite; }
+.position-card .pct-bar-tp-marker {
+  position: absolute;
+  right: -2px; top: 50%; transform: translate(0, -50%);
+  font-size: 0.78rem; line-height: 1;
+  filter: drop-shadow(0 0 4px rgba(0,229,184,0.55));
+  z-index: 2;
+  pointer-events: none;
+}
+
+/* ============================================================
+   FIX-2026-08-05: AU Prediction panel (🛡️ / ⏳ Au)
+   - inline expanded card below TP progress bar
+   - shown only when isArmed || stuckLike
+   - shows predicted exit (upper-KC) + predicted loss USDT/THB + %PnL
+   - armed = red glow; pending = amber dashed
+   ============================================================ */
+.position-card .au-prediction {
+  margin: 0.55rem 0 0.65rem;
+  padding: 0.65rem 0.85rem 0.75rem;
+  border-radius: var(--radius-md);
+  background: linear-gradient(180deg, rgba(255, 77, 109, 0.08) 0%, rgba(255, 77, 109, 0.04) 100%);
+  border: 1px solid rgba(255, 77, 109, 0.30);
+  border-left: 3px solid var(--bear-1);
+  font-size: 0.82rem;
+  position: relative;
+  overflow: hidden;
+}
+.position-card .au-prediction.is-armed { animation: slArmedPulse 2.4s ease-in-out infinite; }
+.position-card .au-prediction.is-pending {
+  background: linear-gradient(180deg, rgba(255, 181, 71, 0.08) 0%, rgba(255, 181, 71, 0.04) 100%);
+  border-color: rgba(255, 181, 71, 0.30);
+  border-left-color: var(--bull-3, #ffb547);
+  border-style: solid;
+}
+.position-card .au-prediction .au-head {
+  display: flex; justify-content: space-between; align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.5rem;
+  padding-bottom: 0.4rem;
+  border-bottom: 1px dashed rgba(255, 255, 255, 0.10);
+  flex-wrap: wrap;
+}
+.position-card .au-prediction .au-title {
+  font-weight: 700;
+  font-size: 0.86rem;
+  color: var(--bear-1);
+  letter-spacing: 0.01em;
+}
+.position-card .au-prediction.is-pending .au-title { color: var(--bull-3, #ffb547); }
+.position-card .au-prediction .au-when {
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  color: var(--text-3);
+  opacity: 0.85;
+}
+.position-card .au-prediction .au-row {
+  display: grid;
+  grid-template-columns: minmax(110px, 1.2fr) 1fr;
+  gap: 0.35rem 0.65rem;
+  align-items: baseline;
+  padding: 0.28rem 0;
+  border-bottom: 1px dashed rgba(255, 255, 255, 0.05);
+}
+.position-card .au-prediction .au-row:last-of-type { border-bottom: none; }
+.position-card .au-prediction .au-row-inline {
+  grid-template-columns: minmax(110px, 1.2fr) auto;
+}
+.position-card .au-prediction .au-k {
+  color: var(--text-2);
+  font-weight: 500;
+  font-size: 0.78rem;
+}
+.position-card .au-prediction .au-v {
+  font-family: var(--font-mono);
+  font-weight: 600;
+  color: var(--text-1);
+  font-size: 0.92rem;
+  text-align: right;
+}
+.position-card .au-prediction .au-v.pnl-bull { color: var(--bull-1); }
+.position-card .au-prediction .au-v.pnl-bear { color: var(--bear-1); }
+.position-card .au-prediction .au-sub {
+  grid-column: 1 / -1;
+  font-family: var(--font-mono);
+  font-size: 0.66rem;
+  color: var(--text-3);
+  margin-top: 0.1rem;
+  letter-spacing: 0.02em;
+  padding-left: 0.1rem;
+}
+.position-card .au-prediction .au-sub.thb-eq {
+  color: var(--gold-2);
+  opacity: 0.85;
+}
+.position-card .au-prediction .au-warmup {
+  padding: 0.55rem 0.65rem;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px dashed rgba(255, 255, 255, 0.10);
+  border-radius: var(--radius-sm);
+  color: var(--text-2);
+  font-size: 0.78rem;
+  margin: 0.35rem 0;
+  font-family: var(--font-mono);
+}
+.position-card .au-prediction .au-warmup-text {
+  font-weight: 600;
+  color: var(--text-1);
+  margin-bottom: 0.3rem;
+  font-size: 0.82rem;
+}
+.position-card .au-prediction .au-warmup-meta {
+  font-size: 0.74rem;
+  color: var(--text-2);
+  margin-bottom: 0.3rem;
+}
+.position-card .au-prediction .au-warmup-meta strong {
+  color: var(--gold-2);
+  font-weight: 700;
+}
+.position-card .au-prediction .au-warmup-bar {
+  width: 100%;
+  height: 6px;
+  background: rgba(255, 255, 255, 0.06);
+  border-radius: 999px;
+  overflow: hidden;
+  margin-bottom: 0.35rem;
+}
+.position-card .au-prediction .au-warmup-bar-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--gold-2), var(--gold-1, #ffd76a));
+  box-shadow: 0 0 6px rgba(245, 184, 0, 0.45);
+  border-radius: 999px;
+  transition: width 0.4s cubic-bezier(.34,1.4,.64,1);
+}
+.position-card .au-prediction .au-warmup-hint {
+  font-size: 0.68rem;
+  color: var(--text-3);
+  font-style: italic;
+  letter-spacing: 0.01em;
+}
+.position-card .au-prediction .au-explainer {
+  margin-top: 0.5rem;
+  padding-top: 0.45rem;
+  border-top: 1px dashed rgba(255, 255, 255, 0.08);
+  color: var(--text-2);
+  font-size: 0.74rem;
+  line-height: 1.45;
+  font-style: italic;
+}
+.position-card .au-prediction.is-pending .au-explainer { color: var(--bull-3, #ffb547); }
+
+/* Mobile prediction panel — compact single column */
+@media (max-width: 640px) {
+  .position-card .au-prediction { padding: 0.55rem 0.65rem 0.6rem; font-size: 0.78rem; }
+  .position-card .au-prediction .au-row { grid-template-columns: 1fr; gap: 0.15rem; }
+  .position-card .au-prediction .au-v { text-align: left; font-size: 0.86rem; }
+  .position-card .au-prediction .au-sub { padding-left: 0; }
+}
+
+/* ============================================================
    LUXURY MODAL — premium confirm/create/delete dialogs
    Replaces native confirm()/prompt()/alert() — adds password field,
    animated icon, variant-tinted headers, loading state.

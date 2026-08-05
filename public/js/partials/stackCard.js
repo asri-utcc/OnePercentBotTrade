@@ -60,7 +60,37 @@ window.StackCard = {
       }
     }
 
-    return { bep, totalQty, totalSpent, tp, px, pnlPct, unrealizedUsdt, pctToTp, tpReached, totalPathPct };
+    // FIX-2026-08-05: friendly forward-progress fields (mirror positionCard.computeMetrics)
+    let progressPct = 0;
+    if (pctToTp != null && totalPathPct > 0) {
+      progressPct = (1 - (pctToTp / totalPathPct)) * 100;
+      if (progressPct < 0) progressPct = 0;
+      if (progressPct > 100) progressPct = 100;
+    } else if (tpReached) {
+      progressPct = 100;
+    }
+    const traveledPct = bep > 0 && px > 0
+      ? Math.max(-999, ((px - bep) / bep) * 100)
+      : 0;
+
+    // FIX-2026-08-05: AU prediction fields (server-decorated via /api/bots/:id/details — zero Binance weight)
+    const upperKC = Number.isFinite(stack.upperKC) ? Number(stack.upperKC) : null;
+    const predictedSellPrice = Number.isFinite(stack.predictedSellPrice) ? Number(stack.predictedSellPrice) : null;
+    const predictedLossUsdt = Number.isFinite(stack.predictedLossUsdt) ? Number(stack.predictedLossUsdt) : null;
+    const predictedLossPct = Number.isFinite(stack.predictedLossPct) ? Number(stack.predictedLossPct) : null;
+    const predictedLossThb = Number.isFinite(stack.predictedLossThb) ? Number(stack.predictedLossThb) : null;
+    const predictionWarmup = stack.predictionWarmup === true || upperKC == null;
+    const predictionComputedAt = stack.predictionComputedAt || null;
+
+    return {
+      bep, totalQty, totalSpent, tp, px,
+      pnlPct, unrealizedUsdt, pctToTp, tpReached, totalPathPct,
+      progressPct, traveledPct, // friendly tunnel-bar fields
+      symbol: stack.symbol,
+      upperKC, predictedSellPrice, predictedLossUsdt, predictedLossPct, predictedLossThb,
+      predictionWarmup, predictionComputedAt,
+      isDcaStack: true,
+    };
   },
 
   renderCard(stack, currentPrice, opts = {}) {
@@ -84,9 +114,19 @@ window.StackCard = {
     const ageTxt = this.fmtDur(ageMs);
 
     let tpLabel;
-    if (m.tpReached) tpLabel = '🎯 ถึง TP แล้ว!';
-    else if (m.pctToTp != null) tpLabel = `ต้องขึ้นอีก ${m.pctToTp.toFixed(3)}% ถึง TP`;
-    else tpLabel = '⚠️ รอ layer fill';
+    if (m.tpReached) {
+      tpLabel = '🎯 ถึง TP แล้ว! 🎉';
+    } else if (m.pctToTp == null) {
+      tpLabel = '⚠️ รอ layer fill';
+    } else if (m.pnlPct < 0) {
+      tpLabel = `💔 ติดลบ ${Math.abs(m.pnlPct).toFixed(2)}% — ต้องขึ้นอีก ${m.pctToTp.toFixed(3)}% ถึง TP`;
+    } else if (m.pctToTp < 1) {
+      tpLabel = `🔥 ใกล้แล้ว! เหลืออีก ${m.pctToTp.toFixed(3)}% ก็ถึงเป้า`;
+    } else if (m.progressPct >= 50) {
+      tpLabel = `🚀 เกินครึ่งทางแล้ว! (${m.progressPct.toFixed(0)}%) — เหลืออีก ${m.pctToTp.toFixed(3)}%`;
+    } else {
+      tpLabel = `📈 ขึ้นมาแล้ว ${m.progressPct.toFixed(0)}% ของทาง — เหลืออีก ${m.pctToTp.toFixed(3)}% ก็ถึง TP`;
+    }
 
     const layersHtml = (stack.buyLayers || []).map((ly) => {
       const filledAt = ly.filledAt ? this.fmtDateTime(ly.filledAt) : '-';
@@ -164,6 +204,13 @@ window.StackCard = {
           </div>
         </div>
         ${layersTable}
+        <div class="pos-progress" style="margin-top:0.5rem;">
+          <div class="pos-progress-label ${m.tpReached ? 'tp-reached' : ''}">
+            <span>${tpLabel}</span>
+          </div>
+          ${window.PositionCard ? window.PositionCard.renderProgressTunnel(m, pnlCls) : ''}
+        </div>
+        ${slArmed && window.PositionCard ? window.PositionCard.renderAUPrediction(m, stack, true) : ''}
         <div class="pos-foot">
           <div class="foot-meta">
             ${stack.sellOrderId ? `<span title="SELL order id">🎯 SELL #${this.escapeHtml(String(stack.sellOrderId).slice(-8))}</span>` : ''}
