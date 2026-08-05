@@ -2312,6 +2312,54 @@ class Trader {
         }, 'trader: no bookTicker for BUY price selection, falling back to candle.close');
       }
 
+      // FIX-2026-08-05 (HFT -2010 hardening): pre-flight fresh bookTicker
+      //   - HFT incident (low-cap + 1m TF): WS snapshot จาก @bookTicker stream อาจเก่า 200-500ms
+      //     เพราะ order book เปลี่ยนทุก 100-200ms → ask ขยับลงก่อน LIMIT_MAKER ไปถึง matching engine
+      //     → -2010 "Order would immediately match and take"
+      //   - fix: ถ้า WS snapshot เก่าเกิน 200ms → refetch ผ่าน /api/v3/ticker/bookTicker (REST, weight=2)
+      //     แล้ว recompute bid/ask/refPrice ด้วยค่าใหม่ → race window ลดจาก ~300-500ms เหลือ ~50-100ms
+      //   - ถ้า refetch fail (network/429) → fall through ใช้ snapshot เดิม (retry path ที่ step 8 ยังกัน -2010 อยู่)
+      //   - 200ms threshold: มากกว่า WS tick ปกติ (~50ms สำหรับ active symbols) แต่น้อยกว่า Binance HTTP RTT (~100-150ms)
+      const STALE_THRESHOLD_MS = 200;
+      const wsAgeMs = ticker && ticker.ts ? Date.now() - ticker.ts : Infinity;
+      if (ticker && ticker.bid && ticker.ask && Number.isFinite(wsAgeMs) && wsAgeMs > STALE_THRESHOLD_MS) {
+        try {
+          const fresh = await binanceRest.getBookTicker(this.bot.symbol);
+          if (fresh && fresh.bidPrice && fresh.askPrice) {
+            const oldBid = bid;
+            const oldAsk = ask;
+            const fBid = parseFloat(fresh.bidPrice);
+            const fAsk = parseFloat(fresh.askPrice);
+            logger.info({
+              botId: this.bot._id.toString(),
+              symbol: this.bot.symbol,
+              wsAgeMs,
+              oldBid, oldAsk,
+              newBid: fBid, newAsk: fAsk,
+            }, 'trader: pre-flight bookTicker refresh (WS snapshot stale > 200ms)');
+            // recompute bid/ask/refPrice ด้วยค่าใหม่ — ใช้ logic เดียวกับ block ด้านบน
+            bid = fBid;
+            ask = fAsk;
+            const freshSpread = new Decimal(fAsk).minus(fBid);
+            if (bid >= ask) {
+              refPrice = new Decimal(fAsk).minus(tickSize);
+            } else if (freshSpread.lessThan(tickDec.times(minSpreadTicks))) {
+              refPrice = new Decimal(fBid);
+            } else {
+              refPrice = new Decimal(fBid).minus(tickSize);
+            }
+          } else {
+            logger.warn({ botId: this.bot._id.toString(), symbol: this.bot.symbol }, 'trader: pre-flight bookTicker returned empty — using WS snapshot');
+          }
+        } catch (refreshErr) {
+          logger.warn({
+            botId: this.bot._id.toString(),
+            symbol: this.bot.symbol,
+            err: refreshErr.message,
+          }, 'trader: pre-flight bookTicker refresh failed — using WS snapshot (retry path will catch -2010)');
+        }
+      }
+
       // 3. คำนวณ qty
       // FIX-2026-08-03: DCA + Martingale scaling — when DCA mode + martingaleEnabled,
       //   per-layer notional scales by multiplier^(layerIndex-1), capped by martingaleMaxLayerNotional.
