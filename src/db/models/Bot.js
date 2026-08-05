@@ -129,6 +129,17 @@ const botSchema = new mongoose.Schema(
     //   - **ไม่แนะนำให้เปิดกับบอท DCA** (DCA ซื้อ dip โดยเฉพาะ — filter นี้ block dip-buy → ขัดกับ DCA intent)
     //   - Ported from Pine "Trendlines with Breaks" by LuxAlgo (CC BY-NC-SA 4.0); slope=ATR(14)/14*1.0
     safeTradeTrendlineEnabled: { type: Boolean, default: false },
+    // FIX-2026-08-05: Safe-trade filter #3 — Pine "No-Trade Signal Engine" (engulfing + shooting star)
+    //   - true: ก่อนวาง BUY ตรวจ upper-TF (TREND_TF_MAP) ว่าแท่งล่าสุดมี "nt"/"nt1" pattern หรือไม่
+    //   - false (default): ปิด filter นี้ (พฤติกรรมเดิม — ไม่กรอง no-trade pattern)
+    //   - FAIL-OPEN on Binance error / insufficient data (mirror ST#1/ST#2)
+    //   - **ไม่แนะนำสำหรับบอท DCA** (DCA ซื้อ dip — filter นี้ block dip-buy → ขัดกับ DCA intent)
+    //   - Keltner Channel: kcLen=20 fixed, kcMult = bot.kcMult (FIX: ใช้ per-bot ให้ consistent กับ S1 detection)
+    //   - Patterns: Bearish Engulfing (1-bar / 2-bar) + Shooting Star ที่อยู่ใน upper KC zone
+    //   - State machine: เมื่อ trigger → ครอบคลุม 2 แท่งแดงถัดไป (matches Pine `redCountRemaining=2`)
+    //   - **Real-time check**: ตรวจแท่งปัจจุบัน แม้ยังไม่ close (Binance REST คืนแท่งที่ยังสร้างไม่เสร็จ
+    //     → close = last price แบบ live) — Pine run ทุก tick อยู่แล้ว จึงเป็นธรรมชาติเดียวกัน
+    safeTradeNoTradeEnabled: { type: Boolean, default: false },
     // FIX-2026-08-01: per-bot auto-pause on low Min-%KC (default ON)
     //   - ทุก 5 min: scan Min-%KC(30 bars) — ถ้า < autoPauseMinKcPct (default 2%) → set enabled=false
     //   - ถ้า ≥ threshold (และเคยถูก auto-pause) → auto-resume (vol_recovered)

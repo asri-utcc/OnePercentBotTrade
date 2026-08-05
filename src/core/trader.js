@@ -2076,6 +2076,64 @@ class Trader {
       }
     }
 
+    // FIX-2026-08-05: Safe-trade filter #3 — Pine "No-Trade Signal Engine" (engulfing + shooting star)
+    //   - หลัง ST#1 + ST#2 ผ่าน: ตรวจ upper-TF (TREND_TF_MAP) — แท่งล่าสุดมี nt/nt1 pattern หรือไม่
+    //   - PASS = lastKind === 'none' → BUY
+    //   - FAIL-OPEN on Binance error / insufficient data / no_trend_tf (mirror ST#1/ST#2)
+    //   - **ไม่แนะนำสำหรับ DCA bots** (DCA ซื้อ dip — filter นี้ block dip-buy → �ัดกับ DCA intent)
+    //   - **Real-time**: Binance REST returns last candle ที่ยังไม่ close (close = live price) → check ทันที (ไม่รอ kline:closed)
+    //   - ใช้ bot.kcMult (per-bot) ผ่าน checkNoTradeOnUpperTF (FIX: ให้ consistent กับ S1 detection)
+    // FIX-2026-08-05: ST#3 disabled for DCA bots (UI warns "not recommended for DCA")
+    //   - DCA intent = buy dips — filter = block dip-buys → ขัดกัน
+    //   - Wizard layer-add ของ DCA ใช้ placeBuy path เดียวกัน → ต้อง bypass filter
+    if (this.bot.safeTradeNoTradeEnabled === true && !this._isDcaMode()) {
+      try {
+        const trendTF = volatilityScanner.TREND_TF_MAP && volatilityScanner.TREND_TF_MAP[this.bot.timeframe];
+        const st3 = await signalEngine.checkNoTradeOnUpperTF(this.bot, trendTF, binanceRest);
+        if (st3.skip) {
+          logger.info({
+            botId: this.bot._id.toString(),
+            symbol: this.bot.symbol,
+            tf: this.bot.timeframe,
+            trendTF: st3.trendTF,
+            lastKind: st3.lastKind,
+            lastClose: st3.lastClose,
+            kcMult: st3.kcMult,
+          }, 'trader: safe-trade no-trade blocked BUY');
+          await Signal.updateOne({ _id: signalDoc._id }, { outcome: 'skipped', note: 'safe_trade_no_trade_block' });
+          try {
+            eventBus.emit('safe_trade_no_trade:blocked', {
+              botId: String(this.bot._id),
+              symbol: this.bot.symbol,
+              timeframe: this.bot.timeframe,
+              trendTF: st3.trendTF,
+              lastKind: st3.lastKind,
+              lastClose: st3.lastClose,
+              kcMult: st3.kcMult,
+            });
+          } catch (_) {}
+          return; // do NOT place buy
+        }
+        // PASS or fail-open — log only when meaningful
+        if (st3.reason === 'pass') {
+          logger.debug({
+            botId: this.bot._id.toString(),
+            trendTF: st3.trendTF,
+            lastKind: st3.lastKind,
+          }, 'trader: safe-trade no-trade PASS');
+        } else if (st3.reason !== 'disabled' && st3.reason !== 'no_trend_tf') {
+          logger.warn({
+            botId: this.bot._id.toString(),
+            reason: st3.reason,
+            error: st3.error,
+          }, 'trader: safe-trade no-trade fail-open — allowing BUY');
+        }
+      } catch (err) {
+        // fail-open on unexpected exception (defensive)
+        logger.warn({ err: err.message, botId: this.bot._id.toString() }, 'trader: safe-trade no-trade check threw — allowing BUY');
+      }
+    }
+
     await this.placeBuy(signalDoc, candle);
   }
 

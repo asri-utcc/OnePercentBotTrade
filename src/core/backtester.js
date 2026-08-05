@@ -109,6 +109,45 @@ function _trendlineAt(mainBarOpenTime, upperKlines, upperTrendline) {
   return upperTrendline[ans];
 }
 
+// FIX-2026-08-05: Safe-trade filter #3 — pre-compute per-bar nt/nt1/none for backtest range
+//   - Mirror _computeBacktestTrendline but uses computeNoTradePerBar
+//   - kcMult passed from bot.kcMult (per-bot, FIX: consistent กับ S1 + live behavior)
+//   - Returns null when no trendTF / fetch failed / insufficient data → backtest fails-OPEN
+async function _computeBacktestNoTrade({ symbol, timeframe, kcMult, fromMs, toMs, fetchFn }) {
+  const trendTF = volatilityScanner.TREND_TF_MAP[timeframe];
+  if (!trendTF) return null;
+  try {
+    const result = await fetchFn({ symbol, interval: trendTF, fromMs, toMs });
+    const upperRaw = result.klines || result;
+    if (!Array.isArray(upperRaw) || upperRaw.length < 21) return null;
+    const upperKlines = upperRaw.map((k) => ({
+      openTime: k.openTime,
+      open: parseFloat(k.open),
+      high: parseFloat(k.high),
+      low: parseFloat(k.low),
+      close: parseFloat(k.close),
+    }));
+    const perBar = signalEngine.computeNoTradePerBar(upperKlines, { mult: kcMult });
+    return { trendTF, upperKlines, perBar };
+  } catch (err) {
+    logger.warn({ symbol, timeframe, trendTF, err: err.message }, 'backtest: no-trade fetch failed — fail-open');
+    return null;
+  }
+}
+
+// FIX-2026-08-05: lookup per-bar no-trade kind for a given main bar openTime (binary search)
+function _noTradeAt(mainBarOpenTime, upperKlines, perBar) {
+  let lo = 0, hi = upperKlines.length - 1, ans = -1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (upperKlines[mid].openTime <= mainBarOpenTime) { ans = mid; lo = mid + 1; }
+    else { hi = mid - 1; }
+  }
+  if (ans < 0) return 'none';
+  const entry = perBar[ans];
+  return (entry && entry.kind) || 'none';
+}
+
 function intervalToMs(interval) {
   const m = interval.match(/^(\d+)([mhdwM])$/);
   if (!m) throw new Error(`Invalid interval: ${interval}`);
@@ -188,6 +227,8 @@ function simulateTrades({ klines, signals, opts }) {
     //   - if null/undefined: filter disabled (skip the check)
     //   - if {trendTF, upperKlines, upperTrendline}: filter enabled, check per-signal
     trendlineData = null,
+    // FIX-2026-08-05: Safe-trade filter #3 (no-trade engulfing/SS) — pre-computed per-bar
+    noTradeData = null,
   } = opts;
 
   // FIX-2026-08-03: build cfg object ที่ inner scope ใช้อ่าน (mirror DCA closeOpenStack pattern)
@@ -201,6 +242,11 @@ function simulateTrades({ klines, signals, opts }) {
   const trendlineEnabled = trendlineData != null
     && Array.isArray(trendlineData.upperKlines)
     && Array.isArray(trendlineData.upperTrendline);
+
+  // FIX-2026-08-05: no-trade filter enabled flag (truthy if per-bar data provided)
+  const noTradeEnabled = noTradeData != null
+    && Array.isArray(noTradeData.upperKlines)
+    && Array.isArray(noTradeData.perBar);
 
   const trades = [];
   // Active trades: เรียงตาม exitIdx ascending (FIFO) เพื่อ clean up เร็ว
@@ -250,6 +296,37 @@ function simulateTrades({ klines, signals, opts }) {
           // custom audit fields (kept on tradeSim via extra fields)
           trendlineValue: Number(tlValue.toFixed(8)),
           gapPct: Number(gapPct.toFixed(3)),
+        });
+        continue; // skip this signal — do NOT consume concurrent slot
+      }
+    }
+
+    // ─── FIX-2026-08-05: Safe-trade #3 (no-trade engulfing/SS) filter ───────────────
+    //   - check Pine "No-Trade Signal Engine" per-bar (pre-computed from upper-TF)
+    //   - �้า upper-TF bar matching sig.openTime มี lastKind === 'nt' | 'nt1' → skip
+    //   - FAIL-OPEN semantics: ถ้า noTrade ไม่พร้อม (warmup, null) → ผ่าน (ไม่ block)
+    //   - ทำก่อน concurrent slot check เพื่อไม่ให้ filter consume slot
+    if (noTradeEnabled) {
+      const lastKind = _noTradeAt(sig.openTime, noTradeData.upperKlines, noTradeData.perBar);
+      if (lastKind === 'nt' || lastKind === 'nt1') {
+        trades.push({
+          signalTime: new Date(sig.openTime),
+          candleCloseTime: new Date(sig.closeTime),
+          buyPrice,
+          targetSellPrice: target,
+          sellPrice: null,
+          buyFilled: false,
+          sellFilled: false,
+          qty: 0,
+          notional: 0,
+          grossPnl: 0,
+          fees: 0,
+          realizedPnl: 0,
+          pnlPercent: 0,
+          exitReason: 'safe_trade_no_trade_block',
+          bgState: sig.bgState,
+          lastKind,
+          trendTF: noTradeData.trendTF,
         });
         continue; // skip this signal — do NOT consume concurrent slot
       }
@@ -574,6 +651,9 @@ async function runBacktest(params) {
     slUkcTriggerOnProfit = false,
     // FIX-2026-08-03: Safe-trade filter #2 (trendline) — opt-in per-bar filter
     safeTradeTrendlineEnabled = false,
+    // FIX-2026-08-05: Safe-trade filter #3 (no-trade engulfing/SS) — opt-in per-bar filter
+    safeTradeNoTradeEnabled = false,
+    kcMult = 1.5,
   } = params;
 
   const fromMs = typeof from === 'string' ? new Date(from).getTime() : from;
@@ -631,11 +711,28 @@ async function runBacktest(params) {
     }
   }
 
+  // FIX-2026-08-05: pre-compute no-trade (engulfing/SS) per-bar if filter enabled
+  let noTradeData = null;
+  if (safeTradeNoTradeEnabled === true) {
+    noTradeData = await _computeBacktestNoTrade({
+      symbol, timeframe, kcMult, fromMs, toMs, fetchFn: fetchKlines,
+    });
+    if (noTradeData) {
+      logger.info({
+        symbol, trendTF: noTradeData.trendTF,
+        upperBars: noTradeData.upperKlines.length,
+      }, 'backtest: no-trade pre-computed');
+    } else {
+      logger.warn({ symbol, timeframe }, 'backtest: no-trade pre-compute failed — fail-open');
+    }
+  }
+
   logger.info({
     symbol, timeframe, klines: klines.length, signals: signals.length,
     stepSize: stepSizeStr, minNotional: minNotional.toString(),
     truncated,
     safeTradeTrendlineEnabled: !!safeTradeTrendlineEnabled,
+    safeTradeNoTradeEnabled: !!safeTradeNoTradeEnabled,
     actualDays: klines.length > 1
       ? Math.round((klines[klines.length - 1].openTime - klines[0].openTime) / 86400000)
       : 0,
@@ -660,6 +757,8 @@ async function runBacktest(params) {
       slUkcTriggerOnProfit,
       // FIX-2026-08-03: Safe-trade filter #2 (trendline) — pre-computed upper-TF data
       trendlineData,
+      // FIX-2026-08-05: Safe-trade filter #3 (no-trade engulfing/SS) — pre-computed upper-TF per-bar
+      noTradeData,
     },
   });
 
@@ -668,6 +767,8 @@ async function runBacktest(params) {
   stats.maxConcurrentTradesUsed = maxConcurrentTradesUsed;
   // FIX-2026-08-03: count Safe-trade trendline blocked signals (separate from noBuyFillCount)
   stats.safeTradeTrendlineBlocked = trades.filter((t) => t.exitReason === 'safe_trade_trendline_block').length;
+  // FIX-2026-08-05: count Safe-trade no-trade blocked signals
+  stats.safeTradeNoTradeBlocked = trades.filter((t) => t.exitReason === 'safe_trade_no_trade_block').length;
 
   const storedTrades = trades.length > 500 ? trades.slice(0, 250).concat(trades.slice(-250)) : trades;
 
@@ -771,8 +872,10 @@ async function runDcaBacktest(params) {
     martingaleMultiplier = 1.5,
     martingaleMaxLayerNotional = 100,
     // FIX-2026-08-03: Safe-trade filter #2 (trendline) — opt-in per-bar filter
-    //   - ไม่แนะนำสำหรับ DCA mode (DCA ซื้อ dip — filter นี้ block dip-buy)
+    //   - ไม่แนะนำสำหรับ DCA mode (DCA �ื้อ dip — filter นี้ block dip-buy)
     safeTradeTrendlineEnabled = false,
+    // FIX-2026-08-05: Safe-trade filter #3 (no-trade engulfing/SS) — opt-in per-bar filter
+    safeTradeNoTradeEnabled = false,
   } = params;
 
   if (!symbol || !timeframe || !from || !to) {
@@ -871,10 +974,30 @@ async function runDcaBacktest(params) {
   }
   const trendlineEnabled = trendlineData != null && Array.isArray(trendlineData.upperKlines);
 
+  // FIX-2026-08-05: pre-compute no-trade per-bar (engulfing/SS) for DCA backtest
+  let noTradeData = null;
+  if (safeTradeNoTradeEnabled === true) {
+    noTradeData = await _computeBacktestNoTrade({
+      symbol, timeframe, kcMult, fromMs, toMs, fetchFn: fetchKlines,
+    });
+    if (noTradeData) {
+      logger.info({
+        symbol, trendTF: noTradeData.trendTF,
+        upperBars: noTradeData.upperKlines.length,
+      }, 'dca-backtest: no-trade pre-computed');
+    } else {
+      logger.warn({ symbol, timeframe }, 'dca-backtest: no-trade pre-compute failed — fail-open');
+    }
+  }
+  const noTradeEnabled = noTradeData != null
+    && Array.isArray(noTradeData.upperKlines)
+    && Array.isArray(noTradeData.perBar);
+
   logger.info({
     symbol, timeframe, klines: klines.length, signals: signals.length,
     dcaMaxLayers, stepSize: stepSizeStr, minNotional: minNotional.toString(),
     safeTradeTrendlineEnabled: !!safeTradeTrendlineEnabled,
+    safeTradeNoTradeEnabled: !!safeTradeNoTradeEnabled,
   }, 'dca-backtest: signals detected');
 
   const feeRate = fees.getMakerRate({ useBnbForFees });
@@ -882,6 +1005,9 @@ async function runDcaBacktest(params) {
 
   // FIX-2026-08-03: trendline blocked counter (separate stat for DCA)
   let safeTradeTrendlineBlocked = 0;
+  // FIX-2026-08-05: no-trade blocked counter — ST#3 is disabled for DCA bots
+  //   (mirror UI warning "not recommended for DCA") → counter stays 0 for DCA path
+  let safeTradeNoTradeBlocked = 0;
 
   // ─── Simulate DCA stack flow per signal ────────────────────────
   // Active stack: at most 1 stack per bot at any time.
@@ -924,6 +1050,36 @@ async function runDcaBacktest(params) {
           gapPct: Number(gapPct.toFixed(3)),
         });
         safeTradeTrendlineBlocked += 1;
+        continue; // skip this layer-add
+      }
+    }
+
+    // ─── FIX-2026-08-05: Safe-trade #3 (no-trade engulfing/SS) filter ───────────────
+    //   - DCA mode: filter blocks layer-add when upper-TF lastKind === 'nt' | 'nt1'
+    //   - ⚠️ ไม่แนะนำเปิดกับ DCA (filter นี้ block dip-buy → ขัดกับ DCA intent)
+    //   - FAIL-OPEN: noTrade ไม่พร้อม → ผ่าน
+    //   - AUDIT-FIX-2026-08-05: ST#3 disabled for DCA bots (mirror live trader.js bypass)
+    //     - bot.dcaEnabled จริงหลัง merge จาก cfg.dcaEnabled ?? false
+    //   - ถ้า DCA bypass: counter ยัง track ตามปกติ (เพื่อ visibility) — counter จะเป็น 0 ในทางปฏิบัติ
+    if (noTradeEnabled && !dcaEnabled) {
+      const lastKind = _noTradeAt(sig.openTime, noTradeData.upperKlines, noTradeData.perBar);
+      if (lastKind === 'nt' || lastKind === 'nt1') {
+        trades.push({
+          signalTime: new Date(sig.openTime),
+          candleCloseTime: new Date(sig.closeTime),
+          buyPrice,
+          layerIndex: openStack ? (openStack.layerCount + 1) : 1,
+          layerCountAfter: 0,
+          buyFilled: false,
+          sellFilled: false,
+          qty: 0,
+          notional: 0,
+          exitReason: 'safe_trade_no_trade_block',
+          bgState: sig.bgState,
+          lastKind,
+          trendTF: noTradeData.trendTF,
+        });
+        safeTradeNoTradeBlocked += 1; // FIX-2026-08-05: parity with ST#2 trendline counter
         continue; // skip this layer-add
       }
     }
@@ -1198,6 +1354,8 @@ async function runDcaBacktest(params) {
     stillHoldingPositions,
     // FIX-2026-08-03: Safe-trade trendline filter blocked count (per-bar stat for DCA mode)
     safeTradeTrendlineBlocked,
+    // FIX-2026-08-05: no-trade filter blocked count (parity with ST#2 trendline)
+    safeTradeNoTradeBlocked,
   };
 }
 
@@ -1441,6 +1599,16 @@ async function runMultiBacktest(params) {
         symbol: b.symbol.toUpperCase(), timeframe: b.timeframe, fromMs, toMs, fetchFn: fetchKlines,
       });
     }
+    // FIX-2026-08-05: pre-compute no-trade (engulfing/SS) per-bar if this bot enabled
+    let noTradeData = null;
+    if (b.safeTradeNoTradeEnabled === true) {
+      noTradeData = await _computeBacktestNoTrade({
+        symbol: b.symbol.toUpperCase(),
+        timeframe: b.timeframe,
+        kcMult: signalOpts.mult,
+        fromMs, toMs, fetchFn: fetchKlines,
+      });
+    }
     let stepSizeStr = null;
     let minNotional = new Decimal('10');
     try {
@@ -1496,6 +1664,8 @@ async function runMultiBacktest(params) {
       closesArr,
       // FIX-2026-08-03: pre-computed LuxAlgo trendline for per-bot safe-trade #2 filter
       trendlineData,
+      // FIX-2026-08-05: pre-computed no-trade (engulfing/SS) per-bar for per-bot safe-trade #3
+      noTradeData,
       truncated,
       candlesFetched: klines.length,
     };
@@ -1518,6 +1688,8 @@ async function runMultiBacktest(params) {
         _closesArr: bi.closesArr,
         // FIX-2026-08-03: propagate trendline data per-signal (may be null if filter off)
         _trendlineData: bi.trendlineData,
+        // FIX-2026-08-05: propagate no-trade per-bar (may be null if filter off)
+        _noTradeData: bi.noTradeData,
       });
     }
   }
@@ -1554,7 +1726,7 @@ async function runMultiBacktest(params) {
     // FIX-2026-08-03: Safe-trade #2 (trendline) filter — multi-bot per-signal check
     //   - ใช้ per-bot pre-computed trendline (sig._trendlineData)
     //   - FAIL-OPEN: trendline ไม่พร้อม → ผ่าน
-    //   - ทำก่อน concurrent slot check เพื่อไม่ให้ filter consume slot
+    //   - ทำก่อน concurrent slot check เ�ื่อไม่ให้ filter consume slot
     if (sig._trendlineData && Array.isArray(sig._trendlineData.upperKlines)) {
       const tlValue = _trendlineAt(sig.openTime, sig._trendlineData.upperKlines, sig._trendlineData.upperTrendline);
       if (tlValue != null && Number.isFinite(tlValue) && buyPrice <= tlValue) {
@@ -1578,6 +1750,36 @@ async function runMultiBacktest(params) {
           bgState: sig.bgState,
           trendlineValue: Number(tlValue.toFixed(8)),
           gapPct: Number(gapPct.toFixed(3)),
+        });
+        continue; // skip this signal — do NOT consume slot or capital
+      }
+    }
+
+    // FIX-2026-08-05: Safe-trade #3 (no-trade engulfing/SS) filter — multi-bot per-signal check
+    //   - ใช้ per-bot pre-computed noTradeData (sig._noTradeData)
+    //   - FAIL-OPEN: ไม่พร้อม → ผ่าน
+    if (sig._noTradeData && Array.isArray(sig._noTradeData.upperKlines) && Array.isArray(sig._noTradeData.perBar)) {
+      const lastKind = _noTradeAt(sig.openTime, sig._noTradeData.upperKlines, sig._noTradeData.perBar);
+      if (lastKind === 'nt' || lastKind === 'nt1') {
+        const targetForRecord = new Decimal(buyPrice).mul(1 + cfg.tpPercent / 100 + 2 * cfg.feeRate).toNumber();
+        perBotTrades[sig.botId].push({
+          signalTime: new Date(sig.openTime),
+          candleCloseTime: new Date(sig.closeTime),
+          buyPrice,
+          targetSellPrice: targetForRecord,
+          sellPrice: null,
+          buyFilled: false,
+          sellFilled: false,
+          qty: 0,
+          notional: 0,
+          grossPnl: 0,
+          fees: 0,
+          realizedPnl: 0,
+          pnlPercent: 0,
+          exitReason: 'safe_trade_no_trade_block',
+          bgState: sig.bgState,
+          lastKind,
+          trendTF: sig._noTradeData.trendTF,
         });
         continue; // skip this signal — do NOT consume slot or capital
       }
@@ -2165,7 +2367,12 @@ async function runMultiBacktest(params) {
       slUkcTriggerOnProfit: bi.cfg.slUkcTriggerOnProfit === true,
       // FIX-2026-08-03: Safe-trade #2 (trendline) filter — per-bot block count
       safeTradeTrendlineEnabled: bi.trendlineData != null,
+      // FIX-2026-08-05: include no-trade filter status in per-bot summary
+      safeTradeNoTradeEnabled: bi.noTradeData != null,
       safeTradeTrendlineBlocked,
+      // FIX-2026-08-05: no-trade filter blocked count (per-bot, mirror ST#2 trendline)
+      //   - count from allBotTrades where exitReason === 'safe_trade_no_trade_block'
+      safeTradeNoTradeBlocked: allBotTrades.filter((t) => t.exitReason === 'safe_trade_no_trade_block').length,
       candlesFetched: bi.candlesFetched,
       truncated: bi.truncated,
       signalsCount: bi.signals.length,

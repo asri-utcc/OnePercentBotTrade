@@ -660,6 +660,12 @@ router.post('/', requireAuth, requireBotActionPassword, async (req, res) => {
       //   - false (default): ไม่กรอง trendline — opt-in เท่านั้น
       //   - ⚠️ ไม่แนะนำสำหรับบอท DCA (DCA ซื้อ dip — filter นี้ block dip-buy)
       safeTradeTrendlineEnabled: data.safeTradeTrendlineEnabled === true,
+      // FIX-2026-08-05: safeTradeNoTradeEnabled (default false) — opt-in Pine "No-Trade Signal Engine" filter
+      //   - true: BUY gate ตรวจ upper-TF (TREND_TF_MAP) ว่าแท่งล่าสุดมี "nt"/"nt1" pattern (engulfing + shooting star)
+      //   - false (default): ไม่กรอง no-trade pattern — opt-in เท่านั้น
+      //   - ⚠️ ไม่แนะนำสำหรับบอท DCA (DCA ซื้อ dip — filter นี้ block dip-buy)
+      //   - Real-time: ตรวจแท่งที่ยังไม่ close ได้ (Binance REST คืน close=live price)
+      safeTradeNoTradeEnabled: data.safeTradeNoTradeEnabled === true,
       // FIX-2026-08-01: autoPauseEnabled (default true) — per-bot auto-pause on low Min-%KC toggle
       //   - true (default): ทุก 5 min ตรวจ Min-%KC(30 bars) — ถ้า < autoPauseMinKcPct → set enabled=false + auto-resume เมื่อกลับมา
       //   - false: ไม่ตรวจ (พฤติกรรมเดิม)
@@ -723,7 +729,7 @@ router.put('/:id', requireAuth, async (req, res) => {
     if (!bot) return res.status(404).json({ error: 'Bot not found' });
 
     const data = req.body || {};
-    const allowed = ['name', 'capitalPerTrade', 'maxTrades', 'tpPercent', 'retryTimeMin', 'retryMax', 'timeframe', 'stopLossOnUpperKC', 'autoUpdateTp', 'kcMult', 'minSpreadTicks', 's1OnlyDown', 'xs1Enabled', 'cbEnabled', 'safeTradeEnabled', 'safeTradeTrendlineEnabled', 'autoPauseEnabled', 'autoPauseMinKcPct', 'suggestTpWindow', 'autoArmStopLossOnUKC', 'autoArmLossPct', 'autoArmAgeHours', 'slUkcTriggerOnProfit', 'tpTrendMultiplier', 'tpTrendEnabled', 'dcaEnabled', 'dcaMaxLayers', 'martingaleEnabled', 'martingaleMultiplier', 'martingaleMaxLayerNotional'];
+    const allowed = ['name', 'capitalPerTrade', 'maxTrades', 'tpPercent', 'retryTimeMin', 'retryMax', 'timeframe', 'stopLossOnUpperKC', 'autoUpdateTp', 'kcMult', 'minSpreadTicks', 's1OnlyDown', 'xs1Enabled', 'cbEnabled', 'safeTradeEnabled', 'safeTradeTrendlineEnabled', 'autoPauseEnabled', 'autoPauseMinKcPct', 'suggestTpWindow', 'autoArmStopLossOnUKC', 'autoArmLossPct', 'autoArmAgeHours', 'slUkcTriggerOnProfit', 'tpTrendMultiplier', 'tpTrendEnabled', 'dcaEnabled', 'dcaMaxLayers', 'martingaleEnabled', 'martingaleMultiplier', 'martingaleMaxLayerNotional', 'safeTradeNoTradeEnabled']; // FIX-2026-08-05: audit fix — missing from allowed list caused bot-edit save to silently drop the field
 
     for (const k of allowed) {
       if (data[k] !== undefined) {
@@ -740,6 +746,9 @@ router.put('/:id', requireAuth, async (req, res) => {
           bot[k] = Math.min(168, Math.max(0.5, parseFloat(data[k])));
         } else if (k === 'slUkcTriggerOnProfit') {
           // FIX-2026-08-03: SL-UKC trigger on profitable positions (default false)
+          bot[k] = data[k] === true || data[k] === 'true';
+        } else if (k === 'safeTradeNoTradeEnabled') {
+          // FIX-2026-08-05: Pine no-trade engulfing/SS filter (default false — opt-in)
           bot[k] = data[k] === true || data[k] === 'true';
         } else if (k === 'tpTrendEnabled') {
           // FIX-2026-08-01: per-bot toggle for TP trend multiplier (default true)
@@ -1342,6 +1351,8 @@ router.post('/bulk-update', requireAuth, async (req, res) => {
       's1OnlyDown', 'xs1Enabled', 'cbEnabled', 'safeTradeEnabled',
       // FIX-2026-08-03: Safe-trade filter #2 (trendline) — bulk-update support
       'safeTradeTrendlineEnabled',
+      // FIX-2026-08-05: Safe-trade filter #3 (no-trade engulfing/SS) — bulk-update support
+      'safeTradeNoTradeEnabled',
       'autoPauseEnabled', 'autoPauseMinKcPct',
       'suggestTpWindow', 'autoArmStopLossOnUKC', 'autoArmLossPct', 'autoArmAgeHours', 'slUkcTriggerOnProfit',
       'tpTrendMultiplier', 'tpTrendEnabled',

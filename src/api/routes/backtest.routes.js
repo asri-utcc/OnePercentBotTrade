@@ -42,6 +42,12 @@ router.post('/', requireAuth, async (req, res) => {
       //     signal skipped if lastClose <= trendline value at signal time
       //   - when false (default): no trendline pre-fetch — backward compatible
       safeTradeTrendlineEnabled = false,
+      // FIX-2026-08-05: Safe-trade filter #3 (no-trade engulfing/SS) — opt-in, default OFF
+      //   - when true: backtester pre-fetches upper-TF (TREND_TF_MAP) klines + computes nt/nt1 per-bar;
+      //     signal skipped if lastKind === 'nt' | 'nt1' at signal time
+      //   - when false (default): no no-trade pre-fetch — backward compatible
+      //   - ใช้ kcMult จาก bot เพื่อ consistent กับ live behavior
+      safeTradeNoTradeEnabled = false,
     } = req.body || {};
 
     if (!symbol || !timeframe || !from || !to) {
@@ -87,6 +93,8 @@ router.post('/', requireAuth, async (req, res) => {
         martingaleMaxLayerNotional: parseFloat(martingaleMaxLayerNotional) || 100,
         // FIX-2026-08-03: Safe-trade filter #2 (trendline) — forward flag to DCA backtest
         safeTradeTrendlineEnabled: safeTradeTrendlineEnabled === true,
+        // FIX-2026-08-05: Safe-trade filter #3 (no-trade engulfing/SS) — forward flag to DCA backtest
+        safeTradeNoTradeEnabled: safeTradeNoTradeEnabled === true,
       });
       return res.json({
         id: result.id,
@@ -123,6 +131,8 @@ router.post('/', requireAuth, async (req, res) => {
       slUkcTriggerOnProfit: slUkcTriggerOnProfit === true,
       // FIX-2026-08-03: Safe-trade filter #2 (trendline) — forward flag to non-DCA backtest
       safeTradeTrendlineEnabled: safeTradeTrendlineEnabled === true,
+      // FIX-2026-08-05: Safe-trade filter #3 (no-trade engulfing/SS) — forward flag to non-DCA backtest
+      safeTradeNoTradeEnabled: safeTradeNoTradeEnabled === true,
     });
 
     res.json({
@@ -218,6 +228,8 @@ router.post('/multi', requireAuth, async (req, res) => {
         slUkcTriggerOnProfit: b.slUkcTriggerOnProfit === true,
         // FIX-2026-08-03: Safe-trade filter #2 (trendline) — forward per-bot flag
         safeTradeTrendlineEnabled: b.safeTradeTrendlineEnabled === true,
+        // FIX-2026-08-05: Safe-trade filter #3 (no-trade engulfing/SS) — forward per-bot flag
+        safeTradeNoTradeEnabled: b.safeTradeNoTradeEnabled === true,
       })),
     });
 

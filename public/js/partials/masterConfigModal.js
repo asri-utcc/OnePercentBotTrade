@@ -38,6 +38,7 @@
     { id: 'mc-cbEnabled',           key: 'cbEnabled',           label: '🚨 Circuit-breaker panic-sell' },
     { id: 'mc-safeTradeEnabled',    key: 'safeTradeEnabled',    label: '🛡️ Safe-trade filter' },
     { id: 'mc-safeTradeTrendlineEnabled', key: 'safeTradeTrendlineEnabled', label: '📐 Safe-trade trendline support (⚠️ ไม่แนะนำสำหรับ DCA)' },
+    { id: 'mc-safeTradeNoTradeEnabled', key: 'safeTradeNoTradeEnabled', label: '🚫 Safe-trade no-trade engulfing/SS filter (⚠️ ไม่แนะนำสำหรับ DCA)' },
     { id: 'mc-stopLossOnUpperKC',   key: 'stopLossOnUpperKC',   label: '🛑 Stop-loss on upper KC' },
     { id: 'mc-autoUpdateTp',        key: 'autoUpdateTp',        label: '⏰ Auto-update TP ทุกต้นชั่วโมง' },
     { id: 'mc-autoArmStopLossOnUKC', key: 'autoArmStopLossOnUKC', label: '🛡️ Auto-arm SL-on-UKC' },

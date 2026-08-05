@@ -165,11 +165,26 @@ function render() {
         <div class="mb-3">
           <label class="form-check">
             <input type="checkbox" class="form-check-input" id="f-safe-trade-trendline-enabled" ${bot.safeTradeTrendlineEnabled === true ? 'checked' : ''} />
-            <span class="form-check-label">📐 <strong>Safe-trade filter #2 (trendline support)</strong> — ก่อนซื้อตรวจ upper-TF (TREND_TF_MAP) ว่าราคา "เหนือ" เส้น LuxAlgo pivot-low trendline (⚠️ ไม่แนะนำสำหรับ DCA)</span>
+            <span class="form-check-label">📐 <strong>Safe-trade filter #2 (trendline support)</strong> — ก่อนซื้อตรวจ upper-TF (TREND_TF_MAP) ว่าราคา "เ�นือ" เส้น LuxAlgo pivot-low trendline (⚠️ ไม่แนะนำสำหรับ DCA)</span>
           </label>
           <small class="text-muted d-block mt-1">
             · PASS = lastClose &gt; trendline value → BUY
             · FAIL-OPEN on Binance error / warmup
+            · <strong>default OFF</strong> (opt-in)
+          </small>
+        </div>
+        <div class="mb-3">
+          <label class="form-check">
+            <input type="checkbox" class="form-check-input" id="f-safe-trade-no-trade-enabled" ${bot.safeTradeNoTradeEnabled === true ? 'checked' : ''} />
+            <span class="form-check-label">🚫 <strong>Safe-trade filter #3 (no-trade engulfing / shooting star)</strong> — ก่อนซื้อตรวจ upper-TF (TREND_TF_MAP) ว่าแท่งล่าสุดมี "nt"/"nt1" pattern (⚠️ ไม่แนะนำสำหรับ DCA)</span>
+          </label>
+          <small class="text-muted d-block mt-1">
+            · Pine Script port: Bearish Engulfing (1-bar/2-bar) + Shooting Star ใน upper KC zone
+            · Keltner: kcLen=20, kcMult = <strong>bot.kcMult</strong> (FIX: ใช้ค่าบอทนี้ ให้ consistent กับ S1)
+            · State machine: เมื่อ trigger → ครอบคลุม 2 แท่งแดงถัดไป
+            · <strong>Real-time</strong>: ตรวจแม้แท่งยังไม่ close (Binance REST คืน close=live price)
+            · PASS = no nt/nt1 → BUY
+            · FAIL-OPEN on Binance error / insufficient data
             · <strong>default OFF</strong> (opt-in)
           </small>
         </div>
@@ -851,6 +866,7 @@ async function save(e) {
     cbEnabled: document.getElementById('f-cb-enabled').checked, // FIX-2026-08-01: per-bot Circuit-breaker panic-sell toggle (default true) — เดิมชื่อ sls1Enabled
     safeTradeEnabled: document.getElementById('f-safe-trade-enabled').checked, // FIX-2026-08-01: per-bot safe-trade filter (default ON)
     safeTradeTrendlineEnabled: document.getElementById('f-safe-trade-trendline-enabled').checked, // FIX-2026-08-03: Safe-trade filter #2 (LuxAlgo trendline) — opt-in, default OFF
+    safeTradeNoTradeEnabled: document.getElementById('f-safe-trade-no-trade-enabled').checked, // FIX-2026-08-05: Safe-trade filter #3 (no-trade engulfing/SS) — opt-in, default OFF
     autoPauseEnabled: document.getElementById('f-auto-pause-enabled').checked, // FIX-2026-08-01: per-bot auto-pause on low Min-%KC (default ON)
     autoPauseMinKcPct: parseFloat(document.getElementById('f-auto-pause-min-kc').value) || 2, // FIX-2026-08-01: auto-pause threshold %
     autoArmStopLossOnUKC: document.getElementById('f-auto-arm-stop-loss-ukc').checked, // FIX-2026-07-31 (F1): per-bot auto-arm SL-on-UKC toggle (default true)

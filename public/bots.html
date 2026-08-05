@@ -358,6 +358,21 @@
               </small>
             </div>
             <div class="form-check mt-2">
+              <input class="form-check-input" type="checkbox" id="nb-safe-trade-no-trade-enabled" />
+              <label class="form-check-label" for="nb-safe-trade-no-trade-enabled">
+                🚫 <strong>Safe-trade filter #3 (no-trade engulfing / shooting star)</strong> — ก่อนซื้อตรวจ upper-TF (TREND_TF_MAP) ว่าแท่งล่าสุดมี "nt"/"nt1" pattern (Bearish Engulfing + Shooting Star ใน upper KC)
+              </label>
+              <small class="text-muted d-block mt-1">
+                · Keltner: kcLen=20, kcMult = <strong>bot.kcMult</strong> (FIX: ใช้ค่าบอทนี้ ให้ consistent �ับ S1)
+                · State machine: trigger → ครอบคลุม 2 แท่งแดงถัดไป
+                · <strong>Real-time</strong>: ตรวจแม้แท่งยังไม่ close (Binance REST คืน close=live price)
+                · <strong>ปิด (default)</strong>: ไม่กรอง no-trade — opt-in เท่านั้น
+                · <strong>เปิด</strong>: skip BUY ถ้า upper-TF มี nt/nt1 pattern
+                · <strong>⚠️ ไม่แนะนำสำหรับบอท DCA</strong> (DCA ซื้อ dip — filter นี้ block dip-buy)
+                · FAIL-OPEN on Binance error / insufficient data
+              </small>
+            </div>
+            <div class="form-check mt-2">
               <input class="form-check-input" type="checkbox" id="nb-auto-pause-enabled" checked />
               <label class="form-check-label" for="nb-auto-pause-enabled">
                 ⏸️ <strong>Auto-pause on low Min-%KC</strong> — หยุดบอทอัตโนมัติเมื่อ Min-%KC (30 bars) ต่ำกว่า threshold (auto-resume เมื่อกลับมา)

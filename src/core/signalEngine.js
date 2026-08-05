@@ -35,6 +35,11 @@ const { ema, atr } = require('./indicators');
 const KC_LEN = 20;
 const KC_MULT = 1.5;
 
+// FIX-2026-08-05: Safe-trade filter #3 — Pine "No-Trade Signal Engine" constants
+//   - kcLen=20 (fixed, matches Pine)
+//   - kcMult = bot.kcMult (per-bot, pass-through via opts.mult) — FIX ให้ consistent กับ S1
+const NO_TRADE_KC_LEN = 20;
+
 // คำนวณ bg_state ของแต่ละแท่ง
 function computeBgStates({ closes, highs, lows, length = KC_LEN, mult = KC_MULT, useTrueRange = true }) {
   const n = closes.length;
@@ -410,6 +415,173 @@ async function checkSafeTradeTrendline(bot, trendTF, binanceRest) {
   }
 }
 
+// FIX-2026-08-05: Safe-trade filter #3 — Pine "No-Trade Signal Engine" patterns + state machine
+//   - Ported from Pine Script by user (Bearish Engulfing 1-bar / 2-bar + Shooting Star)
+//   - All patterns must be in upper KC zone (open or close > upperKC)
+//   - Tolerance: open*1.001 >= close[1], close*0.999 <= open[1] (Pine: open*(1.001) ... close*(0.999))
+//   - Returns per-bar result of {kind: 'none'|'nt'|'nt1'} (same length as klines)
+//   - **Real-time**: Binance REST `getKlines` returns the current incomplete candle as the last
+//     entry (close = last price แบบ live) — Pine semantics เดิม run ทุก tick จึง treat เหมือน closed bar
+
+// Pattern 1: Bearish Engulfing (1-bar) — red candle �ลืนกิน green [1]
+//   Pine: close[1] > open[1] AND close < open
+//         AND open*1.001 >= close[1] AND close*0.999 <= open[1]
+//         AND (close[1] > upperKC OR open > upperKC)
+function isEngulf1BarAt(i, opens, closes, upperKC) {
+  if (i < 1) return false;
+  if (opens[i] == null || closes[i] == null || opens[i - 1] == null || closes[i - 1] == null) return false;
+  if (upperKC[i] == null || upperKC[i - 1] == null) return false;
+  const greenPrev = closes[i - 1] > opens[i - 1];
+  const redNow = closes[i] < opens[i];
+  const coversHigh = opens[i] * 1.001 >= closes[i - 1];
+  const dipsBelow = closes[i] * 0.999 <= opens[i - 1];
+  const inUpperZone = closes[i - 1] > upperKC[i - 1] || opens[i] > upperKC[i];
+  return greenPrev && redNow && coversHigh && dipsBelow && inUpperZone;
+}
+
+// Pattern 1.2: Bearish Engulfing (2-bar) — green [2] → red/doji [1] → red [0] กลืนกินย้อนไปถึง [2]
+//   Pine: close[2] > open[2] AND close[1] <= open[1] AND close < open
+//         AND close*0.999 <= open[2]
+//         AND (close[2] > upperKC OR close[1] > upperKC OR open > upperKC)
+function isEngulf2BarAt(i, opens, closes, upperKC) {
+  if (i < 2) return false;
+  if (opens[i] == null || closes[i] == null
+      || opens[i - 1] == null || closes[i - 1] == null
+      || opens[i - 2] == null || closes[i - 2] == null) return false;
+  if (upperKC[i] == null || upperKC[i - 1] == null || upperKC[i - 2] == null) return false;
+  const green2Ago = closes[i - 2] > opens[i - 2];
+  const redOrDoji1Ago = closes[i - 1] <= opens[i - 1];
+  const redNow = closes[i] < opens[i];
+  const dipsBelow2Open = closes[i] * 0.999 <= opens[i - 2];
+  const inUpperZone = closes[i - 2] > upperKC[i - 2]
+    || closes[i - 1] > upperKC[i - 1]
+    || opens[i] > upperKC[i];
+  return green2Ago && redOrDoji1Ago && redNow && dipsBelow2Open && inUpperZone;
+}
+
+// Pattern 2: Shooting Star — small body + long upper wick + small lower wick ใน upper KC zone
+//   Pine: bodySize = |close - open|
+//         upperWick = high - max(open, close)
+//         lowerWick = min(open, close) - low
+//         candleRange = high - low
+//         isSmallBody = bodySize <= candleRange * bodyMaxPercent AND candleRange > 0
+//         isLongUpperWick = upperWick >= bodySize * wickRatio AND upperWick >= candleRange * 0.5
+//         isSmallLowerWick = lowerWick <= candleRange * lowerWickMaxPercent
+//         isShootingStar = above + (open > upperKC OR close > upperKC)
+function isShootingStarAt(i, opens, closes, highs, lows, upperKC, opts = {}) {
+  const bodyMaxPercent = opts.bodyMaxPercent != null ? opts.bodyMaxPercent : 0.35;
+  const wickRatio = opts.wickRatio != null ? opts.wickRatio : 2.0;
+  const lowerWickMaxPercent = opts.lowerWickMaxPercent != null ? opts.lowerWickMaxPercent : 0.15;
+  if (opens[i] == null || closes[i] == null || highs[i] == null || lows[i] == null || upperKC[i] == null) {
+    return false;
+  }
+  const candleRange = highs[i] - lows[i];
+  if (candleRange <= 0) return false;
+  const bodySize = Math.abs(closes[i] - opens[i]);
+  const upperWick = highs[i] - Math.max(opens[i], closes[i]);
+  const lowerWick = Math.min(opens[i], closes[i]) - lows[i];
+  const isSmallBody = bodySize <= candleRange * bodyMaxPercent;
+  const isLongUpperWick = upperWick >= bodySize * wickRatio && upperWick >= candleRange * 0.5;
+  const isSmallLowerWick = lowerWick <= candleRange * lowerWickMaxPercent;
+  const inUpperZone = opens[i] > upperKC[i] || closes[i] > upperKC[i];
+  return isSmallBody && isLongUpperWick && isSmallLowerWick && inUpperZone;
+}
+
+// computeNoTradePerBar — คำนวณ per-bar nt/nt1/none พร้อม state machine
+//   - inputs: klines [{openTime, open, high, low, close, volume}], opts.mult (kcMult from bot)
+//   - returns Array<{kind: 'none'|'nt'|'nt1'}> (same length)
+//   - Pine semantics: trigger (nt) → ครอบคลุม 2 แท่งแดงถัดไป (nt1) — reset เมื่อเจอแท่งเขียว
+function computeNoTradePerBar(klines, opts = {}) {
+  const length = opts.length != null ? opts.length : NO_TRADE_KC_LEN;
+  const mult = opts.mult != null ? opts.mult : KC_MULT;
+  const n = klines.length;
+  const result = new Array(n).fill(null).map(() => ({ kind: 'none' }));
+  if (n === 0) return result;
+
+  const opens = klines.map((k) => parseFloat(k.open));
+  const closes = klines.map((k) => parseFloat(k.close));
+  const highs = klines.map((k) => parseFloat(k.high));
+  const lows = klines.map((k) => parseFloat(k.low));
+
+  // FIX-2026-08-05: Keltner Channel (kcLen=20, kcMult = opts.mult from bot.kcMult)
+  const basisArr = ema(closes, length);
+  const rangeArr = atr(highs, lows, closes, length);
+  const upperKC = new Array(n).fill(null);
+  for (let i = 0; i < n; i += 1) {
+    if (basisArr[i] == null || rangeArr[i] == null) continue;
+    upperKC[i] = basisArr[i] + mult * rangeArr[i];
+  }
+
+  let redCountRemaining = 0;
+  for (let i = 0; i < n; i += 1) {
+    const engulf1 = isEngulf1BarAt(i, opens, closes, upperKC);
+    const engulf2 = isEngulf2BarAt(i, opens, closes, upperKC);
+    const shooting = isShootingStarAt(i, opens, closes, highs, lows, upperKC, opts);
+    const rawNoTrade = engulf1 || engulf2 || shooting;
+    if (rawNoTrade) {
+      result[i] = { kind: 'nt', engulf1, engulf2, shooting };
+      redCountRemaining = 2;
+    } else if (redCountRemaining > 0 && opens[i] != null && closes[i] != null && closes[i] < opens[i]) {
+      result[i] = { kind: 'nt1' };
+      redCountRemaining -= 1;
+    } else {
+      result[i] = { kind: 'none' };
+      redCountRemaining = 0;
+    }
+  }
+  return result;
+}
+
+// checkNoTradeOnUpperTF — entry point (live trader + backtester)
+//   - On S1 BUY signal: check upper-TF (TREND_TF_MAP) — แท่งล่าสุดมี nt/nt1 pattern หรือไม่
+//   - PASS = lastKind === 'none' → BUY
+//   - FAIL-OPEN on Binance error / insufficient data / no_trend_tf / warmup (mirror ST#1/ST#2)
+//   - **Real-time**: Binance REST returns last candle with close = live price → check ทันที
+async function checkNoTradeOnUpperTF(bot, trendTF, binanceRest) {
+  if (bot.safeTradeNoTradeEnabled !== true) {
+    return { skip: false, pass: true, reason: 'disabled', trendTF: null };
+  }
+  if (!trendTF) {
+    return { skip: false, pass: true, reason: 'no_trend_tf', trendTF: null };
+  }
+  try {
+    const raw = await binanceRest.getKlines({ symbol: bot.symbol, interval: trendTF, limit: 30 });
+    if (!Array.isArray(raw) || raw.length < 21) {
+      return { skip: false, pass: true, reason: 'insufficient_data_open', trendTF };
+    }
+    // Binance raw tuple → object kline
+    const klines = raw.map((k) => ({
+      openTime: k[0],
+      open: parseFloat(k[1]),
+      high: parseFloat(k[2]),
+      low: parseFloat(k[3]),
+      close: parseFloat(k[4]),
+      closeTime: k[6],
+    }));
+    const mult = bot.kcMult != null ? parseFloat(bot.kcMult) : KC_MULT;
+    const perBar = computeNoTradePerBar(klines, { mult });
+    const lastIdx = klines.length - 1;
+    const lastEntry = perBar[lastIdx] || { kind: 'none' };
+    const lastKind = lastEntry.kind;
+    const blocked = lastKind === 'nt' || lastKind === 'nt1';
+    return {
+      skip: blocked,
+      pass: !blocked,
+      reason: blocked ? 'blocked' : 'pass',
+      trendTF,
+      lastKind,
+      lastOpenTime: klines[lastIdx].openTime,
+      lastClose: klines[lastIdx].close,
+      lastOpen: klines[lastIdx].open,
+      lastHigh: klines[lastIdx].high,
+      lastLow: klines[lastIdx].low,
+      kcMult: mult,
+    };
+  } catch (err) {
+    return { skip: false, pass: true, reason: 'api_error_open', error: err.message, trendTF };
+  }
+}
+
 module.exports = {
   computeBgStates,
   isS1At,
@@ -426,4 +598,11 @@ module.exports = {
   // FIX-2026-08-03: Safe-trade filter #2 (trendline) exports
   computeTrendlinePivotLows,
   checkSafeTradeTrendline,
+  // FIX-2026-08-05: Safe-trade filter #3 (no-trade engulfing/SS) exports
+  NO_TRADE_KC_LEN,
+  isEngulf1BarAt,
+  isEngulf2BarAt,
+  isShootingStarAt,
+  computeNoTradePerBar,
+  checkNoTradeOnUpperTF,
 };
