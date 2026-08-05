@@ -89,6 +89,15 @@ class Trader {
     this.startupSweepTimer = null;
     this.startupBalanceTimer = null;
     this.buyCooldownTimer = null;
+    // FIX-2026-08-06 (FIDA incident): tpPercent TTL cache — defense-in-depth กันกรณี bot:updated event ตกหล่น
+    //   - primary: bot:updated event (emit จาก tpUpdater / botManager / API routes) → _botUpdatedHandler refresh this.bot
+    //   - secondary: ทุก 5s _computeTp() จะเช็คว่า this.bot.tpPercent เก่าเกิน TTL หรือไม่
+    //     ถ้าเก่า → re-read จาก DB (เฉพาะ tpPercent-related fields) แล้ว update this.bot
+    //   - ทำให้แม้ event bus มีปัญหา TP ก็ sync ภายใน ≤5s
+    //   - เก็บ cache time per-field เพื่อให้ selective refresh (ไม่ re-fetch ทั้ง doc)
+    this._tpCacheAt = 0;
+    this._tpCacheFields = {}; // { tpPercent, tpTrendEnabled, tpTrendMultiplier, tpOnFloor, updateTpAt }
+    this._tpCacheTtlMs = 5000; // 5s — balance between freshness + DB load
   }
 
   // ─── FIX P2.1: serialized bot:status emit ──────────────────────────
@@ -340,6 +349,11 @@ class Trader {
           kcMult: this.bot.kcMult,
           s1OnlyDown: this.bot.s1OnlyDown,
           minSpreadTicks: this.bot.minSpreadTicks,
+          // FIX-2026-08-06: include tpPercent for visibility (FIDA incident — bot:tp-updated must propagate)
+          tpPercent: this.bot.tpPercent,
+          tpTrendMultiplier: this.bot.tpTrendMultiplier,
+          tpTrendEnabled: this.bot.tpTrendEnabled,
+          tpOnFloor: this.bot.tpOnFloor,
         }, 'trader: bot config refreshed from bot:updated event');
       } catch (err) {
         logger.warn({ err: err.message, botId: this.bot._id.toString() }, 'trader: bot:updated refresh failed');
@@ -407,6 +421,9 @@ class Trader {
     this._cbKlineHandler = null;
     this.tradesByClientOrderId.clear();
     this.handleBuyFilledLocks.clear();
+    // FIX-2026-08-06: reset TP cache flags so a respawned trader doesn't inherit stale values
+    this._tpCacheAt = 0;
+    this._tpCacheInFlight = false;
     logger.info({ botId: this.bot._id.toString() }, 'trader stopped');
     eventBus.emit('bot:status', { botId: this.bot._id, status: 'idle' });
   }
@@ -636,7 +653,13 @@ class Trader {
   //   - 3 of those 4 sites used `this.bot.tpPercent` directly, skipping trend mult AND fee buffer
   //   - net result: bots were placing SELL at buyPrice × (1 + tp/100) only, missing 2× mult + 0.15% fee buffer
   //   - now: every SELL placement calls this helper → consistent + correct TP targeting
+  // FIX-2026-08-06: TTL refresh tpPercent-related fields from DB — defense-in-depth กัน event-bus miss
+  //   - primary sync: bot:updated event → _botUpdatedHandler refresh this.bot
+  //   - secondary sync: ถ้า this._tpCacheAt ห่างจาก now > 5s → re-read 4 fields (tpPercent, tpTrendEnabled, tpTrendMultiplier, tpOnFloor, updateTpAt)
+  //   - DB query ใช้ select แค่ 4 fields เพื่อ minimize load
   async _computeTp({ buyPrice, skipTrend = false } = {}) {
+    // FIX-2026-08-06: defense-in-depth refresh — re-read TP fields from DB if cache stale
+    await this._refreshTpCacheIfStale();
     const tpTrendEnabled = !skipTrend && this.bot.tpTrendEnabled !== false;
     let effectiveTpPercent = this.bot.tpPercent;
     let trendState = { trendState: 'warmup', trendTF: null };
@@ -669,6 +692,55 @@ class Trader {
       sellPriceRaw,
       sellPrice,
     };
+  }
+
+  // FIX-2026-08-06: TTL cache refresh — re-read tpPercent-related fields from DB if cache stale
+  //   - triggered from _computeTp() before TP calc
+  //   - refresh only 4 fields (cheap select) — preserves all hot-path fields
+  //   - idempotent + safe under concurrent calls (in-flight guard)
+  async _refreshTpCacheIfStale() {
+    if (!this.bot || !this.bot._id) return;
+    // FIX-2026-08-06: don't issue DB query after stop() — guard against late _computeTp calls
+    if (!this.running) return;
+    if (Date.now() - this._tpCacheAt < this._tpCacheTtlMs) return;
+    if (this._tpCacheInFlight) return;
+    this._tpCacheInFlight = true;
+    try {
+      const fresh = await Bot.findById(this.bot._id)
+        .select('tpPercent tpTrendEnabled tpTrendMultiplier tpOnFloor updateTpAt')
+        .lean();
+      if (!fresh) return;
+      const before = {
+        tpPercent: this.bot.tpPercent,
+        tpTrendEnabled: this.bot.tpTrendEnabled,
+        tpTrendMultiplier: this.bot.tpTrendMultiplier,
+        tpOnFloor: this.bot.tpOnFloor,
+        updateTpAt: this.bot.updateTpAt,
+      };
+      let changed = false;
+      for (const k of Object.keys(fresh)) {
+        if (this.bot[k] !== fresh[k]) {
+          this.bot[k] = fresh[k];
+          changed = true;
+        }
+      }
+      this._tpCacheAt = Date.now();
+      if (changed) {
+        logger.info({
+          botId: this.bot._id.toString(),
+          symbol: this.bot.symbol,
+          tpPercent: this.bot.tpPercent,
+          tpTrendMultiplier: this.bot.tpTrendMultiplier,
+          tpTrendEnabled: this.bot.tpTrendEnabled,
+          tpOnFloor: this.bot.tpOnFloor,
+          before,
+        }, 'trader: TP cache refreshed from DB (TTL expired, defense-in-depth)');
+      }
+    } catch (err) {
+      logger.warn({ err: err.message, botId: this.bot._id && this.bot._id.toString() }, 'trader: TP cache refresh failed');
+    } finally {
+      this._tpCacheInFlight = false;
+    }
   }
 
   async _getTrendState() {

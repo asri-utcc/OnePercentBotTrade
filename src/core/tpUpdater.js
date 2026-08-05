@@ -212,6 +212,10 @@ async function runTpUpdateForAllEligibleBots() {
         const expectedFloor = !!calc.tpOverridden;
         if (!!bot.tpOnFloor !== expectedFloor) {
           await Bot.updateOne({ _id: bot._id }, { $set: { tpOnFloor: expectedFloor } });
+          // FIX-2026-08-06: also notify running trader (small flag-only change but UI uses tpOnFloor badge too)
+          try {
+            eventBus.emit('bot:updated', { botId: String(bot._id) });
+          } catch (_) { /* eventBus may not be available in some test contexts */ }
           logger.info({ botId, symbol: bot.symbol, tpOnFloor: expectedFloor }, 'tpUpdater: tpOnFloor flag synced (no TP value change)');
         }
         skipped += 1;
@@ -229,6 +233,13 @@ async function runTpUpdateForAllEligibleBots() {
           },
         }
       );
+      // FIX-2026-08-06: emit bot:updated so running trader's cached this.bot.tpPercent refreshes
+      //   - FIDA incident: tpUpdater changed DB 5 times but trader kept stale 0.661 → pnl% locked at 1.32%
+      //   - _botUpdatedHandler in trader.js reads fresh bot from DB and overwrites this.bot.tpPercent
+      //   - safe: only ~5-20 bots affected per hour, 1 DB query each (acceptable)
+      try {
+        eventBus.emit('bot:updated', { botId: String(bot._id) });
+      } catch (_) { /* eventBus may not be available in some test contexts */ }
       // FIX-2026-08-02: invalidate per-bot volatility snapshot cache ด้วย
       //   - volSuggestedTpPct ที่ UI แสดงใน tile "TP แนะนำ % (NET)" มาจาก volatilityForBot
       //   - ถ้าไม่ invalidate → UI แสดง TP เก่าจนกว่า 60s TTL จะหมด
