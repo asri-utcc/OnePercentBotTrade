@@ -33,8 +33,17 @@ const DEFAULT_EVENTS = {
   trendlineStatusChanged: true,
   // FIX-2026-08-02: DCA + BEP stack events (per user request: full notifications, not compact)
   dcaLayerAdded: true, dcaTargetHit: true, dcaMaxLayersHit: true,
+  // FIX-2026-08-05: BNB balance low alert — กัน BNB-empty fee-deduct incident ซ้ำ (เติม BNB ก่อนหมด)
+  bnbLowBalance: true,
+  // FIX-2026-08-05: Auto-Buy BNB — ผลของการเติม BNB (success/failed/skipped) — critical ดูแต่ละครั้ง
+  bnbAutoBuy: true,
 };
-const DEFAULT_THRESHOLDS = { positionLossPct: 2, positionProfitPct: 1, positionStuckMin: 30 };
+const DEFAULT_THRESHOLDS = {
+  positionLossPct: 2, positionProfitPct: 1, positionStuckMin: 30,
+  // FIX-2026-08-05: BNB low-balance alert threshold (USDT value of BNB qty × BNB/USDT price)
+  //   - ถ้า (bnbQty × bnbUsdtPrice) < threshold → แจ้งเตือน (default $0.50)
+  bnbLowBalanceUsdt: 0.5,
+};
 
 // Anti-spam: per-trade state เพื่อกัน flood
 //   side: 'loss' | 'profit' | null — last side ที่แจ้งไปแล้ว (notify เฉพาะตอน crossing)
@@ -70,6 +79,48 @@ async function fetchUsdtBalance() {
     logger.warn({ err: err.message }, 'telegramNotifier: fetchUsdtBalance failed');
     return null;
   }
+}
+
+// FIX-2026-08-05: BNB balance cache — qty + USDT value, shared with frontend
+//   - 30s TTL (longer than USDT cache 10s — BNB is for fee, not active trading)
+//   - usdtValue = bnbQty × BNBUSDT bid (ใช้ bid เพราะถ้า sell BNB จะได้ราคา bid)
+//   - ถ้า fetch fail → return null + keep stale cache (ไม่ invalidate ทันที — fail-open)
+//   - shared กับ /api/account/bnb-status ผ่าน module.exports.getBnbBalanceCached
+let bnbBalanceCache = null; // { qty, usdtPrice, usdtValue, ts }
+const BNB_BALANCE_CACHE_MS = 30 * 1000;
+
+async function fetchBnbBalance() {
+  const now = Date.now();
+  if (bnbBalanceCache && (now - bnbBalanceCache.ts) < BNB_BALANCE_CACHE_MS) return bnbBalanceCache;
+  try {
+    const acc = await binanceRest.getAccount();
+    const row = (acc.balances || []).find((b) => b.asset === 'BNB');
+    const qty = row ? (parseFloat(row.free) || 0) + (parseFloat(row.locked) || 0) : 0;
+    // BNB/USDT price — prefer in-memory lastBookTicker (free, WS-driven)
+    //   - fallback REST bookTicker ถ้าไม่มี bot BNBUSDT → lastBookTicker ว่าง
+    let usdtPrice = 0;
+    const cached = lastBookTicker.get('BNBUSDT');
+    if (cached && cached.bid && (now - cached.ts) < 60_000) {
+      usdtPrice = parseFloat(cached.bid);
+    } else {
+      const ticker = await binanceRest.getBookTicker('BNBUSDT');
+      usdtPrice = parseFloat(ticker.bidPrice) || 0;
+    }
+    const usdtValue = qty * usdtPrice;
+    bnbBalanceCache = { qty, usdtPrice, usdtValue, ts: now };
+    return bnbBalanceCache;
+  } catch (err) {
+    logger.warn({ err: err.message }, 'telegramNotifier: fetchBnbBalance failed');
+    return null;
+  }
+}
+
+function invalidateBnbBalanceCache() {
+  bnbBalanceCache = null;
+}
+
+function getBnbBalanceCached() {
+  return bnbBalanceCache; // may be null if never fetched
 }
 
 // FIX-2026-08-04: 30s → 120s (ลด DB load — telegram PnL scan เป็น read-only display)
@@ -252,6 +303,30 @@ function renderMessage(eventKey, p, cfg) {
         return `🔺 Position profit > ${cfg.thresholds.positionProfitPct}%\nBot: ${p.botName}\nSymbol: ${p.symbol}\nPnL: +${p.pnlPct.toFixed(2)}%`;
       case 'positionStuck':
         return `⏳ Position open > ${cfg.thresholds.positionStuckMin}m\nBot: ${p.botName}\nSymbol: ${p.symbol}\nHeld: ${p.heldMin}m`;
+      // FIX-2026-08-05: BNB balance low — กัน BNB-empty fee-deduct incident ซ้ำ
+      //   - trigger เมื่อ (bnbQty × bnbUsdtPrice) < threshold (default $0.50)
+      //   - latch: ส่งครั้งเดียวต่อ crossing (down→below→up→below) — กัน spam ทุก 5 นาที
+      case 'bnbLowBalance':
+        return `💎 BNB balance ต่ำ\nQty: ${p.bnbQty != null ? p.bnbQty.toFixed(4) : '?'} BNB\nPrice: ${p.bnbUsdtPrice != null ? p.bnbUsdtPrice.toFixed(2) : '?'} USDT\nValue: ${p.bnbValueUsdt != null ? p.bnbValueUsdt.toFixed(4) : '?'} USDT\nThreshold: ${p.threshold != null ? p.threshold.toFixed(2) : '0.50'} USDT\n\n⚠️ Binance จะหัก fee 0.1% จาก base asset เมื่อ BNB หมด — เติม BNB ด่วน`;
+      // FIX-2026-08-05: Auto-Buy BNB — ผลของการเติม BNB อัตโนมัติ (success/failed/skipped)
+      case 'bnbAutoBuy': {
+        if (p.kind === 'success') {
+          const qtyBought = p.bnbQtyBought != null ? p.bnbQtyBought.toFixed(4) : '?';
+          const price = p.bnbPriceFilled != null ? p.bnbPriceFilled.toFixed(2) : '?';
+          const spent = p.usdtSpent != null ? p.usdtSpent.toFixed(2) : '?';
+          const before = p.bnbQtyBefore != null ? p.bnbQtyBefore.toFixed(4) : '?';
+          const orderId = p.orderId || '?';
+          const source = p.source === 'manual' ? '🖐 manual' : '⏰ auto';
+          return `💎 Auto-Buy BNB สำเร็จ (${source})\nBought: ${qtyBought} BNB @ ${price} USDT\nSpent: ${spent} USDT\nBNB before: ${before} BNB (value ${p.bnbValueBefore != null ? p.bnbValueBefore.toFixed(4) : '?'} USDT)\nThreshold: ${p.threshold != null ? p.threshold.toFixed(2) : '0.50'} USDT\nOrder: ${orderId}`;
+        } else if (p.kind === 'failed') {
+          return `❌ Auto-Buy BNB ล้มเหลว\nReason: ${p.reason || p.msg || 'unknown'}\nCode: ${p.code || '?'}\nTopUp: ${p.topUpUsdt != null ? p.topUpUsdt.toFixed(2) : '?'} USDT\n\nตรวจสอบ API keys + USDT balance + BNB minNotional`;
+        } else {
+          let detail = '';
+          if (p.reason === 'insufficient_usdt') detail = `USDT free: ${p.usdtAvail != null ? p.usdtAvail.toFixed(2) : '?'} (need ${p.needed != null ? p.needed.toFixed(2) : '?'})`;
+          else if (p.reason === 'daily_cap') detail = `Spent today: ${p.spentToday != null ? p.spentToday.toFixed(2) : '?'} / ${p.cap != null ? p.cap.toFixed(2) : '?'} USDT`;
+          return `⏸ Auto-Buy BNB skipped\nReason: ${p.reason || '?'}${detail ? '\n' + detail : ''}`;
+        }
+      }
       // FIX-2026-07-26: เตือน NET TP ต่ำกว่า threshold
       case 'tpLowPnL':
         return `📉 TP ต่ำเกินไป\nBot: ${p.botName}\nSymbol: ${p.symbol} (${p.timeframe || '?'})\nTP (NET): ${p.tpPct != null ? p.tpPct.toFixed(3) : '?'}%\nThreshold: ${p.threshold != null ? p.threshold.toFixed(3) : '0.2'}%\n\nแนะนำ: ปรับ capitalPerTrade สูงขึ้น · เพิ่ม kcMult · หรือปิด autoUpdateTp`;
@@ -696,6 +771,59 @@ function bindEventHandlers() {
     if (!t || !t.symbol) return;
     lastBookTicker.set(t.symbol, { bid: t.bid, ask: t.ask, ts: t.ts });
   });
+
+  // FIX-2026-08-05: Auto-Buy BNB events
+  eventBus.on('bnbAutoBuySuccess', async (p) => {
+    try {
+      const cfg = await loadConfig();
+      if (!cfg.enabled || !cfg.hasToken) return;
+      await dispatch('bnbAutoBuy', {
+        kind: 'success',
+        bnbQtyBought: p.bnbQtyBought,
+        usdtSpent: p.usdtSpent,
+        bnbPriceFilled: p.bnbPriceFilled,
+        orderId: p.orderId,
+        bnbQtyBefore: p.bnbQtyBefore,
+        bnbValueBefore: p.bnbValueBefore,
+        threshold: p.threshold,
+        topUpUsdt: p.topUpUsdt,
+        source: p.source,
+      });
+    } catch (err) {
+      logger.warn({ err: err.message }, 'telegramNotifier: bnbAutoBuySuccess handler error');
+    }
+  });
+  eventBus.on('bnbAutoBuyFailed', async (p) => {
+    try {
+      const cfg = await loadConfig();
+      if (!cfg.enabled || !cfg.hasToken) return;
+      await dispatch('bnbAutoBuy', {
+        kind: 'failed',
+        reason: p.reason,
+        code: p.code,
+        msg: p.msg,
+        topUpUsdt: p.topUpUsdt,
+      });
+    } catch (err) {
+      logger.warn({ err: err.message }, 'telegramNotifier: bnbAutoBuyFailed handler error');
+    }
+  });
+  eventBus.on('bnbAutoBuySkipped', async (p) => {
+    try {
+      const cfg = await loadConfig();
+      if (!cfg.enabled || !cfg.hasToken) return;
+      await dispatch('bnbAutoBuy', {
+        kind: 'skipped',
+        reason: p.reason,
+        usdtAvail: p.usdtAvail,
+        needed: p.needed,
+        spentToday: p.spentToday,
+        cap: p.cap,
+      });
+    } catch (err) {
+      logger.warn({ err: err.message }, 'telegramNotifier: bnbAutoBuySkipped handler error');
+    }
+  });
 }
 
 // ─── Periodic scan (PnL threshold + stuck duration) ───
@@ -928,11 +1056,43 @@ async function scanAndDispatchSummaries() {
 // ─── Lifecycle ────────────────────────────────────────
 // FIX-2026-07-24: mark async + return Promise so caller สามารถ .catch() ได้
 //   (เดิมเป็น sync function → caller `.catch()` throws "Cannot read properties of undefined")
+// FIX-2026-08-05: BNB low-balance scanner (crossing-latch anti-spam)
+//   - scan ทุก 5 นาที (read-only Binance getAccount + bookTicker, shared cache 30s)
+//   - ส่ง telegram เฉพาะ crossing down→below threshold (latch=true)
+//   - reset latch เมื่อ BNB กลับขึ้นเหนือ threshold → รอบใหม่พร้อมส่ง
+const BNB_BALANCE_SCAN_INTERVAL_MS = 5 * 60 * 1000;
+let bnbBalanceTimer = null;
+let bnbBalanceNotified = false; // latch: true = เคยแจ้งแล้วในรอบปัจจุบัน, reset เมื่อ BNB กลับเหนือ threshold
+
+async function scanBnbBalance() {
+  const cfg = await loadConfig();
+  if (!cfg.enabled || !cfg.hasToken) return;
+  if (!cfg.events.bnbLowBalance) return;
+  const balance = await fetchBnbBalance();
+  if (!balance) return;
+  const threshold = Number(cfg.thresholds.bnbLowBalanceUsdt);
+  if (!Number.isFinite(threshold) || threshold <= 0) return;
+  const isLow = balance.usdtValue < threshold && balance.qty > 0;
+  if (isLow && !bnbBalanceNotified) {
+    await dispatch('bnbLowBalance', {
+      bnbQty: balance.qty,
+      bnbUsdtPrice: balance.usdtPrice,
+      bnbValueUsdt: balance.usdtValue,
+      threshold,
+    });
+    bnbBalanceNotified = true;
+  } else if (!isLow && bnbBalanceNotified) {
+    bnbBalanceNotified = false;
+    logger.info({ bnbQty: balance.qty, bnbValueUsdt: balance.usdtValue }, 'telegramNotifier: BNB balance recovered above threshold');
+  }
+}
+
 async function start() {
   bindEventHandlers();
   if (pnlTimer) clearInterval(pnlTimer);
   if (stuckTimer) clearInterval(stuckTimer);
   if (summaryTimer) clearInterval(summaryTimer);
+  if (bnbBalanceTimer) clearInterval(bnbBalanceTimer); // FIX-2026-08-05
   pnlTimer = setInterval(() => {
     scanOpenPositions().catch((err) => logger.warn({ err: err.message }, 'telegramNotifier: pnl scan failed'));
   }, PNL_SCAN_INTERVAL_MS);
@@ -943,19 +1103,32 @@ async function start() {
   summaryTimer = setInterval(() => {
     scanAndDispatchSummaries().catch((err) => logger.warn({ err: err.message }, 'telegramNotifier: summary scan failed'));
   }, SUMMARY_SCAN_INTERVAL_MS);
+  // FIX-2026-08-05: BNB balance scanner — เช็คทุก 5 นาทีว่า BNB value ต่ำกว่า threshold หรือไม่
+  bnbBalanceTimer = setInterval(() => {
+    scanBnbBalance().catch((err) => logger.warn({ err: err.message }, 'telegramNotifier: bnb balance scan failed'));
+  }, BNB_BALANCE_SCAN_INTERVAL_MS);
   // initial scan หลัง 5s (ให้ eventBus + bookTicker warm up)
   setTimeout(() => {
     scanOpenPositions().catch((err) => logger.warn({ err: err.message }, 'telegramNotifier: initial scan failed'));
   }, 5000);
+  // FIX-2026-08-05: initial BNB scan หลัง 10s (รอ bookTicker cache warm up)
+  setTimeout(() => {
+    scanBnbBalance().catch((err) => logger.warn({ err: err.message }, 'telegramNotifier: initial bnb scan failed'));
+  }, 10000);
   // initial config load
   loadConfig(true).catch(() => {});
-  logger.info({ pnlSec: PNL_SCAN_INTERVAL_MS / 1000, stuckSec: STUCK_SCAN_INTERVAL_MS / 1000 }, 'telegramNotifier: started');
+  logger.info({
+    pnlSec: PNL_SCAN_INTERVAL_MS / 1000,
+    stuckSec: STUCK_SCAN_INTERVAL_MS / 1000,
+    bnbSec: BNB_BALANCE_SCAN_INTERVAL_MS / 1000, // FIX-2026-08-05
+  }, 'telegramNotifier: started');
 }
 
 function stop() {
   if (pnlTimer) { clearInterval(pnlTimer); pnlTimer = null; }
   if (stuckTimer) { clearInterval(stuckTimer); stuckTimer = null; }
   if (summaryTimer) { clearInterval(summaryTimer); summaryTimer = null; }
+  if (bnbBalanceTimer) { clearInterval(bnbBalanceTimer); bnbBalanceTimer = null; } // FIX-2026-08-05
   eventBus.removeAllListeners('trade:update');
   eventBus.removeAllListeners('bot:enabled');
   eventBus.removeAllListeners('bot:disabled');
@@ -964,6 +1137,8 @@ function stop() {
   eventBus.removeAllListeners('tp:low'); // FIX-2026-07-26
   eventBus.removeAllListeners('bookTicker');
   usdtBalanceCache = null; // FIX-2026-07-27: reset balance cache
+  bnbBalanceCache = null; // FIX-2026-08-05: reset BNB cache
+  bnbBalanceNotified = false; // FIX-2026-08-05: reset latch
   bound = false;
   logger.info('telegramNotifier: stopped');
 }
@@ -974,4 +1149,7 @@ module.exports = {
   reloadConfig,
   // exposed for telegram.routes.js POST /test
   sendNow: dispatch,
+  // FIX-2026-08-05: expose BNB cache สำหรับ /api/account/bnb-status route (shared cache, no extra Binance call)
+  getBnbBalanceCached,
+  invalidateBnbBalanceCache,
 };

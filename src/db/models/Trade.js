@@ -128,6 +128,16 @@ const tradeSchema = new mongoose.Schema(
     sellPartialLatchedAt: { type: Date, default: null },
     sellPartialLatchedReason: { type: String, default: null },
 
+    // FIX-2026-08-05: SELL placement in-flight flag — atomic guard กัน DUPLICATE SELL
+    //   - HOMEUSDT incident (2026-08-05T00:20:04): scheduleHoldingRetry มี async gap ระหว่าง clearTimeout
+    //     กับ setTimeout — 2 timers เข้าพร้อมกัน, ทั้ง 2 วาง MARKET SELL, ทั้ง 2 fill → orphan SELL กิน 882 HOME
+    //   - fix: ก่อน place SELL order ใน scheduleHoldingRetry / _emergencyMarketSell ทำ atomic claim
+    //     `findOneAndUpdate({_id, state:'holding'/'filled', sellInFlight:{$ne:true}}, {sellInFlight:true})`
+    //   - ถ้า claim fail → path อื่นกำลัง place SELL อยู่ → abort (กัน duplicate โดยไม่พึ่ง timer dedup)
+    //   - reset เป็น null เมื่อ trade ออกจาก holding (sold/failed/cancelled) หรือ SELL place fail
+    sellInFlight: { type: Boolean, default: false },
+    sellInFlightAt: { type: Date, default: null },
+
     state: { type: String, enum: TRADE_STATES, default: 'placed', index: true },
     realizedPnl: { type: Number, default: null },     // กำไรขาดทุนจริง (USDT)
     pnlPercent: { type: Number, default: null },      // % เทียบ buyQuoteQty

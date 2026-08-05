@@ -23,6 +23,7 @@ const accountRoutes = require('./api/routes/account.routes');
 const fxRoutes = require('./api/routes/fx.routes');
 const healthRoutes = require('./api/routes/health.routes');
 const scanRoutes = require('./api/routes/scan.routes');
+const bnbAutoBuyRoutes = require('./api/routes/bnbAutoBuy.routes'); // FIX-2026-08-05: auto-buy BNB
 // FIX-2026-07-24: Telegram + History (ใหม่)
 const telegramRoutes = require('./api/routes/telegram.routes');
 const historyRoutes = require('./api/routes/history.routes');
@@ -105,6 +106,7 @@ function createApp() {
   app.use('/api/fx', fxRoutes);
   app.use('/api/health', healthRoutes);
   app.use('/api/scan', scanRoutes);
+  app.use('/api/bnb-auto-buy', bnbAutoBuyRoutes); // FIX-2026-08-05
   // FIX-2026-07-24: register telegram + history
   app.use('/api/telegram', telegramRoutes);
   // FIX-2026-07-29: register pnl (calendar + series)

@@ -3464,6 +3464,35 @@ class Trader {
       const alreadyCumQuote = parseFloat(opts.alreadyCumQuote) || (alreadyFilledQty * alreadyAvgSellPrice);
       const allowStates = opts.allowStates || ['filled', 'holding', 'stopping'];
 
+      // FIX-2026-08-05: atomic claim BEFORE placing MARKET order — กัน DUPLICATE SELL
+      //   - HOMEUSDT incident 2026-08-05T00:20:04: _emergencyMarketSell ถูกเรียก 2 ครั้งจากคนละ path
+      //     (handleBuyFilled → -2010 → emergencyMarketSell + reconcile ORPHAN → emergencyMarketSell)
+      //     → ทั้ง 2 วาง MARKET ก่อนที่ DB update จะ race-safe
+      //   - filter `sellInFlight: {$ne:true}` + state in allowStates → ถ้า claim fail = path อื่นกำลัง place SELL → abort
+      const placeClaim = await Trade.findOneAndUpdate(
+        {
+          _id: trade._id,
+          state: { $in: allowStates },
+          sellInFlight: { $ne: true },
+        },
+        {
+          $set: {
+            sellInFlight: true,
+            sellInFlightAt: new Date(),
+            sellStatus: 'PLACING',
+          },
+        },
+        { new: true }
+      );
+      if (!placeClaim) {
+        logger.warn({
+          tradeId: trade._id.toString(),
+          allowStates,
+          qty,
+        }, 'trader: _emergencyMarketSell — another path already placing SELL (sellInFlight claim failed), abort');
+        return false;
+      }
+
       const marketSellId = this.makeClientOrderId('em-sell', Date.now(), 0);
       const resp = await binanceRest.newOrder({
         symbol: this.bot.symbol,
@@ -3479,6 +3508,11 @@ class Trader {
           err: resp.error,
           tradeId: trade._id.toString(),
         }, 'trader: EMERGENCY MARKET SELL also failed');
+        // FIX-2026-08-05: clear sellInFlight on place failure so caller can retry
+        await Trade.updateOne(
+          { _id: trade._id, sellInFlight: true },
+          { $set: { sellInFlight: false, sellInFlightAt: null, sellStatus: '' } }
+        ).catch(() => null);
         return false;
       }
 
@@ -3519,6 +3553,7 @@ class Trader {
         {
           _id: trade._id,
           state: { $in: allowStates },
+          sellInFlight: true,
         },
         {
           state: 'sold',
@@ -3549,6 +3584,9 @@ class Trader {
           sellPartialDetectedAt: null,
           sellPartialLatchedAt: null,
           sellPartialLatchedReason: null,
+          // FIX-2026-08-05: clear SELL placement in-flight flag (success path)
+          sellInFlight: false,
+          sellInFlightAt: null,
           // FIX-2026-08-01: structured sellReason — caller passes opts.reason (e.g. 'cb_panic',
           //   'stop_loss_upper_kc'); default 'market_fallback' for validation/LIMIT reject paths.
           sellReason: opts.reason || 'market_fallback',
@@ -3567,6 +3605,11 @@ class Trader {
           marketOrderId: resp.orderId,
           alreadyFilledQty, executed,
         }, '_emergencyMarketSell — claim failed (race lost), skip Bot.$inc to avoid double-count');
+        // FIX-2026-08-05: clear sellInFlight since we lost the race (state already moved on by another path)
+        await Trade.updateOne(
+          { _id: trade._id, sellInFlight: true },
+          { $set: { sellInFlight: false, sellInFlightAt: null } }
+        ).catch(() => null);
         // Try to record audit flag — state may already be 'sold' so this may not match
         Trade.updateOne(
           { _id: trade._id },
@@ -3758,6 +3801,40 @@ class Trader {
         //   or 2 bots on same symbol). Use buyFilledQty (post-top-up) or buyQty (initial).
         const tradeMaxQty = parseFloat(trade.buyFilledQty || trade.buyQty) || qty;
         const sellQty = Math.min(freeQty, tradeMaxQty);
+
+        // FIX-2026-08-05: atomic claim BEFORE placing MARKET order — กัน DUPLICATE SELL
+        //   - ป้องกัน async race: scheduleHoldingRetry มี async gap ระหว่าง clearTimeout/setTimeout
+        //     → 2 timers เกิดพร้อมกัน, ทั้ง 2 วาง MARKET SELL, ทั้ง 2 fill → orphan SELL
+        //   - HOMEUSDT incident 2026-08-05T00:20:04: 2 timers placed SELL 283049653 + 283049654
+        //     (qty=878 each), ทั้งคู่ fill → 882 HOME ของ stuck trade ถูกกินโดย orphan 283049654
+        //   - atomic filter `sellInFlight: {$ne: true}` + state='holding' → ถ้า claim fail = path อื่นกำลัง place SELL อยู่ → abort
+        const placeClaim = await Trade.findOneAndUpdate(
+          {
+            _id: trade._id,
+            state: 'holding',
+            sellInFlight: { $ne: true },
+          },
+          {
+            $set: {
+              sellInFlight: true,
+              sellInFlightAt: new Date(),
+              // FIX-2026-08-05: transition to 'selling' so other paths skip this trade
+              state: 'selling',
+              sellStatus: 'PLACING',
+            },
+          },
+          { new: true }
+        );
+        if (!placeClaim) {
+          logger.warn({
+            tradeId: trade._id.toString(),
+            retryCount: fresh.holdingRetryCount,
+            sellQty,
+          }, 'trader: holding retry — another path already placing SELL (sellInFlight claim failed), abort');
+          // ไม่ schedule retry ใหม่ — ปล่อยให้ path ที่ claim สำเร็จจัดการ
+          return;
+        }
+
         logger.warn({
           tradeId: trade._id.toString(),
           freeQty, qty, tradeMaxQty, sellQty,
@@ -3777,6 +3854,11 @@ class Trader {
 
         if (resp.error) {
           logger.error({ err: resp.error, tradeId: trade._id.toString(), retryCount: fresh.holdingRetryCount }, 'trader: holding retry MARKET SELL failed');
+          // FIX-2026-08-05: clear sellInFlight + revert state to holding so next retry can claim
+          await Trade.updateOne(
+            { _id: trade._id, sellInFlight: true },
+            { $set: { state: 'holding', sellStatus: 'CANCELED', sellInFlight: false, sellInFlightAt: null }, $unset: { sellOrderId: '', sellClientOrderId: '' } }
+          ).catch(() => null);
           // FIX P1.5: counter จะถูก increment ใน scheduleHoldingRetry call ถัดไป
           //   ถ้าเกิน MAX_HOLDING_RETRIES จะ alert + abort
           if (this.running) {
@@ -3798,7 +3880,7 @@ class Trader {
         });
 
         await Trade.updateOne(
-          { _id: trade._id, state: 'holding' },
+          { _id: trade._id, state: 'selling', sellInFlight: true },
           {
             $set: {
               state: 'sold',
@@ -3824,6 +3906,9 @@ class Trader {
               sellPartialDetectedAt: null,
               sellPartialLatchedAt: null,
               sellPartialLatchedReason: null,
+              // FIX-2026-08-05: clear SELL placement in-flight flag
+              sellInFlight: false,
+              sellInFlightAt: null,
             },
           }
         );
@@ -3860,6 +3945,11 @@ class Trader {
         }, 'trader: holding retry — RECOVERED stranded position via MARKET SELL');
       } catch (err) {
         logger.error({ err: err.message, tradeId: trade._id.toString() }, 'trader: holding retry failed');
+        // FIX-2026-08-05: clear sellInFlight + revert state to holding so next retry can claim
+        await Trade.updateOne(
+          { _id: trade._id, sellInFlight: true },
+          { $set: { state: 'holding', sellInFlight: false, sellInFlightAt: null } }
+        ).catch(() => null);
         // schedule อีก 60s
         if (this.running) {
           this.holdingRetryTimer = setTimeout(() => this.scheduleHoldingRetry(trade, qty, buyPrice, targetSellPrice), 60 * 1000);

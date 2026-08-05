@@ -9,6 +9,7 @@ const dashboardWs = require('./realtime/dashboardWs');
 const botManager = require('./core/botManager');
 const healthMonitor = require('./services/healthMonitor');
 const positionWatchdog = require('./services/positionWatchdog');
+const autoBnbBuyer = require('./services/autoBnbBuyer'); // FIX-2026-08-05: auto-buy BNB service
 
 async function main() {
   logger.info({ env: config.env, port: config.port }, 'starting OnePercentBotTrade');
@@ -50,6 +51,10 @@ async function main() {
   //   Runs independently of botManager/Trader so paused bots still get armed + force-closed
   positionWatchdog.start();
 
+  // FIX-2026-08-05: Auto-Buy BNB — periodic scan + MARKET BUY BNB/USDT when value < threshold
+  //   user-configurable via /api/bnb-auto-buy/config (default OFF — must opt-in)
+  autoBnbBuyer.start();
+
   // Graceful shutdown
   let shuttingDown = false;
   const shutdown = async (signal) => {
@@ -58,6 +63,7 @@ async function main() {
     logger.info({ signal }, 'shutting down');
     try { healthMonitor.stop(); } catch (e) { /* ignore */ }
     try { positionWatchdog.stop(); } catch (e) { /* ignore */ }
+    try { autoBnbBuyer.stop(); } catch (e) { /* ignore */ }
     try { await botManager.flushActiveTimeOnShutdown(); } catch (e) { /* ignore */ }
     try { await botManager.stop(); } catch (e) { /* ignore */ }
     server.close(() => {

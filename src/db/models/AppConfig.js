@@ -65,6 +65,25 @@ const appConfigSchema = new mongoose.Schema(
         trendMinPct: 50,
       }),
     },
+
+    // FIX-2026-08-05: Auto-Buy BNB (ป้องกัน BNB-empty fee-deduct incident)
+    //   - enabled: master switch (default false — user must opt-in)
+    //   - topUpUsdt: USDT amount to spend each buy (default 5.5) — must be >= BNB minNotional
+    //   - thresholdUsdt: trigger when BNB value < this (default 0.5)
+    //   - checkIntervalMin: how often to scan (default 60 min)
+    //   - maxUsdtPerDay: safety cap (default 50) — block if (sum today) >= cap
+    //   - cooldownMin: minimum minutes between buys (default 30) — กัน burst
+    autoBuyBnbEnabled:        { type: Boolean, default: false },
+    autoBuyBnbTopUpUsdt:      { type: Number,  default: 5.5 },
+    autoBuyBnbThresholdUsdt:  { type: Number,  default: 0.5 },
+    autoBuyBnbCheckIntervalMin: { type: Number, default: 60, min: 5 },
+    autoBuyBnbMaxUsdtPerDay:  { type: Number,  default: 50 },
+    autoBuyBnbCooldownMin:    { type: Number,  default: 30, min: 0 },
+    // FIX-2026-08-05: BNB oil gauge (UI progress bar on /bots.html)
+    //   - targetUsdt: 100% เมื่อ bnbValue == target (default 10 USDT)
+    //   - user ตั้งได้ผ่าน Settings section 5️⃣ → บันทึกลง AppConfig
+    //   - ไม่กระทบ alert/banner/auto-buy (เป็นคนละ value — gauge ใช้ดูเฉยๆ)
+    bnbGaugeTargetUsdt:       { type: Number,  default: 10, min: 1, max: 100 },
   },
   { timestamps: true }
 );

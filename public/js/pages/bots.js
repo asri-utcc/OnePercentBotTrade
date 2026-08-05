@@ -143,6 +143,7 @@ async function init() {
     loadApiKeysStatus(),
     refreshPnlShortcut(),
     loadOpenPositions(),
+    loadBnbStatus(), // FIX-2026-08-05: BNB low-balance warning banner
   ]);
 
   // FIX-2026-08-02: kick off slow quality compute in background — first paint shows pills "—"
@@ -273,6 +274,11 @@ async function init() {
   //   - ยังได้ live updates ผ่าน WS kline:update (EMA tile) + trade:update (active positions)
   //   - surgical renderBots() ไม่ rebuild DOM เว้นแต่ bot set เปลี่ยน
   setInterval(() => { loadBots().catch(() => {}); }, 120_000);
+
+  // FIX-2026-08-05: refresh BNB low-balance banner ทุก 60s
+  //   - backend cache 30s → frontend poll 60s พอ (max 2 calls/min ไม่กระทบ Binance weight)
+  //   - independent จาก loadBots — banner ต้องอัปเดตเร็วกว่า bot list เมื่อ BNB ลดลง
+  setInterval(() => { loadBnbStatus().catch(() => {}); }, 60_000);
 
   // FIX-2026-08-01: click delegation สำหรับ Quality Indicator pill — เปิด modal
   document.getElementById('bots-list').addEventListener('click', (e) => {
@@ -563,6 +569,63 @@ async function loadBalance() {
     `;
   } catch (err) {
     document.getElementById('balance-summary').textContent = `(ไม่สามารถโหลด: ${err.message})`;
+  }
+}
+
+// FIX-2026-08-05: BNB low-balance warning banner — แสดงเมื่อ BNB value < $1 USDT
+//   - threshold $1 (คงที่) เพื่อให้ banner แสดงเร็วกว่า telegram (default $0.5)
+//   - poll ทุก 60s (balance เปลี่ยนช้า, cache backend 30s ลด Binance weight)
+//   - fail-open: �่อน banner ถ้า fetch fail (ไม่ให้รบกวน UI)
+// FIX-2026-08-05: BNB oil gauge (horizontal fuel-bar — % ของ user target)
+//   - target อ่านจาก AppConfig.bnbGaugeTargetUsdt (default 10 USDT)
+//   - zone: healthy ≥ 70% / low 30-70% / critical < 30%
+//   - ใช้ response เดียวกับ banner (ไม่เพิ่ม fetch — reuse 60s setInterval)
+async function loadBnbStatus() {
+  const banner = document.getElementById('bnb-low-banner');
+  const detail = document.getElementById('bnb-low-detail');
+  if (!banner || !detail) return; // element ยังไม่ render (ยังอยู่ page อื่น)
+  try {
+    const resp = await API.get('/api/account/bnb-status');
+
+    // ── (1) low-balance banner ───────────────────────
+    if (resp && resp.isLow) {
+      const qty = resp.bnbQty != null ? Number(resp.bnbQty).toFixed(4) : '?';
+      const price = resp.bnbUsdtPrice != null ? Number(resp.bnbUsdtPrice).toFixed(2) : '?';
+      const value = resp.bnbValueUsdt != null ? Number(resp.bnbValueUsdt).toFixed(4) : '?';
+      detail.textContent = `${qty} BNB × ${price} USDT = ${value} USDT (ต่ำกว่า $${resp.threshold})`;
+      banner.hidden = false;
+      banner.style.display = 'flex'; // override inline display:none
+    } else {
+      banner.hidden = true;
+      banner.style.display = 'none';
+    }
+
+    // ── (2) oil gauge (FIX-2026-08-05) ────────────────
+    const statusEl = document.getElementById('bnb-gauge-status');
+    const valueEl  = document.getElementById('bnb-gauge-value');
+    const fillEl   = document.getElementById('bnb-gauge-fill');
+    if (statusEl && valueEl && fillEl) {
+      const pct = Number(resp.gaugePct) || 0;
+      const zone = resp.gaugeZone || 'low';
+      const target = Number(resp.gaugeTargetUsdt) || 10;
+      const value = Number(resp.bnbValueUsdt) || 0;
+      const emoji = zone === 'healthy' ? '🟢' : zone === 'low' ? '�' : '🔴';
+      const label = zone === 'healthy' ? 'Healthy' : zone === 'low' ? 'Low' : 'Critical';
+      statusEl.textContent = `${emoji} ${label} (${pct.toFixed(0)}%)`;
+      statusEl.className = zone === 'healthy' ? 'text-success'
+                         : zone === 'critical' ? 'text-danger'
+                         : 'text-warning';
+      valueEl.textContent = `${value.toFixed(2)} / ${target.toFixed(2)} USDT`;
+      fillEl.style.width = `${pct}%`;
+      fillEl.className = `bnb-gauge-fill is-${zone}`;
+    }
+  } catch (err) {
+    // fail-open: ซ่อน banner ถ้า fetch fail (ไม่ให้รบกวน UI)
+    banner.hidden = true;
+    banner.style.display = 'none';
+    // gauge → reset to 0 width (fail-open — ไม่โชว์ค่าผิด)
+    const fillEl = document.getElementById('bnb-gauge-fill');
+    if (fillEl) { fillEl.style.width = '0%'; fillEl.className = 'bnb-gauge-fill'; }
   }
 }
 

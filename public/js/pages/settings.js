@@ -6,6 +6,7 @@
 //   - reload on every PUT/DELETE เพราะ backend เรียก notifier.reloadConfig() ให้แล้ว
 
 let cfg = null; // cached config
+let bnbCfg = null; // FIX-2026-08-05: auto-buy BNB config
 
 async function init() {
   const me = await API.get('/api/auth/me').catch(() => null);
@@ -19,6 +20,14 @@ async function init() {
 async function loadConfig() {
   try {
     cfg = await API.get('/api/telegram/config');
+    // FIX-2026-08-05: load auto-buy BNB config (แยก endpoint, ไม่กระทบโหลดครั้งแรกถ้า fail)
+    try {
+      bnbCfg = await API.get('/api/bnb-auto-buy/config');
+    } catch (err) {
+      console.warn('auto-buy BNB config load failed:', err.message);
+      // FIX-2026-08-05: include gaugeTargetUsdt in fallback
+      bnbCfg = { enabled: false, topUpUsdt: 5.5, thresholdUsdt: 0.5, checkIntervalMin: 60, cooldownMin: 30, maxUsdtPerDay: 50, gaugeTargetUsdt: 10, status: {} };
+    }
     render();
   } catch (err) {
     document.getElementById('settings-content').innerHTML =
@@ -32,6 +41,8 @@ function render() {
   const qth = cfg.qualityThresholds || {};
   const qEnabled = cfg.qualityEnabled !== false; // default true
   const qRefreshMin = Math.round((Number.isFinite(cfg.qualityRefreshMs) ? cfg.qualityRefreshMs : 5 * 60 * 1000) / 60000);
+  // FIX-2026-08-05: bnbCfg defaults (กัน null/undefined)
+  bnbCfg = bnbCfg || { enabled: false, topUpUsdt: 5.5, thresholdUsdt: 0.5, checkIntervalMin: 60, cooldownMin: 30, maxUsdtPerDay: 50, gaugeTargetUsdt: 10, status: {} };
   const status = cfg.hasToken && cfg.chatId
     ? (cfg.enabled ? '🟢 live' : '🟡 token only')
     : '⚪ not configured';
@@ -168,6 +179,12 @@ function render() {
             <span class="form-check-label">🚨 <strong>Circuit-breaker panic-sell</strong> <small class="text-muted d-block">3 แท่งติด red + below lowerKC → panic-close ALL positions</small></span>
           </label>
         </div>
+        <div class="col-md-6">
+          <label class="form-check">
+            <input type="checkbox" class="form-check-input" id="ev-bnbLowBalance" ${ev.bnbLowBalance !== false ? 'checked' : ''} />
+            <span class="form-check-label">💎 <strong>BNB balance ต่ำ</strong> <small class="text-muted d-block">BNB value &lt; threshold (แจ้งเติม BNB ก่อน fee ถูกหักจาก base)</small></span>
+          </label>
+        </div>
       </div>
 
       <div class="mt-3">
@@ -195,6 +212,11 @@ function render() {
           <label class="form-label">⏳ Stuck (นาที) <span class="text-muted">(≥ แจ้งเตือน)</span></label>
           <input type="number" class="form-control" id="th-stuck" value="${th.positionStuckMin ?? 30}" step="1" min="1" max="1440" />
           <small class="text-muted">เช่น <code>30</code> = แจ้งเมื่อเปิด ≥ 30 นาที</small>
+        </div>
+        <div class="col-md-4">
+          <label class="form-label">💎 BNB low (USDT) <span class="text-muted">(&lt; แจ้งเตือน)</span></label>
+          <input type="number" class="form-control" id="th-bnbLow" value="${th.bnbLowBalanceUsdt ?? 0.5}" step="0.05" min="0.05" max="100" />
+          <small class="text-muted">เช่น <code>0.5</code> = แจ้งเมื่อ BNB value &lt; $0.50 (banner ที่ /bots.html ใช้ $1 คงที่)</small>
         </div>
       </div>
 
@@ -264,6 +286,63 @@ function render() {
         <span class="quality-pill is-green">3–4</span>
       </div>
 
+      <hr />
+
+      <!-- ── FIX-2026-08-05: Auto-Buy BNB ──────────────────────────────── -->
+      <h6 class="text-muted-3 mb-3">5️⃣ 💎 Auto-Buy BNB <small class="text-muted-3">(MARKET BUY BNB/USDT อัตโนมัติเมื่อ BNB value &lt; threshold)</small></h6>
+
+      <div class="mb-3">
+        <label class="form-check form-switch">
+          <input type="checkbox" class="form-check-input" id="bnb-enabled" ${bnbCfg.enabled ? 'checked' : ''} />
+          <span class="form-check-label"><strong>เปิด Auto-Buy BNB</strong> — <span class="text-danger">⚠️ Live trading</span> — ระบบจะ MARKET BUY BNB ด้วยเงินจริงเมื่อ BNB value ต่ำกว่า threshold</span>
+        </label>
+      </div>
+
+      <div class="row g-3">
+        <div class="col-md-4">
+          <label class="form-label">💰 TopUp per buy (USDT)</label>
+          <input type="number" class="form-control" id="bnb-topUp" value="${bnbCfg.topUpUsdt}" step="0.5" min="5" max="100" />
+          <small class="text-muted">จำนวน USDT ต่อการซื้อแต่ละครั้ง (≥ 5 USDT ตาม BNB minNotional)</small>
+        </div>
+        <div class="col-md-4">
+          <label class="form-label">⚠️ Trigger threshold (USDT)</label>
+          <input type="number" class="form-control" id="bnb-threshold" value="${bnbCfg.thresholdUsdt}" step="0.05" min="0.1" max="100" />
+          <small class="text-muted">ซื้อเมื่อ BNB value &lt; ค่านี้</small>
+        </div>
+        <div class="col-md-4">
+          <label class="form-label">⏱ Check interval (นาที)</label>
+          <input type="number" class="form-control" id="bnb-interval" value="${bnbCfg.checkIntervalMin}" step="5" min="5" max="1440" />
+          <small class="text-muted">ความถี่ในการตรวจ (default 60 = 1 ชม.)</small>
+        </div>
+        <div class="col-md-4">
+          <label class="form-label">🛑 Cooldown (นาที)</label>
+          <input type="number" class="form-control" id="bnb-cooldown" value="${bnbCfg.cooldownMin}" step="5" min="0" max="1440" />
+          <small class="text-muted">เวลารอขั้นต่ำระหว่างการซื้อ (กัน burst)</small>
+        </div>
+        <div class="col-md-4">
+          <label class="form-label">📊 Daily cap (USDT)</label>
+          <input type="number" class="form-control" id="bnb-dailycap" value="${bnbCfg.maxUsdtPerDay}" step="5" min="0" max="10000" />
+          <small class="text-muted">เพดานการใช้จ่าย USDT ต่อวัน (กัน runaway)</small>
+        </div>
+        <div class="col-md-4">
+          <label class="form-label">� Gauge target (USDT)</label>
+          <input type="number" class="form-control" id="bnb-gauge-target" value="${bnbCfg.gaugeTargetUsdt ?? 10}" step="1" min="1" max="100" />
+          <small class="text-muted">เป้าหมาย 100% ของ fuel gauge (default 10 USDT)</small>
+        </div>
+      </div>
+
+      <div class="mt-3">
+        <button type="button" class="btn btn-primary" id="btn-save-bnb">💾 บันทึก Auto-Buy BNB</button>
+        <button type="button" class="btn btn-outline-warning ms-2" id="btn-trigger-bnb">🖐 Trigger BUY now</button>
+        <span class="ms-2 text-muted small" id="bnb-status"></span>
+      </div>
+
+      <div class="text-muted small mt-3">
+        <strong>สถานะ:</strong> tickCount=${bnbCfg.status && bnbCfg.status.tickCount != null ? bnbCfg.status.tickCount : 0} · lastTick=${bnbCfg.status && bnbCfg.status.lastTickAt ? new Date(bnbCfg.status.lastTickAt).toLocaleString() : '—'} · dailySpend=${bnbCfg.status && bnbCfg.status.dailySpendUsdt != null ? bnbCfg.status.dailySpendUsdt.toFixed(2) : '0.00'} USDT
+        <br /><strong>Safety:</strong> ${bnbCfg.cooldownMin}-min cooldown · ${bnbCfg.maxUsdtPerDay} USDT daily cap · dailySpend reset at midnight UTC
+        <br /><strong>Audit log:</strong> <a href="/api/bnb-auto-buy/logs" target="_blank">GET /api/bnb-auto-buy/logs</a> (50 รายการล่าสุด)
+      </div>
+
     </div>
   `;
 
@@ -281,6 +360,11 @@ function bindEvents() {
   document.getElementById('btn-save-thresholds').onclick = saveThresholds;
   const sq = document.getElementById('btn-save-quality');
   if (sq) sq.onclick = saveQualityThresholds;
+  // FIX-2026-08-05: auto-buy BNB
+  const sb = document.getElementById('btn-save-bnb');
+  if (sb) sb.onclick = saveAutoBuyBnb;
+  const tb = document.getElementById('btn-trigger-bnb');
+  if (tb) tb.onclick = triggerAutoBuyBnb;
 }
 
 function setStatus(elId, msg, isError = false) {
@@ -370,6 +454,8 @@ async function saveEvents() {
     // FIX-2026-07-26: TP ต่ำเกินไป
     tpLowPnL:            document.getElementById('ev-tpLowPnL').checked,
     cbPanicClose:       document.getElementById('ev-cbPanicClose').checked,
+    // FIX-2026-08-05: BNB balance ต่ำ — กัน BNB-empty fee-deduct incident
+    bnbLowBalance:      document.getElementById('ev-bnbLowBalance').checked,
   };
   try {
     await API.put('/api/telegram/config', { events });
@@ -385,9 +471,15 @@ async function saveThresholds() {
     positionLossPct:   parseFloat(document.getElementById('th-loss').value),
     positionProfitPct: parseFloat(document.getElementById('th-profit').value),
     positionStuckMin:  parseInt(document.getElementById('th-stuck').value, 10),
+    // FIX-2026-08-05: BNB low-balance threshold (USDT value ของ BNB ที่ trigger alert)
+    bnbLowBalanceUsdt: parseFloat(document.getElementById('th-bnbLow').value),
   };
   if (!Number.isFinite(thresholds.positionLossPct) || !Number.isFinite(thresholds.positionProfitPct) || !Number.isFinite(thresholds.positionStuckMin)) {
     setStatus('thresholds-status', '❌ ค่าต้องเป็นตัวเลข', true);
+    return;
+  }
+  if (!Number.isFinite(thresholds.bnbLowBalanceUsdt) || thresholds.bnbLowBalanceUsdt < 0.05) {
+    setStatus('thresholds-status', '❌ BNB low threshold ต้อง ≥ 0.05 USDT', true);
     return;
   }
   try {
@@ -431,6 +523,100 @@ async function saveQualityThresholds() {
     await loadConfig();
   } catch (err) {
     setStatus('quality-status', '❌ ' + err.message, true);
+  }
+}
+
+// FIX-2026-08-05: save Auto-Buy BNB config
+//   - PUT /api/bnb-auto-buy/config with boolean + numbers
+//   - backend calls autoBnbBuyer.reloadConfig() → restart timer with new interval
+async function saveAutoBuyBnb() {
+  const enabled        = !!document.getElementById('bnb-enabled').checked;
+  const topUpUsdt      = parseFloat(document.getElementById('bnb-topUp').value);
+  const thresholdUsdt  = parseFloat(document.getElementById('bnb-threshold').value);
+  const checkIntervalMin = parseInt(document.getElementById('bnb-interval').value, 10);
+  const cooldownMin    = parseInt(document.getElementById('bnb-cooldown').value, 10);
+  const maxUsdtPerDay  = parseFloat(document.getElementById('bnb-dailycap').value);
+  // FIX-2026-08-05: BNB oil gauge target (ส่งไป endpoint เดียวกัน — gauge ไม่ต้องแยก endpoint)
+  const gaugeTargetUsdt = parseFloat(document.getElementById('bnb-gauge-target').value);
+
+  // basic validation
+  if (!Number.isFinite(topUpUsdt) || topUpUsdt < 5 || topUpUsdt > 100) {
+    setStatus('bnb-status', '❌ TopUp ต้องอยู่ระหว่าง 5–100 USDT', true);
+    return;
+  }
+  if (!Number.isFinite(thresholdUsdt) || thresholdUsdt < 0.1 || thresholdUsdt > 100) {
+    setStatus('bnb-status', '❌ Threshold ต้องอยู่ระหว่าง 0.1–100 USDT', true);
+    return;
+  }
+  if (!Number.isFinite(checkIntervalMin) || checkIntervalMin < 5 || checkIntervalMin > 1440) {
+    setStatus('bnb-status', '❌ Check interval ต้องอยู่ระหว่าง 5–1440 นาที', true);
+    return;
+  }
+  if (!Number.isFinite(cooldownMin) || cooldownMin < 0 || cooldownMin > 1440) {
+    setStatus('bnb-status', '� Cooldown ต้องอยู่ระหว่าง 0–1440 นาที', true);
+    return;
+  }
+  if (!Number.isFinite(maxUsdtPerDay) || maxUsdtPerDay < 0 || maxUsdtPerDay > 10000) {
+    setStatus('bnb-status', '❌ Daily cap ต้องอยู่ระหว่าง 0–10000 USDT', true);
+    return;
+  }
+  // FIX-2026-08-05: gauge target validation (1..100 USDT)
+  if (!Number.isFinite(gaugeTargetUsdt) || gaugeTargetUsdt < 1 || gaugeTargetUsdt > 100) {
+    setStatus('bnb-status', '❌ Gauge target ต้องอยู่ระหว่าง 1–100 USDT', true);
+    return;
+  }
+
+  // extra: กันเปิด enabled โดยไม่ตั้งใจ → 2-step confirm
+  if (enabled && !(bnbCfg && bnbCfg.enabled)) {
+    const ok = confirm(
+      '⚠️ จะเปิด Auto-Buy BNB ใช่หรือไม่?\n\n' +
+      'ระบบจะ MARKET BUY BNB/USDT ด้วยเงินจริงอัตโนมัติ ' +
+      'เมื่อ BNB value < threshold (' + thresholdUsdt + ' USDT)\n\n' +
+      'TopUp: ' + topUpUsdt + ' USDT · Interval: ' + checkIntervalMin + ' นาที\n' +
+      'Daily cap: ' + maxUsdtPerDay + ' USDT\n\n' +
+      'แน่ใจหรือไม่?'
+    );
+    if (!ok) {
+      // revert checkbox
+      document.getElementById('bnb-enabled').checked = false;
+      return;
+    }
+  }
+
+  try {
+    const resp = await API.put('/api/bnb-auto-buy/config', {
+      enabled, topUpUsdt, thresholdUsdt, checkIntervalMin, cooldownMin, maxUsdtPerDay,
+      // FIX-2026-08-05: BNB oil gauge target — ส่งไปด้วย (route จะอัปเดต field แยก)
+      gaugeTargetUsdt,
+    });
+    setStatus('bnb-status', '✅ บันทึกแล้ว' + (resp.enabled ? ' · Auto-Buy BNB 🟢 ON' : ' · Auto-Buy BNB ⚪ OFF'));
+    await loadConfig();
+  } catch (err) {
+    setStatus('bnb-status', '❌ ' + (err.body && err.body.error ? err.body.error : err.message), true);
+  }
+}
+
+// FIX-2026-08-05: manual trigger — bypass enabled flag (สำหรับ test หรือ emergency top-up)
+//   - ส่งคำสั่งจริง → ต้อง confirm
+async function triggerAutoBuyBnb() {
+  if (!confirm(
+    '⚠️ จะสั่งซื้อ BNB/USDT MARKET BUY ทันที?\n\n' +
+    'สำหรับ top-up BNB แบบ manual (bypass enabled flag)\n\n' +
+    'ค่าเงินจริง — แน่ใจหรือไม่?'
+  )) return;
+  setStatus('bnb-status', '⏳ กำลังส่งคำสั่ง...');
+  try {
+    const result = await API.post('/api/bnb-auto-buy/trigger', {});
+    const ok = result && result.result && result.result.outcome;
+    setStatus('bnb-status', '✅ ' + (ok ? 'ส่งคำสั่งสำเร็จ (outcome: ' + ok + ')' : 'เสร็จแล้ว'));
+    await loadConfig();
+  } catch (err) {
+    // 409 = already running → ไม่ถือเป็น error
+    if (err.status === 409) {
+      setStatus('bnb-status', '⏳ มีคำสั่งกำลังทำงานอยู่ — ลองใหม่ภายหลัง');
+    } else {
+      setStatus('bnb-status', '❌ ' + (err.body && err.body.error ? err.body.error : err.message), true);
+    }
   }
 }
 
