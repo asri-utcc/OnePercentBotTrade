@@ -10,6 +10,10 @@ let bots = [];
 
 // ── 2026-07-31: View mode toggle (compact | expand) — persisted in localStorage ────────
 const BOT_VIEW_MODE_KEY = 'botsListViewMode';
+// FIX-2026-08-05: track last rendered view mode — used by renderBots() to force-rebuild
+//   cards when user toggles compact↔expand (without this, masterSetChanged stays false on
+//   toggle, so the .is-compact/.is-expand class on existing cards never updates → กราฟ+tiles ค้างซ่อน)
+let _lastRenderedViewMode = null;
 function getBotViewMode() {
   try {
     const v = localStorage.getItem(BOT_VIEW_MODE_KEY);
@@ -36,15 +40,18 @@ function wireViewModeToggle() {
   compactBtn.addEventListener('click', () => {
     if (getBotViewMode() === 'compact') return;
     setBotViewMode('compact');
-    renderBots(); // re-render with is-compact class — skip chart load
+    // FIX-2026-08-05: renderBots() detects viewModeChanged → force-rebuild cards with .is-compact
+    //   (cards เดิมที่มี class .is-expand จะถูกแทนที่ด้วย .is-compact → CSS ซ่อนกราฟ+tiles ทันที)
+    renderBots();
   });
   expandBtn.addEventListener('click', () => {
     if (getBotViewMode() === 'expand') return;
     setBotViewMode('expand');
     // FIX-2026-08-02: re-fetch with ?expand=1 to get volatility snapshot (for tiles)
     //   - cached snapshot reused if recent (60s server-side)
+    // FIX-2026-08-05: loadBots() internally calls renderBots() ซึ่งจะ trigger rebuild
+    //   ผ่าน viewModeChanged → ไม่ต้องเรียก renderBots() ซ้ำ
     loadBots({ expand: true }).catch(() => {});
-    renderBots(); // re-render with is-expand — load mini charts
   });
 }
 
@@ -1072,12 +1079,19 @@ function renderBots() {
   const masterSetChanged = existingIds.size !== masterIds.size
     || [...existingIds].some((id) => !masterIds.has(id))
     || [...masterIds].some((id) => !existingIds.has(id));
-  if (masterSetChanged) {
+  // FIX-2026-08-05: view mode change (compact↔expand) ต้อง rebuild การ์ดด้วย
+  //   - เดิมเช็คแค่ masterSetChanged ทำให้ class .is-compact/.is-expand บนการ์ดไม่เปลี่ยน
+  //   - ส่งผลให้ CSS rule .bot-card-v2.is-compact .bc-minichart-wrap { display:none } ยังคงซ่อนกราฟ+tiles
+  //   - ตอนผู้ใช้กด Expand จึงไม่เห็นอะไรเปลี่ยนแปลง
+  const viewMode = getBotViewMode();
+  const viewModeChanged = _lastRenderedViewMode !== null && _lastRenderedViewMode !== viewMode;
+  if (masterSetChanged || viewModeChanged) {
     teardownMiniCharts();
     container.innerHTML = bots.map(renderBotCard).join('');
-    if (getBotViewMode() === 'expand') {
+    if (viewMode === 'expand') {
       setupMiniCharts();
     }
+    _lastRenderedViewMode = viewMode;
   }
   // Apply filter visibility (CSS hide) — runs in BOTH rebuild + same-set cases
   //   - ไม่ต้อง teardown charts เมื่อ filter เปลี่ยน (cards ที่ hidden ยังเก็บ state ไว้)
