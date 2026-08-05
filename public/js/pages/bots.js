@@ -55,6 +55,221 @@ let tradeIdToBotId = new Map();     // tradeId -> botId (used by WS trade:update
 let modalPriceOverrides = new Map();// tradeId -> live close price (UNUSED 2026-08-03 — WS price auto-update ถูกปิดแล้ว)
 let currentModalOp = null;          // bootstrap.Modal instance for #openPositionsModal
 
+// ── FIX-2026-08-05: Bot search & filter (client-side) ────────
+//   - text search: match name / symbol / timeframe / status (case-insensitive)
+//   - filter chips: multi-select (AND logic) — running / stopped / has-position /
+//     has-error / has-warning / dca
+//   - chip state persisted in localStorage (BOT_FILTER_KEY) — refresh แล้ว state คงอยู่
+//   - search query NOT persisted (always fresh on reload)
+//   - counter "X/Y" shown next to title when filter is active
+const BOT_FILTER_KEY = 'botsListFilter';
+const botFilter = {
+  query: '',          // search input value (transient)
+  chips: new Set(),   // active filter chip keys (persisted)
+};
+
+function loadBotFilter() {
+  try {
+    const raw = localStorage.getItem(BOT_FILTER_KEY);
+    if (!raw) return;
+    const parsed = JSON.parse(raw);
+    if (parsed && Array.isArray(parsed.chips)) {
+      botFilter.chips = new Set(parsed.chips.filter((c) => typeof c === 'string'));
+    }
+  } catch (_) { /* ignore corrupt JSON */ }
+}
+function saveBotFilter() {
+  try {
+    localStorage.setItem(BOT_FILTER_KEY, JSON.stringify({
+      chips: [...botFilter.chips],
+    }));
+  } catch (_) { /* ignore quota / private mode */ }
+}
+
+function botMatchesFilters(b) {
+  // text search: name + symbol + timeframe + status (case-insensitive substring)
+  if (botFilter.query) {
+    const q = botFilter.query.toLowerCase();
+    const hay = [
+      b.name || '',
+      b.symbol || '',
+      b.timeframe || '',
+      b.status || '',
+    ].join(' ').toLowerCase();
+    if (!hay.includes(q)) return false;
+  }
+  // chip filters (AND — ทุก chip ที่ active ต้องผ่าน)
+  if (botFilter.chips.size > 0) {
+    for (const chip of botFilter.chips) {
+      switch (chip) {
+        case 'running':      if (!b.enabled) return false; break;
+        case 'stopped':      if (b.enabled)  return false; break;
+        case 'has-position': if (!((b.activePositionsCount || 0) > 0)) return false; break;
+        case 'has-error':    if (!b.lastError)   return false; break;
+        case 'has-warning':  if (!b.warning)     return false; break;
+        case 'dca':          if (!b.dcaEnabled)  return false; break;
+        default: break; // unknown chip → ignore
+      }
+    }
+  }
+  return true;
+}
+
+function getFilteredBots() {
+  // fast path: no filter active → return original array reference (surgical in-place update works)
+  if (!botFilter.query && botFilter.chips.size === 0) return bots;
+  return bots.filter(botMatchesFilters);
+}
+
+function isFilterActive() {
+  return botFilter.query.length > 0 || botFilter.chips.size > 0;
+}
+
+function updateFilterCounter() {
+  const counter = document.getElementById('bot-filter-counter');
+  if (!counter) return;
+  const total = bots.length;
+  if (total === 0) {
+    counter.textContent = '0';
+    counter.classList.remove('is-filtered');
+    counter.title = 'ยังไม่มีบอท';
+    return;
+  }
+  if (isFilterActive()) {
+    const visible = getFilteredBots().length;
+    counter.textContent = `${visible}/${total}`;
+    counter.classList.add('is-filtered');
+    counter.title = `แสดง ${visible} จาก ${total} บอท`;
+  } else {
+    counter.textContent = `${total}`;
+    counter.classList.remove('is-filtered');
+    counter.title = `ทั้งหมด ${total} บอท`;
+  }
+}
+
+function renderNoResultsEmpty() {
+  const parts = [];
+  if (botFilter.query) parts.push(`search: <code>${escapeHtml(botFilter.query)}</code>`);
+  if (botFilter.chips.size > 0) {
+    parts.push(`chips: ${[...botFilter.chips].map((c) => `<code>${escapeHtml(c)}</code>`).join(', ')}`);
+  }
+  return `
+    <div class="bot-search-empty">
+      <span class="glyph">🔍</span>
+      <div class="ttl">ไม่พบบอทที่ตรงกับเงื่อนไข</div>
+      <div class="sub">${parts.length > 0 ? 'กำลังกรอง: ' + parts.join(' · ') : 'ลองค้นหาด้วยคำอื่น หรือเปลี่ยน filter'}</div>
+      <button class="btn-lux btn-bear btn-sm" type="button" id="bot-search-empty-clear">✕ ล้างตัวกรอง</button>
+    </div>
+  `;
+}
+
+function applyBotFilter() {
+  // Surgical renderBots() will pick up the new filter via getFilteredBots() — no need to teardown charts here
+  renderBots();
+}
+
+function updateClearAllVisibility() {
+  const clearAll = document.getElementById('bot-filter-clear');
+  if (!clearAll) return;
+  clearAll.hidden = !isFilterActive();
+}
+
+function clearBotFilter() {
+  botFilter.query = '';
+  botFilter.chips.clear();
+  saveBotFilter();
+  // sync DOM
+  const input = document.getElementById('bot-search-input');
+  if (input) input.value = '';
+  const clearBtn = document.getElementById('bot-search-clear');
+  if (clearBtn) clearBtn.hidden = true;
+  document.querySelectorAll('.bot-chip[data-filter]').forEach((el) => {
+    el.classList.remove('is-active');
+  });
+  updateClearAllVisibility();
+  applyBotFilter();
+}
+
+function setupBotSearch() {
+  const input = document.getElementById('bot-search-input');
+  const clearBtn = document.getElementById('bot-search-clear');
+  const clearAllBtn = document.getElementById('bot-filter-clear');
+  const chipsContainer = document.getElementById('bot-filter-chips');
+  if (!input || !chipsContainer) return;
+
+  // restore persisted chip state
+  loadBotFilter();
+  for (const chip of botFilter.chips) {
+    const el = chipsContainer.querySelector(`.bot-chip[data-filter="${chip}"]`);
+    if (el) el.classList.add('is-active');
+  }
+  updateClearAllVisibility();
+
+  // search input: in-memory filter is fast — no debounce needed
+  input.addEventListener('input', (e) => {
+    botFilter.query = String(e.target.value || '').trim();
+    if (clearBtn) clearBtn.hidden = botFilter.query.length === 0;
+    updateClearAllVisibility();
+    applyBotFilter();
+  });
+
+  // ESC ล้าง search (เมื่อ input focused)
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && botFilter.query) {
+      e.preventDefault();
+      input.value = '';
+      botFilter.query = '';
+      if (clearBtn) clearBtn.hidden = true;
+      updateClearAllVisibility();
+      applyBotFilter();
+    }
+  });
+
+  // × button (clear search)
+  if (clearBtn) {
+    clearBtn.addEventListener('click', () => {
+      input.value = '';
+      botFilter.query = '';
+      clearBtn.hidden = true;
+      input.focus();
+      updateClearAllVisibility();
+      applyBotFilter();
+    });
+  }
+
+  // chip click: toggle is-active + persist + re-render
+  chipsContainer.addEventListener('click', (e) => {
+    const chip = e.target.closest('.bot-chip[data-filter]');
+    if (!chip) return;
+    const key = chip.dataset.filter;
+    if (botFilter.chips.has(key)) {
+      botFilter.chips.delete(key);
+      chip.classList.remove('is-active');
+    } else {
+      botFilter.chips.add(key);
+      chip.classList.add('is-active');
+    }
+    saveBotFilter();
+    updateClearAllVisibility();
+    applyBotFilter();
+  });
+
+  // "ล้างทั้งหมด" button
+  if (clearAllBtn) {
+    clearAllBtn.addEventListener('click', clearBotFilter);
+  }
+
+  // empty-state "ล้างตัวกรอง" button (delegated — ปุ่มนี้ถูกสร้างใหม่ทุก render)
+  const botsList = document.getElementById('bots-list');
+  if (botsList) {
+    botsList.addEventListener('click', (e) => {
+      if (e.target.closest('#bot-search-empty-clear')) {
+        clearBotFilter();
+      }
+    });
+  }
+}
+
 // ── FIX-2026-08-01: Bot Quality Indicator pill (badge for bot card) ─────
 //   - HTML returned by buildQualityBadge — string template (uses escapeHtml from below)
 //   - คลิก → delegated ใน init() → qualityModal.openQualityModal(bot)
@@ -169,6 +384,9 @@ async function init() {
 
   // FIX-2026-07-31: wire Compact/Expand toggle (default = compact)
   wireViewModeToggle();
+
+  // FIX-2026-08-05: wire search input + filter chips (persisted in localStorage)
+  setupBotSearch();
 
   // FIX-2026-07-31: deep-link จาก scan-volatility — ?newBot=1&symbol=BTCUSDT&tf=5m
   //   - pre-fill symbol/timeframe ใน create modal แล้วเปิดอัตโนมัติ
@@ -827,35 +1045,51 @@ async function onOpenPositionsClick(ev) {
 
 function renderBots() {
   const container = document.getElementById('bots-list');
+  // counter update เสมอ (รวมกรณี bots.length === 0)
+  updateFilterCounter();
   if (bots.length === 0) {
     container.innerHTML = '<div class="alert alert-secondary">ยังไม่มีบอท — คลิก <strong>+ New Bot</strong> เพื่อเริ่มต้น</div>';
+    teardownMiniCharts();
     return;
   }
+  // FIX-2026-08-05: filter applied — อาจมี 0 บอทที่ตรงเงื่อนไข
+  const visible = getFilteredBots();
+  if (visible.length === 0) {
+    // ไม่มีบอทตรงกับ search/filter — แสดง empty state (replace DOM + teardown charts)
+    container.innerHTML = renderNoResultsEmpty();
+    teardownMiniCharts();
+    return;
+  }
+  // ── FIX-2026-08-05: แยก "master set changed" vs "filter changed" ────────────
+  //   - master set changed (new bot added / removed / reordered) → full rebuild + chart re-init
+  //   - filter changed only → toggle CSS .is-hidden-by-filter บนการ์ด (no DOM thrash, no chart re-init)
+  //   - WS kline:update → updateCardEma() mutates tile in-place (works on hidden cards too)
+  //   - WS trade:update → updates active count + PnL via in-place mutation
   const existingIds = new Set();
   const existingCards = container.querySelectorAll('[data-bot-id]');
   existingCards.forEach((el) => existingIds.add(el.dataset.botId));
-  const newIds = new Set(bots.map((b) => String(b._id)));
-
-  // FIX-2026-08-04: surgical update — only rebuild when bot set changes (add/remove/order)
-  //   - WS kline:update → updateCardEma() already mutates EMA tile in-place
-  //   - WS trade:update → updates active positions count + today PnL via in-place mutation
-  //   - on identical bot set → skip full rebuild to avoid teardown/recreate mini-charts + DOM thrash
-  const setChanged = existingIds.size !== newIds.size
-    || [...existingIds].some((id) => !newIds.has(id))
-    || [...newIds].some((id) => !existingIds.has(id));
-
-  if (setChanged) {
-    // Pool changed → full rebuild (once)
+  const masterIds = new Set(bots.map((b) => String(b._id)));
+  const masterSetChanged = existingIds.size !== masterIds.size
+    || [...existingIds].some((id) => !masterIds.has(id))
+    || [...masterIds].some((id) => !existingIds.has(id));
+  if (masterSetChanged) {
     teardownMiniCharts();
     container.innerHTML = bots.map(renderBotCard).join('');
     if (getBotViewMode() === 'expand') {
       setupMiniCharts();
     }
-    return;
   }
-
-  // Same bot set → surgical in-place mutation of frequently-changing fields
-  for (const b of bots) {
+  // Apply filter visibility (CSS hide) — runs in BOTH rebuild + same-set cases
+  //   - ไม่ต้อง teardown charts เมื่อ filter เปลี่ยน (cards ที่ hidden ยังเก็บ state ไว้)
+  //   - เมื่อ user ล้าง filter → การ์ดที่ซ่อนอยู่จะกลับมาแสดงทันที (มี state + chart พร้อม)
+  const visibleIds = new Set(visible.map((b) => String(b._id)));
+  for (const card of container.querySelectorAll('.bot-card-v2')) {
+    const id = card.dataset.botId;
+    const isHidden = !visibleIds.has(id);
+    card.classList.toggle('is-hidden-by-filter', isHidden);
+  }
+  // Surgical in-place mutation of frequently-changing fields (active count, today PnL, status)
+  for (const b of visible) {
     updateBotCardInPlace(b);
   }
 }

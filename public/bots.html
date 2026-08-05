@@ -167,7 +167,10 @@
 
     <!-- Bots list -->
     <div class="page-title">
-      <h3>🤖 บอททั้งหมด</h3>
+      <h3>
+        🤖 บอททั้งหมด
+        <span class="bot-filter-counter" id="bot-filter-counter" title="จำนวนบอทที่แสดง / ทั้งหมด">0</span>
+      </h3>
       <div class="d-flex align-items-center gap-2 flex-wrap">
         <!-- FIX-2026-07-31: สลับมุมมอง Compact / Expand -->
         <div class="view-mode-toggle btn-group btn-group-sm" role="group" aria-label="มุมมองบอท">
@@ -179,6 +182,31 @@
         <button class="btn btn-outline-primary" id="btn-master-config" title="ตั้งค่าหลายบอทพร้อมกัน (clobber mode)">⚙️ Master Config</button>
       </div>
     </div>
+
+    <!-- FIX-2026-08-05: Search & filter row
+         - search input: ค้นหา name / symbol / TF / status (case-insensitive)
+         - filter chips: multi-select (Running / Stopped / Has Position / Error / Warning / DCA)
+         - counter: "3/10" เมื่อกำลัง filter, "10" เมื่อไม่ filter
+         - ค้นหา + chips persist ใน localStorage (BOT_FILTER_KEY) — refresh แล้ว state คงอยู่ -->
+    <div class="bot-search-bar">
+      <div class="bot-search-wrap">
+        <span class="bot-search-icon" aria-hidden="true">🔍</span>
+        <input type="text" id="bot-search-input" class="bot-search-input"
+               placeholder="ค้นหา ชื่อบอท / symbol / TF / สถานะ  (เช่น BTC, 5m, holding)"
+               autocomplete="off" spellcheck="false" />
+        <button type="button" class="bot-search-clear" id="bot-search-clear" hidden aria-label="ล้างการค้นหา" title="ล้าง (Esc)">×</button>
+      </div>
+      <div class="bot-filter-chips" id="bot-filter-chips" role="group" aria-label="ตัวกรองบอท">
+        <button type="button" class="bot-chip" data-filter="running" title="บอทที่กำลังทำงานอยู่ (enabled)">▶ Running</button>
+        <button type="button" class="bot-chip" data-filter="stopped" title="บอทที่หยุดอยู่ (disabled)">⏸ Stopped</button>
+        <button type="button" class="bot-chip" data-filter="has-position" title="บอทที่กำลังถือ position อยู่">📂 Has Position</button>
+        <button type="button" class="bot-chip" data-filter="has-error" title="บอทที่มี lastError">⚠️ Error</button>
+        <button type="button" class="bot-chip" data-filter="has-warning" title="บอทที่มี warning (เช่น SELL partial-fill latched 1h)">⏰ Warning</button>
+        <button type="button" class="bot-chip" data-filter="dca" title="บอท DCA + BEP stack mode">📚 DCA</button>
+        <button type="button" class="bot-chip is-clear" id="bot-filter-clear" hidden title="ล้างการค้นหา + filter chips ทั้งหมด">✕ ล้างทั้งหมด</button>
+      </div>
+    </div>
+
     <div id="bots-list"></div>
   </div>
 
