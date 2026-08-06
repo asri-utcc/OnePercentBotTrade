@@ -112,11 +112,15 @@ class PositionWatchdog {
   // Mirror trader.js:_autoArmStopLossOnUKC but bot-by-bot so we can apply per-bot
   // thresholds (autoArmLossPct, autoArmAgeHours).
   async _armStuckPositions(stats) {
-    // Loose query — fetch all open selling positions not yet armed, with age floor
+    // FIX-2026-08-06: widened state filter to include 'holding' + 'filled' — เมื่อ SELL cancel
+    //   → state revert เป็น 'holding' (botManager reconcile orphan handler) → trade ติด holding
+    //   ไม่มี SELL placed อีก → ถ้า filter แค่ 'selling' จะไม่เห็น trade นี้อีกเลย
+    //   pattern เดียวกับ botManager reconcilePendingTrades: state ∈ {placed, filled, holding, cancelled, selling}
+    // Loose query — fetch all open positions not yet armed, with age floor
     // of 1h (any position younger than 1h cannot be F1-eligible at default 4h threshold).
     const ageFloor = new Date(Date.now() - 60 * 60 * 1000);
     const candidates = await Trade.find({
-      state: 'selling',
+      state: { $in: ['selling', 'holding', 'filled'] },
       useStopLossOnUKC: { $ne: true },
       buyFilledAt: { $lte: ageFloor },
     }).lean();
@@ -208,8 +212,11 @@ class PositionWatchdog {
   // ─── Phase 2: SL-UKC trigger ──────────────────────────────────────────────
   // Mirror trader.js:_checkStopLossOnUpperKC for DISABLED bots.
   async _triggerArmedPositions(stats) {
+    // FIX-2026-08-06: widened state filter to include 'holding' + 'filled' — Phase 1 arm ตอนนี้
+    //   ครอบคลุม holding แล้ว (ดู comment ด้านบน) → Phase 2 ต้องครอบคลุม matching states ด้วย
+    //   มิเช่นนั้น armed flag จะ dormant หลัง SELL cancel → state revert 'selling' → 'holding'
     const armedTrades = await Trade.find({
-      state: 'selling',
+      state: { $in: ['selling', 'holding', 'filled'] },
       useStopLossOnUKC: true,
     }).lean();
 
@@ -285,14 +292,15 @@ class PositionWatchdog {
           }
         }
 
-        // FIX-2026-08-04: Re-fetch fresh state via bulk lookup (avoid double-sell if trader path already handled it)
+        // FIX-2026-08-06: Re-fetch fresh state via bulk lookup (avoid double-sell if trader path already handled it)
+        //   widened to accept 'holding'/'filled' as still-armed states (mirror Phase 1 filter)
         const fresh = freshMap.get(String(t._id));
-        if (!fresh || fresh.state !== 'selling' || fresh.useStopLossOnUKC !== true) {
+        if (!fresh || (fresh.state !== 'selling' && fresh.state !== 'holding' && fresh.state !== 'filled') || fresh.useStopLossOnUKC !== true) {
           logger.debug({
             tradeId: String(t._id),
             dbState: fresh ? fresh.state : 'deleted',
             dbArmed: fresh ? fresh.useStopLossOnUKC : null,
-          }, 'positionWatchdog: trade no longer armed/selling — skip');
+          }, 'positionWatchdog: trade no longer armed — skip');
           continue;
         }
 

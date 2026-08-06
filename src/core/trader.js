@@ -3672,11 +3672,42 @@ class Trader {
       }
 
       const marketSellId = this.makeClientOrderId('em-sell', Date.now(), 0);
+
+      // FIX-2026-08-06 (HOME stuck SL-UKC loop): round qty to LOT_SIZE stepSize before MARKET
+      //   - forceClose.js + scheduleHoldingRetry already round, but defense-in-depth here
+      //   - targets all callers: handleBuyFilled validation-fail, LIMIT_MAKER reject, partial-fill
+      //     finalize, CB panic-sell, stop-loss-on-UKC, D.C.A. unsold stack, etc.
+      //   - สำหรับ HOME/USDT stepSize=1: ถ้า qty=945.5 → 945
+      //   - ถ้า rounded qty < minQty → keep but warn (caller may want to retry with smaller)
+      let marketQty = qty;
+      try {
+        const info = await symbolInfo.loadSymbol(this.bot.symbol);
+        const stepSize = info.lotSize.stepSize;
+        const minQty = info.lotSize.minQty;
+        marketQty = symbolInfo.roundQty(qty, stepSize);
+        if (minQty && marketQty < parseFloat(String(minQty))) {
+          logger.warn({
+            tradeId: trade._id.toString(),
+            symbol: this.bot.symbol,
+            requestedQty: qty,
+            roundedQty: marketQty,
+            minQty: String(minQty),
+            stepSize: String(stepSize),
+          }, 'trader: _emergencyMarketSell — rounded qty below minQty, attempting anyway (Binance may reject)');
+        }
+      } catch (e) {
+        logger.warn({
+          tradeId: trade._id.toString(),
+          symbol: this.bot.symbol,
+          err: e.message,
+        }, 'trader: _emergencyMarketSell — symbolInfo load failed, using raw qty');
+      }
+
       const resp = await binanceRest.newOrder({
         symbol: this.bot.symbol,
         side: 'SELL',
         type: 'MARKET',
-        quantity: qty.toString(),
+        quantity: marketQty.toString(),
         newClientOrderId: marketSellId,
         recvWindow: config_recvWindow(),
       }).catch((err) => ({ error: binanceRest.formatBinanceError(err) }));
@@ -3978,7 +4009,44 @@ class Trader {
         //   which could include other positions' inventory on the same symbol (multi-trade bots
         //   or 2 bots on same symbol). Use buyFilledQty (post-top-up) or buyQty (initial).
         const tradeMaxQty = parseFloat(trade.buyFilledQty || trade.buyQty) || qty;
-        const sellQty = Math.min(freeQty, tradeMaxQty);
+        let sellQty = Math.min(freeQty, tradeMaxQty);
+
+        // FIX-2026-08-06 (HOME stuck SL-UKC loop): round sellQty to LOT_SIZE stepSize
+        //   - defense-in-depth: forceClose.js also rounds, but if this path is taken first
+        //     (scheduleHoldingRetry before SL-UKC) → prevent -1013 LOT_SIZE repeat
+        //   - HOME/USDT stepSize=1: freeQty=947.095 → min(947.095, 945) = 945 (in whole units)
+        //     but Math.min keeps fractional and 945 is integer so passes here. The trap is
+        //     when other symbols have fractional freeQty that exceeds buyQty (e.g. orphan).
+        //   - floor to stepSize always to avoid any leftover fractional pass-through
+        try {
+          const info = await symbolInfo.loadSymbol(this.bot.symbol);
+          const stepSize = info.lotSize.stepSize;
+          const minQty = info.lotSize.minQty;
+          sellQty = symbolInfo.roundQty(sellQty, stepSize);
+          if (minQty && sellQty < parseFloat(String(minQty))) {
+            // rounded below minQty (orphan portion) → fall back to stepSize×1 or skip
+            const stepSizeNum = parseFloat(String(stepSize));
+            if (stepSizeNum > 0 && stepSizeNum <= parseFloat(String(minQty))) {
+              // stepSize itself >= minQty → use 1 step
+              sellQty = stepSizeNum;
+            } else {
+              // too small → skip retry, hope partial-fill finalize or other path handles
+              logger.warn({
+                tradeId: trade._id.toString(),
+                symbol: this.bot.symbol,
+                sellQty, minQty: String(minQty), stepSize: String(stepSize),
+              }, 'trader: holding retry — sellQty below minQty after stepSize rounding, skip');
+              return;
+            }
+          }
+        } catch (e) {
+          // symbolInfo load failed → continue with unrounded qty (Binance will reject if wrong)
+          logger.warn({
+            tradeId: trade._id.toString(),
+            symbol: this.bot.symbol,
+            err: e.message,
+          }, 'trader: holding retry — symbolInfo round failed, continuing with raw sellQty');
+        }
 
         // FIX-2026-08-05: atomic claim BEFORE placing MARKET order — กัน DUPLICATE SELL
         //   - ป้องกัน async race: scheduleHoldingRetry มี async gap ระหว่าง clearTimeout/setTimeout
@@ -4752,11 +4820,38 @@ class Trader {
     }
 
     const sellClientOrderId = this.makeClientOrderId('sell', Date.now(), trade.retryCount || 0);
+
+    // FIX-2026-08-06 (HOME stuck SL-UKC loop): round filledQty to stepSize before SELL LIMIT_MAKER
+    //   - filledQty มาจาก BUY fills (cumulative) — Binance fills may have fractional leftovers
+    //   - e.g. ZIL/USDT stepSize=1: BUY filled 1234.7 → round → 1234
+    //   - defense-in-depth: validateOrder above may pass but Binance strict-mode rejects
+    let sellFilledQty = filledQty;
+    try {
+      const stepSize = symCached.lotSize.stepSize;
+      const minQty = symCached.lotSize.minQty;
+      sellFilledQty = symbolInfo.roundQty(filledQty, stepSize);
+      if (minQty && sellFilledQty < parseFloat(String(minQty))) {
+        logger.warn({
+          tradeId: trade._id.toString(),
+          symbol: this.bot.symbol,
+          filledQty, sellFilledQty,
+          minQty: String(minQty), stepSize: String(stepSize),
+        }, 'trader: accept_partial — rounded sellQty below minQty, using filledQty anyway (validation above should have caught)');
+        sellFilledQty = filledQty;
+      }
+    } catch (e) {
+      // symCached might be missing lotSize — fall back to raw filledQty
+      logger.warn({
+        tradeId: trade._id.toString(),
+        symbol: this.bot.symbol, err: e.message,
+      }, 'trader: accept_partial — symbolInfo round failed, using raw filledQty');
+    }
+
     const sellResp = await binanceRest.newOrder({
       symbol: this.bot.symbol,
       side: 'SELL',
       type: 'LIMIT_MAKER',
-      quantity: filledQty.toString(),
+      quantity: sellFilledQty.toString(),
       price: sellPrice,
       newClientOrderId: sellClientOrderId,
       recvWindow: config_recvWindow(),

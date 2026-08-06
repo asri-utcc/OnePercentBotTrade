@@ -79,6 +79,12 @@ class BotManager {
     const bots = await Bot.find({ enabled: true });
     for (const bot of bots) {
       try {
+        // FIX 2026-08-06 (BANK incident): reset stale cursor on PM2 restart too
+        //   - enableBot() + auto-resume มี guard นี้แล้ว แต่ start() (โหลดบอทตอน process boot) ไม่มี
+        //   - ถ้า lastSignalCloseTime เก่า > 30 นาที (เช่น PM2 ถูก restart ตอนบอท enabled) reconcileKlines('startup')
+        //     จะ replay historical candles หลายร้อยแท่ง → S1 detector ยิง ghost BUY บน candles เก่า
+        //   - safe: cursor advances monotonically ($max guard ใน trader reconcileKlines กันย้อนหลังอยู่แล้ว)
+        await this._resetStaleReplayCursorOnEnable(bot);
         await this.spawnTrader(bot);
       } catch (err) {
         logger.error({ err: err.message, botId: bot._id.toString() }, 'botManager: spawn failed');
@@ -110,8 +116,11 @@ class BotManager {
     tpUpdater.scheduleHourlyTpUpdate();
 
     // FIX-2026-08-01: auto-pause scanner (ทุก 5 นาที: pause/resume ตาม Min-%KC 30 bars)
+    // FIX-2026-08-06 (BANK incident): bind this → BotManager instance
+    //   - checkAutoPauseBots เป็น standalone function (declared outside class) ที่ใช้ this.traders / this._resetStaleReplayCursorOnEnable / this.spawnTrader
+    //   - ถ้าเรียกเป็น free function `this` = undefined (strict mode) → auto-resume crash ทุกครั้งที่ cursor > 30 min
     autoPauseTimer = setInterval(() => {
-      checkAutoPauseBots().catch((err) => logger.warn({ err: err.message }, 'botManager: auto-pause tick failed'));
+      checkAutoPauseBots.call(this).catch((err) => logger.warn({ err: err.message }, 'botManager: auto-pause tick failed'));
     }, AUTO_PAUSE_INTERVAL_MS);
     if (autoPauseTimer && typeof autoPauseTimer.unref === 'function') autoPauseTimer.unref();
     logger.info({ intervalMs: AUTO_PAUSE_INTERVAL_MS }, 'botManager: auto-pause scanner scheduled');
@@ -768,7 +777,15 @@ async function checkAutoPauseBots() {
           });
         } catch (_) { /* non-fatal */ }
         const trader = this.traders.get(String(b._id));
-        if (trader) await trader.stop('auto_pause_low_kc').catch(() => {});
+        if (trader) {
+          // FIX-2026-08-06 (HOME stuck SL-UKC loop): delete from map BEFORE stop()
+          //   - trader.stop() sets running=false but leaves instance in this.traders map
+          //   - on auto-resume, spawnTrader() bails with "trader already running" because map is non-empty
+          //   - reconcile orphan handler calls trader.handleBuyFilled etc. → bails at if (!this.running) return
+          //   - delete ก่อน → spawnTrader จะสร้าง instance ใหม่ได้ตอน auto-resume (clean restart)
+          this.traders.delete(String(b._id));
+          await trader.stop('auto_pause_low_kc').catch(() => {});
+        }
         logger.info({ botId: String(b._id), minKcPct, threshold }, 'botManager: auto-paused bot (low Min-%KC)');
       } else if (minKcPct >= threshold && b.enabled === false && b.autoPauseReason === 'low_vol') {
         // ─── RESUME (เฉพาะบอทที่เคยถูก auto-pause) ──────────────────

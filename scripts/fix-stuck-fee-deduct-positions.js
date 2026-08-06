@@ -104,10 +104,14 @@ function directSignedRequest(method, path, params = {}) {
 const STUCK_TRADE_IDS = [
   '6a72555c37d90627a0d49e19', // VICUSDT
   '6a72570a37d90627a0d4a0e5', // COTIUSDT
-  '6a72571637d90627a0d4a109', // HOMEUSDT
+  '6a72571637d90627a0d4a109', // HOMEUSDT (old BNB-empty incident 2026-08-05)
   '6a725cc337d90627a0d4add9', // HFTUSDT
   '6a725e3737d90627a0d4b122', // NILUSDT
 ];
+
+// FIX-2026-08-06: accept positional trade IDs as override (HOME SL-UKC loop trade)
+const POSITIONAL_IDS = process.argv.slice(2).filter((a) => !a.startsWith('--') && /^[0-9a-f]{24}$/i.test(a));
+const TARGET_TRADE_IDS = POSITIONAL_IDS.length > 0 ? POSITIONAL_IDS : STUCK_TRADE_IDS;
 
 const FEE_RATE = 0.001; // Binance Spot standard fee when paying with BNB disabled
 
@@ -289,10 +293,10 @@ async function fixOne(tradeIdStr) {
 async function main() {
   await require('../src/db/connection').connect();
   log(`=== fix-stuck-fee-deduct-positions START mode=${DRY_RUN ? 'DRY-RUN' : 'EXECUTE'} ===`);
-  log(`Patched trades: ${STUCK_TRADE_IDS.length}`);
+  log(`Target trades: ${TARGET_TRADE_IDS.length} (${POSITIONAL_IDS.length > 0 ? 'argv override' : 'default list'})`);
 
   const results = [];
-  for (const tid of STUCK_TRADE_IDS) {
+  for (const tid of TARGET_TRADE_IDS) {
     try {
       const r = await fixOne(tid);
       results.push(r);

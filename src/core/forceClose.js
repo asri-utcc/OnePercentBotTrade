@@ -31,6 +31,7 @@
 const config = require('../../config');
 const binanceRest = require('../binance/binanceRest');
 const fees = require('../binance/fees');
+const symbolInfo = require('../binance/symbolInfo');
 const logger = require('../utils/logger');
 const eventBus = require('../services/eventBus');
 const Bot = require('../db/models/Bot');
@@ -258,7 +259,60 @@ async function forceCloseTrade({ trade, bot = null, allowMarketSell = true }) {
         });
       }
       const tradeSymbol = trade.symbol || bot.symbol;
-      const placed = await placeMarketSell(tradeSymbol, resolved.freeQty, 'fc');
+
+      // FIX-2026-08-06: round qty to LOT_SIZE stepSize BEFORE placing MARKET SELL.
+      //   - Bug: freeQty มาจาก Binance account API อาจมี fractional component (เช่น 947.095 HOME
+      //     จาก 945 trade + 2.095 orphan) — Binance จะ reject -1013 LOT_SIZE ถ้าไม่ใช่ multiple of stepSize
+      //   - pattern เดียวกับ scripts/fix-stuck-fee-deduct-positions.js (FIX-2026-08-05) แต่ apply ที่ runtime
+      //   - cap = min(freeQty, buyQty × 0.998) — กัน over-sell orphan ของบอทอื่น (multi-bot same symbol)
+      //   - round down to stepSize + enforce minQty (skip if rounding → 0)
+      const buyQtyCap = parseFloat(trade.buyQty) > 0 ? parseFloat(trade.buyQty) * 0.998 : resolved.freeQty;
+      const candidateRaw = Math.min(resolved.freeQty, buyQtyCap);
+      let marketSellQty = candidateRaw;
+      try {
+        const sym = await symbolInfo.loadSymbol(tradeSymbol);
+        if (sym && sym.lotSize && sym.lotSize.stepSize) {
+          const stepSize = parseFloat(sym.lotSize.stepSize.toString());
+          const minQty = parseFloat(sym.lotSize.minQty.toString());
+          // floor to stepSize (works for both stepSize=1 and fractional stepSize like 0.001)
+          marketSellQty = Math.floor(candidateRaw / stepSize) * stepSize;
+          // precision: ตัดทศนิยย่อยเกินจริงตาม stepSize
+          if (stepSize >= 1) {
+            marketSellQty = Math.floor(marketSellQty);
+          } else {
+            const decimals = (stepSize.toString().split('.')[1] || '').replace(/0+$/, '').length;
+            marketSellQty = parseFloat(marketSellQty.toFixed(decimals));
+          }
+          if (marketSellQty < minQty) {
+            logger.warn({
+              ...logCtx,
+              freeQty: resolved.freeQty,
+              buyQtyCap,
+              candidateRaw,
+              marketSellQty,
+              minQty,
+            }, 'forceClose: rounded qty below minQty — falling through to synthetic close');
+            return await forceCloseTrade_synthetic({
+              trade, logCtx, reason: `rounded qty ${marketSellQty} < minQty ${minQty} (freeQty=${resolved.freeQty})`,
+            });
+          }
+          if (Math.abs(marketSellQty - candidateRaw) > 1e-12) {
+            logger.info({
+              ...logCtx,
+              freeQty: resolved.freeQty,
+              candidateRaw,
+              marketSellQty,
+              stepSize, minQty,
+            }, 'forceClose: qty rounded down to LOT_SIZE stepSize');
+          }
+        } else {
+          logger.warn({ ...logCtx, tradeSymbol }, 'forceClose: symbolInfo.lotSize missing — sending qty raw (may reject)');
+        }
+      } catch (symErr) {
+        logger.warn({ ...logCtx, err: symErr.message }, 'forceClose: loadSymbol failed — sending qty raw (may reject)');
+      }
+
+      const placed = await placeMarketSell(tradeSymbol, marketSellQty, 'fc');
       if (!placed.ok) {
         return { ok: false, mode: 'market-failed', executedQty: 0, avgSellPrice: null, pnl: 0, error: JSON.stringify(placed.error) };
       }
@@ -341,7 +395,8 @@ async function forceCloseTrade({ trade, bot = null, allowMarketSell = true }) {
       logger.info({
         ...logCtx,
         isDcaStack,
-        mode: 'market', executedQty: executed, avgSellPrice: avgSell, pnl: pnl.net, freeQty: resolved.freeQty,
+        mode: 'market', executedQty: executed, avgSellPrice: avgSell, pnl: pnl.net,
+        requestedQty: marketSellQty, freeQty: resolved.freeQty,
       }, 'forceCloseTrade: MARKET SELL completed');
       return { ok: true, mode: 'market', executedQty: executed, avgSellPrice: avgSell, pnl: pnl.net };
     }
