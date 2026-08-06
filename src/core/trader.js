@@ -5906,10 +5906,22 @@ class Trader {
       //   `selling → partial_sell_wait` (atomic guard at L3579), then post-cancel fully-filled branch
       //   (L3622/3654) calls `handleSellFilled` — without 'partial_sell_wait' in this guard set, the
       //   modifiedCount=0 → trade stuck in 'partial_sell_wait' forever, no Bot $inc, no 'idle' status.
+      // FIX-2026-08-06: เพิ่ม 'cancelled' (BUG-BICO) — pattern: partial-fill BUY → leftover unfilled
+      //   portion auto-CANCELED → trade auto-marked 'cancelled' by reconcile sweep (line ~392)
+      //   → SELL for the filled portion already placed (state='selling' at that moment)
+      //   → SELL fills on Binance but trade.state is 'cancelled' → handleSellFilled bails (modifiedCount=0)
+      //   → trade stuck 'cancelled' with FILLED SELL forever, reconcile ORPHAN loop every 5min
+      //   incident: BICO 6a73e01514eb21f18b0441d6 08:15 BUY partial 312.52/333.2 → cancel 20.68 → reconcile mark cancelled 08:16:57 → SELL fill 08:20:26 → bailed → 15+ orphan detects
       const upd = await Trade.updateOne(
         {
           _id: trade._id,
-          state: { $in: ['selling', 'holding', 'stopping', 'partial_sell_wait'] },
+          state: { $in: ['selling', 'holding', 'stopping', 'partial_sell_wait', 'cancelled'] },
+          // FIX-2026-08-06: extra safety for 'cancelled' state — must have an active sellOrderId
+          //   and that sellOrderId must match the one being filled (either from WS event or from
+          //   the trade snapshot passed by reconcile orphan path).
+          ...(trade.state === 'cancelled'
+            ? { sellOrderId: update.orderId || trade.sellOrderId }
+            : {}),
         },
         {
           state: 'sold',

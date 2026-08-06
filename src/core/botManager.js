@@ -431,49 +431,125 @@ class BotManager {
                 botId: trade.botId.toString(),
               }, 'reconcile: ORPHAN — SELL filled but DB state not sold');
               const trader = this.traders.get(bot._id.toString());
+
+              // FIX-2026-08-06 (BUG-BICO): inline mark-sold is the SAFE FALLBACK — does NOT
+              //   depend on trader state, handleSellFilled guard set, or any race-condition.
+              //   - pattern: partial-fill BUY → leftover unfilled portion auto-CANCELED → trade
+              //     auto-marked 'cancelled' by reconcile sweep → SELL for the filled portion
+              //     already placed (state was 'selling' at that moment) → SELL fills on Binance
+              //     → handleSellFilled bails because trade.state='cancelled' is not in guard set
+              //   - เคยเกิด 15+ orphan detects every 5min จนกว่าจะแก้
+              //   - inline path ใช้ Trade.updateOne ไม่มี state guard → force write 'sold'
+              //     + atomic state-sellOrderId check for idempotency
+              const inlineSellPrice = parseFloat(order.price || order.avgPrice) || (parseFloat(order.cummulativeQuoteQty) / parseFloat(order.executedQty));
+              const inlineSellQty = parseFloat(order.executedQty);
+              const inlineFeeRate = require('../binance/fees').getMakerRate();
+              const inlinePnl = require('../binance/fees').calcPnl({
+                buyPrice: trade.buyPrice,
+                sellPrice: inlineSellPrice,
+                qty: inlineSellQty,
+                feeRate: inlineFeeRate,
+              });
+
+              let inlineMark = false;
+
+              // Helper: inline mark-sold (idempotent, atomic sellOrderId check)
+              const doInlineMarkSold = async () => {
+                const updRes = await Trade.updateOne(
+                  {
+                    _id: trade._id,
+                    sellOrderId: order.orderId,
+                    state: { $nin: ['sold'] }, // already sold → skip
+                  },
+                  {
+                    state: 'sold',
+                    sellStatus: 'FILLED',
+                    sellPrice: inlineSellPrice,
+                    sellQty: inlineSellQty,
+                    sellQuoteQty: parseFloat(order.cummulativeQuoteQty),
+                    sellFilledAt: new Date(order.updateTime || Date.now()),
+                    realizedPnl: inlinePnl.net,
+                    pnlPercent: inlinePnl.pnlPercent,
+                    // FIX-2026-07-31 (F1): reset SL-on-UKC auto-arm flag
+                    useStopLossOnUKC: false,
+                    autoArmedAt: null,
+                    autoArmLossPct: null,
+                    autoArmAgeHours: null,
+                    // FIX-2026-08-01: reset SELL partial-fill latch
+                    sellPartialDetectedAt: null,
+                    sellPartialLatchedAt: null,
+                    sellPartialLatchedReason: null,
+                    // FIX-2026-08-01: structured sellReason for orphan recovery
+                    sellReason: 'manual_api_market', // closest enum for "force close via reconcile"
+                    sellReasonDetail: `orphan reconcile: SELL ${order.orderId} filled but DB state='${trade.state}' — inline mark-sold`,
+                    sellReasonAt: new Date(),
+                    sellReasonSource: 'botManager.reconcilePendingTrades',
+                  }
+                );
+                return updRes.modifiedCount === 1;
+              };
+
               if (trader) {
                 trader.currentTrade = trade;
                 await trader.handleSellFilled({
+                  orderId: order.orderId, // FIX-2026-08-06: pass orderId so cancelled-state guard can match
                   executedQty: order.executedQty,
                   avgPrice: order.price || order.avgPrice,
                   cumulativeQuoteQty: order.cummulativeQuoteQty,
                   ts: order.updateTime,
                 }, trade);
-              } else {
-                // ไม่มี trader → mark sold + คำนวณ PnL inline + อัปเดต Bot totals
-                // (FIX: ก่อนหน้านี้ลืมอัปเดต Bot → totalTrades ตกหล่นทำให้ todayTrades > totalTrades)
-                const feeRate = require('../binance/fees').getMakerRate();
-                const sellPrice = parseFloat(order.price || order.avgPrice) || (parseFloat(order.cummulativeQuoteQty) / parseFloat(order.executedQty));
-                const pnl = require('../binance/fees').calcPnl({
-                  buyPrice: trade.buyPrice,
-                  sellPrice,
-                  qty: parseFloat(order.executedQty),
-                  feeRate,
-                });
-                await Trade.updateOne(
-                  { _id: trade._id },
-                  {
-                    state: 'sold',
-                    sellStatus: 'FILLED',
-                    sellPrice,
-                    sellQty: parseFloat(order.executedQty),
-                    sellQuoteQty: parseFloat(order.cummulativeQuoteQty),
-                    sellFilledAt: new Date(order.updateTime || Date.now()),
-                    realizedPnl: pnl.net,
-                    pnlPercent: pnl.pnlPercent,
+
+                // FIX-2026-08-06 (BUG-BICO): defense-in-depth — if trader path didn't update
+                //   (modifiedCount=0 because state='cancelled' wasn't in guard set, OR trade
+                //   re-fetched state='sold' by another path), try inline mark-sold with idempotent guard
+                const freshAfter = await Trade.findById(trade._id, 'state').lean();
+                if (freshAfter && freshAfter.state !== 'sold') {
+                  inlineMark = await doInlineMarkSold();
+                  if (inlineMark) {
+                    logger.warn({
+                      tradeId: trade._id.toString(),
+                      orderId: order.orderId,
+                      dbState: freshAfter.state,
+                      botId: trade.botId.toString(),
+                    }, 'reconcile: ORPHAN — trader.handleSellFilled no-op, fell through to inline mark-sold');
                   }
-                );
-                // FIX: อัปเดต Bot totals ด้วย $inc (กัน lost update)
+                }
+              } else {
+                // ไม่มี trader → inline mark-sold
+                inlineMark = await doInlineMarkSold();
+              }
+
+              // อัปเดต Bot totals ด้วย $inc (atomic, idempotent เช็คจาก trade.sellReason)
+              if (inlineMark) {
                 await Bot.updateOne(
                   { _id: trade.botId },
                   {
                     $inc: {
-                      totalPnl: pnl.net,
+                      totalPnl: inlinePnl.net,
                       totalTrades: 1,
-                      winTrades: (pnl.net > 0 ? 1 : 0),
+                      winTrades: (inlinePnl.net > 0 ? 1 : 0),
                     },
+                    $set: { status: 'idle', lastError: '' },
                   }
                 );
+                eventBus.emit('trade:update', {
+                  tradeId: trade._id,
+                  botId: trade.botId,
+                  state: 'sold',
+                  reason: 'orphan_reconcile',
+                  reasonDetail: `SELL ${order.orderId} filled but DB state='${trade.state}' — inline mark-sold`,
+                  realizedPnl: inlinePnl.net,
+                  pnlPercent: inlinePnl.pnlPercent,
+                });
+                // FIX-2026-08-06: alert via eventBus so telegramNotifier + dashboard surface it.
+                //   - ใช้ 'trade:warning' event ที่มีอยู่ (ดู eventBus taxonomy)
+                eventBus.emit('trade:warning', {
+                  tradeId: trade._id,
+                  botId: trade.botId,
+                  state: 'sold',
+                  reason: 'orphan_reconcile_inline_mark',
+                  reasonDetail: `SELL ${order.orderId} FILLED but DB was '${trade.state}' — inline mark-sold, PnL=${inlinePnl.net.toFixed(4)} USDT (${inlinePnl.pnlPercent.toFixed(2)}%)`,
+                });
               }
             } else if ((order.status === 'CANCELED' || order.status === 'EXPIRED') && trade.state !== 'cancelled') {
               // FIX: SELL ถูก cancel/expire (เช่น manual cancel หรือ TTL) แต่ DB state ยังเป็น selling
