@@ -459,6 +459,30 @@
 
     /* S1 signal row — date+time sub line (2026-08-06) */
     .cm-ls-datetime { font-size: 0.62rem; opacity: 0.55; font-family: 'JetBrains Mono', monospace; margin-top: 1px; }
+
+    /* Expand chart button (2026-08-06) — small magnifier on card header */
+    .cm-card-expand {
+      background: rgba(255,255,255,0.05);
+      border: 1px solid rgba(255,255,255,0.1);
+      color: var(--text-2, #cbd5e1);
+      width: 24px; height: 24px; border-radius: 6px;
+      cursor: pointer; font-size: 0.78rem; line-height: 1;
+      padding: 0; display: inline-flex; align-items: center; justify-content: center;
+      transition: background 0.15s ease, transform 0.12s ease;
+    }
+    .cm-card-expand:hover {
+      background: rgba(245,184,0,0.18); color: var(--gold-1, #f5b800);
+      transform: scale(1.05);
+    }
+
+    /* Expand modal — signal row mirrors card decorations */
+    #cmExpandSignalRow .cm-signal-pill,
+    #cmExpandSignalRow .cm-blocked-pill,
+    #cmExpandSignalRow .cm-zone-pill,
+    #cmExpandSignalRow .cm-prediction {
+      font-size: 0.7rem;
+    }
+    #cmExpandSignalRow .cm-status { font-size: 0.7rem; padding: 0.15rem 0.5rem; border-radius: 999px; font-weight: 600; }
   </style>
 </head>
 <body>
@@ -649,6 +673,40 @@
         </div>
         <div class="modal-body" id="cmPositionModalBody">
           <div class="empty-positions">เลือก position เพื่อดูรายละเอียด</div>
+        </div>
+        <div class="modal-footer lux-modal-footer">
+          <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">ปิด</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 2026-08-06: Expand mini-chart modal (default 500 bars, load more) -->
+  <div class="modal fade" id="cmExpandModal" tabindex="-1">
+    <div class="modal-dialog modal-dialog-centered modal-xl">
+      <div class="modal-content lux-modal">
+        <div class="modal-header lux-modal-header is-gold">
+          <div class="lux-modal-title-wrap">
+            <span class="lux-modal-icon">📈</span>
+            <div>
+              <h5 class="modal-title mb-0" id="cmExpandModalTitle">—</h5>
+              <div class="lux-modal-sub" id="cmExpandModalSub">—</div>
+            </div>
+          </div>
+          <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+        </div>
+        <div class="modal-body" id="cmExpandModalBody" style="padding: 0.75rem 1rem;">
+          <div class="d-flex flex-wrap gap-2 align-items-center mb-2" id="cmExpandSignalRow" style="font-size:0.85rem;"></div>
+          <div id="cmExpandChartWrap" style="width:100%; height:500px; background:rgba(0,0,0,0.18); border-radius:8px; position:relative; overflow:hidden;">
+            <div class="cm-minichart-loading">⏳ กำลังโหลด…</div>
+          </div>
+          <div class="d-flex justify-content-between align-items-center mt-2 flex-wrap gap-2">
+            <span class="text-muted-2 small" id="cmExpandStats">—</span>
+            <div class="d-flex gap-2">
+              <button type="button" class="btn btn-sm btn-outline-info" id="cmExpandLoadMore" title="เพิ่มแท่งอีก 500">🔄 Load more (+500)</button>
+              <button type="button" class="btn btn-sm btn-outline-secondary" id="cmExpandReset" title="กลับไป 500 แท่ง">↻ Reset</button>
+            </div>
+          </div>
         </div>
         <div class="modal-footer lux-modal-footer">
           <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">ปิด</button>

@@ -80,6 +80,13 @@ async function init() {
     _cmPositionModal = window.bootstrap.Modal.getOrCreateInstance(modalEl);
   }
 
+  // Bootstrap modal instance for expand chart (2026-08-06) + Load more/Reset buttons
+  initCmExpandModal();
+
+  // Delegated click handler for expand button (🔍) on each card
+  const cmGrid = document.getElementById('cm-grid');
+  if (cmGrid) cmGrid.addEventListener('click', onCmCardActionClick);
+
   // Start WS for live candle updates
   WSClient.start();
 
@@ -366,6 +373,24 @@ async function onCmPositionCardClick(ev) {
   openCmPositionModal(pos);
 }
 
+/* 2026-08-06: Card action click delegation (currently: expand chart button) */
+function onCmCardActionClick(ev) {
+  const btn = ev.target.closest('[data-action="expand-chart"]');
+  if (!btn) return;
+  ev.preventDefault();
+  ev.stopPropagation();
+  const botId = btn.dataset.botId;
+  if (!botId) return;
+  const bot = _cmBots.find((b) => String(b._id) === String(botId));
+  if (!bot) return;
+  // Init _cmExpandChart entry so loadExpandChart has somewhere to write
+  _cmExpandChart = {
+    chart: null, candleSeries: null, basisSeries: null, upperSeries: null, lowerSeries: null,
+    botId, symbol: bot.symbol, timeframe: bot.timeframe, limit: 0, ro: null, tpPriceLines: [],
+  };
+  openCmExpandModal(botId).catch((e) => console.warn('expand modal:', e.message));
+}
+
 function openCmPositionModal(pos) {
   const titleEl = document.getElementById('cmPositionModalTitle');
   const subEl = document.getElementById('cmPositionModalSub');
@@ -389,6 +414,292 @@ function openCmPositionModal(pos) {
     },
   );
   if (_cmPositionModal) _cmPositionModal.show();
+}
+
+/* ════════════════════════════════════════════════════════════════════
+ * Expand mini-chart modal (2026-08-06)
+ *   - click 🔍 on any card → opens this modal
+ *   - default 500 bars (larger view, all features preserved)
+ *     - candle series + KC bands (basis/upper/lower)
+ *     - S1 markers + BUY/SELL trade markers
+ *     - TP price lines (one per open position)
+ *     - signal badge + zone pill + prediction label (from _cmSignalMapByBot)
+ *   - Load more button: increments limit by 500 (up to backend cap 2000)
+ *   - Reset button: back to 500
+ *   - WS kline:update still updates the live candle
+ *   - Cleanup: chart removed on modal hide (avoids memory leak)
+ * ════════════════════════════════════════════════════════════════════ */
+let _cmExpandModal = null;
+let _cmExpandChart = null; // { chart, candleSeries, basisSeries, upperSeries, lowerSeries, botId, limit, tpPriceLines: [], ro }
+let _cmExpandInitialLimit = 500;
+let _cmExpandLoadStep = 500;
+const CM_EXPAND_MAX_LIMIT = 2000;
+
+function initCmExpandModal() {
+  const modalEl = document.getElementById('cmExpandModal');
+  if (!modalEl || !window.bootstrap) return;
+  _cmExpandModal = window.bootstrap.Modal.getOrCreateInstance(modalEl);
+  // Wire Load more / Reset buttons (once)
+  const loadMore = document.getElementById('cmExpandLoadMore');
+  const reset = document.getElementById('cmExpandReset');
+  if (loadMore) loadMore.addEventListener('click', () => {
+    if (!_cmExpandChart) return;
+    const next = Math.min(_cmExpandChart.limit + _cmExpandLoadStep, CM_EXPAND_MAX_LIMIT);
+    if (next === _cmExpandChart.limit) {
+      setExpandStats(`ถึงขีดจำกัดแล้ว (${CM_EXPAND_MAX_LIMIT} แท่ง)`);
+      return;
+    }
+    loadExpandChart(next).catch((e) => console.warn('expand load more:', e.message));
+  });
+  if (reset) reset.addEventListener('click', () => {
+    loadExpandChart(_cmExpandInitialLimit).catch((e) => console.warn('expand reset:', e.message));
+  });
+  // Cleanup on hide
+  modalEl.addEventListener('hidden.bs.modal', teardownCmExpandChart);
+}
+
+async function openCmExpandModal(botId) {
+  const bot = _cmBots.find((b) => String(b._id) === String(botId));
+  if (!bot) return;
+  if (!_cmExpandModal) initCmExpandModal();
+  if (!_cmExpandModal) return;
+  // Title + sub
+  const titleEl = document.getElementById('cmExpandModalTitle');
+  const subEl = document.getElementById('cmExpandModalSub');
+  if (titleEl) titleEl.textContent = `${bot.name || bot.symbol}`;
+  if (subEl) {
+    const todayPnl = bot.todayPnl || 0;
+    const pnlSign = todayPnl > 0 ? '+' : todayPnl < 0 ? '' : '';
+    subEl.innerHTML = `<span class="cm-card-symbol">${escapeHtml(bot.symbol || '')}</span> <span class="cm-card-tf">${escapeHtml(bot.timeframe || '')}</span> · PnL ${pnlSign}${todayPnl.toFixed(4)} USDT · ${bot.todayTrades || 0} ไม้`;
+  }
+  // Signal row (mirror card decorations: signal pill + zone + prediction + blocked)
+  renderExpandSignalRow(bot);
+  // Reset body before show
+  const wrap = document.getElementById('cmExpandChartWrap');
+  if (wrap) wrap.innerHTML = '<div class="cm-minichart-loading">⏳ กำลังโหลด…</div>';
+  _cmExpandModal.show();
+  await loadExpandChart(_cmExpandInitialLimit);
+}
+
+async function loadExpandChart(limit) {
+  if (!_cmExpandChart || !_cmExpandChart.botId) return;
+  const botId = _cmExpandChart.botId;
+  const bot = _cmBots.find((b) => String(b._id) === String(botId));
+  if (!bot) return;
+  const wrap = document.getElementById('cmExpandChartWrap');
+  const statsEl = document.getElementById('cmExpandStats');
+  if (statsEl) statsEl.textContent = `⏳ กำลังโหลด ${limit} แท่ง…`;
+  try {
+    const resp = await API.get(`/api/bots/${botId}/mini-chart?limit=${limit}`);
+    _cmExpandChart.limit = limit;
+    // (Re)create chart if first load OR limit changed and we want fresh
+    if (!_cmExpandChart.chart) {
+      if (wrap) wrap.innerHTML = '';
+      const w = wrap ? (wrap.clientWidth || 900) : 900;
+      const h = wrap ? (wrap.clientHeight || 500) : 500;
+      const chart = LightweightCharts.createChart(wrap, {
+        width: w,
+        height: h,
+        layout: {
+          background: { type: 'solid', color: 'transparent' },
+          textColor: '#94a3b8',
+          fontFamily: "'JetBrains Mono', monospace",
+          fontSize: 11,
+        },
+        grid: {
+          vertLines: { color: 'rgba(255,255,255,0.04)' },
+          horzLines: { color: 'rgba(255,255,255,0.04)' },
+        },
+        rightPriceScale: {
+          borderColor: 'rgba(255,255,255,0.06)',
+          scaleMargins: { top: 0.08, bottom: 0.08 },
+        },
+        timeScale: {
+          borderColor: 'rgba(255,255,255,0.06)',
+          timeVisible: true,
+          secondsVisible: false,
+          rightOffset: 6,
+          handleScroll: { mouseWheel: true, pressedMouseMove: true, horzTouchDrag: true, vertTouchDrag: false },
+          handleScale: { mouseWheel: true, pinch: true, axisPressedMouseMove: true, mouseWheelPan: true },
+        },
+        crosshair: {
+          vertLine: { color: 'rgba(245,184,0,0.4)', width: 1, style: 3, labelBackgroundColor: '#f5b800' },
+          horzLine: { color: 'rgba(245,184,0,0.4)', width: 1, style: 3, labelBackgroundColor: '#f5b800' },
+        },
+      });
+      const candleSeries = chart.addCandlestickSeries({
+        upColor: '#00e5b8', downColor: '#ff4d6d',
+        borderUpColor: '#00e5b8', borderDownColor: '#ff4d6d',
+        wickUpColor: '#00e5b8', wickDownColor: '#ff4d6d',
+      });
+      const basisSeries = chart.addLineSeries({ color: '#f5b800', lineWidth: 1 });
+      const upperSeries = chart.addLineSeries({ color: '#ff7849', lineWidth: 1, lineStyle: 2 });
+      const lowerSeries = chart.addLineSeries({ color: '#a78bfa', lineWidth: 1, lineStyle: 2 });
+      _cmExpandChart.chart = chart;
+      _cmExpandChart.candleSeries = candleSeries;
+      _cmExpandChart.basisSeries = basisSeries;
+      _cmExpandChart.upperSeries = upperSeries;
+      _cmExpandChart.lowerSeries = lowerSeries;
+      // Resize observer
+      const ro = new ResizeObserver(() => {
+        const w2 = wrap ? wrap.clientWidth : 900;
+        const h2 = wrap ? wrap.clientHeight : 500;
+        chart.applyOptions({ width: w2, height: h2 });
+      });
+      ro.observe(wrap);
+      _cmExpandChart.ro = ro;
+    }
+    // Set data
+    if (!resp.klines || resp.klines.length === 0) {
+      if (wrap) wrap.innerHTML = '<div class="cm-minichart-error">— ไม่มีข้อมูล —</div>';
+      return;
+    }
+    const candleData = resp.klines.map((k) => ({
+      time: Math.floor(k.openTime / 1000),
+      open: k.open, high: k.high, low: k.low, close: k.close,
+    }));
+    _cmExpandChart.candleSeries.setData(candleData);
+    const basisData = [], upperData = [], lowerData = [];
+    for (let i = 0; i < resp.klines.length; i += 1) {
+      const t = Math.floor(resp.klines[i].openTime / 1000);
+      if (resp.keltner.basis[i] != null) {
+        basisData.push({ time: t, value: resp.keltner.basis[i] });
+        upperData.push({ time: t, value: resp.keltner.upper[i] });
+        lowerData.push({ time: t, value: resp.keltner.lower[i] });
+      }
+    }
+    _cmExpandChart.basisSeries.setData(basisData);
+    _cmExpandChart.upperSeries.setData(upperData);
+    _cmExpandChart.lowerSeries.setData(lowerData);
+    // Markers: S1 + BUY/SELL
+    const s1Markers = (resp.signals || []).map((s) => ({
+      time: Math.floor(s.openTime / 1000),
+      position: 'belowBar', color: '#22c55e', shape: 'arrowUp', text: 'S1',
+    }));
+    const allMarkers = [...s1Markers, ...(resp.tradeMarkers || [])];
+    if (allMarkers.length > 0) _cmExpandChart.candleSeries.setMarkers(allMarkers);
+    // TP lines
+    drawCmExpandTpLines();
+    // Stats
+    if (statsEl) {
+      const from = resp.klines[0] ? new Date(resp.klines[0].openTime).toLocaleString('th-TH', { timeZone: 'Asia/Bangkok', day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }) : '?';
+      const to = resp.klines[resp.klines.length - 1] ? new Date(resp.klines[resp.klines.length - 1].openTime).toLocaleString('th-TH', { timeZone: 'Asia/Bangkok', day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }) : '?';
+      statsEl.textContent = `${resp.klines.length} แท่ง · ${from} → ${to}`;
+    }
+    // First load: fit content (show all data). Load more: keep current view (new bars appear on left).
+    // Reset: fit content (back to default 500).
+    if (limit === _cmExpandInitialLimit) {
+      // small timeout so chart is fully painted before fitContent measures
+      setTimeout(() => {
+        try { _cmExpandChart.chart.timeScale().fitContent(); } catch (_) {}
+      }, 50);
+    }
+    // (else: Load more — keep current visible range; new data on left auto-shifts in)
+  } catch (err) {
+    if (wrap) wrap.innerHTML = `<div class="cm-minichart-error">⚠️ โหลดไม่สำเร็จ: ${escapeHtml(err.message || 'unknown')}</div>`;
+  }
+}
+
+function setExpandStats(text) {
+  const el = document.getElementById('cmExpandStats');
+  if (el) el.textContent = text;
+}
+
+function renderExpandSignalRow(bot) {
+  const rowEl = document.getElementById('cmExpandSignalRow');
+  if (!rowEl) return;
+  const sig = _cmSignalMapByBot.get(String(bot._id));
+  const hasLiveSignal = !!(sig && sig.hasLiveSignal);
+  const prediction = sig && sig.prediction ? sig.prediction : null;
+  const lastSignal = sig && sig.lastSignal ? sig.lastSignal : null;
+  const prevSignal = sig && sig.prevSignal ? sig.prevSignal : null;
+  const blockedReasons = (lastSignal && lastSignal.blockedReasons) || (prevSignal && prevSignal.blockedReasons) || [];
+  const isRunning = !!bot.enabled;
+  const hasError = !!bot.lastError;
+  const hasWarning = !!bot.warning;
+  const statusClass = !isRunning ? 'is-stopped' : hasError ? 'is-error' : hasWarning ? 'is-warning' : 'is-running';
+  const statusText = !isRunning ? '⏸ STOPPED' : hasError ? '⚠ ERROR' : hasWarning ? '⚠ WARN' : '▶ RUNNING';
+  const emaState = bot.emaState || 'warmup';
+  const emaZoneClass = emaState === 'above' ? 'zone-1' : emaState === 'below' ? 'zone-3' : 'zone-0';
+  const emaZoneLabel = emaState === 'above' ? 'Strong Up' : emaState === 'below' ? 'Strong Down' : emaState === 'warmup' ? 'Warmup' : '—';
+  // Status
+  let html = `<span class="cm-status ${statusClass}">${statusText}</span>`;
+  // Zone pill
+  html += `<span class="cm-zone-pill ${emaZoneClass}">Zone: ${emaZoneLabel}</span>`;
+  // Prediction
+  if (prediction && prediction.label) {
+    const pCode = prediction.code || 'unknown';
+    html += `<span class="cm-prediction cm-pred-${pCode}" title="${escapeHtml(prediction.label)}">${escapeHtml(prediction.label)}</span>`;
+  }
+  // S1 signal pill
+  if (hasLiveSignal && lastSignal) {
+    const signalPillClass = lastSignal.status === 'blocked' ? 'cm-signal-pill is-blocked' : 'cm-signal-pill is-active';
+    const signalText = lastSignal.status === 'blocked' ? 'S1 (ข้าม)' : '🔥 S1 LIVE';
+    const signalTitle = lastSignal.status === 'blocked'
+      ? `S1 ติดที่แท่งล่าสุด แต่ถูกบล็อก: ${lastSignal.blockedReasons.map(r => r.text).join(' · ')}`
+      : `S1 ติดที่แท่งล่าสุด — บอทกำลังเข้า BUY`;
+    html += `<span class="${signalPillClass}" title="${escapeHtml(signalTitle)}">${signalText}</span>`;
+  }
+  // Blocked badges
+  if (blockedReasons.length > 0) {
+    html += `<div class="cm-blocked-row">${blockedReasons.map((r) => {
+      return `<span class="cm-blocked-pill kind-${r.kind}" title="${escapeHtml(r.text)}">${escapeHtml(r.text)}</span>`;
+    }).join('')}</div>`;
+  }
+  rowEl.innerHTML = html;
+}
+
+function clearCmExpandTpLines() {
+  if (!_cmExpandChart || !_cmExpandChart.candleSeries) return;
+  if (Array.isArray(_cmExpandChart.tpPriceLines)) {
+    for (const line of _cmExpandChart.tpPriceLines) {
+      try { _cmExpandChart.candleSeries.removePriceLine(line); } catch (_) {}
+    }
+  }
+  _cmExpandChart.tpPriceLines = [];
+}
+
+function drawCmExpandTpLines() {
+  if (!_cmExpandChart || !_cmExpandChart.candleSeries) return;
+  clearCmExpandTpLines();
+  const botId = _cmExpandChart.botId;
+  const positions = _cmPositionsByBot.get(String(botId)) || [];
+  if (positions.length === 0) return;
+  const sym = _cmExpandChart.symbol;
+  const valid = positions.filter((p) =>
+    p.symbol === sym
+    && Number.isFinite(Number(p.targetSellPrice))
+    && Number(p.targetSellPrice) > 0);
+  if (valid.length === 0) return;
+  const MAX_LINES = 4;
+  const shown = valid.slice(0, MAX_LINES);
+  const TP_LINE_COLOR = '#f5b800';
+  shown.forEach((p, idx) => {
+    const tp = Number(p.targetSellPrice);
+    const title = valid.length > MAX_LINES && idx === MAX_LINES - 1
+      ? `TP (+${valid.length - MAX_LINES + 1} more)`
+      : 'TP';
+    try {
+      const line = _cmExpandChart.candleSeries.createPriceLine({
+        price: tp,
+        color: TP_LINE_COLOR,
+        lineWidth: 1,
+        lineStyle: 2,
+        axisLabelVisible: true,
+        title,
+      });
+      _cmExpandChart.tpPriceLines.push(line);
+    } catch (err) {
+      console.debug(`expand TP line draw failed for ${botId}/${p.symbol}:`, err.message);
+    }
+  });
+}
+
+function teardownCmExpandChart() {
+  if (!_cmExpandChart) return;
+  try { if (_cmExpandChart.ro) _cmExpandChart.ro.disconnect(); } catch (_) {}
+  try { if (_cmExpandChart.chart) _cmExpandChart.chart.remove(); } catch (_) {}
+  _cmExpandChart = null;
 }
 
 /* ════════════════════════════════════════════════════════════════════
@@ -751,6 +1062,7 @@ function renderCardHtml(b) {
         <span class="cm-card-symbol">${escapeHtml(b.symbol || '')}</span>
         <span class="cm-card-tf">${escapeHtml(b.timeframe || '')}</span>
         <span class="cm-status ${statusClass}">${statusText}</span>
+        <button type="button" class="cm-card-expand" data-bot-id="${b._id}" data-action="expand-chart" title="เปิดขยาย (500 แท่ง, โหลดเพิ่มได้)" aria-label="เปิดขยาย">🔍</button>
       </div>
 
       ${signalBadgeHtml ? `<div class="cm-signal-row">${signalBadgeHtml}</div>` : ''}
@@ -1078,6 +1390,20 @@ function bindCmWs() {
         close: parseFloat(k.close),
       });
     }
+    // 2026-08-06: also update expand modal chart if open
+    if (_cmExpandChart && _cmExpandChart.chart && _cmExpandChart.symbol === p.symbol && _cmExpandChart.timeframe === p.interval) {
+      const k = p.kline;
+      const t = Math.floor(k.openTime / 1000);
+      try {
+        _cmExpandChart.candleSeries.update({
+          time: t,
+          open: parseFloat(k.open),
+          high: parseFloat(k.high),
+          low: parseFloat(k.low),
+          close: parseFloat(k.close),
+        });
+      } catch (_) { /* candle not in series (e.g. past load limit) — ignore */ }
+    }
   });
 
   // When a bot's status changes (start/stop), refresh the grid to update pills
@@ -1092,6 +1418,10 @@ function bindCmWs() {
     }
     // 2026-08-06: positions panel also reacts to trade updates (BUY/SELL fired)
     loadCmPositions().catch((e) => console.debug('chart-monitor positions trade:update:', e.message));
+    // 2026-08-06: redraw TP lines on expand modal if open
+    if (_cmExpandChart && _cmExpandChart.chart) {
+      setTimeout(() => drawCmExpandTpLines(), 0);
+    }
   });
 }
 

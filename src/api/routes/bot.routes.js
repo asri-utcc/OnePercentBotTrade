@@ -553,6 +553,270 @@ router.get('/positions', requireAuth, async (req, res) => {
   }
 });
 
+// ─── GET /api/bots/chart-monitor/signals ─────────────────────────
+// 2026-08-06: Chart Monitor page aggregation
+//   - Per-bot: current zone + prediction label + last 2 signals (with blocked reasons)
+//   - Cross-bot: top 20 latest signals across all running bots
+//   - "blockedReasons" mirrors the runtime gates:
+//       * xs1 (XS1 candle-wide dump filter, when xs1Enabled=true)
+//       * s1OnlyDown (when s1OnlyDown=true and signal is Strong Up)
+//       * noTrade (Bearish Engulfing / Shooting Star on upper TF, when safeTradeNoTradeEnabled=true)
+//       * trendline (when safeTradeTrendlineEnabled=true and tlStatus=blocked)
+//   - 30s in-memory cache (page refreshes don't re-hit Binance)
+//   - per-bot: klineCache-first (0 weight) + REST fallback only when cache cold
+//   - significant Binance weight only when a bot has safeTradeNoTradeEnabled=true (then 1 REST per such bot for upper TF)
+let _cmSignalsCache = null;
+const CM_SIGNALS_CACHE_MS = 30_000;
+router.get('/chart-monitor/signals', requireAuth, async (req, res) => {
+  try {
+    const forceRefresh = req.query.fresh === '1';
+    if (!forceRefresh && _cmSignalsCache && (Date.now() - _cmSignalsCache.at) < CM_SIGNALS_CACHE_MS) {
+      return res.json(_cmSignalsCache.data);
+    }
+
+    const bots = await Bot.find({ enabled: true }).lean();
+    const trendlineMap = botManager.getTrendlineStatusForBots(bots.map((b) => String(b._id)));
+
+    // Per-bot summary (concurrency-4 — klineCache-heavy, only noTrade filter falls through to REST)
+    const perBot = await volatilityForBot.mapWithConcurrency(bots, 4, async (bot) => {
+      try {
+        const cached = klineCache.getAll(bot.symbol, bot.timeframe);
+        if (!cached || cached.length < 50) return null;
+
+        const fullKlines = cached.map((c) => ({
+          openTime: c.openTime,
+          open: parseFloat(c.open),
+          high: parseFloat(c.high),
+          low: parseFloat(c.low),
+          close: parseFloat(c.close),
+          closeTime: c.closeTime,
+        }));
+
+        const xs1On = bot.xs1Enabled !== false;
+        const s1Opts = {
+          mult: bot.kcMult != null ? parseFloat(bot.kcMult) : 1.5,
+          onlyDown: !!bot.s1OnlyDown,
+          xs1Enabled: xs1On,
+        };
+
+        // Filtered S1 (what the bot actually fires)
+        const detected = signalEngine.detectS1Signals(fullKlines, s1Opts);
+        const { signals, basis, upper, lower, bg } = detected;
+
+        // Raw S1 (without xs1) — for "ข้าม candle-wide dump" annotation
+        let rawSignalTimes = null;
+        if (xs1On) {
+          const raw = signalEngine.detectS1Signals(fullKlines, { ...s1Opts, xs1Enabled: false });
+          rawSignalTimes = new Set(raw.signals.map((s) => s.openTime));
+        }
+
+        // NoTrade filter (upper TF) — same logic as checkNoTradeOnUpperTF but in-memory
+        const noTradeEnabled = bot.safeTradeNoTradeEnabled === true;
+        const trendTF = volatilityScanner.TREND_TF_MAP[bot.timeframe];
+        let noTradeUpperKlines = null;
+        let noTradePerBar = null;
+        let noTradeLastKind = null;
+        let noTradeReason = null;
+        if (noTradeEnabled && trendTF) {
+          try {
+            const raw = await binanceRest.getKlines({
+              symbol: bot.symbol,
+              interval: trendTF,
+              limit: 30,
+            });
+            if (Array.isArray(raw) && raw.length >= 21) {
+              noTradeUpperKlines = raw.map((k) => ({
+                openTime: k[0],
+                open: parseFloat(k[1]),
+                high: parseFloat(k[2]),
+                low: parseFloat(k[3]),
+                close: parseFloat(k[4]),
+                closeTime: k[6],
+              }));
+              noTradePerBar = signalEngine.computeNoTradePerBar(noTradeUpperKlines, { mult: s1Opts.mult });
+              const last = noTradePerBar[noTradePerBar.length - 1];
+              noTradeLastKind = last ? last.kind : null;
+            }
+          } catch (_) {
+            noTradeReason = 'api_error_open';
+          }
+        }
+
+        // Trendline status
+        const tl = bot.safeTradeTrendlineEnabled === true ? trendlineMap[String(bot._id)] : null;
+
+        // Helper: หา upper-TF bar index ที่มี openTime <= signal.openTime
+        const findUpperIdx = (openTime) => {
+          if (!noTradeUpperKlines) return -1;
+          // binary search for last bar with openTime <= target
+          let lo = 0, hi = noTradeUpperKlines.length - 1, ans = -1;
+          while (lo <= hi) {
+            const mid = (lo + hi) >> 1;
+            if (noTradeUpperKlines[mid].openTime <= openTime) { ans = mid; lo = mid + 1; }
+            else { hi = mid - 1; }
+          }
+          return ans;
+        };
+
+        // Build enriched signals with blocked reasons
+        const enrichedSignals = signals.map((s) => {
+          const blockedReasons = [];
+          // XS1: filtered out by xs1Enabled
+          if (xs1On && rawSignalTimes && !rawSignalTimes.has(s.openTime)) {
+            blockedReasons.push({ kind: 'xs1', text: 'ข้าม candle-wide dump (XS1)' });
+          }
+          // s1OnlyDown: skip Strong Up
+          if (s1Opts.onlyDown && s.bgState === 1) {
+            blockedReasons.push({ kind: 's1OnlyDown', text: 's1OnlyDown (skip Strong Up)' });
+          }
+          // NoTrade: upper TF bar at signal time has nt/nt1
+          if (noTradeEnabled && noTradePerBar) {
+            const idx = findUpperIdx(s.openTime);
+            if (idx >= 0) {
+              const kind = noTradePerBar[idx]?.kind;
+              if (kind === 'nt' || kind === 'nt1') {
+                const label = kind === 'nt' ? 'Bearish Engulfing/SS' : 'no-trade continuation';
+                blockedReasons.push({ kind: 'noTrade', text: `ข้าม ${label} บน ${trendTF}` });
+              }
+            }
+          }
+          // Trendline: tlStatus=blocked at signal time (we sample current status; per-signal history is hard)
+          if (tl && tl.status === 'blocked') {
+            const gapTxt = (tl.gapPct != null) ? ` (gap ${tl.gapPct.toFixed(2)}%)` : '';
+            blockedReasons.push({ kind: 'trendline', text: `ข้าม trendline${gapTxt}` });
+          }
+          return {
+            botId: String(bot._id),
+            name: bot.name || bot.symbol,
+            symbol: bot.symbol,
+            timeframe: bot.timeframe,
+            openTime: s.openTime,
+            close: s.close,
+            bgState: s.bgState,
+            bgPrev: s.bgPrev,
+            ageMs: Date.now() - s.openTime,
+            status: blockedReasons.length > 0 ? 'blocked' : 'active',
+            blockedReasons,
+          };
+        });
+
+        // Prediction label — based on LAST CLOSED candle bg state (in-progress candle is [-1])
+        const lastClosedIdx = fullKlines.length - 2;
+        const lastClosedBg = lastClosedIdx >= 0 ? bg[lastClosedIdx] : null;
+        const lastCandle = fullKlines[fullKlines.length - 1];
+        const lastClosedCandle = fullKlines[lastClosedIdx];
+        const lastCandleBg = bg[bg.length - 1];
+
+        let predictionLabel = null;
+        let predictionCode = 'unknown';
+        let nearS1 = false;
+        if (lastClosedCandle != null && lastClosedBg != null) {
+          if (lastClosedBg === 2) {
+            predictionLabel = '🌡️ Weak zone — ใกล้ S1';
+            predictionCode = 'near-s1';
+            nearS1 = true;
+          } else if (lastClosedBg === 1) {
+            predictionLabel = '🚀 Strong Up ล่าสุด';
+            predictionCode = 'strong-up';
+          } else if (lastClosedBg === 3) {
+            predictionLabel = '📉 Strong Down ล่าสุด';
+            predictionCode = 'strong-down';
+          } else if (lastClosedBg === 0) {
+            predictionLabel = '➡️ Above basis';
+            predictionCode = 'above-basis';
+          }
+        }
+        // Bonus: if in-progress candle already broke upper/lower, upgrade label
+        if (lastCandle && lastCandleBg != null && lastCandleBg !== lastClosedBg) {
+          if (lastCandleBg === 1) { predictionLabel = '🚀 Breakout แท่งนี้'; predictionCode = 'breakout'; }
+          if (lastCandleBg === 3) { predictionLabel = '📉 Breakdown แท่งนี้'; predictionCode = 'breakdown'; }
+        }
+
+        // Last 2 signals — lastSignal highlighted if on last or previous closed candle
+        const lastSignal = enrichedSignals[enrichedSignals.length - 1] || null;
+        const prevSignal = enrichedSignals[enrichedSignals.length - 2] || null;
+        const lastCandleOpenTime = lastCandle?.openTime;
+        const lastClosedOpenTime = lastClosedCandle?.openTime;
+        let hasLiveSignal = false;
+        if (lastSignal && lastCandleOpenTime != null) {
+          hasLiveSignal = lastSignal.openTime === lastCandleOpenTime || lastSignal.openTime === lastClosedOpenTime;
+        }
+        // EMA20 + gap%
+        const ema20 = basis[basis.length - 1];
+        const emaGapPct = (lastCandle && ema20) ? ((lastCandle.close - ema20) / ema20) * 100 : null;
+
+        return {
+          botId: String(bot._id),
+          name: bot.name || bot.symbol,
+          symbol: bot.symbol,
+          timeframe: bot.timeframe,
+          lastClose: lastCandle?.close,
+          ema20,
+          emaGapPct,
+          currentZone: { bgState: lastClosedBg, code: predictionCode, label: predictionLabel, nearS1 },
+          prediction: { label: predictionLabel, code: predictionCode, nearS1 },
+          // For the highlight: include lastSignal + prevSignal
+          lastSignal: hasLiveSignal ? lastSignal : null,
+          prevSignal: prevSignal,
+          hasLiveSignal,
+          // All enriched signals (for top-20 aggregation)
+          _signals: enrichedSignals,
+          // Snapshot of configs that affect the highlight color
+          s1OnlyDown: s1Opts.onlyDown,
+          xs1Enabled: xs1On,
+          noTradeEnabled,
+          noTradeTrendTF: trendTF || null,
+          noTradeLastKind,
+          trendlineStatus: tl ? tl.status : null,
+        };
+      } catch (err) {
+        logger.warn({ botId: String(bot._id), err: err.message }, 'chart-monitor signal per-bot failed');
+        return null;
+      }
+    });
+
+    const validBots = perBot.filter(Boolean);
+
+    // Top 20 latest signals across all running bots
+    const allSignals = validBots.flatMap((b) => b._signals || []);
+    allSignals.sort((a, b) => b.openTime - a.openTime);
+    const top20 = allSignals.slice(0, 20);
+
+    const data = {
+      asOf: Date.now(),
+      cachedForMs: CM_SIGNALS_CACHE_MS,
+      count: { running: bots.length, computed: validBots.length, signals: allSignals.length, top: top20.length },
+      signals: top20,
+      bots: validBots.map((b) => ({
+        botId: b.botId,
+        name: b.name,
+        symbol: b.symbol,
+        timeframe: b.timeframe,
+        lastClose: b.lastClose,
+        ema20: b.ema20,
+        emaGapPct: b.emaGapPct,
+        currentZone: b.currentZone,
+        prediction: b.prediction,
+        lastSignal: b.lastSignal,
+        prevSignal: b.prevSignal,
+        hasLiveSignal: b.hasLiveSignal,
+        s1OnlyDown: b.s1OnlyDown,
+        xs1Enabled: b.xs1Enabled,
+        noTradeEnabled: b.noTradeEnabled,
+        noTradeTrendTF: b.noTradeTrendTF,
+        noTradeLastKind: b.noTradeLastKind,
+        trendlineStatus: b.trendlineStatus,
+      })),
+    };
+
+    _cmSignalsCache = { at: Date.now(), data };
+    res.json(data);
+  } catch (err) {
+    logger.error({ err: err.message, stack: err.stack }, 'chart-monitor signals failed');
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ─── GET /api/bots/:id ────────────────────────────────
 router.get('/:id', requireAuth, async (req, res) => {
   try {
@@ -1140,7 +1404,7 @@ router.get('/:id/mini-chart', requireAuth, async (req, res) => {
     const bot = await Bot.findById(req.params.id).lean();
     if (!bot) return res.status(404).json({ error: 'Bot not found' });
 
-    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 30, 5), 200);
+    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 30, 5), 2000);
 
     // FIX-2026-08-04: try klineCache first (zero Binance weight)
     //   - format already matches: openTime/open/high/low/close/volume/closeTime (epoch ms)
@@ -1164,7 +1428,7 @@ router.get('/:id/mini-chart', requireAuth, async (req, res) => {
     } else {
       // FIX-2026-08-04: cache insufficient (cold start / disabled bot / WS not seeded yet) → fall back to REST
       //   - fetch extra candles (limit + 20) เพื่อให้ EMA seed มี history พอ
-      const fetchLimit = Math.min(limit + 20, 500);
+      const fetchLimit = Math.min(limit + 20, 2000);
       const raw = await binanceRest.getKlines({
         symbol: bot.symbol,
         interval: bot.timeframe,
