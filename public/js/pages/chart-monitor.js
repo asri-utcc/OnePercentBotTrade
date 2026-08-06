@@ -673,7 +673,9 @@ function drawCmExpandTpLines() {
   if (valid.length === 0) return;
   const MAX_LINES = 4;
   const shown = valid.slice(0, MAX_LINES);
-  const TP_LINE_COLOR = '#f5b800';
+  // 2026-08-06: TP lines = blue (#3b82f6) — switched from yellow after user feedback
+  //   was: '#f5b800' (gold) → '#3b82f6' (blue) for clear contrast vs KC bands
+  const TP_LINE_COLOR = '#3b82f6';
   shown.forEach((p, idx) => {
     const tp = Number(p.targetSellPrice);
     const title = valid.length > MAX_LINES && idx === MAX_LINES - 1
@@ -1337,10 +1339,9 @@ function drawCmTpLinesForBot(botId) {
   // Cap visible lines to keep mini-chart readable (DCA stacks can have many)
   const MAX_LINES = 4;
   const shown = valid.slice(0, MAX_LINES);
-  // 2026-08-06: TP lines = brand gold/yellow (#f5b800) consistently — uniform color for all DCA layers
-  //   was palette ['#f472b6', '#22d3ee', '#a3e635', '#fbbf24'] (pink/cyan/lime/yellow)
-  //   user feedback: pink clashed with mini-chart, switch to single yellow brand color
-  const TP_LINE_COLOR = '#f5b800';
+  // 2026-08-06: TP lines = blue (#3b82f6) — switched from yellow after user feedback
+  //   was: '#f5b800' (gold) → '#3b82f6' (blue) for clear contrast vs KC bands
+  const TP_LINE_COLOR = '#3b82f6';
   shown.forEach((p, idx) => {
     const tp = Number(p.targetSellPrice);
     // 2026-08-06: TP label = "TP" only (drop symbol suffix to avoid clutter)
