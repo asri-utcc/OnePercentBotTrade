@@ -88,12 +88,17 @@ async function init() {
   await loadSignals();
   await loadCmPositions();
   await loadHealth();
+  // 2026-08-06: BNB fuel gauge (mirror bots.html)
+  loadCmBnbStatus().catch(() => {});
 
   // Heartbeat polling
   setInterval(() => { loadHealth().catch(() => {}); }, 15_000);
 
   // Signals refresh — 60s (server cache is 30s)
   setInterval(() => { loadSignals().catch((e) => console.debug('chart-monitor signals refresh:', e.message)); }, 60_000);
+
+  // 2026-08-06: BNB gauge poll — 60s (server cache 30s, balance changes slowly)
+  setInterval(() => { loadCmBnbStatus().catch(() => {}); }, 60_000);
 
   // Positions refresh — 30s (cache uses klineCache; user-triggered fresh mode uses Binance bookTicker)
   setInterval(() => { loadCmPositions().catch((e) => console.debug('chart-monitor positions refresh:', e.message)); }, 30_000);
@@ -133,6 +138,66 @@ async function loadHealth() {
     renderHeartbeat(status);
   } catch (err) {
     // silently ignore — heartbeat is best-effort
+  }
+}
+
+/* ════════════════════════════════════════════════════════════════════
+ * BNB fuel gauge (2026-08-06) — mirror bots.html `loadBnbStatus`
+ *   - GET /api/account/bnb-status returns:
+ *       { bnbQty, bnbUsdtPrice, bnbValueUsdt, isLow, threshold,
+ *         gaugeTargetUsdt, gaugePct, gaugeZone (healthy|low|critical) }
+ *   - Updates:
+ *       #cm-bnb-gauge-status  → emoji + label + pct
+ *       #cm-bnb-gauge-value   → "X.XX / Y.YY USDT"
+ *       #cm-bnb-gauge-fill    → width + zone class
+ *       #cm-bnb-low-banner    → shown when isLow=true
+ *   - Fail-open: hide banner + reset gauge to 0% on error
+ * ════════════════════════════════════════════════════════════════════ */
+async function loadCmBnbStatus() {
+  const banner = document.getElementById('cm-bnb-low-banner');
+  const detail = document.getElementById('cm-bnb-low-detail');
+  if (!banner || !detail) return; // elements not rendered (wrong page)
+  try {
+    const resp = await API.get('/api/account/bnb-status');
+
+    // (1) low-balance banner
+    if (resp && resp.isLow) {
+      const qty = resp.bnbQty != null ? Number(resp.bnbQty).toFixed(4) : '?';
+      const price = resp.bnbUsdtPrice != null ? Number(resp.bnbUsdtPrice).toFixed(2) : '?';
+      const value = resp.bnbValueUsdt != null ? Number(resp.bnbValueUsdt).toFixed(4) : '?';
+      detail.textContent = `${qty} BNB × ${price} USDT = ${value} USDT (ต่ำกว่า $${resp.threshold})`;
+      banner.hidden = false;
+      banner.style.display = 'flex';
+    } else {
+      banner.hidden = true;
+      banner.style.display = 'none';
+    }
+
+    // (2) oil gauge — zone color + width + value label
+    const statusEl = document.getElementById('cm-bnb-gauge-status');
+    const valueEl  = document.getElementById('cm-bnb-gauge-value');
+    const fillEl   = document.getElementById('cm-bnb-gauge-fill');
+    if (statusEl && valueEl && fillEl) {
+      const pct = Number(resp.gaugePct) || 0;
+      const zone = resp.gaugeZone || 'low';
+      const target = Number(resp.gaugeTargetUsdt) || 10;
+      const value = Number(resp.bnbValueUsdt) || 0;
+      const emoji = zone === 'healthy' ? '🟢' : zone === 'low' ? '🟡' : '🔴';
+      const label = zone === 'healthy' ? 'Healthy' : zone === 'low' ? 'Low' : 'Critical';
+      statusEl.textContent = `${emoji} ${label} (${pct.toFixed(0)}%)`;
+      statusEl.className = zone === 'healthy' ? 'text-success'
+                         : zone === 'critical' ? 'text-danger'
+                         : 'text-warning';
+      valueEl.textContent = `${value.toFixed(2)} / ${target.toFixed(2)} USDT`;
+      fillEl.style.width = `${pct}%`;
+      fillEl.className = `bnb-gauge-fill is-${zone}`;
+    }
+  } catch (err) {
+    // fail-open: hide banner, reset gauge
+    banner.hidden = true;
+    banner.style.display = 'none';
+    const fillEl = document.getElementById('cm-bnb-gauge-fill');
+    if (fillEl) { fillEl.style.width = '0%'; fillEl.className = 'bnb-gauge-fill'; }
   }
 }
 
