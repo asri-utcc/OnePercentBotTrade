@@ -456,15 +456,74 @@ router.get('/positions', requireAuth, async (req, res) => {
     }
     const botIds = [...new Set(trades.map((t) => String(t.botId)))];
     // FIX-2026-08-05: include kcMult for upper-KC prediction (per-bot mult)
-    const bots = await Bot.find({ _id: { $in: botIds } }).select('_id name symbol timeframe retryMax kcMult').lean();
+    const bots = await Bot.find({ _id: { $in: botIds } }).select('_id name symbol timeframe retryMax kcMult enabled').lean();
     const botMap = new Map(bots.map((b) => [String(b._id), b]));
+
+    // FIX-2026-08-08 ACTUSDT orphan-positions: filter out trades whose botId doesn't exist in bots
+    //   - previous code fell back to `|| {}` at L520 which silently kept ghost positions
+    //     (ACTUSDT trade 6a75d52f...e9 lived in DB after ACT(bAdd) bot was hard-deleted)
+    //   - new: drop the trade from the response, count it in `orphanFiltered` so admin sees the count
+    //   - log a single warning per request (idempotent — same orphanId won't spam logs)
+    //   - ghost trade cleanup should be done via permanent-delete (now correctly synthesizes) or
+    //     via /admin/orphan-trades reconciliation script
+    const orphanTradeIds = [];
+    const validTrades = trades.filter((t) => {
+      if (botMap.has(String(t.botId))) return true;
+      orphanTradeIds.push(String(t._id));
+      return false;
+    });
+    if (orphanTradeIds.length > 0) {
+      logger.warn({
+        orphanCount: orphanTradeIds.length,
+        orphanTradeIds,
+        orphanBotIds: [...new Set(trades.filter((t) => !botMap.has(String(t.botId))).map((t) => String(t.botId)))],
+      }, 'positions: orphan trades filtered (botId missing in bots collection) — run cleanupOrphanTrades or permanent-delete to reconcile');
+    }
+
+    // FIX-2026-08-08: Stopped-bot price bypass — klineCache is frozen after trader.stop()
+    //   (Binance WS kline:update stops flowing), so positions of disabled bots show stale prices
+    //   in the default non-fresh mode. Pre-fetch live bookTicker per unique symbol of stopped bots
+    //   so Chart Monitor's 10s auto-refresh can update them too.
+    //   Cost: 1 bookTicker call (weight=2) per unique stopped-bot symbol per /positions request.
+    //   Safe even with 10s polling (Binance limit = 1200 weight/min).
+    const disabledBotIds = new Set(bots.filter((b) => !b.enabled).map((b) => String(b._id)));
+    const stoppedBotSymbols = new Set();
+    for (const t of validTrades) {
+      if (disabledBotIds.has(String(t.botId))) stoppedBotSymbols.add(t.symbol);
+    }
+    let stoppedBotPriceMap = new Map();
+    let stoppedBotFetchFailed = [];
+    if (stoppedBotSymbols.size > 0) {
+      const uniqueSymbols = [...stoppedBotSymbols];
+      const settled = await Promise.allSettled(
+        uniqueSymbols.map(async (sym) => {
+          const ticker = await binanceRest.getBookTicker(sym);
+          const bid = parseFloat(ticker.bidPrice);
+          const ask = parseFloat(ticker.askPrice);
+          if (!Number.isFinite(bid) || !Number.isFinite(ask) || bid <= 0 || ask <= 0) {
+            throw new Error(`bookTicker invalid for ${sym}`);
+          }
+          return { sym, midPrice: (bid + ask) / 2 };
+        })
+      );
+      for (let i = 0; i < settled.length; i += 1) {
+        const s = settled[i];
+        const sym = uniqueSymbols[i];
+        if (s.status === 'fulfilled' && s.value && Number.isFinite(s.value.midPrice)) {
+          stoppedBotPriceMap.set(sym, s.value.midPrice);
+        } else {
+          stoppedBotFetchFailed.push(sym);
+          logger.warn({ symbol: sym, err: s.reason && s.reason.message }, 'positions stopped-bot price fetch failed, will fallback to klineCache');
+        }
+      }
+    }
 
     // FIX-2026-08-05: pre-compute upper-KC for each unique (symbol, timeframe) pair
     //   - primary: zero Binance weight (klineCache in-memory)
     //   - fallback: REST getKlines when klineCache warmup (e.g. disabled bot / no trader running) — 1 call per unique pair
     const uniqueKCItems = [];
     const seenKCKeys = new Set();
-    for (const t of trades) {
+    for (const t of validTrades) {
       const bot = botMap.get(String(t.botId));
       if (!bot) continue;
       const k = prediction.makeKey(t.symbol, t.timeframe);
@@ -492,7 +551,7 @@ router.get('/positions', requireAuth, async (req, res) => {
     //   - mark freshFailedSymbols ใน response เพื่อ UI แสดง warning ถ้าจำเป็น
     let freshFailedSymbols = [];
     if (freshMode) {
-      const uniqueSymbols = [...new Set(trades.map((t) => t.symbol))];
+      const uniqueSymbols = [...new Set(validTrades.map((t) => t.symbol))];
       const settled = await Promise.allSettled(
         uniqueSymbols.map(async (sym) => {
           const ticker = await binanceRest.getBookTicker(sym);
@@ -516,17 +575,27 @@ router.get('/positions', requireAuth, async (req, res) => {
       }
     }
 
-    const positions = trades.map((t) => {
-      const bot = botMap.get(String(t.botId)) || {};
+    const positions = validTrades.map((t) => {
+      const bot = botMap.get(String(t.botId));
+      // FIX-2026-08-08 ACTUSDT orphan-fix: bot lookup is guaranteed to succeed (filtered above).
+      //   Defensive guard retained to avoid throwing if upstream filter regresses.
+      if (!bot) {
+        logger.error({ tradeId: String(t._id), botId: String(t.botId) }, 'positions: unexpected ghost trade (filter regression?)');
+        return null;
+      }
       // price resolution priority:
       //   1. freshMode + freshPriceMap → midPrice from Binance bookTicker (authoritative)
-      //   2. klineCache.getCurrent() → WS kline (fast but may be stale)
-      //   3. buyPrice fallback (PnL = 0)
+      //   2. FIX-2026-08-08: stopped-bot bookTicker → bypass frozen klineCache for disabled bots
+      //   3. klineCache.getCurrent() → WS kline (fast but may be stale)
+      //   4. buyPrice fallback (PnL = 0)
       let currentPrice = 0;
       let priceSource = 'klineCache';
       if (freshMode && freshPriceMap && freshPriceMap.has(t.symbol)) {
         currentPrice = freshPriceMap.get(t.symbol);
         priceSource = 'binance-bookTicker';
+      } else if (stoppedBotPriceMap.has(t.symbol)) {
+        currentPrice = stoppedBotPriceMap.get(t.symbol);
+        priceSource = 'binance-bookTicker-stopped-bot';
       } else {
         const current = klineCache.getCurrent(t.symbol, t.timeframe);
         currentPrice = current ? parseFloat(current.close) : (Number(t.buyPrice) || 0);
@@ -590,22 +659,30 @@ router.get('/positions', requireAuth, async (req, res) => {
         _unrealizedUsdt: unrealizedUsdt,
       };
     });
-    const totalCost = positions.reduce((s, p) => s + (p._costUsdt || 0), 0);
-    const totalUnrealized = positions.reduce((s, p) => s + (p._unrealizedUsdt || 0), 0);
+    // FIX-2026-08-08 ACTUSDT orphan-fix: filter out the defensive nulls (shouldn't happen since
+    //   validTrades pre-filtered, but kept as a safety net).
+    const positionsClean = positions.filter((p) => p !== null);
+    const totalCost = positionsClean.reduce((s, p) => s + (p._costUsdt || 0), 0);
+    const totalUnrealized = positionsClean.reduce((s, p) => s + (p._unrealizedUsdt || 0), 0);
     res.json({
       asOf: new Date().toISOString(),
-      count: positions.length,
+      count: positionsClean.length,
       totalCostUsdt: totalCost,
       totalUnrealizedUsdt: totalUnrealized,
       // FIX-2026-08-03: ?fresh=1 metadata — UI ใช้แสดง badge "Binance" vs "cache"
       fresh: freshMode,
       priceSources: {
-        binance: positions.filter((p) => p.priceSource === 'binance-bookTicker').length,
-        klineCache: positions.filter((p) => p.priceSource === 'klineCache').length,
-        buyPrice: positions.filter((p) => p.priceSource === 'buyPrice').length,
+        binance: positionsClean.filter((p) => p.priceSource === 'binance-bookTicker').length,
+        binanceStoppedBot: positionsClean.filter((p) => p.priceSource === 'binance-bookTicker-stopped-bot').length,
+        klineCache: positionsClean.filter((p) => p.priceSource === 'klineCache').length,
+        buyPrice: positionsClean.filter((p) => p.priceSource === 'buyPrice').length,
       },
       freshFailedSymbols,
-      positions: positions.map(({ _costUsdt, _unrealizedUsdt, ...p }) => p),
+      stoppedBotFetchFailed,
+      // FIX-2026-08-08: orphan-filter metadata — UI/admin can see how many ghosts were dropped
+      orphanFiltered: orphanTradeIds.length,
+      orphanTradeIds,
+      positions: positionsClean.map(({ _costUsdt, _unrealizedUsdt, ...p }) => p),
     });
   } catch (err) {
     logger.error({ err: err.message }, 'list open positions failed');
@@ -1407,18 +1484,51 @@ router.post('/:id/restore', requireAuth, requireBotActionPassword, async (req, r
 // FIX-2026-08-08: Feature #5 — permanent delete (admin-only, requires password)
 //   - bypasses 30-day window
 //   - use for cleanup or user-requested immediate delete
+// FIX-2026-08-08 ACTUSDT orphan-prevention: cleanup OPEN_STATES trades BEFORE Bot.deleteOne
+//   - previous code deleted the Bot doc while leaving OPEN_STATES trades behind → ghost positions
+//     reappeared in /api/bots/positions forever (no bot to attribute them to)
+//   - fix: stop trader → cleanupOrphanTrades (synthetic-close, state='sold', sellStatus='FORCED_SYNTHETIC') → delete Bot
+//   - admin should reconcile actual Binance fills separately (PnL will be 0 in the synthetic close —
+//     manually re-edit if real fills were discovered after the fact, like we did for trade 6a75d52f)
 router.delete('/:id/permanent', requireAuth, requireBotActionPassword, async (req, res) => {
   try {
     const bot = await Bot.findById(req.params.id);
     if (!bot) return res.status(404).json({ error: 'Bot not found' });
 
+    // 1) Stop trader (cancels any live orders on Binance)
     if (bot.enabled) {
-      await botManager.stopTrader(bot._id);
+      try {
+        await botManager.stopTrader(bot._id);
+      } catch (stopErr) {
+        logger.warn({ botId: bot._id.toString(), err: stopErr.message }, 'bot.routes permanent-delete: stopTrader failed (continuing)');
+      }
     }
+    // 2) Synthetic-close any OPEN_STATES trades — prevents ghost positions
+    let cleanup = { cleaned: [], errors: [] };
+    try {
+      cleanup = await forceClose.cleanupOrphanTrades({ botId: bot._id });
+    } catch (cleanupErr) {
+      logger.warn({ botId: bot._id.toString(), err: cleanupErr.message }, 'bot.routes permanent-delete: cleanupOrphanTrades failed (will still delete bot)');
+    }
+    // 3) Now safe to delete the Bot doc (all trades are 'sold' — no orphan positions will remain)
     await Bot.deleteOne({ _id: bot._id });
     eventBus.emit('bot:deleted', { botId: String(bot._id), name: bot.name, permanent: true });
-    logger.warn({ botId: bot._id.toString(), actorIp: req.ip }, 'bot: permanent delete (admin)');
-    res.json({ ok: true, permanent: true });
+    logger.warn({
+      botId: bot._id.toString(),
+      actorIp: req.ip,
+      cleanedTrades: cleanup.cleaned.length,
+      cleanupErrors: cleanup.errors.length,
+    }, 'bot: permanent delete (admin)');
+    res.json({
+      ok: true,
+      permanent: true,
+      cleanup: {
+        cleaned: cleanup.cleaned.length,
+        errors: cleanup.errors.length,
+        trades: cleanup.cleaned,
+        errorDetails: cleanup.errors,
+      },
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
