@@ -386,12 +386,12 @@ window.PositionCard = {
             <span class="v mono">${m.tp > 0 ? PriceFormat.format(m.tp, m.symbol) : '—'}</span>
             <span class="sub">${tpSub}</span>
           </div>
-          <div class="cell">
+          <div class="cell cell-pnl">
             <span class="k">Unrealized PnL</span>
             <span class="v mono ${pnlCls}">${pnlSign}${m.unrealizedUsdt.toFixed(4)} USDT</span>
             ${thbUpnl ? `<span class="sub thb-eq">${thbUpnl}</span>` : ''}
           </div>
-          <div class="cell">
+          <div class="cell cell-pnl">
             <span class="k">% PnL</span>
             <span class="v mono ${pnlCls}">${pnlSign}${m.pnlPct.toFixed(3)}%</span>
           </div>

@@ -415,6 +415,48 @@
     .cm-positions-grid .position-card .cell .k { font-size: 0.65rem; }
     .cm-positions-grid .position-card .cell .v { font-size: 0.85rem; }
     .cm-positions-grid .position-card .cell .sub { font-size: 0.62rem; }
+    /* ─── 2026-08-08: Make $PnL cells pop on Chart Monitor ───
+       Larger + bolder + glow + soft highlight. Responsive on mobile. */
+    .cm-positions-grid .position-card .cell-pnl {
+      background: rgba(245, 184, 0, 0.07);
+      border: 1px solid rgba(245, 184, 0, 0.22);
+      border-radius: 8px;
+      padding: 0.5rem 0.55rem;
+      margin: -0.18rem -0.05rem;
+    }
+    .cm-positions-grid .position-card .cell-pnl .k {
+      font-size: 0.7rem;
+      color: #e2e8f0;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+    }
+    .cm-positions-grid .position-card .cell-pnl .v {
+      font-size: 1.45rem;
+      font-weight: 700;
+      letter-spacing: -0.01em;
+      line-height: 1.1;
+    }
+    .cm-positions-grid .position-card .cell-pnl .v.pnl-bull {
+      text-shadow: 0 0 14px rgba(0, 229, 184, 0.6), 0 0 4px rgba(0, 229, 184, 0.4);
+    }
+    .cm-positions-grid .position-card .cell-pnl .v.pnl-bear {
+      text-shadow: 0 0 14px rgba(255, 77, 109, 0.6), 0 0 4px rgba(255, 77, 109, 0.4);
+    }
+    .cm-positions-grid .position-card .cell-pnl .sub {
+      font-size: 0.72rem;
+      margin-top: 0.1rem;
+    }
+    /* Mobile: keep $PnL prominent but fit narrower cards */
+    @media (max-width: 640px) {
+      .cm-positions-grid .position-card .cell-pnl {
+        padding: 0.4rem 0.45rem;
+        margin: -0.12rem -0.05rem;
+        border-radius: 6px;
+      }
+      .cm-positions-grid .position-card .cell-pnl .k { font-size: 0.65rem; }
+      .cm-positions-grid .position-card .cell-pnl .v { font-size: 1.15rem; }
+      .cm-positions-grid .position-card .cell-pnl .sub { font-size: 0.65rem; }
+    }
     .cm-positions-grid .position-card .pos-progress-label { font-size: 0.7rem; }
     /* Source badge on grid header */
     .cm-positions-source {
@@ -445,6 +487,64 @@
     .cm-positions-card.is-collapsed #cm-positions-list,
     .cm-positions-card.is-collapsed #cm-positions-refresh {
       display: none !important;
+    }
+    /* ─── 2026-08-08: Auto-refresh toggle for Open Positions ───
+       Default OFF on every page load (state not persisted). */
+    .cm-auto-toggle {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.4rem;
+      padding: 0.18rem 0.55rem;
+      font-size: 0.78rem;
+      line-height: 1.1;
+      background: rgba(255,255,255,0.04);
+      border: 1px solid rgba(255,255,255,0.14);
+      color: #94a3b8;
+      border-radius: 6px;
+      cursor: pointer;
+      transition: background 0.18s ease, border-color 0.18s ease, color 0.18s ease;
+      font-weight: 600;
+    }
+    .cm-auto-toggle:hover {
+      border-color: rgba(245,184,0,0.45);
+      color: #f5b800;
+    }
+    .cm-auto-toggle .cm-auto-dot {
+      display: inline-block;
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      background: #64748b;
+      box-shadow: inset 0 0 0 1px rgba(0,0,0,0.25);
+      transition: background 0.18s ease, box-shadow 0.18s ease;
+    }
+    .cm-auto-toggle.is-on {
+      background: rgba(0,229,184,0.14);
+      border-color: rgba(0,229,184,0.55);
+      color: #00e5b8;
+    }
+    .cm-auto-toggle.is-on:hover {
+      background: rgba(255,77,109,0.14);
+      border-color: rgba(255,77,109,0.55);
+      color: #ff4d6d;
+    }
+    .cm-auto-toggle.is-on .cm-auto-dot {
+      background: #00e5b8;
+      box-shadow: 0 0 8px rgba(0,229,184,0.75), inset 0 0 0 1px rgba(0,0,0,0.2);
+      animation: cmAutoPulse 1.8s ease-in-out infinite;
+    }
+    .cm-auto-toggle.is-on:hover .cm-auto-dot {
+      background: #ff4d6d;
+      box-shadow: 0 0 8px rgba(255,77,109,0.75), inset 0 0 0 1px rgba(0,0,0,0.2);
+      animation: none;
+    }
+    @keyframes cmAutoPulse {
+      0%, 100% { box-shadow: 0 0 6px rgba(0,229,184,0.55), inset 0 0 0 1px rgba(0,0,0,0.2); }
+      50%      { box-shadow: 0 0 12px rgba(0,229,184,0.95), inset 0 0 0 1px rgba(0,0,0,0.2); }
+    }
+    /* Mobile: tighter padding to fit in header */
+    @media (max-width: 640px) {
+      .cm-auto-toggle { padding: 0.15rem 0.45rem; font-size: 0.72rem; }
+      .cm-auto-toggle .cm-auto-dot { width: 7px; height: 7px; }
     }
     /* When collapsed, click on the header (whole top row) still toggles */
     .cm-positions-card .cm-positions-header { cursor: pointer; user-select: none; }
@@ -489,42 +589,6 @@
   <nav class="app-nav" id="app-nav"></nav>
 
   <div class="container-fluid px-3 px-md-4 py-3 py-md-4">
-
-    <!-- Heartbeat / system status -->
-    <div class="heartbeat-bar mb-3" id="heartbeat-bar">
-      <span class="heartbeat-pill" id="hb-overall">
-        <span class="hb-dot"></span>
-        <span class="hb-label">Overall: <strong>-</strong></span>
-      </span>
-      <span class="heartbeat-pill" id="hb-mongodb">
-        <span class="hb-dot"></span>
-        <span class="hb-icon">🗄️</span>
-        <span class="hb-label">MongoDB</span>
-      </span>
-      <span class="heartbeat-pill" id="hb-binance">
-        <span class="hb-dot"></span>
-        <span class="hb-icon">🔌</span>
-        <span class="hb-label">Binance API</span>
-      </span>
-      <span class="heartbeat-pill" id="hb-marketws">
-        <span class="hb-dot"></span>
-        <span class="hb-icon">📡</span>
-        <span class="hb-label">Market WS</span>
-      </span>
-      <span class="heartbeat-pill" id="hb-userws">
-        <span class="hb-dot"></span>
-        <span class="hb-icon">👤</span>
-        <span class="hb-label">User Stream</span>
-      </span>
-      <span class="heartbeat-pill" id="hb-bots">
-        <span class="hb-dot"></span>
-        <span class="hb-icon">🤖</span>
-        <span class="hb-label">Bots: <span id="hb-bots-count">0</span></span>
-      </span>
-      <span class="heartbeat-meta">
-        <span>Updated: <span id="hb-ts">-</span></span>
-      </span>
-    </div>
 
     <!-- Page title -->
     <div class="page-title">
@@ -602,6 +666,9 @@
         <span class="cm-positions-meta">
           <span id="cm-positions-sub">กำลังโหลด…</span>
           <button type="button" class="cm-positions-toggle" id="cm-positions-toggle" title="ยุบ/ขยาย" aria-label="ยุบ/ขยาย">▾</button>
+          <button type="button" class="cm-auto-toggle is-off" id="cm-positions-auto" title="Auto Refresh (default OFF ทุกครั้งที่โหลดหน้า) — คลิกเพื่อเปิด" aria-pressed="false">
+            <span class="cm-auto-dot"></span><span class="cm-auto-label">Auto</span>
+          </button>
           <button type="button" class="btn btn-sm btn-outline-info" id="cm-positions-refresh" title="รีเฟรชราคา (Binance bookTicker)">🔄 Refresh</button>
         </span>
       </div>
