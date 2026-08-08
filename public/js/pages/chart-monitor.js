@@ -33,6 +33,43 @@ let _cmFilter = 'running-with-position'; // 'running' | 'stopped' | 'all' | 'run
 let _cmSort = 'default'; // 'default' | 'name' | 'symbol' | 'pnl' | 'tf'
 let _cmPositionModal = null; // bootstrap.Modal instance for #cmPositionModal
 
+// 2026-08-08: Auto-refresh toggle for Open Positions panel — default OFF on every page load.
+// State is NOT persisted; reload always resets to OFF.
+let _cmPositionsAuto = false;
+let _cmPositionsAutoTimer = null;
+const CM_POS_AUTO_INTERVAL_MS = 10_000;
+
+function startCmPositionsAutoRefresh() {
+  if (_cmPositionsAutoTimer) return; // already running
+  _cmPositionsAutoTimer = setInterval(() => {
+    loadCmPositions().catch((e) => console.debug('chart-monitor positions auto-refresh:', e.message));
+  }, CM_POS_AUTO_INTERVAL_MS);
+}
+
+function stopCmPositionsAutoRefresh() {
+  if (_cmPositionsAutoTimer) {
+    clearInterval(_cmPositionsAutoTimer);
+    _cmPositionsAutoTimer = null;
+  }
+}
+
+function setCmPositionsAuto(on) {
+  _cmPositionsAuto = !!on;
+  const btn = document.getElementById('cm-positions-auto');
+  if (btn) {
+    btn.classList.toggle('is-on', _cmPositionsAuto);
+    btn.classList.toggle('is-off', !_cmPositionsAuto);
+    btn.setAttribute('aria-pressed', _cmPositionsAuto ? 'true' : 'false');
+    const label = btn.querySelector('.cm-auto-label');
+    if (label) label.textContent = _cmPositionsAuto ? 'Auto: ON' : 'Auto';
+    btn.title = _cmPositionsAuto
+      ? `Auto Refresh ON (ทุก ${CM_POS_AUTO_INTERVAL_MS / 1000}s) — คลิกเพื่อปิด`
+      : 'Auto Refresh OFF (default) — คลิกเพื่อเปิด';
+  }
+  if (_cmPositionsAuto) startCmPositionsAutoRefresh();
+  else stopCmPositionsAutoRefresh();
+}
+
 async function init() {
   const me = await API.get('/api/auth/me').catch(() => null);
   if (!me || !me.authenticated) {
@@ -62,6 +99,17 @@ async function init() {
     e.stopPropagation(); // don't trigger collapse toggle
     loadCmPositions({ fresh: true }).catch((e2) => console.warn('chart-monitor positions refresh:', e2.message));
   });
+
+  // 2026-08-08: Auto-refresh toggle for Open Positions — default OFF on every page load
+  const autoBtn = document.getElementById('cm-positions-auto');
+  if (autoBtn) {
+    autoBtn.addEventListener('click', (e) => {
+      e.stopPropagation(); // don't trigger collapse toggle
+      setCmPositionsAuto(!_cmPositionsAuto);
+    });
+  }
+  // Ensure UI reflects OFF state on init (defensive — HTML already has is-off)
+  setCmPositionsAuto(false);
 
   // Positions card collapse/expand (2026-08-06) — default collapsed, state persisted in localStorage
   initCmPositionsCollapse();
@@ -94,12 +142,8 @@ async function init() {
   await loadBots();
   await loadSignals();
   await loadCmPositions();
-  await loadHealth();
   // 2026-08-06: BNB fuel gauge (mirror bots.html)
   loadCmBnbStatus().catch(() => {});
-
-  // Heartbeat polling
-  setInterval(() => { loadHealth().catch(() => {}); }, 15_000);
 
   // Signals refresh — 60s (server cache is 30s)
   setInterval(() => { loadSignals().catch((e) => console.debug('chart-monitor signals refresh:', e.message)); }, 60_000);
@@ -108,7 +152,9 @@ async function init() {
   setInterval(() => { loadCmBnbStatus().catch(() => {}); }, 60_000);
 
   // Positions refresh — 30s (cache uses klineCache; user-triggered fresh mode uses Binance bookTicker)
-  setInterval(() => { loadCmPositions().catch((e) => console.debug('chart-monitor positions refresh:', e.message)); }, 30_000);
+  // 2026-08-08: gated by Auto Refresh toggle (default OFF). WS trade:update still refreshes
+  // independently on actual BUY/SELL events (event-driven, not polling).
+  // setInterval removed; polling now driven by startCmPositionsAutoRefresh()
 
   // Bind WS live updates
   bindCmWs();
@@ -136,15 +182,6 @@ async function loadBots() {
           <div class="alert alert-danger mb-0">⚠️ โหลดข้อมูลบอทไม่สำเร็จ: ${err.message}</div>
         </div>
       </div>`;
-  }
-}
-
-async function loadHealth() {
-  try {
-    const status = await API.get('/api/health');
-    renderHeartbeat(status);
-  } catch (err) {
-    // silently ignore — heartbeat is best-effort
   }
 }
 
@@ -750,9 +787,6 @@ function renderSummary() {
     downTile.classList.remove('is-bear', 'is-violet');
     downTile.classList.add('is-bear');
   }
-
-  // heartbeat bot count
-  setText('hb-bots-count', running.length);
 }
 
 /* ════════════════════════════════════════════════════════════════════
@@ -1424,32 +1458,6 @@ function bindCmWs() {
       setTimeout(() => drawCmExpandTpLines(), 0);
     }
   });
-}
-
-/* ════════════════════════════════════════════════════════════════════
- * Heartbeat
- * ════════════════════════════════════════════════════════════════════ */
-
-function renderHeartbeat(status) {
-  const sym = (ok) => ok ? '🟢' : '🔴';
-  const known = (ok, label) => `${sym(ok)} ${label}`;
-  const fmt = (ok) => ok ? 'is-ok' : 'is-error';
-  const set = (id, label, ok) => {
-    const el = document.getElementById(id);
-    if (!el) return;
-    el.classList.remove('is-ok', 'is-error');
-    el.classList.add(fmt(ok));
-    const lbl = el.querySelector('.hb-label');
-    if (lbl) lbl.innerHTML = label;
-  };
-  set('hb-mongodb',  `🗄️ MongoDB`,        !!status.mongodb);
-  set('hb-binance',  `🔌 Binance API`,     !!status.binance);
-  set('hb-marketws', `📡 Market WS`,       !!status.marketWs);
-  set('hb-userws',   `👤 User Stream`,     !!status.userStream);
-  const overall = !!(status.mongodb && status.binance && status.marketWs);
-  set('hb-overall',  `Overall: <strong>${overall ? '🟢 OK' : '🔴 DEGRADED'}</strong>`, overall);
-  const ts = status.ts ? new Date(status.ts).toLocaleTimeString('th-TH', { timeZone: 'Asia/Bangkok', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }) : '-';
-  setText('hb-ts', ts);
 }
 
 /* ════════════════════════════════════════════════════════════════════
