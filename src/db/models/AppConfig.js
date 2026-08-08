@@ -186,6 +186,61 @@ const appConfigSchema = new mongoose.Schema(
     autoDeleteBotWarningDays: { type: Number, default: 3, min: 1, max: 30 },
     autoDeleteBotLastRunAt: { type: Date, default: null },
     autoDeleteBotLastStats: { type: Object, default: null },
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // FIX-2026-08-08 (rev3): Bot Defaults — ค่าเริ่มต้นในการสร้างบอทใหม่
+    //   - ใช้เป็น default ตอน POST /api/bots (ถ้า client ไม่ส่ง field มา)
+    //   - ตั้ง/แก้ไขได้จากหน้า /settings.html (section 1️⃣)
+    //   - รวม field ทั้งหมดที่ New Bot modal ตั้งค่าได้
+    //   - หมายเหตุ: ค่า default ของแต่ละ field ตรงกับค่าที่ UI/bots.js ใช้อยู่ (ตามที่ user ขอ)
+    // ═══════════════════════════════════════════════════════════════════════
+    botDefaults: {
+      type: Object,
+      default: () => ({
+        // ทุน & ความเสี่ยง
+        capitalPerTrade: 9,
+        maxTrades: 1,
+        tpPercent: 0.1,
+        retryTimeMin: 0.2,
+        retryMax: 8,
+        kcMult: 1.2,
+        minSpreadTicks: 1,
+        suggestTpWindow: 30,
+        // DCA
+        dcaEnabled: false,
+        dcaMaxLayers: 3,
+        martingaleEnabled: false,
+        martingaleMultiplier: 1.5,
+        martingaleMaxLayerNotional: 100,
+        // Filters & toggles (default ตาม New Bot modal)
+        s1OnlyDown: false,            // New Bot modal checked by default
+        xs1Enabled: true,
+        cbEnabled: true,              // UI default = OFF; route default = ON. Use UI default for bot modal consistency
+        cbv2Enabled: true,
+        cbv2LockHours: 8,
+        cbv3Enabled: true,
+        cbv3LockHours: 8,
+        cbAutoUnlockEnabled: false,
+        cbAutoUnlockThresholdPct: 1.0,
+        dynamicSizeEnabled: true,
+        safeTradeEnabled: true,
+        safeTradeTrendlineEnabled: false,  // UI checked by default in modal; we use route default (off) for safer default
+        safeTradeNoTradeEnabled: false,    // UI checked by default in modal; we use route default (off) for safer default
+        autoPauseEnabled: true,
+        autoPauseMinKcPct: 2,
+        autoArmStopLossOnUKC: true,
+        autoArmLossPct: 6.3,           // New Bot modal default
+        autoArmAgeHours: 4,
+        slUkcTriggerOnProfit: false,
+        tpTrendEnabled: true,
+        tpTrendMultiplier: 2,
+        autoUpdateTp: true,
+        stopLossOnUpperKC: false,
+        // Default symbol + timeframe (first dropdown options)
+        defaultSymbol: 'BNBUSDT',
+        defaultTimeframe: '3m',
+      }),
+    },
   },
   { timestamps: true }
 );

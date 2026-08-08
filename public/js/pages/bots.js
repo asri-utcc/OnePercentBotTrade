@@ -588,10 +588,13 @@ function setupEventHandlers() {
   //   - บน show.bs.modal: auto-fill name จาก symbol (BTCUSDT → BTC(bAdd)) และ auto-trigger ✨ Get TP%
   //   - ใช้ symbol change → re-derive name (ถ้า name ยังเป็น auto-fill pattern)
   //   - ครอบคลุมทั้ง click "+ New Bot" และ deep-link จาก scan-volatility
+  // FIX-2026-08-08 (rev3): apply Bot Defaults (จาก /settings.html section 1️⃣) — pre-fill inputs ตอนเปิด modal
   const newBotModalEl = document.getElementById('newBotModal');
   if (newBotModalEl) {
-    newBotModalEl.addEventListener('show.bs.modal', () => {
+    newBotModalEl.addEventListener('show.bs.modal', async () => {
       // delay เล็กน้อยเพื่อให้ deep-link handler (set nb-symbol/nb-timeframe) เสร็จก่อน
+      // และ fetch Bot Defaults → pre-fill (ถ้า user ยังไม่เคยแก้ field นั้น)
+      await applyBotDefaultsToNewBot();
       setTimeout(() => {
         autoFillNewBotName();
         // FIX-2026-08-07: auto-trigger ✨ Get เพื่อให้ TP% default = NET จาก Min %KC(window) + EMA20 trend
@@ -620,6 +623,63 @@ function setupEventHandlers() {
     } catch (e) {
       window._newBotCbVersion = 'v3';
       console.warn('applyCbVersionToNewBot failed:', e.message);
+    }
+  }
+  // FIX-2026-08-08 (rev3): apply Bot Defaults จาก AppConfig → pre-fill New Bot modal
+  //   - fetched from /api/admin/bot-defaults
+  //   - ใช้เฉพาะ field ที่ user ยังไม่เคยแก้ใน session นี้ (กัน override หลัง user พิมพ์เอง)
+  //   - ถ้า API fail → ใช้ HTML default (เดิม)
+  async function applyBotDefaultsToNewBot() {
+    if (window._botDefaultsApplied) return; // ใช้ครั้งเดียวต่อ session
+    try {
+      const resp = await API.get('/api/admin/bot-defaults');
+      const d = resp && resp.defaults ? resp.defaults : {};
+      const set = (id, val) => { const el = document.getElementById(id); if (el != null && val != null) el.value = val; };
+      const setChecked = (id, val) => { const el = document.getElementById(id); if (el) el.checked = !!val; };
+      // ทุน & ความเสี่ยง
+      set('nb-capital', d.capitalPerTrade);
+      set('nb-maxtrades', d.maxTrades);
+      set('nb-tp', d.tpPercent);
+      set('nb-retry', d.retryTimeMin);
+      set('nb-retry-max', d.retryMax);
+      set('nb-kc-mult', d.kcMult);
+      set('nb-min-spread', d.minSpreadTicks);
+      set('nb-suggest-tp-window', d.suggestTpWindow);
+      set('nb-dca-max-layers', d.dcaMaxLayers);
+      set('nb-cbv2-lock-hours', d.cbv2LockHours);
+      set('nb-cbv3-lock-hours', d.cbv3LockHours);
+      set('nb-cb-auto-unlock-threshold', d.cbAutoUnlockThresholdPct);
+      set('nb-auto-pause-min-kc', d.autoPauseMinKcPct);
+      set('nb-auto-arm-loss-pct', d.autoArmLossPct);
+      set('nb-auto-arm-age-hours', d.autoArmAgeHours);
+      set('nb-tp-trend-multiplier', d.tpTrendMultiplier);
+      // Booleans
+      setChecked('nb-s1-only-down', d.s1OnlyDown);
+      setChecked('nb-xs1-enabled', d.xs1Enabled);
+      setChecked('nb-cb-enabled', d.cbEnabled);
+      setChecked('nb-cbv2-enabled', d.cbv2Enabled);
+      setChecked('nb-cbv3-enabled', d.cbv3Enabled);
+      setChecked('nb-cb-auto-unlock-enabled', d.cbAutoUnlockEnabled);
+      setChecked('nb-dynamic-size-enabled', d.dynamicSizeEnabled);
+      setChecked('nb-safe-trade-enabled', d.safeTradeEnabled);
+      setChecked('nb-safe-trade-trendline-enabled', d.safeTradeTrendlineEnabled);
+      setChecked('nb-safe-trade-no-trade-enabled', d.safeTradeNoTradeEnabled);
+      setChecked('nb-auto-pause-enabled', d.autoPauseEnabled);
+      setChecked('nb-auto-arm-stop-loss-ukc', d.autoArmStopLossOnUKC);
+      setChecked('nb-sl-ukc-trigger-on-profit', d.slUkcTriggerOnProfit);
+      setChecked('nb-tp-trend-enabled', d.tpTrendEnabled);
+      setChecked('nb-auto-update-tp', d.autoUpdateTp);
+      setChecked('nb-stop-loss-upper-kc', d.stopLossOnUpperKC);
+      setChecked('nb-dca-enabled', d.dcaEnabled);
+      // Default symbol/timeframe
+      if (d.defaultSymbol) set('nb-symbol', d.defaultSymbol);
+      if (d.defaultTimeframe) set('nb-timeframe', d.defaultTimeframe);
+      // refresh total capital display
+      if (typeof updateNewBotTotal === 'function') updateNewBotTotal();
+      window._botDefaultsApplied = true;
+    } catch (e) {
+      // fail-open — ใช้ HTML default (เดิม)
+      console.warn('applyBotDefaultsToNewBot failed:', e.message);
     }
   }
   // ถ้า user เปลี่ยน symbol — re-derive name ถ้ายังเป็น auto-fill pattern

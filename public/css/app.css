@@ -2635,6 +2635,40 @@ small.text-muted {
 }
 .lux-details-body { padding: 1rem 1.1rem 1.2rem; }
 
+/* ── FIX-2026-08-08 (rev3): Settings page — group chips + section title ── */
+.lux-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.4rem 0.9rem;
+  border-radius: 999px;
+  background: rgba(255,255,255,0.04);
+  border: 1px solid var(--border-mid);
+  color: var(--text-2);
+  font-size: 0.85rem;
+  font-weight: 500;
+  text-decoration: none;
+  transition: all 120ms ease;
+}
+.lux-chip:hover {
+  background: rgba(255,255,255,0.08);
+  border-color: var(--accent);
+  color: var(--text-1);
+  transform: translateY(-1px);
+}
+.settings-group-title {
+  margin-top: 1.8rem;
+  margin-bottom: 0.4rem;
+  padding-bottom: 0.4rem;
+  border-bottom: 2px solid var(--border-mid);
+  color: var(--text-1);
+  font-size: 1.15rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+.settings-group-title:first-of-type { margin-top: 0.5rem; }
+.text-muted-3 { color: var(--text-3) !important; }
+
 .signal-info-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));

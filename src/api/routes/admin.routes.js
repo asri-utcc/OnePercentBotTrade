@@ -185,7 +185,172 @@ router.post('/auto-delete-run', requireAuth, requireBotActionPassword, async (re
   }
 });
 
-// ─── POST /api/admin/dps-reset-all ─────────────────────────────
+// ─── GET /api/admin/bot-defaults ─────────────────────────────────
+// FIX-2026-08-08 (rev3): Bot Defaults — ค่าเริ่มต้นตอนสร้างบอทใหม่
+//   - GET: คืนค่า defaults ปัจจุบัน (merge DB กับ schema default)
+//   - PUT: อัปเดตค่า + clamp/validate ตาม Bot schema constraints
+//   - whitelist fields (กัน user inject field อื่น)
+//   - per-field clamp (mirror POST /api/bots + Bot model)
+const BOT_DEFAULTS_CLAMP = {
+  capitalPerTrade:           { min: 1,     max: 100000 },
+  maxTrades:                 { min: 1,     max: 1000,   int: true },
+  tpPercent:                 { min: 0.001, max: 100 },
+  retryTimeMin:              { min: 0.1,   max: 60 },
+  retryMax:                  { min: 0,     max: 10,     int: true },
+  kcMult:                    { min: 0.5,   max: 5 },
+  minSpreadTicks:            { min: 0,     max: 10,     int: true },
+  suggestTpWindow:           { min: 30,    max: 1000,   int: true },
+  dcaMaxLayers:              { min: 1,     max: 100,    int: true },
+  martingaleMultiplier:      { min: 1.0,   max: 3.0 },
+  martingaleMaxLayerNotional:{ min: 1,     max: 10000 },
+  cbv2LockHours:             { min: 0.5,   max: 168 },
+  cbv3LockHours:             { min: 0.5,   max: 168 },
+  cbAutoUnlockThresholdPct:  { min: 0.5,   max: 5.0 },
+  autoPauseMinKcPct:         { min: 0.1,   max: 50 },
+  autoArmLossPct:            { min: 1,     max: 90 },
+  autoArmAgeHours:           { min: 0.5,   max: 168 },
+  tpTrendMultiplier:         { min: 1,     max: 10 },
+};
+
+// Schema defaults (mirror POST /api/bots logic — แหล่ง single source of truth)
+const BOT_DEFAULTS_SCHEMA = {
+  capitalPerTrade: 9,
+  maxTrades: 1,
+  tpPercent: 0.1,
+  retryTimeMin: 0.2,
+  retryMax: 8,
+  kcMult: 1.2,
+  minSpreadTicks: 1,
+  suggestTpWindow: 30,
+  dcaEnabled: false,
+  dcaMaxLayers: 3,
+  martingaleEnabled: false,
+  martingaleMultiplier: 1.5,
+  martingaleMaxLayerNotional: 100,
+  s1OnlyDown: false,
+  xs1Enabled: true,
+  cbEnabled: true,
+  cbv2Enabled: true,
+  cbv2LockHours: 8,
+  cbv3Enabled: true,
+  cbv3LockHours: 8,
+  cbAutoUnlockEnabled: false,
+  cbAutoUnlockThresholdPct: 1.0,
+  dynamicSizeEnabled: true,
+  safeTradeEnabled: true,
+  safeTradeTrendlineEnabled: false,
+  safeTradeNoTradeEnabled: false,
+  autoPauseEnabled: true,
+  autoPauseMinKcPct: 2,
+  autoArmStopLossOnUKC: true,
+  autoArmLossPct: 6.3,
+  autoArmAgeHours: 4,
+  slUkcTriggerOnProfit: false,
+  tpTrendEnabled: true,
+  tpTrendMultiplier: 2,
+  autoUpdateTp: true,
+  stopLossOnUpperKC: false,
+  defaultSymbol: 'BNBUSDT',
+  defaultTimeframe: '3m',
+};
+
+function _clampBotDefault(name, value) {
+  const r = BOT_DEFAULTS_CLAMP[name];
+  if (!r) return value;
+  let v = value;
+  if (r.int) v = Math.round(v);
+  v = Math.max(r.min, Math.min(r.max, v));
+  return v;
+}
+
+function _readBotDefaults(cfg) {
+  const stored = (cfg && cfg.botDefaults) || {};
+  return { ...BOT_DEFAULTS_SCHEMA, ...stored };
+}
+
+router.get('/bot-defaults', requireAuth, async (req, res) => {
+  try {
+    const cfg = await AppConfig.findOne({ key: 'singleton' }).lean();
+    res.json({ defaults: _readBotDefaults(cfg) });
+  } catch (err) {
+    logger.warn({ err: err.message }, 'admin: GET bot-defaults failed');
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.put('/bot-defaults', requireAuth, requireSettingsPassword, async (req, res) => {
+  try {
+    const body = req.body || {};
+    // whitelist: only known fields (number/string/boolean)
+    const BOOLEAN_FIELDS = [
+      'dcaEnabled', 'martingaleEnabled',
+      's1OnlyDown', 'xs1Enabled', 'cbEnabled', 'cbv2Enabled', 'cbv3Enabled',
+      'cbAutoUnlockEnabled', 'dynamicSizeEnabled',
+      'safeTradeEnabled', 'safeTradeTrendlineEnabled', 'safeTradeNoTradeEnabled',
+      'autoPauseEnabled', 'autoArmStopLossOnUKC',
+      'slUkcTriggerOnProfit', 'tpTrendEnabled', 'autoUpdateTp', 'stopLossOnUpperKC',
+    ];
+    const NUMBER_FIELDS = [
+      'capitalPerTrade', 'maxTrades', 'tpPercent', 'retryTimeMin', 'retryMax',
+      'kcMult', 'minSpreadTicks', 'suggestTpWindow',
+      'dcaMaxLayers', 'martingaleMultiplier', 'martingaleMaxLayerNotional',
+      'cbv2LockHours', 'cbv3LockHours', 'cbAutoUnlockThresholdPct',
+      'autoPauseMinKcPct', 'autoArmLossPct', 'autoArmAgeHours', 'tpTrendMultiplier',
+    ];
+    const STRING_FIELDS = ['defaultSymbol', 'defaultTimeframe'];
+
+    const update = {};
+    for (const k of BOOLEAN_FIELDS) {
+      if (typeof body[k] === 'boolean') update[k] = body[k];
+    }
+    for (const k of NUMBER_FIELDS) {
+      if (body[k] === undefined) continue;
+      const n = parseFloat(body[k]);
+      if (Number.isFinite(n)) update[k] = _clampBotDefault(k, n);
+    }
+    for (const k of STRING_FIELDS) {
+      if (typeof body[k] === 'string') {
+        const s = body[k].trim();
+        if (s) update[k] = k === 'defaultSymbol' ? s.toUpperCase() : s;
+      }
+    }
+
+    if (Object.keys(update).length === 0) {
+      return res.status(400).json({ error: 'No valid fields to update' });
+    }
+
+    // 2026-08-08 (rev3): Martingale requires DCA mode (validate before write)
+    if (update.martingaleEnabled === true && update.dcaEnabled === false) {
+      // check DB สำหรับ dcaEnabled ปัจจุบัน (อาจไม่ได้อยู่ใน update)
+      const cfg = await AppConfig.findOne({ key: 'singleton' }).lean();
+      const mergedDca = update.dcaEnabled !== undefined ? update.dcaEnabled : (cfg && cfg.botDefaults && cfg.botDefaults.dcaEnabled);
+      if (mergedDca !== true) {
+        return res.status(400).json({ error: 'martingaleEnabled requires dcaEnabled=true (Martingale is a DCA-mode-only strategy)' });
+      }
+    }
+    // DPS mutually exclusive with DCA/Martingale
+    if (update.dynamicSizeEnabled !== false && (update.dcaEnabled === true || update.martingaleEnabled === true)) {
+      return res.status(400).json({ error: 'dynamicSizeEnabled is mutually exclusive with dcaEnabled/martingaleEnabled' });
+    }
+
+    // merge กับ defaults เดิมเพื่อไม่ให้ field ที่ไม่ได้ส่งมาหาย
+    const cfg = await AppConfig.findOne({ key: 'singleton' }).lean();
+    const prev = _readBotDefaults(cfg);
+    const merged = { ...prev, ...update };
+
+    await AppConfig.updateOne(
+      { key: 'singleton' },
+      { $set: { botDefaults: merged } },
+      { upsert: true }
+    );
+
+    logger.info({ botId: null, updated: Object.keys(update) }, 'admin: bot-defaults updated');
+    res.json({ ok: true, defaults: merged });
+  } catch (err) {
+    logger.warn({ err: err.message }, 'admin: PUT bot-defaults failed');
+    res.status(500).json({ error: err.message });
+  }
+});
 // FIX-2026-08-08 (rev2): เคลียร์ DPS state (dynamicSizeCurrent / dynamicLayersCurrent /
 //   dynamicSizeLastResults / dynamicSizeCooldownUntil / dynamicSizeLastEvaluatedAt) ทุกบอท
 //   - สำหรับกรณี state เพี้ยนจากการ migrate / config เปลี่ยน / ต้องการเริ่มนับใหม่ทั้งระบบ
