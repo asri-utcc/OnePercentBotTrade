@@ -332,6 +332,7 @@ function renderCmPositionsPanel() {
 
   if (positions.length === 0) {
     listEl.innerHTML = '<div class="cm-positions-empty">ไม่มี position ที่เปิดอยู่ — เมื่อบอท BUY fill จะปรากฏที่นี่ (คลิกเพื่อดู modal)</div>';
+    updateCmPositionsFooter(0, 0, 0);
     return;
   }
 
@@ -348,6 +349,37 @@ function renderCmPositionsPanel() {
       { ...opts, botName: p.botName || p.symbol },
     ))
     .join('');
+
+  // 2026-08-08: Update totals footer (Cost + Unrealized PnL) from API response
+  const resp = _cmPositions || {};
+  updateCmPositionsFooter(positions.length, Number(resp.totalCostUsdt) || 0, Number(resp.totalUnrealizedUsdt) || 0);
+}
+
+/**
+ * 2026-08-08: Update the small totals footer (Total Cost + Unrealized PnL + %)
+ * - Hidden when positions.length === 0
+ * - PnL color mirrors cards (pnl-bull / pnl-bear) for visual consistency
+ */
+function updateCmPositionsFooter(count, totalCost, totalPnl) {
+  const footerEl = document.getElementById('cm-positions-footer');
+  if (!footerEl) return;
+  if (count === 0) {
+    footerEl.hidden = true;
+    return;
+  }
+  footerEl.hidden = false;
+  const totalPnlPct = totalCost > 0 ? (totalPnl / totalCost * 100) : 0;
+  const sign = totalPnl >= 0 ? '+' : '';
+  const costEl = document.getElementById('cm-pf-cost');
+  const pnlEl = document.getElementById('cm-pf-pnl');
+  const pnlPctEl = document.getElementById('cm-pf-pnl-pct');
+  if (costEl) costEl.textContent = Number(totalCost).toFixed(2);
+  if (pnlEl) {
+    pnlEl.textContent = `${sign}${Number(totalPnl).toFixed(4)}`;
+    pnlEl.classList.toggle('pnl-bull', totalPnl >= 0);
+    pnlEl.classList.toggle('pnl-bear', totalPnl < 0);
+  }
+  if (pnlPctEl) pnlPctEl.textContent = `(${sign}${totalPnlPct.toFixed(3)}%)`;
 }
 
 /* ════════════════════════════════════════════════════════════════════
