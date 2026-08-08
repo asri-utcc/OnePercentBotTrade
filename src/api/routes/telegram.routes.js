@@ -35,6 +35,15 @@ router.get('/config', requireAuth, async (req, res) => {
         { volumeMinUSDT: 100000, topN: 50, kcTightPct: 1.0, squeezeMinPct: 40, trendMinPct: 50 },
         (cfg && cfg.qualityThresholds) || {},
       ),
+      // FIX-2026-08-08: CB Version (global setting — Feature #2)
+      //   - 'v2' = CBv2 only (4 red candles below lowerKC → cooldown)
+      //   - 'v3' = CBv2 + ST3 same-candle on upper-TF (default)
+      cbVersion: (cfg && cfg.cbVersion) || 'v3',
+      // FIX-2026-08-08: Auto Delete Bot (global setting — Feature #5)
+      autoDeleteBotEnabled:   !!(cfg && cfg.autoDeleteBotEnabled),
+      autoDeleteBotDays:      (cfg && Number.isFinite(cfg.autoDeleteBotDays)) ? cfg.autoDeleteBotDays : 30,
+      autoDeleteBotWarningDays: (cfg && Number.isFinite(cfg.autoDeleteBotWarningDays)) ? cfg.autoDeleteBotWarningDays : 3,
+      autoDeleteBotLastRunAt: (cfg && cfg.autoDeleteBotLastRunAt) || null,
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -75,6 +84,21 @@ router.put('/config', requireAuth, async (req, res) => {
       if (Number.isFinite(t.trendMinPct)) clean.trendMinPct = Math.max(0, Math.min(100, t.trendMinPct));
       update.qualityThresholds = clean;
       qualityChanged = true;
+    }
+
+    // FIX-2026-08-08: CB Version (Feature #2) — global toggle
+    if (body.cbVersion === 'v2' || body.cbVersion === 'v3') {
+      update.cbVersion = body.cbVersion;
+    }
+    // FIX-2026-08-08: Auto Delete Bot (Feature #5) — global settings
+    if (typeof body.autoDeleteBotEnabled === 'boolean') {
+      update.autoDeleteBotEnabled = body.autoDeleteBotEnabled;
+    }
+    if (Number.isFinite(body.autoDeleteBotDays)) {
+      update.autoDeleteBotDays = Math.max(7, Math.min(365, parseInt(body.autoDeleteBotDays, 10)));
+    }
+    if (Number.isFinite(body.autoDeleteBotWarningDays)) {
+      update.autoDeleteBotWarningDays = Math.max(1, Math.min(30, parseInt(body.autoDeleteBotWarningDays, 10)));
     }
 
     await AppConfig.updateOne({ key: 'singleton' }, { $set: update });

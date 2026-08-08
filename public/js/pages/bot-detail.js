@@ -429,8 +429,76 @@ function renderMetaChips() {
         hq.title = `คลิกเพื่อดู breakdown · อัปเดตล่าสุด: ${updated}`;
       }
     }
+
+    // FIX-2026-08-06: Delist pill + banner (mirror buildDelistBadge in bots.js)
+    renderDelistInfo(b);
   } catch (err) {
     console.error('renderMetaChips', err);
+  }
+}
+
+// FIX-2026-08-06: แสดง delist pill + warning banner ที่ header
+//   - ใช้ field ที่ /api/bots/:id ส่งมา (isAtRisk, isDelisted, delistTime, delistDateIso, daysUntil)
+function renderDelistInfo(b) {
+  const pill = document.getElementById('hero-delist');
+  const banner = document.getElementById('delist-banner');
+  if (!pill || !banner) return;
+
+  let pillClass = '';
+  let pillText = '';
+  let pillTitle = '';
+
+  if (b.isDelisted === true) {
+    pillClass = 'is-delisted';
+    pillText = '❌ DELISTED';
+    pillTitle = 'Symbol ถูก delist ไปแล้ว';
+  } else if (b.daysUntil != null && Number.isFinite(b.daysUntil)) {
+    const dt = b.delistDateIso ? new Date(b.delistDateIso).toLocaleString('th-TH') : '?';
+    const days = b.daysUntil.toFixed(1);
+    if (b.daysUntil <= 3) {
+      pillClass = 'is-urgent';
+      pillText = `🚨 DELIST ${days}d`;
+    } else if (b.daysUntil <= 7) {
+      pillClass = 'is-warning';
+      pillText = `⚠️ DELIST ${days}d`;
+    } else {
+      pillClass = 'is-scheduled';
+      pillText = `📅 DELIST ${days}d`;
+    }
+    pillTitle = `Binance Delist Schedule\nDelist: ${dt}\nDays until: ${days}\n• ≤ 7d: block new BUY\n• ≤ 3d: force-close position`;
+  } else if (b.isAtRisk === true) {
+    pillClass = 'is-monitoring';
+    pillText = '👁️ MONITORING';
+    pillTitle = 'Binance ติด Monitoring tag — early warning';
+  }
+
+  if (pillText) {
+    pill.className = `delist-pill ${pillClass}`;
+    pill.textContent = pillText;
+    pill.title = pillTitle;
+    pill.style.display = '';
+  } else {
+    pill.style.display = 'none';
+  }
+
+  // Banner — แสดงเฉพาะตอนมี delist schedule (ไม่ใช่ early warning อย่างเดียว)
+  if (b.daysUntil != null && Number.isFinite(b.daysUntil)) {
+    const dt = b.delistDateIso ? new Date(b.delistDateIso).toLocaleString('th-TH') : '?';
+    const days = b.daysUntil.toFixed(1);
+    let bannerClass = 'is-scheduled';
+    let bannerText = `📅 Binance Delist Schedule: <strong>${dt}</strong> (${days} วัน)`;
+    if (b.daysUntil <= 3) {
+      bannerClass = 'is-urgent';
+      bannerText = `🚨 <strong>URGENT:</strong> Binance จะ delist ${b.symbol} ในอีก <strong>${days} วัน</strong> (${dt}) — บอทนี้จะถูก auto-pause + force-close position`;
+    } else if (b.daysUntil <= 7) {
+      bannerClass = 'is-warning';
+      bannerText = `⚠️ <strong>WARNING:</strong> Binance จะ delist ${b.symbol} ในอีก <strong>${days} วัน</strong> (${dt}) — บอทจะ block การเปิด position ใหม่`;
+    }
+    banner.className = `delist-banner ${bannerClass}`;
+    banner.innerHTML = bannerText;
+    banner.style.display = '';
+  } else {
+    banner.style.display = 'none';
   }
 }
 

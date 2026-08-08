@@ -203,6 +203,10 @@
         <button type="button" class="bot-chip" data-filter="has-error" title="บอทที่มี lastError">⚠️ Error</button>
         <button type="button" class="bot-chip" data-filter="has-warning" title="บอทที่มี warning (เช่น SELL partial-fill latched 1h)">⏰ Warning</button>
         <button type="button" class="bot-chip" data-filter="dca" title="บอท DCA + BEP stack mode">📚 DCA</button>
+        <!-- FIX-2026-08-08: Cooldown filter (CBv2/CBv3/DCA-freeze/SELL-partial) — Feature #4 -->
+        <button type="button" class="bot-chip" data-filter="cooldown" title="บอทที่มี cooldown active (CBv2/CBv3/DCA-freeze/SELL-partial)">⏸ Cooldown</button>
+        <button type="button" class="bot-chip" data-filter="cbv2-cooldown" title="บอทที่ cooldown CBv2">💎 CBv2</button>
+        <button type="button" class="bot-chip" data-filter="cbv3-cooldown" title="บอทที่ cooldown CBv3 (v3 active)">💎 CBv3</button>
         <button type="button" class="bot-chip is-clear" id="bot-filter-clear" hidden title="ล้างการค้นหา + filter chips ทั้งหมด">✕ ล้างทั้งหมด</button>
       </div>
     </div>
@@ -227,7 +231,7 @@
         <div class="modal-body">
           <div class="lux-form-section">
             <div class="lux-form-label">ตั้งชื่อบอท</div>
-            <input type="text" class="form-control" id="nb-name" placeholder="เช่น SOL scalp · 1m" />
+            <input type="text" class="form-control" id="nb-name" placeholder="เช่น BTC(bAdd) — auto-fill จากคู่เทรด" />
           </div>
           <div class="row g-2 lux-form-section">
             <div class="col-6">
@@ -237,8 +241,8 @@
             <div class="col-6">
               <div class="lux-form-label">Timeframe</div>
               <select class="form-select" id="nb-timeframe">
-                <option value="1m">1m</option><option value="3m">3m</option>
-                <option value="5m" selected>5m</option><option value="15m">15m</option>
+                <option value="1m">1m</option><option value="3m" selected>3m</option>
+                <option value="5m">5m</option><option value="15m">15m</option>
                 <option value="30m">30m</option><option value="1h">1h</option>
                 <option value="2h">2h</option><option value="4h">4h</option><option value="1d">1d</option>
               </select>
@@ -248,18 +252,18 @@
           <div class="row g-2 lux-form-section">
             <div class="col-6">
               <div class="lux-form-label">ทุน/ไม้ (USDT)</div>
-              <input type="number" class="form-control" id="nb-capital" value="10" step="0.01" min="1" />
+              <input type="number" class="form-control" id="nb-capital" value="9" step="0.01" min="1" />
             </div>
             <div class="col-6">
               <div class="lux-form-label">จำนวนไม้</div>
-              <input type="number" class="form-control" id="nb-maxtrades" value="10" step="1" min="1" max="100" />
+              <input type="number" class="form-control" id="nb-maxtrades" value="1" step="1" min="1" max="100" />
             </div>
           </div>
           <div class="row g-2 lux-form-section">
             <div class="col-4">
               <div class="lux-form-label d-flex justify-content-between align-items-center">
                 <span>TP %</span>
-                <button type="button" class="btn btn-sm btn-outline-warning" id="nb-tp-recommend" title="คำนวณ TP% จาก Min %KC(500 bars) + trend(upper-TF)">
+                <button type="button" class="btn btn-sm btn-outline-warning" id="nb-tp-recommend" title="คำนวณ TP% จาก Min %KC(30 bars) + trend(upper-TF)">
                   ✨ Get
                 </button>
               </div>
@@ -267,16 +271,16 @@
             </div>
             <div class="col-4">
               <div class="lux-form-label">Retry (นาที)</div>
-              <input type="number" class="form-control" id="nb-retry" value="1" step="0.1" min="0.1" max="60" />
+              <input type="number" class="form-control" id="nb-retry" value="0.2" step="0.1" min="0.1" max="60" />
               <small class="text-muted">ทศนิยมได้ เช่น 0.5 = 30 วินาที</small>
             </div>
             <div class="col-4">
               <div class="lux-form-label">Retry max</div>
-              <input type="number" class="form-control" id="nb-retry-max" value="1" step="1" min="0" max="10" />
+              <input type="number" class="form-control" id="nb-retry-max" value="8" step="1" min="0" max="10" />
             </div>
             <div class="col-4">
               <div class="lux-form-label">KC Mult</div>
-              <input type="number" class="form-control" id="nb-kc-mult" value="1.5" step="0.1" min="0.5" max="5" title="ความกว้างของ Keltner Channel (default 1.5)" />
+              <input type="number" class="form-control" id="nb-kc-mult" value="1.2" step="0.1" min="0.5" max="5" title="ความกว้างของ Keltner Channel (default 1.2)" />
             </div>
             <div class="col-4">
               <div class="lux-form-label">Min spread (ticks)</div>
@@ -284,11 +288,11 @@
             </div>
             <div class="col-4">
               <div class="lux-form-label">TP suggest window (bars)</div>
-              <input type="number" class="form-control" id="nb-suggest-tp-window" value="500" step="10" min="30" max="1000" />
+              <input type="number" class="form-control" id="nb-suggest-tp-window" value="30" step="10" min="30" max="1000" />
             </div>
           </div>
           <div class="lux-form-hint">0 = วางครั้งเดียว ไม่ retry · 1 = วางได้อีก 1 ครั้งถ้า bid ขยับ · บอทจะบวก fee buffer ให้อัตโนมัติ</div>
-          <div class="lux-form-hint" id="nb-tp-hint">กด ✨ Get เพื่อให้ระบบคำนวณ TP% จาก Min %KC(500 bars) + EMA20 trend(upper-TF) ของคู่เทรด/tf ที่เลือก</div>
+          <div class="lux-form-hint" id="nb-tp-hint">กด ✨ Get เพื่อให้ระบบคำนวณ TP% จาก Min %KC(window ด้านบน) + EMA20 trend(upper-TF) ของคู่เทรด/tf ที่เลือก · ระบบจะกด ✨ Get ให้อัตโนมัติเมื่อเปิด modal</div>
           <div class="lux-form-section">
             <div class="form-check">
               <input class="form-check-input" type="checkbox" id="nb-s1-only-down" checked />
@@ -321,7 +325,7 @@
               </small>
             </div>
             <div class="form-check mt-2">
-              <input class="form-check-input" type="checkbox" id="nb-cb-enabled" checked />
+              <input class="form-check-input" type="checkbox" id="nb-cb-enabled" />
               <label class="form-check-label" for="nb-cb-enabled">
                 🚨 <strong>Circuit-breaker panic-sell — ปิดทุก position เมื่อกราฟดิ่ง 3 แท่งติด</strong>
               </label>
@@ -332,8 +336,83 @@
                 · <strong>ปิด</strong>: ไม่แตะ — ใช้ logic เดิม (อาจขาดทุนต่อถ้ากราฟไหล)
               </small>
             </div>
+            <!-- FIX-2026-08-08: CBv2 section — hidden if AppConfig.cbVersion !== 'v2' (applied via applyCbVersionToNewBot) -->
+            <div id="nb-cbv2-section" class="form-check mt-2">
+              <input class="form-check-input" type="checkbox" id="nb-cbv2-enabled" checked />
+              <label class="form-check-label" for="nb-cbv2-enabled">
+                💎 <strong>CBv2 sustained panic-sell — ปิดทุก position + cooldown BUY เมื่อกราฟดิ่ง 4 แท่งติด</strong>
+              </label>
+              <div class="row g-2 mt-1 align-items-center">
+                <div class="col-auto">
+                  <label for="nb-cbv2-lock-hours" class="col-form-label small">Cooldown (ชั่วโมง):</label>
+                </div>
+                <div class="col-auto">
+                  <input type="number" class="form-control form-control-sm" id="nb-cbv2-lock-hours" min="0.5" max="168" step="0.5" value="8" style="width: 100px;" />
+                </div>
+                <div class="col-auto"><span class="text-muted small">(0.5–168 ชม., default 8)</span></div>
+              </div>
+              <small class="text-muted d-block mt-1">
+                · stricter กว่า CB: 4 แท่งติด red below lowerKC → cancel SELL + MARKET SELL + <strong>cooldown S1 BUY</strong> cbv2LockHours ชั่วโมง
+                · <strong>HYBRID mode</strong>: บอทยัง enable, Auto-pause/resume ยังทำงานปกติ (เป็นอิสระจาก CBv2 cooldown)
+                · ผู้ใช้ปลด cooldown manual ได้ที่หน้า bot-edit
+              </small>
+            </div>
+
+            <!-- FIX-2026-08-08: Feature #2 — CBv3 (CBv2 + ST3 upper-TF) — new bot modal -->
+            <div id="nb-cbv3-section" class="form-check mt-2">
+              <input class="form-check-input" type="checkbox" id="nb-cbv3-enabled" checked />
+              <label class="form-check-label" for="nb-cbv3-enabled">
+                💎 <strong>CBv3 panic-sell (CBv2 + ST3 upper-TF)</strong> — ปิดทุก position + cooldown BUY
+              </label>
+              <div class="row g-2 mt-1 align-items-center">
+                <div class="col-auto">
+                  <label for="nb-cbv3-lock-hours" class="col-form-label small">Cooldown (ชั่วโมง):</label>
+                </div>
+                <div class="col-auto">
+                  <input type="number" class="form-control form-control-sm" id="nb-cbv3-lock-hours" min="0.5" max="168" step="0.5" value="8" style="width: 100px;" />
+                </div>
+                <div class="col-auto"><span class="text-muted small">(0.5–168 ชม., default 8)</span></div>
+              </div>
+              <small class="text-muted d-block mt-1">
+                · CBv2 pattern + ST3 no-trade (Bearish Engulfing / Shooting Star) on <strong>upper-TF</strong> (3m/5m→1h, 15m→4h, 1h→1d) on SAME candle
+                · Active version: <span id="nb-cbv-version-badge" class="lux-badge lux-badge-warn">v3</span> — เปลี่ยนได้ที่ <a href="/settings.html">Master Config ⚙️</a>
+                · mutually exclusive with CBv2 — ถ้าปิด CBv3 + AppConfig.cbVersion='v2' จะใช้ CBv2 แทน
+              </small>
+            </div>
+
+            <!-- FIX-2026-08-08: Feature #3 — CB Auto-Unlock (opt-in, default OFF) -->
             <div class="form-check mt-2">
-              <input class="form-check-input" type="checkbox" id="nb-safe-trade-enabled" checked />
+              <input class="form-check-input" type="checkbox" id="nb-cb-auto-unlock-enabled" />
+              <label class="form-check-label" for="nb-cb-auto-unlock-enabled">
+                🔓 <strong>CB Auto-Unlock</strong> — ปลด cooldown อัตโนมัติ (3+ profitable signals)
+              </label>
+              <div class="row g-2 mt-1 align-items-center">
+                <div class="col-auto">
+                  <label for="nb-cb-auto-unlock-threshold" class="col-form-label small">Threshold (%):</label>
+                </div>
+                <div class="col-auto">
+                  <input type="number" class="form-control form-control-sm" id="nb-cb-auto-unlock-threshold" min="0.5" max="5" step="0.1" value="1" style="width: 100px;" />
+                </div>
+                <div class="col-auto"><span class="text-muted small">(0.5–5%, default 1%)</span></div>
+              </div>
+              <small class="text-muted d-block mt-1">
+                · opt-in (default OFF) · <strong>ไม่มี whipsaw guard</strong> ตามที่ user ระบุ
+              </small>
+            </div>
+
+            <!-- FIX-2026-08-08: Feature #1 — Dynamic Position Sizing (default ON) -->
+            <div class="form-check mt-2">
+              <input class="form-check-input" type="checkbox" id="nb-dynamic-size-enabled" checked />
+              <label class="form-check-label" for="nb-dynamic-size-enabled">
+                📊 <strong>Dynamic Position Sizing (DPS)</strong> — ปรับ size/layers ตาม trade history
+              </label>
+              <small class="text-muted d-block mt-1">
+                · 3 wins → +1 USDT size, +1 layer · 2 wins &gt;2% → +2 USDT · loss → -2 USDT/-2 layers
+                · Bounds: size 6..15 · layers 1..5 · <strong>skip</strong> เมื่อ DCA/Martingale ON
+              </small>
+            </div>
+            <div class="form-check mt-2">
+              <input class="form-check-input" type="checkbox" id="nb-safe-trade-enabled" />
               <label class="form-check-label" for="nb-safe-trade-enabled">
                 🛡️ <strong>Safe-trade filter</strong> — ก่อนซื้อตรวจ super-upper TF (3m/5m→4h, 15m→1d, 1h→1w) ว่าเป็นแท่งเขียวหรือเหนือ EMA20
               </label>
@@ -345,7 +424,7 @@
               </small>
             </div>
             <div class="form-check mt-2">
-              <input class="form-check-input" type="checkbox" id="nb-safe-trade-trendline-enabled" />
+              <input class="form-check-input" type="checkbox" id="nb-safe-trade-trendline-enabled" checked />
               <label class="form-check-label" for="nb-safe-trade-trendline-enabled">
                 📐 <strong>Safe-trade filter #2 (trendline support)</strong> — ก่อนซื้อตรวจ upper-TF (TREND_TF_MAP) ว่าราคา "เหนือ" เส้น trendline support (LuxAlgo pivot-low, CC BY-NC-SA 4.0)
               </label>
@@ -358,7 +437,7 @@
               </small>
             </div>
             <div class="form-check mt-2">
-              <input class="form-check-input" type="checkbox" id="nb-safe-trade-no-trade-enabled" />
+              <input class="form-check-input" type="checkbox" id="nb-safe-trade-no-trade-enabled" checked />
               <label class="form-check-label" for="nb-safe-trade-no-trade-enabled">
                 🚫 <strong>Safe-trade filter #3 (no-trade engulfing / shooting star)</strong> — ก่อนซื้อตรวจ upper-TF (TREND_TF_MAP) ว่าแท่งล่าสุดมี "nt"/"nt1" pattern (Bearish Engulfing + Shooting Star ใน upper KC)
               </label>
@@ -389,7 +468,7 @@
               <small class="text-muted d-block mt-1">ค่า default: 2% — ถ้า Min-%KC ต่ำกว่านี้จะ pause บอท</small>
             </div>
             <div class="form-check mt-2">
-              <input class="form-check-input" type="checkbox" id="nb-auto-update-tp" />
+              <input class="form-check-input" type="checkbox" id="nb-auto-update-tp" checked />
               <label class="form-check-label" for="nb-auto-update-tp">
                 ⏰ <strong>อัพเดท TP% อัตโนมัติทุกต้นชั่วโมง</strong>
               </label>
@@ -412,8 +491,8 @@
             <div class="row mt-2">
               <div class="col-md-6">
                 <label class="form-label" for="nb-auto-arm-loss-pct">🛡️ <strong>Auto-arm loss threshold (%)</strong></label>
-                <input type="number" class="form-control" id="nb-auto-arm-loss-pct" step="0.5" min="1" max="90" value="10" />
-                <small class="text-muted">% ขาดทุนของ position ที่ trigger auto-arm (range 1-90, default 10)</small>
+                <input type="number" class="form-control" id="nb-auto-arm-loss-pct" step="0.5" min="1" max="90" value="6.3" />
+                <small class="text-muted">% ขาดทุนของ position ที่ trigger auto-arm (range 1-90, default 6.3)</small>
               </div>
               <div class="col-md-6">
                 <label class="form-label" for="nb-auto-arm-age-hours">⏰ <strong>Auto-arm age threshold (ชม.)</strong></label>
@@ -422,7 +501,7 @@
               </div>
             </div>
             <div class="form-check mt-2">
-              <input class="form-check-input" type="checkbox" id="nb-sl-ukc-trigger-on-profit" />
+              <input class="form-check-input" type="checkbox" id="nb-sl-ukc-trigger-on-profit" checked />
               <label class="form-check-label" for="nb-sl-ukc-trigger-on-profit">
                 💰 <strong>ให้ SL-UKC trigger ตอนกำไรด้วย</strong> (default: ปิด — trigger เฉพาะตอนขาดทุน)
               </label>
@@ -644,6 +723,7 @@
   <script src="/js/ws-client.js"></script>
   <script>window.NAV_ACTIVE = 'bots';</script>
   <script src="/js/partials/nav.js"></script>
+  <script src="/js/partials/dailyTargetGauge.js"></script>
   <script src="/js/luxConfirm.js"></script>
   <script src="/js/partials/positionCard.js"></script>
   <script src="/js/partials/qualityModal.js"></script>

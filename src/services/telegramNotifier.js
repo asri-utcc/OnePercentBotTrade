@@ -29,6 +29,10 @@ const DEFAULT_EVENTS = {
   tpLowPnL: true,
   // FIX-2026-08-01: Circuit-breaker (CB) panic-sell — เดิมชื่อ sls1PanicClose (ไม่มีใน list มาก่อน)
   cbPanicClose: true,
+  // FIX-2026-08-06: CBv2 — sustained 3-candle breach lock (strict CB + lock บอท cbv2LockHours hours)
+  cbv2PanicClose: true,
+  // FIX-2026-08-06: แจ้งเมื่อบอทถูก lock (cbv2 lock activate) — anti-spam: ส่งครั้งเดียวต่อ lock
+  botLocked: true,
   // FIX-2026-08-03: Safe-trade filter #2 (trendline) status transitions pass↔blocked (anti-spam: เฉพาะ transition)
   trendlineStatusChanged: true,
   // FIX-2026-08-02: DCA + BEP stack events (per user request: full notifications, not compact)
@@ -37,6 +41,33 @@ const DEFAULT_EVENTS = {
   bnbLowBalance: true,
   // FIX-2026-08-05: Auto-Buy BNB — ผลของการเติม BNB (success/failed/skipped) — critical ดูแต่ละครั้ง
   bnbAutoBuy: true,
+  // FIX-2026-08-06: Binance delist monitor — แจ้งเมื่อ symbol ติด Monitoring tag / เข้า delist schedule
+  //   - delistDetected: confirmed delist (Binance ประกาศแล้ว มี delistTime) — anti-spam latch กันซ้ำ
+  //   - delistMonitoring: early warning (Binance ติด Monitoring tag แต่ยังไม่ประกาศวัน) — critical warning
+  delistDetected: true,
+  delistMonitoring: true,
+  // FIX-2026-08-06: delist-driven force-close (จาก botManager.checkDelistScheduleBots Phase B)
+  positionForceClosed: true,
+  // FIX-2026-08-06: SELL slippage warning — SELL fill below target > 3% (severe slip, often MARKET fallback)
+  //   - แจ้งเตือนเพื่อให้ตรวจสอบ (อาจเป็น holding-retry MARKET หรือ admin close)
+  slippageWarning: true,
+  // FIX-2026-08-07: Auto Add New Bot — แจ้งเตือนเมื่อระบบ auto-create บอทใหม่
+  //   - ส่งทุกครั้งที่มีการสร้างบอทจาก autoAddBot service (manual/periodic)
+  autoAddBotCreated: true,
+  // FIX-2026-08-08: Feature #1 — Dynamic Position Sizing resize notification (size/layers changed)
+  //   - แจ้งเฉพาะเมื่อ size หรือ layers เปลี่ยนจริง (changed=true)
+  //   - ระบุ reason (3-wins / 2-wins-2pct / loss) + before/after
+  dpsResize: true,
+  // FIX-2026-08-08: Feature #2 — CBv3 panic-close (mirror cbv2PanicClose but with ST3 upper-TF)
+  cbv3PanicClose: true,
+  // FIX-2026-08-08: Feature #3 — Auto unlock cooldown (CB auto-unlocked after 3 profitable signals)
+  //   - แจ้งเมื่อระบบปลด cooldown ให้บอทอัตโนมัติ (3+ signals > threshold)
+  botAutoUnlocked: true,
+  // FIX-2026-08-08: Feature #5 — Auto Delete Bot (soft-delete) lifecycle events
+  //   - autoDeleteBotWarning: แจ้งล่วงหน้า N วันก่อน soft-delete
+  //   - autoDeleteBotRemoved: แจ้งเมื่อ soft-delete แล้ว
+  autoDeleteBotWarning: true,
+  autoDeleteBotRemoved: true,
 };
 const DEFAULT_THRESHOLDS = {
   positionLossPct: 2, positionProfitPct: 1, positionStuckMin: 30,
@@ -270,6 +301,7 @@ function renderMessage(eventKey, p, cfg) {
             tp_hit:                 '🎯 TP target hit',
             tp_trend_boosted:       '🎯 TP (trend-boosted)',
             cb_panic:                '🚨 Circuit-breaker panic-close',
+            cbv2_panic:              '💎 CBv2 sustained panic-close (bot locked)',
             stop_loss_upper_kc:     '🛑 Stop-loss (upper KC)',
             market_fallback:        '⚠️ Market fallback',
             manual_api_market:      '🔧 Manual API (market)',
@@ -333,6 +365,12 @@ function renderMessage(eventKey, p, cfg) {
       // FIX-2026-08-01: Circuit-breaker (CB) panic-sell — เดิมชื่อ case 'sls1PanicClose'
       case 'cbPanicClose':
         return `🚨 Circuit-breaker panic-sell — ปิดทุก position\nBot: ${p.botName}\nSymbol: ${p.symbol} (${p.timeframe || '?'})\n3 แท่งติด red + below lowerKC → กันกราฟไหล\nClosed: ${p.closedCount} ไม้\nLowerKC: ${p.lastLower || '?'}`;
+      // FIX-2026-08-07: CBv2 HYBRID — sustained 3-candle breach → force-close + cooldown S1 BUY (bot ยัง enabled)
+      case 'cbv2PanicClose':
+        return `💎 CBv2 sustained panic-sell — ปิดทุก position + cooldown BUY\nBot: ${p.botName}\nSymbol: ${p.symbol} (${p.timeframe || '?'})\n4 แท่งติด red + below lowerKC → กันกราฟไหลต่อเนื่อง\nClosed: ${p.closedCount} ไม้\nCooldown: ${p.lockHours || '?'} ชั่วโมง (until ${p.lockedUntil || '?'})\nLowerKC: ${p.lastLower || '?'}\n\n⏸ บอทยัง enable + Auto-pause/resume ยังทำงานปกติ — แค่กั้น S1 BUY ระหว่าง cooldown\n📌 Manual clear cooldown: POST /api/bots/<id>/unlock-cbv2`;
+      // FIX-2026-08-07: HYBRID — บอทถูกบังคับ cooldown (BUY suppressed) — บอทยังรัน ไม่ disable
+      case 'botLocked':
+        return `⏸ Bot cooldown (CBv2)\nBot: ${p.botName}\nReason: ${p.reason || 'cbv2_panic'}\nCooldown until: ${p.lockedUntil || '?'}\nDuration: ${p.lockHours || '?'} ชั่วโมง\n\n📌 บอทยัง enable — แค่กั้น BUY ระหว่าง cooldown (Auto-pause/resume ยังทำงานแยก)\n📌 Manual clear: POST /api/bots/<id>/unlock-cbv2`;
       // FIX-2026-08-03: Safe-trade filter #2 (trendline) status transition (pass ↔ blocked)
       //   - แจ้งเฉพาะตอน transition (กัน spam) — first scan หรือ warmup ไม่ส่ง
       //   - ตัวอย่าง: "📐 BNBUSDT 5m — trendline: pass → blocked (price 605 < TL 612.3, gap -1.20%)"
@@ -362,6 +400,59 @@ function renderMessage(eventKey, p, cfg) {
       // FIX-2026-07-30: reconcile ตรวจเจอ DB=sold แต่ Binance SELL order ยังไม่ FILLED
       case 'sellOrphanDetected':
         return `🚨 SELL orphan detected (reconcile)\nBot: ${p.botName}\nSymbol: ${p.symbol} (${p.timeframe || '?'})\nTrade: ${p.tradeId}\nDB says sold but Binance SELL ${p.orderId} status = ${p.liveStatus}\nExecuted: ${p.executedQty} / ${p.origQty}\n→ ตรวจสอบด้วยตัวเอง — manual recovery หรือปล่อยให้ fill เอง`;
+      // FIX-2026-08-06: SELL slippage warning — SELL filled below target > 3%
+      //   - reason: TP hit / market_fallback / manual_api_market / holding_retry_recovered
+      //   - indicates price dropped between BUY and SELL fill (MARKET fallback path)
+      case 'slippageWarning': {
+        const slipPct = p.slipPct != null ? Number(p.slipPct).toFixed(2) : '?';
+        const sellPrice = p.sellPrice != null ? formatPrice(Number(p.sellPrice), p.symbol) : '?';
+        const target = p.targetSellPrice != null ? formatPrice(Number(p.targetSellPrice), p.symbol) : '?';
+        const pnlPct = p.pnlPercent != null ? Number(p.pnlPercent).toFixed(2) : '?';
+        const reason = p.sellReason || 'unknown';
+        return `📉 SELL slippage warning (${slipPct}%)\nBot: ${p.botName}\nSymbol: ${p.symbol}\nReason: ${reason}\nSold: ${sellPrice} (target was ${target})\nP&L: ${pnlPct}%\nTrade: ${p.tradeId}\n→ fill ต่ำกว่า target > 3% — ตรวจสอบ TP target + MARKET fallback path`;
+      }
+      // FIX-2026-08-07: Auto Add New Bot — แจ้งเตือนเมื่อ auto-create บอทใหม่
+      //   - bot ถูกสร้างในสถานะ DISABLED — ต้องไปเปิดเองที่หน้า bots.html
+      //   - ส่งทุกครั้งที่ autoAddBot service สร้างบอท (manual/periodic)
+      case 'autoAddBotCreated': {
+        const score = p.score != null ? p.score.toFixed(2) : '?';
+        const kcMin = p.kcMinPct != null ? p.kcMinPct.toFixed(3) : '?';
+        const tp = p.suggestedTpPct != null ? p.suggestedTpPct.toFixed(3) : '?';
+        const tf = p.timeframe || '?';
+        const ae = p.autoEnabled === true;
+        // FIX-2026-08-07: บอก user ว่าบอทเริ่มเทรดแล้ว (default ON) หรือยัง DISABLED
+        const tail = ae
+          ? '\n\n▶️ บอทเริ่มเทรดทันทีแล้ว (spawnTrader) · ดูสถานะที่ /bots.html'
+          : '\n\n⏸ บอทอยู่ในสถานะ DISABLED — ไปเปิดที่หน้า bots.html ถ้าต้องการเทรด';
+        return `🤖 Auto Add New Bot — สร้างบอทใหม่อัตโนมัติ\nBot: ${p.botName}\nSymbol: ${p.symbol} (${tf})\nScore: ${score}\nkcMin: ${kcMin}%\nTP (NET): ${tp}%${tail}`;
+      }
+      // FIX-2026-08-08: Feature #2 — CBv3 panic-close (mirror cbv2PanicClose but with ST3 upper-TF gate)
+      case 'cbv3PanicClose':
+        return `💎 CBv3 panic-sell (CBv2 + ST3) — ปิดทุก position + cooldown BUY\nBot: ${p.botName}\nSymbol: ${p.symbol} (${p.timeframe || '?'})\nCBv2 + ST3 no-trade on upper-TF → กันกราฟไหลต่อเนื่อง\nClosed: ${p.closedCount} ไม้\nCooldown: ${p.lockHours || '?'} ชั่วโมง (until ${p.lockedUntil || '?'})\nLowerKC: ${p.lastLower || '?'}\n\n⏸ บอทยัง enable + Auto-pause/resume ยังทำงานปกติ — แค่กั้น S1 BUY ระหว่าง cooldown\n📌 Manual clear cooldown: POST /api/bots/<id>/unlock-cbv2`;
+      // FIX-2026-08-08: Feature #1 — Dynamic Position Sizing resize (size/layers changed)
+      //   - reason: '3-wins' | '2-wins-2pct' | 'loss' (ตัวเลขเปลี่ยนตาม config)
+      //   - before/after show current USDT size + layer count
+      // FIX-2026-08-08 (rev2): ค่า clamp/cooldown มาจาก payload (ตั้งได้ที่ /settings.html section 🔟)
+      //   + dry-run mode: คำนวณ + แจ้งเตือน แต่ไม่ได้ปรับจริง
+      case 'dpsResize': {
+        const cdMin = Number.isFinite(Number(p.cooldownMinutes)) ? Number(p.cooldownMinutes) : 5;
+        const bMinS = p.minSize ?? 6, bMaxS = p.maxSize ?? 15;
+        const bMinL = p.minLayers ?? 1, bMaxL = p.maxLayers ?? 5;
+        const head = p.dryRun
+          ? '🧪 DPS (DRY-RUN — คำนวณเฉยๆ ไม่ได้ปรับจริง)'
+          : '📊 DPS resize (Dynamic Position Sizing)';
+        return `${head}\nBot: ${p.botName}\nSymbol: ${p.symbol} (${p.timeframe || '?'})\nReason: ${p.reason || '?'}\nBefore: $${p.beforeSize ?? '?'} × ${p.beforeLayers ?? '?'} layers\nAfter: $${p.afterSize ?? '?'} × ${p.afterLayers ?? '?'} layers\nLast trade: pnl ${p.pnlPct != null ? Number(p.pnlPct).toFixed(2) + '%' : '?'} (${p.isWin ? 'WIN' : 'LOSS'})\nCooldown: ${cdMin} นาที (กัน whipsaw)\n\n💡 clamp: $${bMinS}..$${bMaxS} · ${bMinL}..${bMaxL} layers — ปรับได้ที่ Settings 🔟`;
+      }
+
+      // FIX-2026-08-08: Feature #3 — Auto unlock cooldown (CB unlocked after 3+ profitable signals)
+      case 'botAutoUnlocked':
+        return `🔓 Cooldown ปลดอัตโนมัติ (3+ profitable signals)\nBot: ${p.botName}\nSymbol: ${p.symbol}\nSignals found: ${p.signalsFound || '?'}\nThreshold: ${p.threshold || '?'}%\nSource: cbAutoUnlock service\n\n✅ บอทกลับมาเทรดได้แล้ว (BUY gate reset)`;
+      // FIX-2026-08-08: Feature #5 — Auto Delete Bot — warning (แจ้งล่วงหน้า N วัน)
+      case 'autoDeleteBotWarning':
+        return `⏰ Auto Delete Bot — แจ้งล่วงหน้า\nBot: ${p.botName}\nSymbol: ${p.symbol}\nDowntime: ${p.downtimeDays || '?'} วัน (threshold ${p.thresholdDays || '?'} วัน)\nRemaining: ${p.remainingDays || '?'} วัน\n\n⚠️ บอทจะถูก soft-delete (เก็บ 30 วัน แล้วลบถาวร) — ถ้าต้องการเก็บไว้ → enable บอทในหน้า bots.html`;
+      // FIX-2026-08-08: Feature #5 — Auto Delete Bot — soft-deleted (เก็บไว้ 30 วัน restore ได้)
+      case 'autoDeleteBotRemoved':
+        return `🗑 Auto Delete Bot — soft-deleted\nBot: ${p.botName}\nSymbol: ${p.symbol}\nDowntime: ${p.downtimeDays || '?'} วัน (threshold ${p.thresholdDays || '?'} วัน)\n\n📌 Restore ได้ภายใน 30 วัน ผ่าน POST /api/bots/<id>/restore\n📌 หลัง 30 วัน จะถูกลบถาวร (admin cleanup script)`;
       // FIX-2026-08-02: DCA + BEP stack events (full notifications, not compact — per user request)
       case 'dcaLayerAdded': {
         const layerIdx = p.layerIndex || '?';
@@ -390,6 +481,28 @@ function renderMessage(eventKey, p, cfg) {
       }
       case 'dcaMaxLayersHit':
         return `⚠️ DCA Max Layers Reached — skip BUY\nBot: ${p.botName}\nSymbol: ${p.symbol}\nStack already at ${p.layerCount}/${p.maxLayers} layers\nNo new layer will be added until SELL fills or stack closes`;
+      // FIX-2026-08-06: Binance delist detected (confirmed — symbol appears in /sapi/v1/spot/delist-schedule)
+      //   - triggered by delistMonitor:scheduled event (first time a symbol enters schedule)
+      //   - telegramNotifier marks symbol as notified via delistMonitor.markNotified() (anti-spam latch)
+      //   - botManager auto-pause + force-close runs in parallel
+      case 'delistDetected': {
+        const dt = p.delistTime != null ? new Date(p.delistTime).toISOString() : '?';
+        const days = p.daysUntil != null ? p.daysUntil.toFixed(2) : '?';
+        return `🚨 Binance DELIST detected\nSymbol: ${p.symbol}\nDelist time: ${dt}\nDays until: ${days}\n\n⚠️ บอททุกตัวที่ trade ${p.symbol}:\n• Auto-paused (ภายใน 7 �ัน)\n• Force-close position (ภายใน 3 วัน)\n• Block new BUY\n\n🔗 Binance announcement: https://www.binance.com/en/support/announcement/list/161`;
+      }
+      // FIX-2026-08-06: Binance Monitoring tag (early warning — symbol ไม่มี delist date แต่เ�ี่ยง)
+      //   - ไม่ block trade แค่แจ้งเตือน
+      case 'delistMonitoring': {
+        const tagList = Array.isArray(p.tags) ? p.tags.join(', ') : (p.tags || 'Monitoring');
+        return `⚠️ Binance Monitoring tag — ${p.symbol}\nTags: ${tagList}\n\nSymbol นี้อยู่ในรายการติดตามของ Binance (ยังไม่ประกา� delist)\n• บอทยังเปิด position ใหม่ได้ (ไม่ block)\n• แต่ควรเฝ้าระวัง + พิจารณาลดขนาด position`;
+      }
+      // FIX-2026-08-06: positionForceClosed (delist-driven) — ส่งจาก botManager.checkDelistScheduleBots
+      case 'positionForceClosed': {
+        const pnl = p.pnl != null ? Number(p.pnl) : 0;
+        const sign = pnl >= 0 ? '+' : '';
+        const modeLabel = p.mode === 'market' ? 'MARKET SELL' : (p.mode || 'limit');
+        return `🚨 Force-close: Binance delist in ${p.daysUntil != null ? p.daysUntil.toFixed(1) : '?'}d\nBot: ${p.botName}\nSymbol: ${p.symbol} (${p.timeframe || '?'})\nTrade: ${p.tradeId}\nMode: ${modeLabel}\nPnL: ${sign}${pnl.toFixed(4)} USDT\nReason: ${p.reason || 'binance_delist'}`;
+      }
       // FIX-2026-07-26: สรุปการเทรดรายวัน/สัปดาห์/เดือน
       case 'dailySummary':
       case 'weeklySummary':
@@ -665,6 +778,27 @@ function bindEventHandlers() {
     }
   });
 
+  // FIX-2026-08-07: bot:cooldown event — HYBRID CBv2 (BUY suppressed) แจ้งเตือน cooldown state
+  //   - payload จาก trader._checkCBv2PanicClose: { botId, lockedUntil, lockHours, reason }
+  //   - HYBRID: บอทยัง enable, แค่กั้น BUY — message ใช้ template 'botLocked' (เดิม)
+  //   - ส่งครั้งเดียวต่อ cooldown event (no latch needed — trader จะส่งครั้งเดียวต่อ fire)
+  eventBus.on('bot:cooldown', async (p) => {
+    try {
+      if (!p || !p.botId) return;
+      const bot = await Bot.findById(p.botId, 'name').lean();
+      if (!bot) return;
+      await dispatch('botLocked', {
+        botId: p.botId,
+        botName: bot.name,
+        reason: p.reason || 'cbv2_panic',
+        lockedUntil: p.lockedUntil ? new Date(p.lockedUntil).toISOString() : null,
+        lockHours: p.lockHours || null,
+      });
+    } catch (err) {
+      logger.warn({ err: err.message }, 'telegramNotifier: bot:cooldown handler error');
+    }
+  });
+
   eventBus.on('bot:deleted', async (p) => {
     try {
       await dispatch('botDeleted', p);
@@ -822,6 +956,67 @@ function bindEventHandlers() {
       });
     } catch (err) {
       logger.warn({ err: err.message }, 'telegramNotifier: bnbAutoBuySkipped handler error');
+    }
+  });
+  // FIX-2026-08-06: Binance delist monitor events
+  //   - delistMonitor:scheduled → dispatch('delistDetected') with anti-spam latch via delistMonitor.markNotified()
+  //   - delistMonitor:monitoring-added → dispatch('delistMonitoring') per-symbol (early warning, no latch)
+  //   - delistMonitor:schedule-cleared → log only (Binance cancelled delisting)
+  eventBus.on('delistMonitor:scheduled', async (p) => {
+    try {
+      const cfg = await loadConfig();
+      if (!cfg.enabled || !cfg.hasToken || !p || !p.symbol) return;
+      const delistMonitor = require('./binanceDelistMonitor');
+      if (delistMonitor.wasNotified(p.symbol)) {
+        logger.debug({ symbol: p.symbol }, 'telegramNotifier: delist already notified — skip duplicate');
+        return;
+      }
+      const daysUntil = (p.delistTime - Date.now()) / (24 * 60 * 60 * 1000);
+      await dispatch('delistDetected', {
+        symbol: p.symbol,
+        delistTime: p.delistTime,
+        delistDateIso: p.delistDateIso,
+        daysUntil,
+      });
+      delistMonitor.markNotified(p.symbol);
+    } catch (err) {
+      logger.warn({ err: err.message, symbol: p && p.symbol }, 'telegramNotifier: delistMonitor:scheduled handler error');
+    }
+  });
+  eventBus.on('delistMonitor:monitoring-added', async (p) => {
+    try {
+      const cfg = await loadConfig();
+      if (!cfg.enabled || !cfg.hasToken || !p || !Array.isArray(p.symbols)) return;
+      for (const symbol of p.symbols) {
+        await dispatch('delistMonitoring', { symbol, tags: ['Monitoring'] });
+      }
+    } catch (err) {
+      logger.warn({ err: err.message }, 'telegramNotifier: delistMonitor:monitoring-added handler error');
+    }
+  });
+  eventBus.on('delistMonitor:schedule-cleared', async (p) => {
+    if (!p || !p.symbol) return;
+    logger.info({ symbol: p.symbol }, 'telegramNotifier: delist schedule cleared (no-op)');
+  });
+
+  // FIX-2026-08-07: Auto Add New Bot — relay autoAddBot:created event
+  //   - ส่งทุกครั้งที่ autoAddBot service สร้างบอทใหม่ (ทั้ง manual/periodic)
+  //   - bot ถูกสร้างในสถานะ DISABLED — message เตือน user ให้ไปเปิดเอง
+  eventBus.on('autoAddBot:created', async (p) => {
+    try {
+      if (!p || !p.botId) return;
+      await dispatch('autoAddBotCreated', {
+        botId: p.botId,
+        botName: p.botName || '(auto)',
+        symbol: p.symbol,
+        timeframe: p.timeframe,
+        score: p.score,
+        kcMinPct: p.kcMinPct,
+        suggestedTpPct: p.suggestedTpPct,
+        autoEnabled: p.autoEnabled === true, // FIX-2026-08-07: แยก message ระหว่าง "เริ่มเทรดแล้ว" vs "DISABLED รอเปิด"
+      });
+    } catch (err) {
+      logger.warn({ err: err.message }, 'telegramNotifier: autoAddBot:created handler error');
     }
   });
 }
@@ -1132,6 +1327,7 @@ function stop() {
   eventBus.removeAllListeners('trade:update');
   eventBus.removeAllListeners('bot:enabled');
   eventBus.removeAllListeners('bot:disabled');
+  eventBus.removeAllListeners('bot:cooldown'); // FIX-2026-08-07: HYBRID CBv2 cooldown event
   eventBus.removeAllListeners('bot:deleted');
   eventBus.removeAllListeners('insufficient:balance');
   eventBus.removeAllListeners('tp:low'); // FIX-2026-07-26
@@ -1139,6 +1335,10 @@ function stop() {
   usdtBalanceCache = null; // FIX-2026-07-27: reset balance cache
   bnbBalanceCache = null; // FIX-2026-08-05: reset BNB cache
   bnbBalanceNotified = false; // FIX-2026-08-05: reset latch
+  // FIX-2026-08-06: delist monitor event listeners
+  eventBus.removeAllListeners('delistMonitor:scheduled');
+  eventBus.removeAllListeners('delistMonitor:monitoring-added');
+  eventBus.removeAllListeners('delistMonitor:schedule-cleared');
   bound = false;
   logger.info('telegramNotifier: stopped');
 }

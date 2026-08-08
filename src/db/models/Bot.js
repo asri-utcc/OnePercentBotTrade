@@ -76,6 +76,7 @@ const botSchema = new mongoose.Schema(
     updateTpAt: { type: Number, default: null },
     enabled: { type: Boolean, default: false },
     enabledAt: { type: Date, default: null }, // เวลาที่ enable ล่าสุด (reset ทุกครั้งที่ disable→enable)
+    disabledAt: { type: Date, default: null }, // FIX-2026-08-08: เวลาที่ disable ล่าสุด (set on disableBot) — autoDeleteBot ใช้เป็น downtime anchor แทน createdAt (กันบอทที่ enable นานแล้วโดนลบทันทีหลัง disable)
     totalActiveMs: { type: Number, default: 0 }, // เวลาเปิดสะสมทั้งหมด (ms) — บวกเพิ่มตอน disable, บวกต่อตอน enabled
     status: { type: String, enum: BOT_STATUSES, default: 'idle' },
     activeTrades: { type: Number, default: 0 },
@@ -117,6 +118,17 @@ const botSchema = new mongoose.Schema(
     //   - ไม่ใช่ anti-spam latch โดยตรง (cbCheckInFlight mutex ทำหน้าที่นั้น)
     //   - audit trail สำหรับ dashboard "🚨 CB fired at HH:MM:SS"
     cbLastFiredAt: { type: Date, default: null },
+    // FIX-2026-08-06: CBv2 — sustained 3-candle breach lock (stricter than CB)
+    //   - fires เมื่อ CB pattern (isCBAt) matches ทั้ง current AND previous candle (i.e. 4 red candles ติด below lowerKC)
+    //   - on fire: force-close all positions + lock บอทเป็นเวลา cbv2LockHours hours (default 8, range 0.5..168)
+    //   - lock overrides Auto-pause-resume: ถ้า cbv2LockedUntil > now → auto-resume blocked (user ต้อง manual ปลดล็อค หรือรอให้ lock หมดเวลา)
+    //   - lock expiry → auto-resume path ทำงานปกติ (เฉพาะ Min-%KC >= threshold) เหมือน Auto-pause
+    //   - manual unlock via POST /api/bots/:id/unlock-cbv2 (BOT_ACTION_PASSWORD required)
+    cbv2Enabled: { type: Boolean, default: true },
+    cbv2LockHours: { type: Number, default: 8, min: 0.5, max: 168 },
+    cbv2LockedUntil: { type: Date, default: null },
+    cbv2LockReason: { type: String, default: null }, // 'cbv2_panic' | null
+    cbv2LastFiredAt: { type: Date, default: null }, // FIX-2026-08-06: cross-restart restore (informational + audit)
     // FIX-2026-08-01: per-bot safe-trade filter (default ON)
     //   - On S1 buy signal: check super-upper TF (3m/5m→4h, 15m→1d, 1h→1w) — SAFE_TRADE_SUPER_TF_MAP
     //   - PASS = lastClose > open (green) OR lastClose > ema20 (uptrend) → ผ่านเข้า BUY
@@ -184,6 +196,69 @@ const botSchema = new mongoose.Schema(
     //   - persist ไว้ให้ UI แสดง badge + log + warning
     //   - reset เป็น false เมื่อ NET TP กลับมา >= 0.281%
     tpOnFloor: { type: Boolean, default: false },
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // FIX-2026-08-08: Feature #1 — Dynamic Position Sizing (auto-tune size + layers)
+    //   - enabled: master toggle (default true — matches user's request)
+    //   - mutually exclusive กับ DCA / Martingale (validator ใน routes)
+    //   - logic (ทุกครั้งที่ SELL fill 1 closed position):
+    //       * last 3 closed positions all win → size +1 USDT, layers +1
+    //       * last 2 closed positions >2% profit each → size +2 USDT
+    //       * last closed position loss → size -2 (≥6), layers -2 (≥1)
+    //   - bounds: size 6..15 USDT, layers 1..5
+    //   - dynamicSizeCurrent / dynamicLayersCurrent = effective value (snapshot, NOT source of truth)
+    //     — source of truth = evaluate() ใน trader.handleSellFilled hook
+    //   - dynamicSizeCooldownUntil: กัน rapid resize (default 5 min) — ป้องกัน whipsaw
+    // ═══════════════════════════════════════════════════════════════════════
+    dynamicSizeEnabled: { type: Boolean, default: true },
+    dynamicSizeCurrent: { type: Number, default: null },        // null = use capitalPerTrade
+    dynamicLayersCurrent: { type: Number, default: null },      // null = use maxTrades
+    dynamicSizeLastEvaluatedAt: { type: Date, default: null },
+    dynamicSizeCooldownUntil: { type: Date, default: null },   // 5 min cooldown after each eval
+    dynamicSizeLastResults: {                                    // last 3 closed positions (most recent first)
+      type: [{
+        closedAt: Date,
+        pnlPct: Number,
+        isWin: Boolean,
+      }],
+      default: [],
+    },
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // FIX-2026-08-08: Feature #2 — CBv3 (CBv2 + ST3 same-candle on upper-TF)
+    //   - global setting only (AppConfig.cbVersion = 'v2' | 'v3', default 'v3')
+    //   - per-bot fields mirror CBv2 schema for parallel logic
+    //   - cbv3LockedUntil + cbv3LockReason persist across restart
+    //   - cbv3LastFiredAt: audit + trader._cbv3FiredAt restore
+    // ═══════════════════════════════════════════════════════════════════════
+    cbv3LockedUntil: { type: Date, default: null },
+    cbv3LockReason: { type: String, default: null }, // 'cbv3_panic' | null
+    cbv3LastFiredAt: { type: Date, default: null },
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // FIX-2026-08-08: Feature #3 — Auto Unlock Cooldown (CBv2/CBv3)
+    //   - enabled: per-bot toggle (default false — user must opt-in)
+    //   - threshold Pct: ต้องการ signal close > threshold% เทียบกับราคา signal
+    //   - count: จำนวน signals ที่ match threshold (reset เมื่อ CB fires ครั้งใหม่)
+    //   - if count >= 3 → unlock ทันที (no whipsaw guard per user request)
+    // ═══════════════════════════════════════════════════════════════════════
+    cbAutoUnlockEnabled: { type: Boolean, default: false },
+    cbAutoUnlockThresholdPct: { type: Number, default: 1.0, min: 0.5, max: 5.0 },
+    cbAutoUnlockCheckedAt: { type: Date, default: null },
+    cbAutoUnlockSignalsFound: { type: Number, default: 0 },
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // FIX-2026-08-08: Feature #5 — Auto Delete Bot (soft delete + restore)
+    //   - deletedAt: timestamp when soft-deleted (set by autoDeleteBot service)
+    //   - restore window: 30 days from deletedAt → after that, hard delete
+    //   - scheduledDeleteAt: when bot is scheduled for deletion (system-set)
+    //   - deleteNotificationSentAt: when 3-day warning was sent (no duplicate alerts)
+    //   - when deletedAt is set: bots list API excludes (unless ?includeDeleted)
+    // ═══════════════════════════════════════════════════════════════════════
+    deletedAt: { type: Date, default: null },
+    scheduledDeleteAt: { type: Date, default: null },
+    deleteNotificationSentAt: { type: Date, default: null },
+
     // สถิติสะสม
     totalPnl: { type: Number, default: 0 },
     totalTrades: { type: Number, default: 0 },

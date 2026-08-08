@@ -102,13 +102,26 @@ function floorPrice(price, tickSize) {
   return new Decimal(price).div(tickSize).floor().mul(tickSize);
 }
 
-// ตรวจว่า order ผ่าน LOT_SIZE / PRICE_FILTER / NOTIONAL หรือไม่
+// ตรวจว่า order ผ่าน LOT_SIZE / PRICE_FILTER / NOTIONAL / DELIST หรือไม่
+// FIX-2026-08-06: เพิ่ม delist gate — ถ้า symbol อยู่ใน /sapi/v1/spot/delist-schedule
+//   และ delistTime - now <= 7 วัน → reject (defense-in-depth นอกเหนือจาก trader pre-flight)
 function validateOrder({ symbol, price, qty }) {
   const info = getCached(symbol);
   if (!info) {
     return { ok: false, reason: 'symbol info not loaded' };
   }
   const errors = [];
+
+  // FIX-2026-08-06: delist gate (load lazily to avoid circular require at module load)
+  try {
+    const delistMonitor = require('../services/binanceDelistMonitor');
+    if (delistMonitor.isDelisted(symbol)) {
+      errors.push(`symbol already delisted on Binance`);
+    } else if (delistMonitor.willDelistWithin(symbol, 7)) {
+      const dt = delistMonitor.getDelistTime(symbol);
+      errors.push(`symbol scheduled for delisting at ${new Date(dt).toISOString()} (within 7 days)`);
+    }
+  } catch (_) { /* delistMonitor not yet started — fail-open */ }
 
   if (info.lotSize) {
     if (new Decimal(qty).lessThan(info.lotSize.minQty)) {

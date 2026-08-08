@@ -1753,6 +1753,65 @@ small.text-muted {
 .trendline-pill.is-warn     { background: #e67e22; }  /* amber — data/api/no-tf */
 .trendline-pill.is-pending  { background: #7f8c8d; cursor: default; }  /* gray — not yet scanned */
 
+/* FIX-2026-08-06: delist-pill — Binance delist risk indicator
+   - is-delisted:    #c0392b (red,    ฺsymbol ถูก delist แล้ว — ไม่ควรแสดง bot นี้)
+   - is-urgent:      #c0392b (red,    ≤ 3d ก่อน delist — force-close)
+   - is-warning:     #e67e22 (amber,  ≤ 7d ก่อน delist — block BUY)
+   - is-scheduled:   #f1c40f (yellow, > 7d ก่อน delist — มี schedule)
+   - is-monitoring:  #7f8c8d (gray,   Binance Monitoring tag — early warning) */
+.delist-pill {
+  display: inline-flex; align-items: center; gap: 0.25rem;
+  font-family: var(--font-mono); font-size: 0.72rem; font-weight: 700;
+  padding: 0.18rem 0.55rem; border-radius: 999px;
+  background: #555; color: #fff; margin-left: 0.3rem;
+  white-space: nowrap; cursor: default; vertical-align: middle;
+  letter-spacing: 0.02em; user-select: none;
+  transition: filter 0.15s ease;
+  animation: delistPulse 2s ease-in-out infinite;
+}
+.delist-pill:hover { filter: brightness(1.15); }
+.delist-pill.is-delisted   { background: #c0392b; animation: none; }
+.delist-pill.is-urgent     { background: #c0392b; }
+.delist-pill.is-warning    { background: #e67e22; }
+.delist-pill.is-scheduled  { background: #f1c40f; color: #1a1a1a; animation: none; }
+.delist-pill.is-monitoring { background: #7f8c8d; animation: none; }
+@keyframes delistPulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.7; }
+}
+
+/* FIX-2026-08-06: delist-banner — full-width warning banner at bot-detail header
+   - is-urgent:    red,    ฺsymbol delist ใน ≤ 3 วัน
+   - is-warning:   amber,  ฺsymbol delist ใน ≤ 7 วัน
+   - is-scheduled: yellow, ฺsymbol delist ใน > 7 วัน */
+.delist-banner {
+  margin: 0.75rem 0 1rem;
+  padding: 0.75rem 1rem;
+  border-radius: 8px;
+  border-left: 4px solid #f1c40f;
+  background: rgba(241, 196, 15, 0.1);
+  color: #f1c40f;
+  font-family: var(--font-mono);
+  font-size: 0.85rem;
+  line-height: 1.5;
+}
+.delist-banner strong { color: inherit; font-weight: 700; }
+.delist-banner.is-urgent {
+  border-left-color: #c0392b;
+  background: rgba(192, 57, 43, 0.15);
+  color: #ff6b6b;
+}
+.delist-banner.is-warning {
+  border-left-color: #e67e22;
+  background: rgba(230, 126, 34, 0.12);
+  color: #ffa94d;
+}
+.delist-banner.is-scheduled {
+  border-left-color: #f1c40f;
+  background: rgba(241, 196, 15, 0.08);
+  color: #ffd43b;
+}
+
 /* FIX-2026-08-01: Quality breakdown modal — clone of .pnl-modal-* pattern */
 .quality-modal-overlay { position: fixed; inset: 0; z-index: 9999; background: rgba(0,0,0,0.7); backdrop-filter: blur(4px); display: none; align-items: flex-start; justify-content: center; padding: 5vh 1rem 1rem; overflow-y: auto; }
 .quality-modal-overlay.is-open { display: flex; }
@@ -3373,4 +3432,384 @@ small.text-muted {
   .bot-search-wrap { min-width: 100%; max-width: 100%; }
   .bot-filter-chips { width: 100%; }
   .bot-chip { font-size: 0.72rem; padding: 0.25rem 0.55rem; }
+}
+
+/* ============================================================
+   2026-08-06: Daily Profit Target gauge — HORIZONTAL BAR (BNB fuel style)
+   - Sticky bar directly under .app-nav (full-width), visible on
+     every page (skip on login)
+   - 2 rows (cleaner — stats now live in popover only):
+       Row 1: 🎯 ฿<PnL>  <USDT>  <pct>  <status>      |  <target pill ✎> ℹ
+       Row 2: [============= horizontal bar =============]
+   - 5 zones (cold/warming/hot/achieved/loss) — same color theme
+     as the original radial version, just horizontal
+   - 🎉 confetti burst when target is newly achieved
+   ============================================================ */
+
+.daily-target-bar {
+  position: sticky; top: 0; z-index: 1029; /* under navbar (1030) */
+  background: linear-gradient(180deg, rgba(7,11,20,0.86), rgba(7,11,20,0.72));
+  backdrop-filter: blur(14px) saturate(140%);
+  -webkit-backdrop-filter: blur(14px) saturate(140%);
+  border-bottom: 1px solid var(--border-soft);
+  padding: 0.5rem 1rem 0.55rem;
+  font-family: var(--font-sans);
+}
+.daily-target-bar.is-loading { opacity: 0.55; }
+.daily-target-bar .dtb-inner {
+  max-width: 1400px; margin: 0 auto;
+}
+
+/* ── Row 1: PnL number + target pill + ℹ ───────────────── */
+.daily-target-bar .dtb-row {
+  display: flex; align-items: center;
+  width: 100%;
+}
+.daily-target-bar .dtb-row-main {
+  gap: 0.6rem; margin-bottom: 0.4rem;
+  flex-wrap: wrap;
+}
+.daily-target-bar .dtb-number {
+  flex: 1 1 auto; min-width: 0;
+  display: flex; align-items: baseline; gap: 0.55rem;
+  flex-wrap: wrap;
+}
+.daily-target-bar .dtb-number-emoji {
+  font-size: 1rem;
+  flex: 0 0 auto;
+}
+.daily-target-bar .dtb-number-value {
+  font-family: var(--font-mono);
+  font-size: 1.35rem; font-weight: 800;
+  color: var(--text-1);
+  letter-spacing: -0.02em;
+  line-height: 1.1;
+  flex: 0 0 auto;
+}
+.daily-target-bar .dtb-number-usdt {
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  color: var(--text-3);
+  font-weight: 500;
+  flex: 0 0 auto;
+}
+.daily-target-bar .dtb-number-pct {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  font-weight: 700;
+  padding: 0.1rem 0.5rem;
+  border-radius: 999px;
+  background: rgba(255,255,255,0.10);
+  color: var(--text-2);
+  flex: 0 0 auto;
+  min-width: 48px; text-align: center;
+}
+.daily-target-bar .dtb-number-status {
+  font-size: 0.75rem;
+  color: var(--text-3);
+  flex: 1 1 auto;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* zone tints on the row 1 elements */
+.daily-target-bar.zone-cold     .dtb-number-value { color: var(--text-1); }
+.daily-target-bar.zone-warming  .dtb-number-value { color: var(--gold-2); text-shadow: 0 0 10px rgba(245,184,0,0.3); }
+.daily-target-bar.zone-hot      .dtb-number-value { color: var(--bull-1); text-shadow: 0 0 14px rgba(0,229,184,0.4); }
+.daily-target-bar.zone-loss     .dtb-number-value { color: var(--bear-2); text-shadow: 0 0 14px rgba(255,77,109,0.4); }
+.daily-target-bar.zone-achieved .dtb-number-value {
+  background: linear-gradient(90deg, var(--gold-1), var(--bull-1), var(--gold-2));
+  background-size: 200% 100%;
+  -webkit-background-clip: text; background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: dtb-shimmer-text 2.4s linear infinite;
+}
+.daily-target-bar .dtb-number-value.is-flash {
+  animation: dtb-flash 700ms ease;
+}
+@keyframes dtb-shimmer-text {
+  0%   { background-position: 0% 50%; }
+  100% { background-position: 200% 50%; }
+}
+@keyframes dtb-flash {
+  0%   { transform: scale(1); }
+  35%  { transform: scale(1.15); }
+  100% { transform: scale(1); }
+}
+
+/* target pill (right side) */
+.daily-target-bar .dtb-target {
+  display: inline-flex; align-items: center; gap: 0.4rem;
+  flex: 0 0 auto;
+  padding: 0.32rem 0.7rem;
+  background: rgba(255,255,255,0.04);
+  border: 1px solid var(--border-soft);
+  border-radius: 999px;
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  color: var(--text-2);
+  cursor: pointer;
+  transition: border-color 0.2s, background 0.2s, color 0.2s;
+  user-select: none;
+}
+.daily-target-bar .dtb-target:hover {
+  border-color: rgba(245,184,0,0.4);
+  background: rgba(245,184,0,0.06);
+  color: var(--gold-1);
+}
+.daily-target-bar .dtb-target-label { color: var(--text-3); font-size: 0.7rem; }
+.daily-target-bar .dtb-target-value { font-weight: 700; color: var(--gold-1); }
+.daily-target-bar .dtb-target-edit  { margin-left: 0.15rem; font-size: 0.85rem; color: var(--text-3); }
+.daily-target-bar .dtb-target:hover .dtb-target-edit { color: var(--gold-1); }
+
+/* inline target editor */
+.daily-target-bar .dtb-target-edit-wrap {
+  display: none; align-items: center; gap: 0.35rem;
+  flex: 0 0 auto;
+}
+.daily-target-bar .dtb-target-edit-wrap.is-open { display: inline-flex; }
+.daily-target-bar .dtb-target-input {
+  width: 90px;
+  padding: 0.28rem 0.5rem;
+  background: var(--bg-2);
+  border: 1px solid rgba(245,184,0,0.35);
+  border-radius: 8px;
+  color: var(--gold-1);
+  font-family: var(--font-mono);
+  font-size: 0.82rem;
+  text-align: right;
+  outline: none;
+}
+.daily-target-bar .dtb-target-input:focus { border-color: var(--gold-1); box-shadow: 0 0 0 3px rgba(245,184,0,0.18); }
+.daily-target-bar .dtb-target-save {
+  background: var(--gold-1); color: #1a1208; border: none;
+  border-radius: 8px; padding: 0.28rem 0.55rem; font-weight: 700;
+  font-size: 0.78rem; cursor: pointer;
+}
+.daily-target-bar .dtb-target-save:disabled { opacity: 0.5; cursor: wait; }
+.daily-target-bar .dtb-target-cancel {
+  background: transparent; color: var(--text-3); border: 1px solid var(--border-soft);
+  border-radius: 8px; padding: 0.28rem 0.5rem; font-size: 0.78rem; cursor: pointer;
+}
+
+/* ℹ summary button (now in row 1, after target pill) */
+.daily-target-bar .dtb-info {
+  background: transparent;
+  border: 1px solid var(--border-soft);
+  border-radius: 999px;
+  padding: 0.28rem 0.65rem;
+  font-size: 0.72rem;
+  color: var(--text-3);
+  cursor: pointer;
+  font-family: var(--font-sans);
+  flex: 0 0 auto;
+  transition: color 0.2s, border-color 0.2s, background 0.2s;
+}
+.daily-target-bar .dtb-info:hover {
+  color: var(--gold-1);
+  border-color: rgba(245,184,0,0.4);
+  background: rgba(245,184,0,0.06);
+}
+
+/* ── Row 2: horizontal progress bar ──────────────────────── */
+/* Increased visibility: bigger height + dark track + light border + inner shadow.
+   Previous rgba(255,255,255,0.06) on the dark glass was nearly invisible. */
+.daily-target-bar .dtb-row-bar {
+  margin: 0.4rem 0 0.35rem;
+  min-height: 22px;       /* safety: prevent flex from collapsing */
+  display: block;          /* override .dtb-row flex — single child, no need */
+}
+.daily-target-bar .dtb-bar-track {
+  position: relative;
+  height: 22px;
+  background: #0a0e1a;     /* solid near-black for max contrast against glass */
+  border: 2px solid rgba(255,255,255,0.25);
+  border-radius: 999px;
+  overflow: hidden;
+  box-shadow:
+    inset 0 2px 6px rgba(0,0,0,0.8),
+    inset 0 -1px 0 rgba(255,255,255,0.06),
+    0 0 0 1px rgba(0,0,0,0.4);
+}
+/* subtle zone marker ticks at 30% / 70% / 100% */
+.daily-target-bar .dtb-bar-track::before,
+.daily-target-bar .dtb-bar-track::after {
+  content: '';
+  position: absolute;
+  top: 3px; bottom: 3px;
+  width: 1px;
+  background: rgba(255,255,255,0.22);
+  pointer-events: none;
+  z-index: 1;
+}
+.daily-target-bar .dtb-bar-track::before { left: 30%; }
+.daily-target-bar .dtb-bar-track::after  { left: 70%; }
+.daily-target-bar .dtb-bar-track > .dtb-bar-fill { position: relative; z-index: 2; }
+
+.daily-target-bar .dtb-bar-fill {
+  height: 100%;
+  width: 0%;
+  border-radius: 999px;
+  transition: width 700ms cubic-bezier(.2,.8,.2,1), background 300ms ease, box-shadow 300ms ease;
+}
+/* zone fills (boosted contrast + thicker glow for visibility) */
+.daily-target-bar.zone-cold .dtb-bar-fill {
+  background: linear-gradient(90deg, #5b7290 0%, #90b0d8 100%);
+  box-shadow: 0 0 12px rgba(120,160,210,0.7);
+}
+.daily-target-bar.zone-warming .dtb-bar-fill {
+  background: linear-gradient(90deg, #f5b800 0%, #ffd76a 100%);
+  box-shadow: 0 0 14px rgba(245,184,0,0.75);
+}
+.daily-target-bar.zone-hot .dtb-bar-fill {
+  background: linear-gradient(90deg, #00e5b8 0%, #80ffd0 100%);
+  box-shadow: 0 0 16px rgba(0,229,184,0.8);
+}
+.daily-target-bar.zone-achieved .dtb-bar-fill {
+  background: linear-gradient(90deg, #f5b800 0%, #00e5b8 35%, #5dc4ff 65%, #ffd76a 100%);
+  background-size: 200% 100%;
+  box-shadow: 0 0 18px rgba(245,184,0,0.9);
+  animation: dtb-shimmer-bar 2.4s linear infinite;
+}
+.daily-target-bar.zone-loss .dtb-bar-fill {
+  background: linear-gradient(90deg, #ff4d6d 0%, #ff85a0 100%);
+  box-shadow: 0 0 14px rgba(255,77,109,0.75);
+}
+@keyframes dtb-shimmer-bar {
+  0%   { background-position: 0% 50%; }
+  100% { background-position: 200% 50%; }
+}
+
+/* ── Popover (breakdown) ────────────────────────────────── */
+.daily-target-bar .dtb-popover {
+  position: absolute;
+  top: calc(100% + 6px); right: 1rem;
+  width: 280px;
+  background: linear-gradient(180deg, var(--bg-2) 0%, var(--bg-3) 100%);
+  border: 1px solid var(--border-mid);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-3);
+  padding: 0.85rem 1rem;
+  z-index: 1031;
+  display: none;
+}
+.daily-target-bar .dtb-popover.is-open { display: block; }
+.daily-target-bar .dtb-popover h6 {
+  margin: 0 0 0.5rem; font-size: 0.78rem; color: var(--text-2);
+  letter-spacing: 0.06em; text-transform: uppercase;
+}
+.daily-target-bar .dtb-popover .dtb-popover-row {
+  display: flex; justify-content: space-between;
+  font-family: var(--font-mono); font-size: 0.78rem;
+  color: var(--text-2);
+  padding: 0.18rem 0;
+}
+.daily-target-bar .dtb-popover .dtb-popover-row .label { color: var(--text-3); }
+.daily-target-bar .dtb-popover .dtb-popover-row .val-win  { color: var(--bull-1); font-weight: 700; }
+.daily-target-bar .dtb-popover .dtb-popover-row .val-loss { color: var(--bear-2); font-weight: 700; }
+.daily-target-bar .dtb-popover .dtb-popover-hint {
+  margin-top: 0.6rem; font-size: 0.7rem; color: var(--text-4);
+  border-top: 1px dashed var(--border-soft); padding-top: 0.5rem;
+}
+
+/* ── Confetti ───────────────────────────────────────────── */
+.daily-target-bar .dtb-confetti {
+  position: absolute; inset: 0;
+  pointer-events: none; overflow: hidden;
+  border-radius: inherit;
+}
+.daily-target-bar .dtb-confetti span {
+  position: absolute; top: 30%; left: 50%;
+  width: 6px; height: 12px; border-radius: 2px;
+  background: var(--gold-1);
+  opacity: 0;
+  animation: dtb-confetti 1.2s ease-out forwards;
+}
+@keyframes dtb-confetti {
+  0%   { transform: translate(-50%, -50%) rotate(0deg); opacity: 1; }
+  100% { transform: translate(calc(-50% + var(--cx, 80px)), calc(-50% + var(--cy, -60px))) rotate(var(--rot, 360deg)); opacity: 0; }
+}
+
+/* ── Responsive ────────────────────────────────────────── */
+@media (max-width: 900px) {
+  /* status label hidden on medium — emoji + pct + target pill convey zone */
+  .daily-target-bar .dtb-number-status { display: none; }
+}
+@media (max-width: 640px) {
+  .daily-target-bar { padding: 0.4rem 0.75rem 0.45rem; }
+  .daily-target-bar .dtb-number-value { font-size: 1.1rem; }
+  .daily-target-bar .dtb-number-usdt { font-size: 0.7rem; }
+  .daily-target-bar .dtb-number-pct  { font-size: 0.68rem; padding: 0.08rem 0.4rem; }
+  .daily-target-bar .dtb-target { padding: 0.25rem 0.55rem; font-size: 0.72rem; }
+  .daily-target-bar .dtb-info { font-size: 0.65rem; padding: 0.2rem 0.5rem; }
+  .daily-target-bar .dtb-row-bar { min-height: 18px; }
+  .daily-target-bar .dtb-bar-track { height: 18px; }
+  /* popover on mobile: right-aligned to bar edge */
+  .daily-target-bar .dtb-popover { right: 0.75rem; width: 260px; }
+}
+@media (max-width: 420px) {
+  /* ultra-narrow: shrink everything to fit one screen row */
+  .daily-target-bar { padding: 0.35rem 0.65rem 0.4rem; }
+  .daily-target-bar .dtb-number-value { font-size: 0.98rem; }
+  .daily-target-bar .dtb-target { font-size: 0.68rem; padding: 0.22rem 0.45rem; }
+  .daily-target-bar .dtb-target-edit { display: none; } /* tighten on tiny screens */
+  .daily-target-bar .dtb-info { font-size: 0.62rem; padding: 0.18rem 0.4rem; }
+  .daily-target-bar .dtb-row-bar { min-height: 14px; }
+  .daily-target-bar .dtb-bar-track { height: 14px; }
+}
+
+/* ── FIX-2026-08-06: CBv2 cooldown banner (HYBRID — บอทยัง enabled) ─── */
+.bot-card-v2 .bc-cbv2-cooldown {
+  margin-top: 0.5rem; margin-bottom: 0.55rem;
+  font-size: 0.78rem; color: #f0b90b;
+  font-family: var(--font-mono); padding: 0.4rem 0.55rem;
+  background: rgba(240,185,11,0.08); border-radius: 6px;
+  border-left: 2px solid #f0b90b;
+  display: flex; align-items: center; gap: 0.5rem;
+}
+.bot-card-v2 .bc-cbv2-cooldown-msg {
+  flex: 1; word-break: break-word; line-height: 1.45;
+}
+.bot-card-v2 .bc-cbv2-cooldown-msg a {
+  color: #f0b90b; text-decoration: underline; margin-left: 0.25rem;
+}
+.bot-card-v2.has-cbv2-cooldown::before {
+  background: linear-gradient(180deg, rgba(240,185,11,0.6), rgba(240,185,11,0.15)) !important;
+}
+
+/* ── FIX-2026-08-08: Feature #2 — CBv3 cooldown banner (mirror CBv2) ─── */
+.bot-card-v2 .bc-cbv3-cooldown {
+  margin-top: 0.5rem; margin-bottom: 0.55rem;
+  font-size: 0.78rem; color: #f0b90b;
+  font-family: var(--font-mono); padding: 0.4rem 0.55rem;
+  background: rgba(240,185,11,0.10); border-radius: 6px;
+  border-left: 2px solid #f5b800;
+  display: flex; align-items: center; gap: 0.5rem;
+}
+.bot-card-v2 .bc-cbv3-cooldown-msg {
+  flex: 1; word-break: break-word; line-height: 1.45;
+}
+.bot-card-v2 .bc-cbv3-cooldown-msg a {
+  color: #f5b800; text-decoration: underline; margin-left: 0.25rem;
+}
+.bot-card-v2.has-cbv3-cooldown::before {
+  background: linear-gradient(180deg, rgba(245,184,0,0.7), rgba(245,184,0,0.20)) !important;
+}
+
+/* ── FIX-2026-08-08: Feature #1 — DPS indicator (Dynamic Position Sizing) ─── */
+.bot-card-v2 .bc-dps-indicator {
+  margin-top: 0.5rem; margin-bottom: 0.5rem;
+  font-size: 0.75rem; color: #94a3b8;
+  font-family: var(--font-mono); padding: 0.35rem 0.5rem;
+  background: rgba(0,229,184,0.05); border-radius: 6px;
+  border-left: 2px solid #00e5b8;
+  display: flex; align-items: center; gap: 0.5rem;
+}
+.bot-card-v2 .bc-dps-label {
+  color: #00e5b8; font-weight: 600;
+}
+.bot-card-v2 .bc-dps-value {
+  flex: 1; word-break: break-word;
 }

@@ -9,6 +9,10 @@ const eventBus = require('../services/eventBus');
 const signalEngine = require('./signalEngine');
 const indicators = require('./indicators'); // FIX-2026-08-01: needed by signalEngine.checkSafeTrade (ema)
 const volatilityScanner = require('./volatilityScanner');
+const dps = require('./dynamicPositionSizing'); // FIX-2026-08-08: Feature #1 — Dynamic Position Sizing
+const cbAutoUnlock = require('./cbAutoUnlock'); // FIX-2026-08-08: Feature #3 — Auto Unlock Cooldown
+const cbVersion = require('./cbVersion'); // FIX-2026-08-08: Feature #2 — CB Version routing (v2 vs v3)
+const masterConfig = require('./masterConfig'); // FIX-2026-08-08: master toggles (DPS, CB Auto-Unlock)
 const telegramNotifier = require('../services/telegramNotifier');
 const logger = require('../utils/logger');
 const Bot = require('../db/models/Bot');
@@ -20,6 +24,11 @@ const Signal = require('../db/models/Signal');
 //   - กัน race: onCandleClosed CB fires (force-close) + S1 BUY on same candle
 //   - default 5 minutes (300_000 ms) — ให้เวลา panic-sell dust settle + กัน FOMO re-entry
 const CB_SUPPRESS_MS = 5 * 60 * 1000;
+
+// FIX-2026-08-07: CBv2 cooldown duration (HYBRID mode — replaces short CBV2_SUPPRESS_MS)
+//   - ใช้ bot.cbv2LockHours (user-configurable, default 8) แปลงเป็น ms แบบ dynamic ใน placeBuy
+//   - เดิม: short 30s suppression + bot.enabled=false (lock) → HYBRID: long window + bot ยัง enabled
+//   - ค่านี้ไม่ fixed เพราะ duration ขึ้นกับ cbv2LockHours ของบอทนั้น (เปลี่ยนได้ runtime)
 
 /**
  * Trader class — state machine ต่อบอท สำหรับ maker-only BUY → TP SELL
@@ -209,6 +218,25 @@ class Trader {
         cbLastFiredAt: this.bot.cbLastFiredAt,
       }, 'trader: cbLastFiredAt restored from DB → suppression continues');
     }
+    // FIX-2026-08-07: CBv2 cooldown gate (HYBRID — replaces 30s suppression with cbv2LockHours window)
+    //   - timestamp of last CBv2 fire (Date.now() ms) — placeBuy consults (now - _cbv2FiredAt) < cbv2LockHours*3600000
+    //   - prevents S1 BUY during the cooldown window after a CBv2 force-close
+    //   - HYBRID: bot stays enabled, Auto-pause still works — _cbv2FiredAt is the only gate
+    //   - restore from bot.cbv2LastFiredAt across restart (cross-restart continuity)
+    this._cbv2FiredAt = 0;
+    if (this.bot.cbv2LastFiredAt) {
+      this._cbv2FiredAt = new Date(this.bot.cbv2LastFiredAt).getTime();
+    }
+
+    // FIX-2026-08-08: Feature #2 — CBv3 cooldown gate (mirror CBv2 schema)
+    //   - CBv3 = CBv2 + ST3 no-trade pattern match on upper-TF (TREND_TF_MAP)
+    //   - active version resolved lazily via cbVersion.getActiveVersion() — AppConfig.cbVersion
+    //   - only consulted in placeBuy IF cbVersion === 'v3' (mutually exclusive with CBv2)
+    //   - restore from bot.cbv3LastFiredAt across restart (parallel to CBv2)
+    this._cbv3FiredAt = 0;
+    if (this.bot.cbv3LastFiredAt) {
+      this._cbv3FiredAt = new Date(this.bot.cbv3LastFiredAt).getTime();
+    }
 
     // FIX-2026-08-02: DCA mode startup reconciliation
     //   - load active DCA stack → set this.currentTrade + register
@@ -280,6 +308,48 @@ class Trader {
     };
     eventBus.on('kline:closed', this._cbKlineHandler);
 
+    // FIX-2026-08-06: CBv2 direct kline:closed subscription (mirror CB pattern)
+    //   - เรียก _checkCBv2PanicClose ทุก candle → strict pattern (4 red candles below lowerKC)
+    //   - on fire: force-close + lock bot cbv2LockHours hours + emit bot:locked
+    this._cbv2KlineHandler = (payload) => {
+      if (!this.running) return;
+      if (!payload || !payload.candle) return;
+      if (payload.symbol !== this.bot.symbol || payload.timeframe !== this.bot.timeframe) return;
+      this._checkCBv2PanicClose(payload.candle).catch((err) =>
+        logger.error({ err: err.message, stack: err.stack }, 'trader: CBv2 direct handler threw'));
+    };
+    eventBus.on('kline:closed', this._cbv2KlineHandler);
+
+    // FIX-2026-08-08: Feature #2 — CBv3 direct kline:closed subscription (mirror CBv2 pattern)
+    //   - CBv3 = CBv2 + ST3 no-trade pattern match on upper-TF (TREND_TF_MAP)
+    //   - active version resolved lazily via cbVersion.getActiveVersion()
+    //   - on fire: force-close + lock bot cbv3LockHours hours + emit bot:cooldown with version='v3'
+    //   - mutually exclusive with CBv2 (user picks one in Settings) — handler is always installed,
+    //     but _checkCBv3PanicClose returns early if cbVersion !== 'v3'
+    this._cbv3KlineHandler = (payload) => {
+      if (!this.running) return;
+      if (!payload || !payload.candle) return;
+      if (payload.symbol !== this.bot.symbol || payload.timeframe !== this.bot.timeframe) return;
+      this._checkCBv3PanicClose(payload.candle).catch((err) =>
+        logger.error({ err: err.message, stack: err.stack }, 'trader: CBv3 direct handler threw'));
+    };
+    eventBus.on('kline:closed', this._cbv3KlineHandler);
+
+    // FIX-2026-08-08: Feature #3 — Auto Unlock Cooldown on candle close (independent of SELL fill)
+    //   - bug-fix: cbAutoUnlock.evaluate() was inside handleSellFilled (deadlock — bot in cooldown
+    //     suppresses new BUYs → no new SELL → never evaluated → permanent lock)
+    //   - new flow: on every kline:closed (matching bot symbol+TF), check cooldown state + scan
+    //     signals since last CB fire. If 3+ profitable signals → unlock immediately.
+    //   - mutex _cbAutoUnlockInFlight กัน concurrent invocations across candles
+    this._cbAutoUnlockKlineHandler = (payload) => {
+      if (!this.running) return;
+      if (!payload || !payload.candle) return;
+      if (payload.symbol !== this.bot.symbol || payload.timeframe !== this.bot.timeframe) return;
+      this._evaluateAutoUnlockOnCandle(payload.candle).catch((err) =>
+        logger.error({ err: err.message, botId: this.bot._id.toString() }, 'trader: cbAutoUnlock handler threw'));
+    };
+    eventBus.on('kline:closed', this._cbAutoUnlockKlineHandler);
+
     // FIX 3 + FIX-2026-07-13: order update handler ใช้ Map lookup + DB fallback
     // (FIX-2026-07-13: _registerTrade บางที register แค่ {buyClientOrderId, sellClientOrderId}
     //  → trade snapshot ไม่มี buyPrice → handleSellFilled pnl.net=NaN → DB ไม่อัปเดต
@@ -336,7 +406,7 @@ class Trader {
         // FIX P2.2: ใช้ **blacklist** แทน whitelist — refresh ทุก field ยกเว้น hot-path state
         //   เดิม whitelist = 13 fields → ถ้า dev เพิ่ม field ใหม่แล้วลืม update array = bug
         //   fix: blacklist เฉพาะ fields ที่ต้อง preserve (status, currentTrade, lastSignalCloseTime, etc.)
-        const preservedKeys = ['_id', 'status', 'lastSignalCloseTime', 'lastSignalAt', 'totalPnl', 'totalTrades', 'winTrades', 'lastError', 'createdAt', 'updatedAt', '__v', 'cbLastFiredAt'];
+        const preservedKeys = ['_id', 'status', 'lastSignalCloseTime', 'lastSignalAt', 'totalPnl', 'totalTrades', 'winTrades', 'lastError', 'createdAt', 'updatedAt', '__v', 'cbLastFiredAt', 'cbv2LastFiredAt']; // FIX-2026-08-06: add cbv2LastFiredAt to preserve CBv2 suppression across bot:updated refresh
         for (const k of Object.keys(fresh)) {
           if (preservedKeys.includes(k)) continue;
           if (k in this.bot) {
@@ -415,10 +485,16 @@ class Trader {
     if (this._bookTickerHandler) eventBus.off('bookTicker', this._bookTickerHandler);
     if (this._klineHandler) eventBus.off('kline:closed', this._klineHandler);
     if (this._cbKlineHandler) eventBus.off('kline:closed', this._cbKlineHandler);
+    if (this._cbv2KlineHandler) eventBus.off('kline:closed', this._cbv2KlineHandler); // FIX-2026-08-06
+    if (this._cbv3KlineHandler) eventBus.off('kline:closed', this._cbv3KlineHandler); // FIX-2026-08-08: CBv3 handler
+    if (this._cbAutoUnlockKlineHandler) eventBus.off('kline:closed', this._cbAutoUnlockKlineHandler); // FIX-2026-08-08: auto-unlock handler
     if (this._orderHandler) eventBus.off('order:update', this._orderHandler);
     if (this._marketReconnectHandler) eventBus.off('market:reconnected', this._marketReconnectHandler);
     if (this._botUpdatedHandler) eventBus.off('bot:updated', this._botUpdatedHandler);
     this._cbKlineHandler = null;
+    this._cbv2KlineHandler = null; // FIX-2026-08-06
+    this._cbv3KlineHandler = null; // FIX-2026-08-08: CBv3 handler
+    this._cbAutoUnlockKlineHandler = null; // FIX-2026-08-08: auto-unlock handler
     this.tradesByClientOrderId.clear();
     this.handleBuyFilledLocks.clear();
     // FIX-2026-08-06: reset TP cache flags so a respawned trader doesn't inherit stale values
@@ -740,6 +816,64 @@ class Trader {
       logger.warn({ err: err.message, botId: this.bot._id && this.bot._id.toString() }, 'trader: TP cache refresh failed');
     } finally {
       this._tpCacheInFlight = false;
+    }
+  }
+
+  // FIX-2026-08-06: SELL slippage helper — เรียกจากทุก SELL-fill path
+  //   - target > 0 และ sellPrice > 0 → slip% = (sell - target) / target * 100
+  //   - slip < -1% → log warn (เห็นใน logs ทันที)
+  //   - slip < -3% → log error + telegram alert (slippageWarning event) — สัญญาณว่า MARKET fallback ทำงานผิดปกติ
+  //   - returns slipPct (number) หรือ null ถ้าคำนวณไม่ได้
+  //   - safe — try/catch ทุกชั้น, ไม่กระทบ trade finalize path
+  _computeSlippage({ sellPrice, targetSellPrice, tradeId, sellReason, pnlPercent }) {
+    try {
+      if (!Number.isFinite(sellPrice) || !Number.isFinite(targetSellPrice) || targetSellPrice <= 0) {
+        return null;
+      }
+      const slip = ((sellPrice - targetSellPrice) / targetSellPrice) * 100;
+      if (slip < -1.0) {
+        logger.warn({
+          botId: this.bot && this.bot._id && this.bot._id.toString(),
+          symbol: this.bot && this.bot.symbol,
+          tradeId: tradeId && tradeId.toString(),
+          sellReason: sellReason || null,
+          sellPrice, targetSellPrice,
+          slipPct: slip.toFixed(3),
+          pnlPercent,
+        }, 'trader: SELL slippage warning — fill below target > 1%');
+      }
+      if (slip < -3.0) {
+        logger.error({
+          botId: this.bot && this.bot._id && this.bot._id.toString(),
+          symbol: this.bot && this.bot.symbol,
+          tradeId: tradeId && tradeId.toString(),
+          sellReason: sellReason || null,
+          sellPrice, targetSellPrice,
+          slipPct: slip.toFixed(3),
+          pnlPercent,
+        }, 'trader: SELL severe slippage — fill below target > 3%');
+        try {
+          // FIX-2026-08-06: telegram alert (non-blocking, swallow errors)
+          //   - sendNow() = public dispatcher, no need to hold reference
+          //   - require แบบ lazy เพราะ telegramNotifier อาจไม่ถูก load ใน test contexts
+          const telegramNotifier = require('../services/telegramNotifier');
+          telegramNotifier.sendNow('slippageWarning', {
+            botName: (this.bot && this.bot.name) || (this.bot && this.bot.symbol) || '?',
+            symbol: (this.bot && this.bot.symbol) || '?',
+            timeframe: (this.bot && this.bot.timeframe) || null,
+            tradeId: tradeId && tradeId.toString(),
+            sellReason: sellReason || 'unknown',
+            sellPrice,
+            targetSellPrice,
+            slipPct: Number(slip.toFixed(3)),
+            pnlPercent,
+          }).catch(() => null);
+        } catch (_) { /* telegram not loaded or sendNow missing */ }
+      }
+      return slip;
+    } catch (err) {
+      logger.warn({ err: err.message }, 'trader: _computeSlippage failed');
+      return null;
     }
   }
 
@@ -1178,6 +1312,482 @@ class Trader {
     }
   }
 
+  // ─── FIX-2026-08-06: CBv2 sustained panic-sell + cooldown cbv2LockHours hours ────
+  // เรียกจาก _cbv2KlineHandler (direct kline:closed subscription) — bypass onCandleClosed gate
+  //   - gate: bot.cbv2Enabled !== false (default true)
+  //   - skip if DCA mode (mirror CB — "no cut loss" DCA philosophy)
+  //   - skip if already CBv2-cooldown active (cbv2LockedUntil > now) → idempotent
+  //   - คำนวณ lower-KC ของ timeframe นี้
+  //   - ถ้า candle ใหม่ AND previous candle match isCBv2At (4 red candles fully below lowerKC)
+  //     → force-close ALL positions + cooldown S1 BUY for cbv2LockHours hours (default 8)
+  //   - HYBRID mode (FIX-2026-08-07): force-close + cooldown only — ไม่ disable บอท, ไม่ override Auto-pause
+  //     - บอทยัง enabled, Auto-pause/resume on Min-%KC ยังทำงานปกติ (เป็นอิสระจาก CBv2 cooldown)
+  //     - BUY suppression = _cbv2FiredAt cooldown window (เดิม 30s → ตอนนี้ใช้ cbv2LockHours)
+  //     - ผู้ใช้ปลด cooldown manual ผ่าน POST /api/bots/:id/unlock-cbv2 ได้
+  //   - ใช้ shared _forceCloseTradeNow() with reason 'cbv2_panic'
+  //   - mutex cbv2CheckInFlight กัน concurrent invocations
+  async _checkCBv2PanicClose(candle) {
+    if (!this.running) {
+      logger.debug({ botId: this.bot._id.toString() }, 'trader: cbv2 skip — not running');
+      return;
+    }
+    // FIX-2026-08-08: Feature #2 — version gate (mutually exclusive with CBv3)
+    //   - cbVersion='v3' → CBv3 handler fires instead (it has ST3 upper-TF filter)
+    //   - cbVersion='v2' → CBv2 handler fires (pure 4-red-below-lowerKC)
+    const cbVer = await cbVersion.getActiveVersion();
+    if (cbVer !== 'v2') {
+      logger.debug({ botId: this.bot._id.toString(), cbVersion: cbVer }, 'trader: cbv2 skip — active version is v3');
+      return;
+    }
+    if (this.bot.cbv2Enabled === false) {
+      logger.debug({ botId: this.bot._id.toString() }, 'trader: cbv2 skip — disabled');
+      return;
+    }
+    // DCA mode — disable CBv2 entirely (mirror CB pattern)
+    if (this._isDcaMode()) {
+      logger.debug({ botId: this.bot._id.toString() }, 'trader: cbv2 skip — DCA mode (no panic-sell per design)');
+      return;
+    }
+    // Already cooldown active — skip (idempotent until expiry + manual unlock)
+    if (this.bot.cbv2LockedUntil && new Date(this.bot.cbv2LockedUntil).getTime() > Date.now()) {
+      logger.debug({ botId: this.bot._id.toString(), cbv2LockedUntil: this.bot.cbv2LockedUntil }, 'trader: cbv2 skip — cooldown active');
+      return;
+    }
+
+    // mutex กัน concurrent invocation
+    if (this.cbv2CheckInFlight) {
+      logger.debug({ botId: this.bot._id.toString() }, 'trader: cbv2 check already in flight, skip');
+      return;
+    }
+
+    logger.debug({
+      botId: this.bot._id.toString(),
+      symbol: this.bot.symbol,
+      tf: this.bot.timeframe,
+      candleCloseTime: candle.closeTime,
+      candleClose: candle.close,
+    }, 'trader: CBv2 check running');
+
+    this.cbv2CheckInFlight = true;
+    try {
+      const klines = klineCache.getAll(this.bot.symbol, this.bot.timeframe);
+      if (!klines || klines.length < 21) {
+        logger.debug({ botId: this.bot._id.toString(), klinesLen: klines?.length }, 'trader: cbv2 skip — klines not warm');
+        return;
+      }
+
+      // คำนวณ lower-KC
+      const { lower } = signalEngine.computeBgStates({
+        closes: klines.map((k) => k.close),
+        highs: klines.map((k) => k.high),
+        lows: klines.map((k) => k.low),
+        length: 20,
+        mult: this.bot.kcMult || 1.5,
+        useTrueRange: true,
+      });
+
+      // find index of PASSED-IN candle in cache (mirror CB pattern)
+      let lastIdx = klines.length - 1;
+      if (candle && candle.closeTime) {
+        let found = -1;
+        const tail = Math.min(10, klines.length);
+        for (let i = klines.length - 1; i >= klines.length - tail; i--) {
+          if (klines[i].closeTime === candle.closeTime) { found = i; break; }
+        }
+        if (found >= 0) lastIdx = found;
+      }
+      const lastLower = lower[lastIdx];
+      if (lastLower == null) {
+        logger.debug({ botId: this.bot._id.toString(), lastIdx }, 'trader: cbv2 skip — lastLower null (warmup?)');
+        return;
+      }
+
+      // ตรวจ CBv2 pattern (4 consecutive red candles fully below lowerKC)
+      const opens = klines.map((k) => parseFloat(k.open));
+      const closes = klines.map((k) => parseFloat(k.close));
+      if (!signalEngine.isCBv2At(lastIdx, opens, closes, lower)) return;
+
+      // include 'partial_sell_wait' (mirror CB pattern)
+      const OPEN_STATES = ['partial_wait', 'filled', 'retrying', 'holding', 'selling', 'partial_sell_wait'];
+      let targets;
+      try {
+        targets = await Trade.find({
+          botId: this.bot._id,
+          state: { $in: OPEN_STATES },
+        }).lean();
+      } catch (err) {
+        logger.warn({ err: err.message }, 'trader: cbv2 — Trade.find failed');
+        return;
+      }
+      if (!targets || targets.length === 0) {
+        // pattern matched but no open positions — still set cooldown (hybrid: ไม่ disable bot, แค่กัน BUY)
+        logger.warn({
+          botId: this.bot._id.toString(),
+          symbol: this.bot.symbol,
+          timeframe: this.bot.timeframe,
+          candleCloseTime: candle.closeTime,
+          lastLower: lastLower.toFixed(6),
+        }, 'trader: cbv2 — pattern matched but no open positions, setting cooldown anyway (hybrid mode)');
+        // fall through to set cooldown
+      } else {
+        logger.warn({
+          botId: this.bot._id.toString(),
+          symbol: this.bot.symbol,
+          timeframe: this.bot.timeframe,
+          candleCloseTime: candle.closeTime,
+          lastLower: lastLower.toFixed(6),
+          targets: targets.length,
+          tradeIds: targets.map((t) => t._id.toString()),
+        }, 'trader: cbv2 — sustained 3-candle lowerKC breach, force-closing ALL positions + setting BUY cooldown');
+
+        // loop ทีละ trade — mirror CB pattern but with cbv2_panic reason
+        for (const t of targets) {
+          if (!this.running) break;
+          try {
+            await this._forceCloseTradeNow(t, {
+              reason: 'cbv2_panic',
+              ctx: {
+                lastClose: parseFloat(candle.close),
+                lastLower: lastLower,
+                allowProfit: true, // CBv2 ไม่สนกำไร/ขาดทุน — ปิดทุก position เพื่อกันกราฟไหลต่อเนื่อง
+              },
+            });
+          } catch (err) {
+            logger.error({
+              err: err.message, stack: err.stack,
+              tradeId: t._id.toString(),
+            }, 'trader: cbv2_force_close — exception');
+          }
+        }
+      }
+
+      // ─── HYBRID COOLDOWN (FIX-2026-08-07) — ไม่ disable bot, แค่กัน S1 BUY ───
+      const lockHours = Math.max(0.5, Math.min(168, Number(this.bot.cbv2LockHours) || 8));
+      const lockedUntil = new Date(Date.now() + lockHours * 60 * 60 * 1000);
+      const lockedUntilIso = lockedUntil.toISOString();
+
+      // set suppression timestamp (in-memory BUY gate)
+      this._cbv2FiredAt = Date.now();
+
+      // persist cooldown fields to Bot (cross-restart continuity)
+      this.bot.cbv2LastFiredAt = new Date();
+      this.bot.cbv2LockedUntil = lockedUntil;
+      this.bot.cbv2LockReason = 'cbv2_panic';
+      // HYBRID: ไม่แตะ bot.enabled / bot.status / autoPauseReason — บอทยังรัน, Auto-pause ยังทำงานปกติ
+
+      Bot.updateOne(
+        { _id: this.bot._id },
+        {
+          $set: {
+            cbv2LastFiredAt: this.bot.cbv2LastFiredAt,
+            cbv2LockedUntil: this.bot.cbv2LockedUntil,
+            cbv2LockReason: this.bot.cbv2LockReason,
+            // HYBRID: enabled/status/autoPauseReason unchanged
+          },
+        }
+      ).catch((err) => logger.warn({ err: err.message }, 'trader: persist cbv2 cooldown failed'));
+
+      // emit events — bot:cooldown (CBv2-specific BUY suppression), bot:updated (no bot:disabled, no bot:locked)
+      eventBus.emit('bot:cooldown', {
+        botId: this.bot._id,
+        reason: 'cbv2_panic',
+        lockedUntil: lockedUntilIso,
+        lockHours,
+      });
+      eventBus.emit('bot:updated', { botId: this.bot._id });
+
+      // แจ้งเตือนผ่าน Telegram
+      try {
+        const botName = this.bot.name || this.bot.symbol || this.bot._id.toString();
+        await telegramNotifier.sendNow('cbv2PanicClose', {
+          botName,
+          symbol: this.bot.symbol,
+          timeframe: this.bot.timeframe,
+          closedCount: targets ? targets.length : 0,
+          candleCloseTime: candle.closeTime,
+          lastLower: lastLower.toFixed(6),
+          lockedUntil: lockedUntilIso,
+          lockHours,
+        }).catch((err) => logger.warn({ err: err.message }, 'trader: cbv2 telegram sendNow failed'));
+      } catch (_) { /* non-fatal */ }
+    } finally {
+      this.cbv2CheckInFlight = false;
+    }
+  }
+
+  // ─── FIX-2026-08-08: Feature #2 — CBv3 panic-sell + cooldown (CBv2 + ST3 upper-TF) ─────
+  // เรียกจาก _cbv3KlineHandler (direct kline:closed subscription)
+  //   - CBv3 = CBv2 sustained pattern (4 red candles below lowerKC) + ST3 no-trade pattern
+  //     match on upper-TF (TREND_TF_MAP: 3m/5m→1h, 15m→4h, 1h→1d) SAME candle (lastCloseTime)
+  //   - mutually exclusive with CBv2: cbVersion='v2' → early return (CBv2 handler already fires)
+  //                        cbVersion='v3' → this handler fires (CBv2 handler returns early)
+  //   - HYBRID mode: force-close + cooldown only — ไม่ disable บอท, ไม่ override Auto-pause
+  //     - bot stays enabled, BUY suppression = _cbv3FiredAt cooldown window (cbv3LockHours)
+  //     - manual unlock via POST /api/bots/:id/unlock-cbv2 (clears both cbv2+c bv3 fields)
+  //   - fields: bot.cbv3LockedUntil / cbv3LockReason / cbv3LastFiredAt (mirror CBv2 schema)
+  //   - mutex cbv3CheckInFlight กัน concurrent invocations
+  async _checkCBv3PanicClose(candle) {
+    if (!this.running) {
+      logger.debug({ botId: this.bot._id.toString() }, 'trader: cbv3 skip — not running');
+      return;
+    }
+    // FIX-2026-08-08: Feature #2 — version gate (mutually exclusive with CBv2)
+    const cbVer = await cbVersion.getActiveVersion();
+    if (cbVer !== 'v3') {
+      logger.debug({ botId: this.bot._id.toString(), cbVersion: cbVer }, 'trader: cbv3 skip — active version is v2');
+      return;
+    }
+    if (this.bot.cbv3Enabled === false) {
+      logger.debug({ botId: this.bot._id.toString() }, 'trader: cbv3 skip — disabled');
+      return;
+    }
+    if (this._isDcaMode()) {
+      logger.debug({ botId: this.bot._id.toString() }, 'trader: cbv3 skip — DCA mode');
+      return;
+    }
+    if (this.bot.cbv3LockedUntil && new Date(this.bot.cbv3LockedUntil).getTime() > Date.now()) {
+      logger.debug({ botId: this.bot._id.toString(), cbv3LockedUntil: this.bot.cbv3LockedUntil }, 'trader: cbv3 skip — cooldown active');
+      return;
+    }
+    if (this.cbv3CheckInFlight) {
+      logger.debug({ botId: this.bot._id.toString() }, 'trader: cbv3 check already in flight, skip');
+      return;
+    }
+
+    this.cbv3CheckInFlight = true;
+    try {
+      const klines = klineCache.getAll(this.bot.symbol, this.bot.timeframe);
+      if (!klines || klines.length < 21) {
+        logger.debug({ botId: this.bot._id.toString(), klinesLen: klines?.length }, 'trader: cbv3 skip — klines not warm');
+        return;
+      }
+      const { lower } = signalEngine.computeBgStates({
+        closes: klines.map((k) => k.close),
+        highs: klines.map((k) => k.high),
+        lows: klines.map((k) => k.low),
+        length: 20,
+        mult: this.bot.kcMult || 1.5,
+        useTrueRange: true,
+      });
+      let lastIdx = klines.length - 1;
+      if (candle && candle.closeTime) {
+        let found = -1;
+        const tail = Math.min(10, klines.length);
+        for (let i = klines.length - 1; i >= klines.length - tail; i--) {
+          if (klines[i].closeTime === candle.closeTime) { found = i; break; }
+        }
+        if (found >= 0) lastIdx = found;
+      }
+      const lastLower = lower[lastIdx];
+      if (lastLower == null) {
+        logger.debug({ botId: this.bot._id.toString(), lastIdx }, 'trader: cbv3 skip — lastLower null');
+        return;
+      }
+      // CBv2 base pattern check
+      const opens = klines.map((k) => parseFloat(k.open));
+      const closes = klines.map((k) => parseFloat(k.close));
+      if (!signalEngine.isCBv2At(lastIdx, opens, closes, lower)) return;
+
+      // FIX-2026-08-08: Feature #2 — ST3 no-trade on upper-TF (SAME candle)
+      //   - resolves TREND_TF_MAP from volatilityScanner (no circular import — passed by reference via global require cache)
+      //   - FAIL-OPEN: if Binance error or no trendTF → CBv3 still fires (treats it as pure CBv2)
+      //     — ST3 is a "stricter" filter, but if we can't fetch upper-TF we shouldn't suppress the panic
+      const volatilityScanner = require('./volatilityScanner'); // FIX-2026-08-08: corrected path (volatilityScanner.js lives in src/core/, not src/services/)
+      const trendTF = volatilityScanner.TREND_TF_MAP ? volatilityScanner.TREND_TF_MAP[this.bot.timeframe] : null;
+      if (trendTF) {
+        try {
+          const noTradeCheck = await signalEngine.checkNoTradeOnUpperTF(this.bot, trendTF, binanceRest);
+          if (noTradeCheck.skip === true) {
+            // ST3 pattern matched on upper-TF → CBv3 trigger
+            logger.warn({
+              botId: this.bot._id.toString(),
+              symbol: this.bot.symbol,
+              timeframe: this.bot.timeframe,
+              trendTF,
+              lastKind: noTradeCheck.lastKind,
+              candleCloseTime: candle.closeTime,
+              lastLower: lastLower.toFixed(6),
+            }, 'trader: CBv3 — CBv2 pattern + ST3 upper-TF no-trade, force-closing ALL positions');
+          } else {
+            // CBv2 pattern matched BUT ST3 didn't trigger → don't fire CBv3
+            // (user opted into v3 for stricter gating — pure CBv2 should NOT trigger)
+            logger.debug({
+              botId: this.bot._id.toString(),
+              symbol: this.bot.symbol,
+              timeframe: this.bot.timeframe,
+              trendTF,
+              reason: noTradeCheck.reason,
+            }, 'trader: cbv3 — CBv2 pattern matched but ST3 cleared, no fire (v3 strict gate)');
+            return;
+          }
+        } catch (stErr) {
+          // FAIL-OPEN: ST3 fetch error — fall through to fire CBv3 (same as CBv2)
+          logger.warn({ err: stErr.message, botId: this.bot._id.toString() }, 'trader: cbv3 — ST3 fetch failed, firing anyway (fail-open)');
+        }
+      } else {
+        // No trendTF for this TF — fall back to CBv2-equivalent fire
+        logger.warn({
+          botId: this.bot._id.toString(),
+          timeframe: this.bot.timeframe,
+          trendTF,
+        }, 'trader: cbv3 — no TREND_TF_MAP entry, firing CBv2-equivalent');
+      }
+
+      const OPEN_STATES = ['partial_wait', 'filled', 'retrying', 'holding', 'selling', 'partial_sell_wait'];
+      let targets;
+      try {
+        targets = await Trade.find({ botId: this.bot._id, state: { $in: OPEN_STATES } }).lean();
+      } catch (err) {
+        logger.warn({ err: err.message }, 'trader: cbv3 — Trade.find failed');
+        return;
+      }
+      if (!targets || targets.length === 0) {
+        logger.warn({
+          botId: this.bot._id.toString(),
+          symbol: this.bot.symbol,
+          timeframe: this.bot.timeframe,
+          candleCloseTime: candle.closeTime,
+          lastLower: lastLower.toFixed(6),
+        }, 'trader: cbv3 — pattern matched but no open positions, setting cooldown anyway (hybrid mode)');
+      } else {
+        logger.warn({
+          botId: this.bot._id.toString(),
+          symbol: this.bot.symbol,
+          timeframe: this.bot.timeframe,
+          candleCloseTime: candle.closeTime,
+          lastLower: lastLower.toFixed(6),
+          targets: targets.length,
+          tradeIds: targets.map((t) => t._id.toString()),
+        }, 'trader: cbv3 — CBv2+ST3 sustained breach, force-closing ALL positions');
+
+        for (const t of targets) {
+          if (!this.running) break;
+          try {
+            await this._forceCloseTradeNow(t, {
+              reason: 'cbv3_panic',
+              ctx: {
+                lastClose: parseFloat(candle.close),
+                lastLower: lastLower,
+                allowProfit: true,
+              },
+            });
+          } catch (err) {
+            logger.error({
+              err: err.message, stack: err.stack,
+              tradeId: t._id.toString(),
+            }, 'trader: cbv3_force_close — exception');
+          }
+        }
+      }
+
+      // HYBRID COOLDOWN
+      const lockHours = Math.max(0.5, Math.min(168, Number(this.bot.cbv3LockHours) || 8));
+      const lockedUntil = new Date(Date.now() + lockHours * 60 * 60 * 1000);
+      const lockedUntilIso = lockedUntil.toISOString();
+      this._cbv3FiredAt = Date.now();
+      this.bot.cbv3LastFiredAt = new Date();
+      this.bot.cbv3LockedUntil = lockedUntil;
+      this.bot.cbv3LockReason = 'cbv3_panic';
+
+      Bot.updateOne(
+        { _id: this.bot._id },
+        {
+          $set: {
+            cbv3LastFiredAt: this.bot.cbv3LastFiredAt,
+            cbv3LockedUntil: this.bot.cbv3LockedUntil,
+            cbv3LockReason: this.bot.cbv3LockReason,
+          },
+        }
+      ).catch((err) => logger.warn({ err: err.message }, 'trader: persist cbv3 cooldown failed'));
+
+      eventBus.emit('bot:cooldown', {
+        botId: this.bot._id,
+        reason: 'cbv3_panic',
+        version: 'v3',
+        lockedUntil: lockedUntilIso,
+        lockHours,
+      });
+      eventBus.emit('bot:updated', { botId: this.bot._id });
+
+      try {
+        const botName = this.bot.name || this.bot.symbol || this.bot._id.toString();
+        await telegramNotifier.sendNow('cbv3PanicClose', {
+          botName,
+          symbol: this.bot.symbol,
+          timeframe: this.bot.timeframe,
+          closedCount: targets ? targets.length : 0,
+          candleCloseTime: candle.closeTime,
+          lastLower: lastLower.toFixed(6),
+          lockedUntil: lockedUntilIso,
+          lockHours,
+        }).catch((err) => logger.warn({ err: err.message }, 'trader: cbv3 telegram sendNow failed'));
+      } catch (_) { /* non-fatal */ }
+    } finally {
+      this.cbv3CheckInFlight = false;
+    }
+  }
+
+  // ─── FIX-2026-08-08: Feature #3 — Auto Unlock Cooldown on candle close ─────
+  // เรียกจาก _cbAutoUnlockKlineHandler (direct kline:closed subscription)
+  //   - runs every candle close while bot is in CB cooldown (cbv2 OR cbv3)
+  //   - if cbAutoUnlockEnabled=false → skip
+  //   - if no cooldown active → skip
+  //   - mutex _cbAutoUnlockInFlight กัน concurrent invocations across candles
+  //   - on unlock: cbAutoUnlock.applyUnlock() clears cbv2* + cbv3* fields + resets in-memory _cbv2FiredAt/_cbv3FiredAt
+  //   - ไม่ override bot.enabled (HYBRID mode — manual unlock ไม่ disable บอท)
+  async _evaluateAutoUnlockOnCandle(_candle) {
+    if (!this.running) return;
+    if (this.bot.cbAutoUnlockEnabled !== true) return;
+    if (this._cbAutoUnlockInFlight) return;
+    this._cbAutoUnlockInFlight = true;
+    try {
+      const cbBot = await Bot.findById(this.bot._id).lean();
+      if (!cbBot) return;
+      // FIX-2026-08-08: master switch — stamp AppConfig.masterCbAutoUnlockEnabled
+      const masterToggles = await masterConfig.getMasterToggles();
+      cbBot._masterCbAutoUnlockEnabled = masterToggles.masterCbAutoUnlockEnabled;
+      const unlockResult = await cbAutoUnlock.evaluate(cbBot);
+      if (unlockResult.unlocked) {
+        await cbAutoUnlock.applyUnlock(cbBot, unlockResult);
+        // refresh in-memory snapshot
+        this.bot.cbv2LockedUntil = null;
+        this.bot.cbv2LockReason = null;
+        this.bot.cbv2LastFiredAt = null;
+        this.bot.cbv3LockedUntil = null;
+        this.bot.cbv3LockReason = null;
+        this.bot.cbv3LastFiredAt = null;
+        logger.info({
+          botId: this.bot._id.toString(),
+          signalsFound: unlockResult.signalsFound,
+          threshold: unlockResult.threshold,
+        }, 'trader: CB auto-unlock triggered (3+ profitable signals on candle close)');
+        try {
+          const botName = this.bot.name || this.bot.symbol || this.bot._id.toString();
+          await telegramNotifier.sendNow('botAutoUnlocked', {
+            botName,
+            symbol: this.bot.symbol,
+            timeframe: this.bot.timeframe,
+            signalsFound: unlockResult.signalsFound,
+            threshold: unlockResult.threshold,
+          }).catch((err) => logger.warn({ err: err.message }, 'trader: cbAutoUnlock telegram failed'));
+        } catch (_) { /* non-fatal */ }
+      } else if (unlockResult.signalsFound > 0) {
+        // partial progress — update counter for UI/debugging
+        await Bot.updateOne(
+          { _id: this.bot._id },
+          { $set: {
+            cbAutoUnlockSignalsFound: unlockResult.signalsFound,
+            cbAutoUnlockCheckedAt: new Date(),
+          } }
+        ).catch(() => {});
+      }
+    } catch (err) {
+      logger.warn({ err: err.message, botId: this.bot._id.toString() }, 'trader: cbAutoUnlock evaluate failed (non-fatal)');
+    } finally {
+      this._cbAutoUnlockInFlight = false;
+    }
+  }
+
   // FIX-2026-07-30: shared force-close helper — ใช้ได้ทั้ง stop-loss (upperKC) และ CB (panic)
   //   - atomic claim → cancel live SELL → MARKET SELL
   //   - reason: 'stop_loss_upper_kc' | 'cb_panic'
@@ -1371,6 +1981,7 @@ class Trader {
                   state: 'sold',
                   sellOrderId: fresh.orderId,
                   sellPrice: avgSell,
+                  sellAvgPrice: avgSell, // P2-fix-2026-08-06: alias for query consistency
                   sellFilledAt: new Date(),
                   sellFilledQty: filledQty,
                   // FIX-2026-07-31 (BUG-1): calcPnl returns {gross,fees,net,pnlPercent} — no realizedPnl key
@@ -1396,6 +2007,18 @@ class Trader {
                 }
               );
               if (upd.modifiedCount === 1) {
+                // FIX-2026-08-06 (P4): slippage check for race-recovery path —
+                //   SELL fill ต่ำกว่า target > 1% (warn) / > 3% (telegram alert)
+                const raceTarget = parseFloat(trade.targetSellPrice || 0);
+                if (raceTarget > 0) {
+                  this._computeSlippage({
+                    sellPrice: avgSell,
+                    targetSellPrice: raceTarget,
+                    tradeId: claim._id,
+                    sellReason: 'race_recovery_filled',
+                    pnlPercent: pnl.pnlPercent,
+                  });
+                }
                 // FIX-2026-07-31 (BUG-1): previously this branch skipped Bot.$inc + unregisterTrade +
                 //   currentTrade cleanup + bot:status idle emit (mirror stop_loss_upper_kc L704-719 pattern)
                 await Bot.updateOne(
@@ -2229,6 +2852,42 @@ class Trader {
         return;
       }
 
+      // FIX-2026-08-07: CBv2 cooldown gate (HYBRID mode — replaces short 30s suppression)
+      //   - HYBRID: CBv2 force-closes positions + sets BUY cooldown cbv2LockHours hours
+      //   - บอทยัง enabled + Auto-pause ยังทำงาน — gate นี้แค่กั้น S1 BUY ในช่วง cooldown
+      //   - dynamic duration: cbv2LockHours (user-configurable per bot, default 8)
+      //   - ถ้า user เปลี่ยน cbv2LockHours ระหว่าง cooldown → window ปรับตามทันที (computed on-the-fly)
+      //   - ผู้ใช้ปลด cooldown manual ผ่าน POST /api/bots/:id/unlock-cbv2 ได้ (reset _cbv2FiredAt)
+      // FIX-2026-08-08: Feature #2 — CBv3 cooldown gate (mirror CBv2 schema)
+      //   - mutually exclusive: cbVersion='v2' → CBv2 gate fires, 'v3' → CBv3 gate fires
+      //   - both gates share the same unlock endpoint (POST /api/bots/:id/unlock-cbv2)
+      const cbv2CooldownMs = (Math.max(0.5, Math.min(168, Number(this.bot.cbv2LockHours) || 8))) * 3600 * 1000;
+      if (this._cbv2FiredAt > 0 && (Date.now() - this._cbv2FiredAt) < cbv2CooldownMs) {
+        const remainingMs = cbv2CooldownMs - (Date.now() - this._cbv2FiredAt);
+        logger.warn({
+          botId: this.bot._id.toString(),
+          signalId: signalDoc._id.toString(),
+          sinceCbv2Ms: Date.now() - this._cbv2FiredAt,
+          cooldownMs: cbv2CooldownMs,
+          remainingMs,
+        }, 'trader: skip BUY — CBv2 cooldown active (hybrid mode)');
+        await Signal.updateOne({ _id: signalDoc._id }, { outcome: 'skipped', note: 'cbv2_cooldown' });
+        return;
+      }
+      const cbv3CooldownMs = (Math.max(0.5, Math.min(168, Number(this.bot.cbv3LockHours) || 8))) * 3600 * 1000;
+      if (this._cbv3FiredAt > 0 && (Date.now() - this._cbv3FiredAt) < cbv3CooldownMs) {
+        const remainingMs = cbv3CooldownMs - (Date.now() - this._cbv3FiredAt);
+        logger.warn({
+          botId: this.bot._id.toString(),
+          signalId: signalDoc._id.toString(),
+          sinceCbv3Ms: Date.now() - this._cbv3FiredAt,
+          cooldownMs: cbv3CooldownMs,
+          remainingMs,
+        }, 'trader: skip BUY — CBv3 cooldown active (hybrid mode)');
+        await Signal.updateOne({ _id: signalDoc._id }, { outcome: 'skipped', note: 'cbv3_cooldown' });
+        return;
+      }
+
       // FIX-2026-07-21: กัน placeBuy รัวจากหลายเส้นทาง (WS kline:closed + reconcileKlines sweep
       //   หรือ 2 sweep ที่มาชนกัน). ถ้ามี BUY กำลังวางอยู่ → skip signal นี้ทันที
       //   (จะถูก process รอบหน้าเมื่อ BUY ก่อนหน้าเสร็จ)
@@ -2269,6 +2928,32 @@ class Trader {
         if (typeof this.buyCooldownTimer.unref === 'function') this.buyCooldownTimer.unref();
         return;
       }
+
+      // FIX-2026-08-06: delist pre-flight — กัน BUY บน symbol ที่กำลังจะถูก delist
+      //   - ถ้า symbol อยู่ใน /sapi/v1/spot/delist-schedule และ delistTime - now <= 7 วัน → skip
+      //   - ตรวจก่อน buyInFlight flag �ั้ง (กัน flag ค้างถ้า reject)
+      //   - defense-in-depth: ซ้ำกับ symbolInfo.validateOrder ในขั้นตอนถัดไป แต่ที่นี่ fail-fast
+      //     ก่อนทำ DCA stack creation / symbolInfo load / bookTicker fetch — ประหยัด work
+      try {
+        const delistMonitor = require('../services/binanceDelistMonitor');
+        if (delistMonitor.isDelisted(this.bot.symbol)) {
+          logger.warn({ botId: this.bot._id.toString(), symbol: this.bot.symbol }, 'trader: symbol already delisted on Binance — skipping BUY');
+          await Signal.updateOne({ _id: signalDoc._id }, { outcome: 'skipped', note: 'symbol_delisted' });
+          return;
+        }
+        if (delistMonitor.willDelistWithin(this.bot.symbol, 7)) {
+          const dt = delistMonitor.getDelistTime(this.bot.symbol);
+          const daysUntil = ((dt - Date.now()) / (24 * 60 * 60 * 1000)).toFixed(2);
+          logger.warn({
+            botId: this.bot._id.toString(),
+            symbol: this.bot.symbol,
+            delistTime: new Date(dt).toISOString(),
+            daysUntil,
+          }, 'trader: delist pre-flight skip');
+          await Signal.updateOne({ _id: signalDoc._id }, { outcome: 'skipped', note: `delist_in_${daysUntil}d` });
+          return;
+        }
+      } catch (_) { /* delistMonitor not yet started — fail-open (validateOrder catches it later) */ }
 
       this.buyInFlight = true;
 
@@ -2510,6 +3195,41 @@ class Trader {
           }, 'trader: DCA Martingale layer sizing');
         }
       }
+      // FIX-2026-08-08: Feature #1 — Dynamic Position Sizing (non-DCA path)
+      //   - mutually exclusive กับ DCA (validated in routes) — only fires when NOT in DCA mode
+      //   - effective size = dynamicSizeCurrent if set, else capitalPerTrade
+      //   - persisted via dynamicPositionSizing service on every SELL fill
+      // FIX-2026-08-08 (rev2): minNotional floor — บั๊ก A5
+      //   เดิม: ถ้า DPS ลด size ต่ำกว่า minNotional ของเหรียญ → validateOrder fail
+      //         → BUY ตายเงียบทุกสัญญาณของบอทตัวนั้น (กระทบระบบเทรดหลัก)
+      //   ใหม่: fail-safe — ถ้า size ที่ DPS เสนอต่ำกว่า minNotional × margin
+      //         → fallback ไปใช้ capitalPerTrade เดิม (ไม่ยกเลิก BUY)
+      if (!this._isDcaMode() && this.bot.dynamicSizeEnabled !== false) {
+        const effective = dps.getEffective(this.bot);
+        if (Number.isFinite(effective.size) && effective.size > 0) {
+          const DPS_MIN_NOTIONAL_MARGIN = 1.02; // กัน edge case ราคาขยับ/ปัดเศษ qty
+          let minNotionalUSDT = 0;
+          try {
+            const info = symbolInfo.getCached(this.bot.symbol);
+            if (info && info.notional && info.notional.minNotional) {
+              minNotionalUSDT = parseFloat(info.notional.minNotional.toString()) || 0;
+            }
+          } catch (_) { minNotionalUSDT = 0; /* non-fatal — treat as no floor */ }
+
+          if (effective.size >= minNotionalUSDT * DPS_MIN_NOTIONAL_MARGIN) {
+            buyNotionalUSDT = effective.size;
+          } else {
+            logger.warn({
+              botId: this.bot._id.toString(),
+              symbol: this.bot.symbol,
+              dpsSize: effective.size,
+              minNotional: minNotionalUSDT,
+              fallback: this.bot.capitalPerTrade,
+            }, 'trader: DPS size below minNotional — falling back to capitalPerTrade');
+          }
+        }
+      }
+
       const { qty } = symbolInfo.calcQtyFromCapital({
         symbol: this.bot.symbol,
         capitalUSDT: buyNotionalUSDT,
@@ -3505,8 +4225,8 @@ class Trader {
 
       // FIX 1: ลอง LIMIT_MAKER ก่อน — ถ้า reject (-2010 Duplicate, MIN_NOTIONAL ฯลฯ)
       // → fallback เป็น MARKET ทันที (emergency exit)
-      const sellClientOrderId = this.makeClientOrderId('sell', order.updateTime || Date.now(), trade.retryCount || 0);
-      const sellResp = await binanceRest.newOrder({
+      let sellClientOrderId = this.makeClientOrderId('sell', order.updateTime || Date.now(), trade.retryCount || 0);
+      let sellResp = await binanceRest.newOrder({
         symbol: this.bot.symbol,
         side: 'SELL',
         type: 'LIMIT_MAKER',
@@ -3515,6 +4235,48 @@ class Trader {
         newClientOrderId: sellClientOrderId,
         recvWindow: config_recvWindow(),
       }).catch((err) => ({ error: binanceRest.formatBinanceError(err) }));
+
+      // FIX-2026-08-07 (ZBT 17:27 incident): retry once on -2010 "insufficient balance"
+      //   - เคสก่อนหน้า: BUY fill ตอนที่ ZBT free=0 (อีก position ของบอท lock ZBT อยู่) → Binance ยัง
+      //     ไม่ settle base asset เข้า free balance → LIMIT_MAKER SELL โดน -2010 "Account has
+      //     insufficient balance for requested action." ทันทีที่ place order
+      //   - ก่อนหน้า fix: fall through ไป _emergencyMarketSell (ตัดขาดทุนทันทีที่ราคา spot)
+      //     ทั้งที่ SELL น่าจะสำเร็จถ้ารอ Binance settle ~500ms-1s
+      //   - fix: detect -2010 + msg="insufficient balance" → รอ 750ms แล้ว retry LIMIT_MAKER
+      //     1 ครั้ง (Binance settle time ปกติ < 1s). ถ้าสำเร็จ → continue ปกติ
+      //     ถ้ายัง fail → fall through ไป _emergencyMarketSell เดิม (safe side)
+      //   - post-only rejected (-2010 "would immediately match") ไม่เข้าเงื่อนไขนี้
+      //     → fall through _emergencyMarketSell ทันที (behavior เดิม)
+      if (sellResp.error && sellResp.error.code === -2010
+          && typeof sellResp.error.msg === 'string'
+          && sellResp.error.msg.toLowerCase().includes('insufficient balance')) {
+        logger.warn({
+          tradeId: trade._id.toString(),
+          symbol: this.bot.symbol,
+          err: sellResp.error,
+        }, 'trader: SELL -2010 insufficient balance — likely Binance settlement race; waiting 750ms and retrying');
+        await new Promise((r) => setTimeout(r, 750));
+        // newClientOrderId must be unique per request — generate fresh for retry
+        const retryClientOrderId = this.makeClientOrderId('sell', Date.now(), (trade.retryCount || 0) + 0.5);
+        sellResp = await binanceRest.newOrder({
+          symbol: this.bot.symbol,
+          side: 'SELL',
+          type: 'LIMIT_MAKER',
+          quantity: filledQty.toString(),
+          price: sellPrice,
+          newClientOrderId: retryClientOrderId,
+          recvWindow: config_recvWindow(),
+        }).catch((err) => ({ error: binanceRest.formatBinanceError(err) }));
+        if (!sellResp.error) {
+          // อัพเดท sellClientOrderId เป็นตัวที่ retry สำเร็จ เพื่อใช้ใน Trade.updateOne/_registerTrade
+          sellClientOrderId = retryClientOrderId;
+          logger.info({
+            tradeId: trade._id.toString(),
+            symbol: this.bot.symbol,
+            orderId: sellResp.orderId,
+          }, 'trader: SELL LIMIT_MAKER retry succeeded after settlement race');
+        }
+      }
 
       if (sellResp.error) {
         logger.warn({
@@ -3851,6 +4613,19 @@ class Trader {
         reason: opts.reason || 'market_fallback',
         reasonDetail: reasonNote || null,
       });
+      // FIX-2026-08-06 (P4): slippage check for MARKET emergency SELL
+      //   - MARKET SELL = bottom-of-book fill, almost always < LIMIT_MAKER target
+      //   - warn on slip > 1%, telegram alert on slip > 3%
+      const emergencyTarget = parseFloat(targetSellPrice || 0);
+      if (emergencyTarget > 0) {
+        this._computeSlippage({
+          sellPrice: avgSellCombined || avgSell,
+          targetSellPrice: emergencyTarget,
+          tradeId: trade._id,
+          sellReason: opts.reason || 'market_fallback',
+          pnlPercent: pnlPct,
+        });
+      }
       logger.warn({
         tradeId: trade._id.toString(),
         pnl: net,
@@ -3958,9 +4733,24 @@ class Trader {
                 orderStatus: order.status,
                 lockedQty,
               }, 'trader: holding retry — asset locked in live SELL, syncing DB to selling');
+              // FIX-2026-08-07 (ZBT 17:27 incident): clear stale error field
+              //   - เคสก่อนหน้า: placeSell flow โดน -2010 "insufficient balance" จาก Binance settlement race
+              //     → set state='holding' + error="-2010: ..." → holding retry path sync state='selling'
+              //     แต่ไม่ clear error → UI แสดง "⚠️ -2010" ต่อแม้ SELL วางสำเร็จแล้ว
+              //   - เมื่อ SELL live on book (status NEW/PARTIALLY_FILLED) แปลว่า placeSell สำเร็จจริง
+              //     → error เก่าเป็น stale เคลียร์ทิ้ง + audit timestamp
               await Trade.updateOne(
                 { _id: trade._id, state: 'holding' },
-                { $set: { state: 'selling', sellStatus: order.status }, $inc: { holdingRetryCount: 0 } }
+                {
+                  $set: {
+                    state: 'selling',
+                    sellStatus: order.status,
+                    error: '',
+                    errorClearedAt: new Date(),
+                    errorClearedReason: 'holding_retry_sell_synced_live',
+                  },
+                  $inc: { holdingRetryCount: 0 },
+                }
               );
               // FIX-2026-07-31 (BUG-12): reset per-trade counter เมื่อเจอ live SELL
               await Trade.updateOne({ _id: trade._id }, { $set: { holdingRetryCount: 0 } }).catch(() => null);
@@ -4133,6 +4923,8 @@ class Trader {
               sellOrderId: resp.orderId,
               sellClientOrderId: retrySellId,
               sellPrice: avgSell,
+              // FIX-2026-08-06: P2 — persist sellAvgPrice alias (same as handleSellFilled)
+              sellAvgPrice: avgSell,
               sellQty: executed,
               sellQuoteQty: parseFloat(resp.cummulativeQuoteQty),
               sellStatus: resp.status,
@@ -4141,6 +4933,12 @@ class Trader {
               realizedPnl: pnl.net,
               pnlPercent: pnl.pnlPercent,
               targetSellPrice: parseFloat(targetSellPrice),
+              // FIX-2026-08-06: derive sellReason — holding retry MARKET path = 'holding_retry_recovered'
+              //   - ก่อนหน้านี้ path นี้ไม่ตั้ง sellReason → DB sellReason=null → dashboard/audit miss
+              //   - fix: ตั้ง 'holding_retry_recovered' ทันทีที่ MARKET fill (เป็น source of truth)
+              sellReason: 'holding_retry_recovered',
+              sellReasonAt: new Date(),
+              sellReasonSource: 'scheduleHoldingRetry',
               holdingRetryCount: 0, // FIX-2026-07-31 (BUG-12): reset on success
               // FIX-2026-07-31 (F1): reset SL-on-UKC auto-arm flag
               useStopLossOnUKC: false,
@@ -4158,6 +4956,17 @@ class Trader {
             },
           }
         );
+
+        // FIX-2026-08-06: P4 — slippage detection (holding retry MARKET fallback path)
+        //   - เคสนี้แหละคือ slippage หนักสุด — MARKET fill ตอน TP ไม่ถึง
+        //   - alert telegram เมื่อ slip < -3% (ผู้ใช้จะได้เห็นทันที)
+        this._computeSlippage({
+          sellPrice: avgSell,
+          targetSellPrice: parseFloat(targetSellPrice) || 0,
+          tradeId: trade._id,
+          sellReason: 'holding_retry_recovered',
+          pnlPercent: pnl.pnlPercent,
+        });
 
         await Bot.updateOne(
           { _id: this.bot._id },
@@ -5752,6 +6561,8 @@ class Trader {
             state: 'sold',
             sellStatus: 'FILLED',
             sellPrice,
+            // FIX-2026-08-06: P2 — persist sellAvgPrice alias (same as handleSellFilled)
+            sellAvgPrice: sellPrice,
             sellQty: stackTotalQty, // aggregate qty (sum of all layers)
             sellQuoteQty: parseFloat(update.cumulativeQuoteQty),
             sellFilledAt: new Date(update.ts || Date.now()),
@@ -5776,6 +6587,20 @@ class Trader {
           },
         }
       );
+
+      // FIX-2026-08-06: P4 — slippage detection (DCA stack — target = stackBep-based targetSellPrice)
+      //   - stackTargetSellPrice persist ใน _handleDcaBuyFilled / _handleDcaLayerAdded
+      //   - ถ้าไม่มี → fall back ไป trade.targetSellPrice
+      const dcaSlipTarget = parseFloat(trade.stackTargetSellPrice || trade.targetSellPrice) || 0;
+      if (dcaSlipTarget > 0) {
+        this._computeSlippage({
+          sellPrice,
+          targetSellPrice: dcaSlipTarget,
+          tradeId: trade._id,
+          sellReason: 'dca_target_hit',
+          pnlPercent: pnl.pnlPercent,
+        });
+      }
       if (upd.modifiedCount === 0) {
         logger.debug({ tradeId: trade._id.toString() }, 'trader: _handleDcaSellFilled skipped — already sold');
         return;
@@ -5927,6 +6752,12 @@ class Trader {
           state: 'sold',
           sellStatus: 'FILLED',
           sellPrice,
+          // FIX-2026-08-06: P2 — persist sellAvgPrice alias เพื่อ query ง่าย
+          //   - เดิม handleSellFilled ตั้งแค่ sellPrice (actual fill)
+          //   - handleSellPartialFill ตั้ง sellAvgPrice เท่านั้น
+          //   - query slippage ต้องใช้ 2 field → สับสน
+          //   - fix: handleSellFilled ก็ตั้ง sellAvgPrice = sellPrice (single source of truth สำหรับ fully-filled)
+          sellAvgPrice: sellPrice,
           sellQty,
           sellQuoteQty: parseFloat(update.cumulativeQuoteQty),
           sellFilledAt: new Date(update.ts || Date.now()),
@@ -5948,6 +6779,19 @@ class Trader {
         logger.debug({ tradeId: trade._id.toString() }, 'trader: handleSellFilled skipped — already sold');
         return;
       }
+
+      // FIX-2026-08-06: P4 — slippage detection (warn -1%, alert telegram -3%)
+      //   - targetSellPrice จาก trade snapshot (persist ตอน BUY fill)
+      //   - sellPrice = actual fill จาก Binance
+      //   - ถ้า sellReason pre-populated แล้ว (เช่น race_recovery_filled) → ใช้ค่านั้น, ไม่งั้น derive หลัง
+      const slipCtx = {
+        sellPrice,
+        targetSellPrice: parseFloat(trade.targetSellPrice) || 0,
+        tradeId: trade._id,
+        sellReason: trade.sellReason || (this._deriveSellReasonFromPriorState(trade, sellPrice) || {}).reason || null,
+        pnlPercent: pnl.pnlPercent,
+      };
+      this._computeSlippage(slipCtx);
 
       // FIX-2026-08-01: derive sellReason if caller didn't pre-populate (TP path = placeSellOrder)
       //   - prior state is `trade.state` snapshot BEFORE the atomic update above
@@ -5988,6 +6832,93 @@ class Trader {
           },
         }
       );
+
+      // FIX-2026-08-08: Feature #1 — Dynamic Position Sizing evaluation
+      //   - evaluate after every closed position (BUY→SELL)
+      //   - skip if disabled / DCA mode / martingale / cooldown / master-off
+      //   - apply dynamicSizeCurrent + dynamicLayersCurrent to bot
+      //   - persisted via dps.persistEval (separate updateOne — non-blocking)
+      // FIX-2026-08-08: master switch — read AppConfig.masterDynamicSizeEnabled (30s cache)
+      //   - if master off → stamp _masterDynamicSizeEnabled=false on snapshot → dps.evaluate() returns 'master-off'
+      // FIX-2026-08-08 (rev2): ย้าย getMasterToggles() เข้ามาใน try — DPS ต้องไม่มีทางกระทบ SELL flow
+      try {
+        const masterConfig = require('./masterConfig');
+        const masterToggles = await masterConfig.getMasterToggles();
+        const dpsCfg = await masterConfig.getDpsConfig();
+        this.bot._masterDynamicSizeEnabled = masterToggles.masterDynamicSizeEnabled;
+        this.bot._masterCbAutoUnlockEnabled = masterToggles.masterCbAutoUnlockEnabled;
+
+        const evalResult = dps.evaluate(this.bot, {
+          closedAt: new Date(),
+          pnlPct: pnl.pnlPercent,
+          isWin: pnl.net > 0,
+        }, dpsCfg);
+
+        // FIX-2026-08-08 (rev2): persistState เขียน history **เสมอ** (แก้บั๊ก A1)
+        //   เดิม persistEval() return ทันทีถ้า !changed → ไม้ชนะปกติ (reason='no-rule')
+        //   ไม่ถูกบันทึก → history ไม่มีวันยาวเกิน 1 → Rule ฝั่งชนะยิงไม่ได้ตลอดกาล
+        if (Array.isArray(evalResult.newHistory) || evalResult.changed) {
+          await dps.persistState(Bot, this.bot._id, evalResult);
+          // refresh in-memory snapshot so next eval/BUY เห็นค่าล่าสุด
+          if (Array.isArray(evalResult.newHistory)) {
+            this.bot.dynamicSizeLastResults = evalResult.newHistory;
+            this.bot.dynamicSizeLastEvaluatedAt = evalResult.appliedAt;
+          }
+          if (evalResult.changed) {
+            this.bot.dynamicSizeCurrent = evalResult.after.size;
+            this.bot.dynamicLayersCurrent = evalResult.after.layers;
+            this.bot.dynamicSizeCooldownUntil = evalResult.cooldownUntil;
+          }
+        }
+
+        if (evalResult.changed || (evalResult.dryRun && evalResult.wouldChange)) {
+          logger.info({
+            botId: this.bot._id.toString(),
+            reason: evalResult.reason,
+            before: evalResult.before,
+            after: evalResult.after,
+            dryRun: !!evalResult.dryRun,
+            pnlPct: pnl.pnlPercent.toFixed(4),
+          }, evalResult.dryRun ? 'trader: DPS — DRY-RUN (ไม่ได้ปรับจริง)' : 'trader: DPS — size/layers updated');
+          // FIX-2026-08-08: emit dpsResize telegram event — user wants visibility on DPS changes
+          //   - non-blocking (no await) so SELL flow ไม่หน่วง
+          try {
+            const botName = this.bot.name || this.bot.symbol || this.bot._id.toString();
+            telegramNotifier.sendNow('dpsResize', {
+              botName,
+              symbol: this.bot.symbol,
+              timeframe: this.bot.timeframe,
+              reason: evalResult.reason,
+              beforeSize: evalResult.before.size,
+              beforeLayers: evalResult.before.layers,
+              afterSize: evalResult.after.size,
+              afterLayers: evalResult.after.layers,
+              pnlPct: pnl.pnlPercent,
+              isWin: pnl.net > 0,
+              // FIX-2026-08-08 (rev2): ส่ง config จริงไปแสดงแทน hardcode ในข้อความ
+              dryRun: !!evalResult.dryRun,
+              cooldownMinutes: Math.round((dpsCfg.cooldownMs || 0) / 60000),
+              minSize: evalResult.bounds && evalResult.bounds.minSize,
+              maxSize: evalResult.bounds && evalResult.bounds.maxSize,
+              minLayers: evalResult.bounds && evalResult.bounds.minLayers,
+              maxLayers: evalResult.bounds && evalResult.bounds.maxLayers,
+            }).catch((err) => logger.warn({ err: err.message }, 'trader: DPS telegram sendNow failed'));
+          } catch (_) { /* non-fatal */ }
+        } else if (evalResult.skipped) {
+          logger.debug({
+            botId: this.bot._id.toString(),
+            skipped: evalResult.skipped,
+            reason: evalResult.reason,
+          }, 'trader: DPS — skipped');
+        }
+      } catch (dpsErr) {
+        logger.warn({ err: dpsErr.message, botId: this.bot._id.toString() }, 'trader: DPS evaluation failed (non-fatal)');
+      }
+
+      // FIX-2026-08-08: Feature #3 — Auto Unlock Cooldown (CBv2/CBv3)
+      //   - BUG-FIX: removed from handleSellFilled (deadlock — cooldown suppresses BUYs → no SELL → never evaluated)
+      //   - moved to _cbAutoUnlockKlineHandler (fires every candle close while cooldown active)
+      //   - see _evaluateAutoUnlockOnCandle() below
 
       this._unregisterTrade(trade);
       if (this.currentTrade && this.currentTrade._id.toString() === trade._id.toString()) {
@@ -6603,6 +7534,37 @@ class Trader {
             volume: parseFloat(lastMissed[5]),
             isClosed: true,
           });
+        }
+      }
+
+      // FIX-2026-08-06: force CBv2 on the most-recent missed candle (sustained breach lock)
+      //   - same WS-outage coverage as CB above but checks CBv2 pattern (4 consecutive red candles below lowerKC)
+      //   - lock expiry is the long-term gate; this just catches the missed candle for force-close
+      // FIX-2026-08-08: Feature #2 — CBv3 replay (mirror CBv2 — _checkCBv3PanicClose internally checks cbVersion)
+      if (replayed > 0) {
+        let lastMissed = null;
+        for (const k of raw) {
+          if (k[6] > nowMs) continue; // forming
+          if (k[6] <= lastSignalCloseMs) continue; // already processed
+          if (!lastMissed || k[6] > lastMissed[6]) lastMissed = k;
+        }
+        if (lastMissed) {
+          const candleObj = {
+            openTime: lastMissed[0],
+            closeTime: lastMissed[6],
+            open: parseFloat(lastMissed[1]),
+            high: parseFloat(lastMissed[2]),
+            low: parseFloat(lastMissed[3]),
+            close: parseFloat(lastMissed[4]),
+            volume: parseFloat(lastMissed[5]),
+            isClosed: true,
+          };
+          if (this.bot.cbv2Enabled !== false && !this.cbv2CheckInFlight) {
+            await this._checkCBv2PanicClose(candleObj);
+          }
+          if (this.bot.cbv3Enabled !== false && !this.cbv3CheckInFlight) {
+            await this._checkCBv3PanicClose(candleObj);
+          }
         }
       }
 

@@ -6,8 +6,9 @@ const config = require('../../config');
 const logger = require('../utils/logger');
 
 // ─── Rate limiter แบบ token bucket ตาม X-MBX-USED-WEIGHT-1M ────
+// IP-based REQUEST_WEIGHT limit = 6000/min (verified via GET /api/v3/exchangeInfo.rateLimits)
 class RateLimiter {
-  constructor({ capacity = 1200, refillPerMs = 1200 / 60000 } = {}) {
+  constructor({ capacity = 6000, refillPerMs = 6000 / 60000 } = {}) {
     this.capacity = capacity;
     this.tokens = capacity;
     this.refillRate = refillPerMs;
@@ -35,7 +36,8 @@ class RateLimiter {
 
   updateFromHeaders(headers) {
     const used = parseInt(headers['x-mbx-used-weight-1m'] || '0', 10);
-    if (used > this.capacity * 0.8) {
+    // แจ้งเตือนเมื่อใช้เกิน 90% (5400/min) — เลิกรบกวนตอนโหลดปกติ
+    if (used > this.capacity * 0.9) {
       logger.warn({ used, capacity: this.capacity }, 'binance weight approaching limit');
     }
     this.tokens = Math.max(0, this.capacity - used);
@@ -208,8 +210,8 @@ async function getKlines({ symbol, interval, startTime, endTime, limit = 500 }) 
  * - Returns bars in ascending openTime order (oldest first).
  *
  * Cost: 1 weight-2 call per 1000 bars. For window=15000 / 3m tf:
- *   15 calls × 50 symbols × 2 weight = 1500 weight — risk of rate-limit
- *   at the 1200/min cap, but acceptable for occasional deep scans.
+ *   15 calls × 50 symbols × 2 weight = 1500 weight — well under the
+ *   6000/min cap, safe for occasional deep scans.
  */
 async function getKlinesPaginated({ symbol, interval, totalLimit, batchLimit = 1000 }) {
   if (!Number.isFinite(totalLimit) || totalLimit <= 0) {
@@ -281,6 +283,25 @@ async function get24hrTickers({ symbol = null } = {}) {
 async function getBookTicker(symbol) {
   if (!symbol) throw new Error('getBookTicker: symbol required');
   return publicGet('/api/v3/ticker/bookTicker', { symbol }, 2);
+}
+
+// ─── Public endpoints (X-MBX-APIKEY only, no signature) ─────────────────
+// FIX-2026-08-06: Get Spot Delist Schedule
+//   - endpoint: GET https://api.binance.com/sapi/v1/spot/delist-schedule
+//   - auth: API key in X-MBX-APIKEY header (no signature, no HMAC)
+//   - weight: 100 (IP-based) — cache recommended (we use 30min)
+//   - response: [{ delistTime: int64_ms, symbols: ['VICUSDT', ...] }, ...]
+//   - empty array = no symbols scheduled for delisting
+async function getSpotDelistSchedule() {
+  await limiter.take(100);
+  // sapi endpoints use the same axios instance — base URL is api.binance.com (config.binanceApi.base)
+  const resp = await http.get('/sapi/v1/spot/delist-schedule');
+  if (!Array.isArray(resp.data)) {
+    // defensive: some proxies wrap responses
+    if (resp.data && Array.isArray(resp.data.data)) return resp.data.data;
+    return [];
+  }
+  return resp.data;
 }
 
 // ─── Signed endpoints ───────────────────────────────────
@@ -401,6 +422,7 @@ module.exports = {
   getKlinesPaginated,
   get24hrTickers,
   getBookTicker,
+  getSpotDelistSchedule,  // FIX-2026-08-06: delist schedule for bot filter
   getAccount,
   newOrder,
   cancelOrder,
@@ -414,7 +436,7 @@ module.exports = {
   formatBinanceError,
   signQuery,
   nowMs,
-  nowMsBinance,           // FIX-2026-07-14: export สำหรับ signed timestamps
+  nowMsBinance,           // FIX-2026-07-14: export �ำหรับ signed timestamps
   refreshServerTimeOffset,// FIX-2026-07-14: export สำหรับ one-shot sync (เช่นตอน botManager.start)
   ensureTimeOffset,
 };

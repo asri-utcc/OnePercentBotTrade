@@ -42,6 +42,8 @@ const appConfigSchema = new mongoose.Schema(
         dailySummary: true, weeklySummary: true, monthlySummary: true,
         // FIX-2026-07-26: เตือน NET TP ต่ำกว่า 0.2% (เฉพาะบอทที่เปิด autoUpdateTp)
         tpLowPnL: true,
+        // FIX-2026-08-07: แจ้งเตือนเมื่อ Auto Add New Bot สร้างบอทใหม่อัตโนมัติ
+        autoAddBotCreated: true,
       }),
     },
     telegramThresholds: {
@@ -84,6 +86,106 @@ const appConfigSchema = new mongoose.Schema(
     //   - user ตั้งได้ผ่าน Settings section 5️⃣ → บันทึกลง AppConfig
     //   - ไม่กระทบ alert/banner/auto-buy (เป็นคนละ value — gauge ใช้ดูเฉยๆ)
     bnbGaugeTargetUsdt:       { type: Number,  default: 10, min: 1, max: 100 },
+
+    // 2026-08-06: Daily Profit Target gauge (radial gauge below navbar)
+    //   - targetThb: เป้าหมายกำไรรายวัน (THB) — 100% เมื่อ todayPnlThb == targetThb
+    //   - user ตั้งได้ผ่าน Settings section 6️⃣ → บันทึกลง AppConfig
+    //   - default 100 THB/วัน (ตาม UX request)
+    //   - gauge ไม่กระทบ trade logic — เป็น visualization อย่างเดียว
+    dailyTargetThb:           { type: Number,  default: 100, min: 1, max: 1000000 },
+
+    // FIX-2026-08-07: Auto Add New Bot — periodic scan + create new bots for new symbols
+    //   - enabled: master switch (default false — user must opt-in)
+    //   - intervalMin: how often to scan (default 60 min)
+    //   - minKcPct: filter candidate by Min %KC(window) > threshold (default 2)
+    //   - maxPerRun: cap bots created per cycle (default 5 — ปลอดภัย)
+    //   - scan params: separate from scan-volatility page (default = same as page defaults 2026-08-07)
+    //   - telegramNotify: emit autoAddBotCreated event when bot is created (default true)
+    //   - lastRunAt/lastStats/lastError: bookkeeping (persist across restart)
+    autoAddBotEnabled:        { type: Boolean, default: false },
+    autoAddBotIntervalMin:    { type: Number,  default: 60, min: 5 },
+    autoAddBotMinKcPct:       { type: Number,  default: 2, min: 0, max: 50 },
+    autoAddBotMaxPerRun:      { type: Number,  default: 5, min: 1, max: 50 },
+    autoAddBotScanTimeframe:  { type: String,  default: '3m' },
+    autoAddBotScanThreshold:  { type: Number,  default: 0.5, min: 0.1, max: 100 },
+    autoAddBotScanWindow:     { type: Number,  default: 500, min: 5, max: 20000 },
+    autoAddBotScanTpWindow:   { type: Number,  default: 30, min: 20, max: 1000 },
+    autoAddBotScanTopN:       { type: Number,  default: 100, min: 20, max: 300 },
+    autoAddBotScanMinVol:     { type: Number,  default: 1_000_000, min: 0 },
+    autoAddBotScanMinPct:     { type: Number,  default: 0.30, min: 0, max: 1 },
+    autoAddBotScanTrends:     { type: [String], default: ['uptrend', 'downtrend', 'sideways'] },
+    autoAddBotTelegramNotify: { type: Boolean, default: true },
+    autoAddBotAutoEnable:     { type: Boolean, default: true },  // FIX-2026-08-07: auto-enable บอทที่เพิ่งสร้าง + spawnTrader ทันที (default ON)
+    // 2026-08-08: name prefix สำหรับบอทที่ auto-add สร้าง (default "(bAdd)" — เดิม hardcode)
+    //   - ใช้ใน autoAddBot._createBotFor(): name = `${base}${namePrefix}`
+    //   - ปลอดภัย: trim + fallback เป็น "(bAdd)" ถ้าว่าง
+    autoAddBotNamePrefix:     { type: String,  default: '(bAdd)', maxlength: 32 },
+    autoAddBotLastRunAt:      { type: Date,    default: null },
+    autoAddBotLastStats:      { type: Object,  default: null },
+    autoAddBotLastError:      { type: String,  default: null },
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // FIX-2026-08-08: Feature #2 — CB Version (global setting)
+    //   - 'v2' = CBv2 only (4 red candles below lowerKC → cooldown)
+    //   - 'v3' = CBv2 + ST3 same-candle on upper-TF (default — recommended)
+    //   - ใช้ AppConfig.cbVersion เป็น single source of truth
+    //   - bot-edit form แสดง readonly badge บอกว่าใช้ version ไหน
+    // ═══════════════════════════════════════════════════════════════════════
+    cbVersion: { type: String, enum: ['v2', 'v3'], default: 'v3' },
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // FIX-2026-08-08: Master toggles for DPS / CB Auto-Unlock
+    //   - masterDynamicSizeEnabled (default true) — when false, all bots skip DPS evaluation
+    //     (per-bot dynamicSizeEnabled still respected as "I want DPS off for this bot")
+    //   - masterCbAutoUnlockEnabled (default false) — when true, auto-enables cbAutoUnlock
+    //     across all bots (per-bot cbAutoUnlockEnabled still respected)
+    // ═══════════════════════════════════════════════════════════════════════
+    masterDynamicSizeEnabled: { type: Boolean, default: true },
+    masterCbAutoUnlockEnabled: { type: Boolean, default: false },
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // FIX-2026-08-08 (rev2): DPS tunables — ย้ายจาก hardcode ใน dynamicPositionSizing.js
+    //   - ปรับได้จากหน้า /settings.html section 🔟
+    //   - default = ค่าเดิมทุกตัว → DB เดิมที่ยังไม่มี field เหล่านี้ ทำงานเหมือนเดิมเป๊ะ
+    //   - validation/clamp อยู่ที่ admin.routes.js (PUT /api/admin/app-config)
+    //   - engine อ่านผ่าน masterConfig.getDpsConfig() (cache 30s)
+    // ═══════════════════════════════════════════════════════════════════════
+    // ── ขอบเขต (ขนาดไม้ + จำนวนไม้) ──
+    dpsMinSize: { type: Number, default: 6 },     // USDT ต่อไม้ ขั้นต่ำ
+    dpsMaxSize: { type: Number, default: 15 },    // USDT ต่อไม้ ขั้นสูง
+    dpsMinLayers: { type: Number, default: 1 },   // จำนวนไม้ ขั้นต่ำ
+    dpsMaxLayers: { type: Number, default: 5 },   // จำนวนไม้ ขั้นสูง
+    dpsCooldownMinutes: { type: Number, default: 5 }, // cooldown ระหว่าง resize (นาที)
+    // ── Rule 1: ชนะติดกัน N ไม้ ──
+    dpsWinStreakCount: { type: Number, default: 3 },
+    dpsWinStreakDeltaSize: { type: Number, default: 1 },
+    dpsWinStreakDeltaLayers: { type: Number, default: 1 },
+    // ── Rule 2: N ไม้ล่าสุดกำไร > X% ทุกไม้ ──
+    dpsBigWinCount: { type: Number, default: 2 },
+    dpsBigWinPct: { type: Number, default: 2.0 },
+    dpsBigWinDeltaSize: { type: Number, default: 2 },
+    dpsBigWinDeltaLayers: { type: Number, default: 0 },
+    // ── Rule 3: แพ้ติดกัน N ไม้ ──
+    dpsLossStreakCount: { type: Number, default: 1 },
+    dpsLossDeltaSize: { type: Number, default: -2 },
+    dpsLossDeltaLayers: { type: Number, default: -2 },
+    // ── safety ──
+    dpsRespectBotCapital: { type: Boolean, default: true },  // anchored clamp — band ครอบ capitalPerTrade เสมอ
+    dpsResetHistoryOnFire: { type: Boolean, default: true }, // กฎยิงแล้วเคลียร์ streak
+    dpsDryRun: { type: Boolean, default: false },            // คำนวณ + แจ้งเตือน แต่ไม่เขียนจริง
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // FIX-2026-08-08: Feature #5 — Auto Delete Bot (global setting)
+    //   - enabled: master switch (default false — user must opt-in)
+    //   - days: downtime threshold (default 30, range 7..365)
+    //   - warningDays: แจ้งเตือนล่วงหน้ากี่วัน (default 3)
+    //   - lastRunAt: telemetry (persist across restart)
+    // ═══════════════════════════════════════════════════════════════════════
+    autoDeleteBotEnabled: { type: Boolean, default: false },
+    autoDeleteBotDays: { type: Number, default: 30, min: 7, max: 365 },
+    autoDeleteBotWarningDays: { type: Number, default: 3, min: 1, max: 30 },
+    autoDeleteBotLastRunAt: { type: Date, default: null },
+    autoDeleteBotLastStats: { type: Object, default: null },
   },
   { timestamps: true }
 );

@@ -19,6 +19,7 @@ const volatilityForBot = require('../../core/volatilityForBot'); // 2026-07-31: 
 const trendlineForBot = require('../../core/trendlineForBot'); // FIX-2026-08-03: Safe-trade #2 (trendline) live status for bot card badge
 const qualityIndicator = require('../../core/qualityIndicator'); // FIX-2026-08-01: Bot Quality Indicator (0-4 score)
 const prediction = require('../../core/prediction'); // FIX-2026-08-05: upper-KC + predicted loss for AU prediction panel
+const dps = require('../../core/dynamicPositionSizing'); // FIX-2026-08-08 (rev2): DPS state reset helper
 const logger = require('../../utils/logger');
 const eventBus = require('../../services/eventBus');
 
@@ -220,9 +221,12 @@ router.get('/', requireAuth, async (req, res) => {
     //   - background fetch: /api/bots?quality=1 to warm quality cache without blocking first paint
     const includeVolatility = req.query.expand === '1';
     const includeQuality = req.query.quality === '1' || req.query.expand === '1';
+    // FIX-2026-08-08: Feature #5 — exclude soft-deleted bots by default; ?includeDeleted=1 to show them
+    const includeDeleted = req.query.includeDeleted === '1';
     // FIX-2026-07-24: เรียง enabled ก่อน (true=1 มาก่อน false=0) → บอทที่เปิดอยู่ลอยขึ้นบนสุดอัตโนมัติ
     //   - secondary sort: createdAt desc (บอทใหม่อยู่บนสุดภายใน group)
-    const bots = await Bot.find().sort({ enabled: -1, createdAt: -1 }).lean();
+    const filter = includeDeleted ? {} : { deletedAt: null };
+    const bots = await Bot.find(filter).sort({ enabled: -1, createdAt: -1 }).lean();
     // FIX-2026-08-02: run aggregations in parallel (independent)
     const [todayMap, monthMap, activePosMap] = await Promise.all([
       aggregateTodayPerBot(),
@@ -311,6 +315,61 @@ router.get('/', requireAuth, async (req, res) => {
         tlPivotCount: tl ? tl.pivotCount : 0,
         tlUpdatedAt: tl ? tl.updatedAt : null,
         tlCached: tl ? !!tl.cached : false,
+        // FIX-2026-08-06: delist risk fields (mirror coinInfo endpoint)
+        //   - isAtRisk: Binance "Monitoring" tag (early warning, ยังเปิด position ได้)
+        //   - isDelisted: delistTime already passed (ห้ามเทรด)
+        //   - delistTime: epoch ms (null = ไม่มี schedule)
+        //   - delistDateIso: ISO string (UI แสดง)
+        //   - daysUntil: �ำนวนวันก่อน delist (null = ไม่มี schedule)
+        //   - ถ้า delistMonitor ยังไม่ start → ทุก field = null/false (UI แสดง "—" / ไม่มี badge)
+        ...(() => {
+          try {
+            const delistMonitor = require('../../services/binanceDelistMonitor');
+            const risk = delistMonitor.getRiskInfoFor(b.symbol);
+            return {
+              isAtRisk: risk ? risk.isAtRisk : false,
+              isDelisted: risk ? risk.isDelisted : false,
+              delistTime: risk ? risk.delistTime : null,
+              delistDateIso: risk ? risk.delistDateIso : null,
+              daysUntil: risk ? risk.daysUntil : null,
+            };
+          } catch (_) {
+            return { isAtRisk: false, isDelisted: false, delistTime: null, delistDateIso: null, daysUntil: null };
+          }
+        })(),
+        // FIX-2026-08-08: Feature #1 — Dynamic Position Sizing fields (effective values for UI)
+        //   - dynamicSizeEffective: ค่าที่ใช้จริง (fallback = capitalPerTrade)
+        //   - dynamicLayersEffective: ค่าที่ใช้จริง (fallback = maxTrades)
+        //   - dynamicSizeInCooldown: อยู่ในช่วง cooldown (กัน rapid resize)
+        dynamicSizeEffective: Number.isFinite(b.dynamicSizeCurrent) ? b.dynamicSizeCurrent : (b.capitalPerTrade || 0),
+        dynamicLayersEffective: Number.isFinite(b.dynamicLayersCurrent) ? b.dynamicLayersCurrent : (b.maxTrades || 0),
+        dynamicSizeInCooldown: b.dynamicSizeCooldownUntil && new Date(b.dynamicSizeCooldownUntil).getTime() > Date.now(),
+        // FIX-2026-08-08: Feature #2 — CB Cooldown state (sub-categories for filter)
+        //   - cbCooldown: { active, reason, version, until, msLeft } — used by bots.html filter
+        //   - version: 'v2' | 'v3' | null (depends on AppConfig.cbVersion)
+        //   - reason: 'cbv2_panic' | 'cbv3_panic' | null
+        cbCooldown: (() => {
+          const now = Date.now();
+          const cbv2LockedUntilMs = b.cbv2LockedUntil ? new Date(b.cbv2LockedUntil).getTime() : 0;
+          const cbv3LockedUntilMs = b.cbv3LockedUntil ? new Date(b.cbv3LockedUntil).getTime() : 0;
+          const cbv2Active = cbv2LockedUntilMs > now;
+          const cbv3Active = cbv3LockedUntilMs > now;
+          if (cbv3Active) {
+            return { active: true, reason: 'cbv3_panic', version: 'v3', until: b.cbv3LockedUntil, msLeft: cbv3LockedUntilMs - now };
+          }
+          if (cbv2Active) {
+            return { active: true, reason: 'cbv2_panic', version: 'v2', until: b.cbv2LockedUntil, msLeft: cbv2LockedUntilMs - now };
+          }
+          return { active: false, reason: null, version: null, until: null, msLeft: 0 };
+        })(),
+        // FIX-2026-08-08: Feature #3 — Auto Unlock Cooldown fields
+        cbAutoUnlockEnabled: !!b.cbAutoUnlockEnabled,
+        cbAutoUnlockThresholdPct: Number.isFinite(b.cbAutoUnlockThresholdPct) ? b.cbAutoUnlockThresholdPct : 1.0,
+        cbAutoUnlockSignalsFound: b.cbAutoUnlockSignalsFound || 0,
+        // FIX-2026-08-08: Feature #5 — Auto Delete Bot fields
+        deletedAt: b.deletedAt || null,
+        scheduledDeleteAt: b.scheduledDeleteAt || null,
+        deleteDaysSince: b.deletedAt ? Math.floor((Date.now() - new Date(b.deletedAt).getTime()) / (1000 * 60 * 60 * 24)) : null,
       };
     });
     res.json({ bots: enriched });
@@ -849,6 +908,22 @@ router.get('/:id', requireAuth, async (req, res) => {
         qualityUpdatedAt: q.updatedAt || null,
         qualityCached: !!q.cached,
         qualityEnabled: q.enabled !== false,
+        // FIX-2026-08-06: delist risk fields (mirror /api/bots list)
+        ...(() => {
+          try {
+            const delistMonitor = require('../../services/binanceDelistMonitor');
+            const risk = delistMonitor.getRiskInfoFor(bot.symbol);
+            return {
+              isAtRisk: risk ? risk.isAtRisk : false,
+              isDelisted: risk ? risk.isDelisted : false,
+              delistTime: risk ? risk.delistTime : null,
+              delistDateIso: risk ? risk.delistDateIso : null,
+              daysUntil: risk ? risk.daysUntil : null,
+            };
+          } catch (_) {
+            return { isAtRisk: false, isDelisted: false, delistTime: null, delistDateIso: null, daysUntil: null };
+          }
+        })(),
       },
     });
   } catch (err) {
@@ -925,6 +1000,17 @@ router.post('/', requireAuth, requireBotActionPassword, async (req, res) => {
       });
     }
 
+    // FIX-2026-08-08: Feature #1 — Dynamic Position Sizing mutally exclusive with DCA stack mode
+    //   - DPS adjusts size/layers per-trade based on win/loss history
+    //   - DCA stack mode manages its own size/layers per layer (BEP-driven)
+    //   - ทั้ง 2 ระบบปรับ size พร้อมกัน → conflict; user ต้องเลือกอย่างใดอย่างหนึ่ง
+    const dpsEnabled = data.dynamicSizeEnabled !== false; // default true
+    if (dpsEnabled && (data.dcaEnabled === true || data.martingaleEnabled === true)) {
+      return res.status(400).json({
+        error: 'dynamicSizeEnabled is mutually exclusive with dcaEnabled/martingaleEnabled (Dynamic Position Sizing adjusts size per-trade; DCA stack manages its own layers). Disable one of them.',
+      });
+    }
+
     const bot = await Bot.create({
       name: data.name || `${symbol} ${timeframe}`,
       symbol,
@@ -965,6 +1051,12 @@ router.post('/', requireAuth, requireBotActionPassword, async (req, res) => {
       //   - true (default): panic-close ALL positions เมื่อ 3 แท่งติด close<lowerKC + open<lowerKC + แดง
       //   - false: ไม่ panic-close (เสี่ยงขาดทุนต่อถ้ากราฟไหล)
       cbEnabled: data.cbEnabled !== false,
+      // FIX-2026-08-06: CBv2 — sustained 3-candle breach lock (default true)
+      //   - true (default): panic-close + lock bot cbv2LockHours hours เมื่อ 4 แท่งติด red below lowerKC
+      //   - false: disable CBv2 lock (CB ปกติยังทำงานถ้า cbEnabled=true)
+      cbv2Enabled: data.cbv2Enabled !== false,
+      // FIX-2026-08-06: CBv2 lock duration hours (0.5..168, default 8)
+      cbv2LockHours: Math.min(168, Math.max(0.5, parseFloat(data.cbv2LockHours ?? 8))),
       // FIX-2026-08-01: safeTradeEnabled (default true) — per-bot safe-trade filter toggle
       //   - true (default): ก่อนวาง BUY ให้เช็ค super-upper TF (4h/1d/1w ตาม bot TF) ว่าเป็นแท่งเขียว/เหนือ EMA20
       //   - false: ซื้อทันที (พฤติกรรมเดิม)
@@ -1010,6 +1102,12 @@ router.post('/', requireAuth, requireBotActionPassword, async (req, res) => {
       //   - enabled: true ถ้า client ส่ง data.enabled === true (atomic create+enable ใน 1 round-trip)
       enabled: data.enabled === true,
       status: data.enabled === true ? 'starting' : 'idle',
+      // FIX-2026-08-08: Feature #1 — Dynamic Position Sizing (default ON per user request)
+      //   - mutually exclusive กับ DCA / Martingale (validator ก่อนหน้านี้ enforce แล้ว)
+      dynamicSizeEnabled: data.dynamicSizeEnabled !== false,
+      // FIX-2026-08-08: Feature #3 — Auto Unlock Cooldown (per-bot, default OFF)
+      cbAutoUnlockEnabled: data.cbAutoUnlockEnabled === true,
+      cbAutoUnlockThresholdPct: Math.min(5.0, Math.max(0.5, parseFloat(data.cbAutoUnlockThresholdPct ?? 1.0))),
     });
 
     // FIX-2026-07-31: atomic auto-enable — ถ้า enabled=true ให้เริ่มเทรดทันที
@@ -1043,7 +1141,10 @@ router.put('/:id', requireAuth, async (req, res) => {
     if (!bot) return res.status(404).json({ error: 'Bot not found' });
 
     const data = req.body || {};
-    const allowed = ['name', 'capitalPerTrade', 'maxTrades', 'tpPercent', 'retryTimeMin', 'retryMax', 'timeframe', 'stopLossOnUpperKC', 'autoUpdateTp', 'kcMult', 'minSpreadTicks', 's1OnlyDown', 'xs1Enabled', 'cbEnabled', 'safeTradeEnabled', 'safeTradeTrendlineEnabled', 'autoPauseEnabled', 'autoPauseMinKcPct', 'suggestTpWindow', 'autoArmStopLossOnUKC', 'autoArmLossPct', 'autoArmAgeHours', 'slUkcTriggerOnProfit', 'tpTrendMultiplier', 'tpTrendEnabled', 'dcaEnabled', 'dcaMaxLayers', 'martingaleEnabled', 'martingaleMultiplier', 'martingaleMaxLayerNotional', 'safeTradeNoTradeEnabled']; // FIX-2026-08-05: audit fix — missing from allowed list caused bot-edit save to silently drop the field
+    // FIX-2026-08-08 (rev2): จำค่าเดิมไว้ตรวจว่า user แก้ capital/maxTrades เองหรือไม่ (แก้บั๊ก A4)
+    const _prevCapital = bot.capitalPerTrade;
+    const _prevMaxTrades = bot.maxTrades;
+    const allowed = ['name', 'capitalPerTrade', 'maxTrades', 'tpPercent', 'retryTimeMin', 'retryMax', 'timeframe', 'stopLossOnUpperKC', 'autoUpdateTp', 'kcMult', 'minSpreadTicks', 's1OnlyDown', 'xs1Enabled', 'cbEnabled', 'cbv2Enabled', 'cbv2LockHours', 'cbv3Enabled', 'cbv3LockHours', 'safeTradeEnabled', 'safeTradeTrendlineEnabled', 'autoPauseEnabled', 'autoPauseMinKcPct', 'suggestTpWindow', 'autoArmStopLossOnUKC', 'autoArmLossPct', 'autoArmAgeHours', 'slUkcTriggerOnProfit', 'tpTrendMultiplier', 'tpTrendEnabled', 'dcaEnabled', 'dcaMaxLayers', 'martingaleEnabled', 'martingaleMultiplier', 'martingaleMaxLayerNotional', 'safeTradeNoTradeEnabled', 'dynamicSizeEnabled', 'cbAutoUnlockEnabled', 'cbAutoUnlockThresholdPct']; // FIX-2026-08-05: audit fix — missing from allowed list caused bot-edit save to silently drop the field  // FIX-2026-08-06: CBv2 fields (cbv2Enabled, cbv2LockHours)  // FIX-2026-08-08: Feature #1+3 (dynamicSizeEnabled, cbAutoUnlockEnabled, cbAutoUnlockThresholdPct)  // FIX-2026-08-08: CBv3 fields (cbv3Enabled, cbv3LockHours) — added to whitelist for bulk update + bot-edit save
 
     for (const k of allowed) {
       if (data[k] !== undefined) {
@@ -1083,6 +1184,21 @@ router.put('/:id', requireAuth, async (req, res) => {
         } else if (k === 'martingaleMaxLayerNotional') {
           // FIX-2026-08-03: Martingale per-layer notional cap (1..10000 USDT, default 100)
           bot[k] = Math.min(10000, Math.max(1, parseFloat(data[k])));
+        } else if (k === 'cbv2Enabled') {
+          // FIX-2026-08-06: CBv2 sustained panic-sell toggle (default true)
+          bot[k] = data[k] === true || data[k] === 'true';
+        } else if (k === 'cbv2LockHours') {
+          // FIX-2026-08-06: CBv2 lock duration hours (0.5..168, default 8)
+          bot[k] = Math.min(168, Math.max(0.5, parseFloat(data[k])));
+        } else if (k === 'dynamicSizeEnabled') {
+          // FIX-2026-08-08: Feature #1 — Dynamic Position Sizing toggle (default ON)
+          bot[k] = data[k] === true || data[k] === 'true';
+        } else if (k === 'cbAutoUnlockEnabled') {
+          // FIX-2026-08-08: Feature #3 — Auto Unlock Cooldown (default OFF)
+          bot[k] = data[k] === true || data[k] === 'true';
+        } else if (k === 'cbAutoUnlockThresholdPct') {
+          // FIX-2026-08-08: Feature #3 — threshold Pct (0.5..5.0, default 1.0)
+          bot[k] = Math.min(5.0, Math.max(0.5, parseFloat(data[k])));
         } else if (k === 'maxTrades' || k === 'retryTimeMin' || k === 'retryMax' || k === 'minSpreadTicks' || k === 'suggestTpWindow') {
           // FIX-2026-07-24: minSpreadTicks clamp 0..10
           // FIX-2026-07-25: retryTimeMin ต้อง parseFloat (รองรับ 0.1..60) ไม่ใช่ parseInt — เดิมใช้ parseInt ตัดทศนิยมทิ้ง → "0.1" กลายเป็น 0 → validation fail
@@ -1118,6 +1234,30 @@ router.put('/:id', requireAuth, async (req, res) => {
       return res.status(400).json({
         error: 'martingaleEnabled requires dcaEnabled=true (Martingale is a DCA-mode-only strategy)',
       });
+    }
+
+    // FIX-2026-08-08: Feature #1 — Dynamic Position Sizing mutually exclusive with DCA (post-merge check)
+    //   - effectiveDps = data.dynamicSizeEnabled ?? existing dynamicSizeEnabled
+    //   - reject ถ้าจะเปิด DPS แต่ DCA/Martingale เปิดอยู่ (ทั้งกรณี enable ใหม่ + กรณี DCA ถูกปิดแต่ DPS ถูก enable)
+    const effectiveDps = data.dynamicSizeEnabled !== undefined
+      ? (data.dynamicSizeEnabled === true || data.dynamicSizeEnabled === 'true')
+      : bot.dynamicSizeEnabled !== false; // default true (matching schema default)
+    if (effectiveDps && (effectiveDca || effectiveMartingale)) {
+      return res.status(400).json({
+        error: 'dynamicSizeEnabled is mutually exclusive with dcaEnabled/martingaleEnabled (Dynamic Position Sizing adjusts size per-trade; DCA stack manages its own layers). Disable one of them.',
+      });
+    }
+
+    // FIX-2026-08-08 (rev2): reset DPS state เมื่อ user แก้ capitalPerTrade/maxTrades เอง (แก้บั๊ก A4)
+    //   เดิม: dynamicSizeCurrent override buyNotionalUSDT ถาวร → แก้ capital ในหน้า bot-edit ไม่มีผลเลย
+    //   ใหม่: ค่าที่ user ตั้งมีผลทันที แล้ว DPS เริ่มนับ streak ใหม่จากฐานใหม่
+    if (bot.capitalPerTrade !== _prevCapital || bot.maxTrades !== _prevMaxTrades) {
+      Object.assign(bot, dps.resetStateUpdate());
+      logger.info({
+        botId: bot._id.toString(),
+        capital: `${_prevCapital} → ${bot.capitalPerTrade}`,
+        maxTrades: `${_prevMaxTrades} → ${bot.maxTrades}`,
+      }, 'bot.routes: capital/maxTrades changed by user → DPS state reset');
     }
 
     // validate symbol (ไม่ให้แก้ symbol ใน v1 - ถ้าต้องการ ลบแล้วสร้างใหม่)
@@ -1186,6 +1326,12 @@ router.put('/:id', requireAuth, async (req, res) => {
 });
 
 // ─── DELETE /api/bots/:id ─────────────────────────────
+// FIX-2026-08-08: Feature #5 — soft delete (sets deletedAt) instead of hard delete
+//   - stop trader if running
+//   - set deletedAt = now (Bot retains in DB for 30 days)
+//   - hard delete: out of scope for user (admin can run cleanup script)
+//   - restore via POST /api/bots/:id/restore
+//   - permanently delete via DELETE /api/bots/:id/permanent (admin-only)
 router.delete('/:id', requireAuth, requireBotActionPassword, async (req, res) => {
   try {
     const bot = await Bot.findById(req.params.id);
@@ -1194,10 +1340,65 @@ router.delete('/:id', requireAuth, requireBotActionPassword, async (req, res) =>
     if (bot.enabled) {
       await botManager.stopTrader(bot._id);
     }
-    await Bot.deleteOne({ _id: bot._id });
+    // FIX-2026-08-08: soft delete instead of hard delete (autoDeleteBot + restore workflow)
+    await Bot.updateOne(
+      { _id: bot._id },
+      { $set: { deletedAt: new Date(), enabled: false, status: 'disabled' } }
+    );
     // FIX-2026-07-24: emit bot:deleted สำหรับ Telegram notifier (เดิมไม่มี — silent delete)
     eventBus.emit('bot:deleted', { botId: String(bot._id), name: bot.name });
-    res.json({ ok: true });
+    res.json({ ok: true, softDeleted: true, deletedAt: new Date().toISOString() });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── POST /api/bots/:id/restore ────────────────────────
+// FIX-2026-08-08: Feature #5 — restore a soft-deleted bot (within 30-day window)
+router.post('/:id/restore', requireAuth, requireBotActionPassword, async (req, res) => {
+  try {
+    const bot = await Bot.findById(req.params.id);
+    if (!bot) return res.status(404).json({ error: 'Bot not found' });
+    if (!bot.deletedAt) {
+      return res.status(400).json({ error: 'Bot is not soft-deleted', deletedAt: null });
+    }
+    // FIX-2026-08-08: restore window check (30 days from deletedAt)
+    const daysSinceDelete = (Date.now() - new Date(bot.deletedAt).getTime()) / (1000 * 60 * 60 * 24);
+    if (daysSinceDelete > 30) {
+      return res.status(400).json({
+        error: 'Bot is beyond the 30-day restore window. Contact admin for backup restore.',
+        daysSinceDelete: Math.floor(daysSinceDelete),
+      });
+    }
+    bot.deletedAt = null;
+    bot.scheduledDeleteAt = null;
+    bot.deleteNotificationSentAt = null;
+    bot.status = 'idle';
+    await bot.save();
+    eventBus.emit('bot:updated', { botId: String(bot._id) });
+    logger.info({ botId: bot._id.toString() }, 'bot: restore — soft-deleted bot restored');
+    res.json({ ok: true, bot });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── DELETE /api/bots/:id/permanent ───────────────────
+// FIX-2026-08-08: Feature #5 — permanent delete (admin-only, requires password)
+//   - bypasses 30-day window
+//   - use for cleanup or user-requested immediate delete
+router.delete('/:id/permanent', requireAuth, requireBotActionPassword, async (req, res) => {
+  try {
+    const bot = await Bot.findById(req.params.id);
+    if (!bot) return res.status(404).json({ error: 'Bot not found' });
+
+    if (bot.enabled) {
+      await botManager.stopTrader(bot._id);
+    }
+    await Bot.deleteOne({ _id: bot._id });
+    eventBus.emit('bot:deleted', { botId: String(bot._id), name: bot.name, permanent: true });
+    logger.warn({ botId: bot._id.toString(), actorIp: req.ip }, 'bot: permanent delete (admin)');
+    res.json({ ok: true, permanent: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -1260,6 +1461,103 @@ router.post('/:id/clear-warning', requireAuth, async (req, res) => {
     eventBus.emit('bot:updated', { botId: req.params.id });
     logger.info({ botId: req.params.id.toString() }, 'bot: clear-warning — warning cleared by user');
     res.json({ ok: true, bot });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── POST /api/bots/:id/unlock-cbv2 ──────────────────
+// FIX-2026-08-07: HYBRID mode — ผู้ใช้กดปลด CBv2 cooldown (manual clear) ก่อน cbv2LockHours หมด
+//   - HYBRID: CBv2 ไม่ disable บอท ไม่ override Auto-pause — endpoint นี้แค่ clear cooldown fields
+//   - clear cbv2LockedUntil + cbv2LockReason + cbv2LastFiredAt ใน DB
+//   - reset trader._cbv2FiredAt = 0 ใน instance (ถ้า trader ยังรัน) เพื่อให้ BUY gate ปลดทันที
+//   - ไม่แตะ bot.enabled / bot.status / autoPauseReason — เป็นอิสระจาก Auto-pause
+//   - ส่ง bot:updated + bot:unlocked event
+//   - ใช้ requireBotActionPassword เพราะ unlock = admin-level action
+// FIX-2026-08-08: Feature #2 — ปลด CBv3 ด้วยพร้อมกัน (shared endpoint — mutually exclusive in time but both fields cleared for cleanliness)
+router.post('/:id/unlock-cbv2', requireAuth, requireBotActionPassword, async (req, res) => {
+  try {
+    const bot = await Bot.findById(req.params.id);
+    if (!bot) return res.status(404).json({ error: 'Bot not found' });
+    if (!bot.cbv2LockReason && !bot.cbv3LockReason) {
+      return res.status(400).json({
+        error: 'Bot is not CB-cooldown',
+        cbv2LockedUntil: bot.cbv2LockedUntil,
+        cbv3LockedUntil: bot.cbv3LockedUntil,
+      });
+    }
+    const wasLockedUntil = bot.cbv2LockedUntil;
+    const wasLockReason = bot.cbv2LockReason;
+    const wasCbv3LockedUntil = bot.cbv3LockedUntil;
+    const wasCbv3LockReason = bot.cbv3LockReason;
+    // FIX-2026-08-08: clear BOTH CBv2 + CBv3 fields (shared unlock endpoint)
+    bot.cbv2LockedUntil = null;
+    bot.cbv2LockReason = null;
+    bot.cbv2LastFiredAt = null;
+    bot.cbv3LockedUntil = null;
+    bot.cbv3LockReason = null;
+    bot.cbv3LastFiredAt = null;
+    await bot.save();
+
+    // FIX-2026-08-07: reset in-memory trader._cbv2FiredAt (เพื่อให้ BUY gate ปลดทันที ไม่ต้องรอ restart)
+    // FIX-2026-08-08: also reset _cbv3FiredAt
+    try {
+      const botManager = require('../../core/botManager');
+      const trader = botManager.traders && botManager.traders.get(String(req.params.id));
+      if (trader) {
+        trader._cbv2FiredAt = 0;
+        trader._cbv3FiredAt = 0;
+        logger.info({ botId: req.params.id.toString() }, 'bot: unlock-cbv2 — trader._cbv2FiredAt + _cbv3FiredAt reset');
+      }
+    } catch (err) {
+      // non-fatal: trader instance may not exist (bot disabled / not running)
+      logger.warn({ err: err.message }, 'bot: unlock-cbv2 — trader reset failed (bot not running?)');
+    }
+
+    eventBus.emit('bot:updated', { botId: req.params.id });
+    eventBus.emit('bot:unlocked', {
+      botId: req.params.id,
+      source: 'manual',
+      wasLockedUntil, wasLockReason,
+      wasCbv3LockedUntil, wasCbv3LockReason,
+    });
+    logger.info({
+      botId: req.params.id.toString(),
+      wasLockedUntil, wasLockReason,
+      wasCbv3LockedUntil, wasCbv3LockReason,
+    }, 'bot: unlock-cbv2 — CBv2+CBv3 cooldown cleared by user');
+    const fresh = await Bot.findById(req.params.id).lean();
+    res.json({ ok: true, bot: fresh });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── POST /api/bots/:id/dps-reset ─────────────────────
+// FIX-2026-08-08 (rev2): เคลียร์ DPS state ของบอทเดียว
+//   - dynamicSizeCurrent/dynamicLayersCurrent → null (กลับไปใช้ capitalPerTrade/maxTrades)
+//   - dynamicSizeLastResults → [] (เริ่มนับ streak ใหม่)
+//   - ใช้เมื่อ state เพี้ยน หรืออยากให้ค่าที่ตั้งเองมีผลทันที
+router.post('/:id/dps-reset', requireAuth, async (req, res) => {
+  try {
+    const bot = await Bot.findById(req.params.id);
+    if (!bot) return res.status(404).json({ error: 'Bot not found' });
+    const before = { size: bot.dynamicSizeCurrent, layers: bot.dynamicLayersCurrent };
+    Object.assign(bot, dps.resetStateUpdate());
+    await bot.save();
+
+    // sync in-memory trader snapshot (ไม่ต้องรอ restart)
+    try {
+      const trader = botManager.traders && botManager.traders.get(String(req.params.id));
+      if (trader && trader.bot) Object.assign(trader.bot, dps.resetStateUpdate());
+    } catch (err) {
+      logger.warn({ err: err.message }, 'bot: dps-reset — trader snapshot sync failed (bot not running?)');
+    }
+
+    eventBus.emit('bot:updated', { botId: req.params.id });
+    logger.info({ botId: req.params.id.toString(), before }, 'bot: dps-reset — DPS state cleared by user');
+    const fresh = await Bot.findById(req.params.id).lean();
+    res.json({ ok: true, before, bot: fresh });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -1697,7 +1995,7 @@ router.post('/bulk-update', requireAuth, async (req, res) => {
     const allowed = [
       'capitalPerTrade', 'maxTrades', 'tpPercent', 'retryTimeMin', 'retryMax',
       'timeframe', 'stopLossOnUpperKC', 'autoUpdateTp', 'kcMult', 'minSpreadTicks',
-      's1OnlyDown', 'xs1Enabled', 'cbEnabled', 'safeTradeEnabled',
+      's1OnlyDown', 'xs1Enabled', 'cbEnabled', 'cbv2Enabled', 'cbv2LockHours', 'safeTradeEnabled',
       // FIX-2026-08-03: Safe-trade filter #2 (trendline) — bulk-update support
       'safeTradeTrendlineEnabled',
       // FIX-2026-08-05: Safe-trade filter #3 (no-trade engulfing/SS) — bulk-update support
@@ -1708,6 +2006,8 @@ router.post('/bulk-update', requireAuth, async (req, res) => {
       'dcaEnabled', 'dcaMaxLayers',
       // FIX-2026-08-03: Martingale fields (Master Config support)
       'martingaleEnabled', 'martingaleMultiplier', 'martingaleMaxLayerNotional',
+      // FIX-2026-08-08: Feature #1+3 — DPS + Auto Unlock Cooldown (Master Config support)
+      'dynamicSizeEnabled', 'cbAutoUnlockEnabled', 'cbAutoUnlockThresholdPct',
     ];
     const update = {};
     for (const k of allowed) {
@@ -1728,6 +2028,12 @@ router.post('/bulk-update', requireAuth, async (req, res) => {
     if ('martingaleEnabled' in update) update.martingaleEnabled = update.martingaleEnabled === true || update.martingaleEnabled === 'true';
     if (Number.isFinite(update.martingaleMultiplier)) update.martingaleMultiplier = Math.max(1, Math.min(3, update.martingaleMultiplier));
     if (Number.isFinite(update.martingaleMaxLayerNotional)) update.martingaleMaxLayerNotional = Math.max(1, Math.min(10000, update.martingaleMaxLayerNotional));
+    // FIX-2026-08-06: CBv2 field validation (bulk-update support)
+    if ('cbv2Enabled' in update) update.cbv2Enabled = update.cbv2Enabled === true || update.cbv2Enabled === 'true';
+    if (Number.isFinite(update.cbv2LockHours)) update.cbv2LockHours = Math.max(0.5, Math.min(168, update.cbv2LockHours));
+    // FIX-2026-08-08: CBv3 field validation (bulk-update support)
+    if ('cbv3Enabled' in update) update.cbv3Enabled = update.cbv3Enabled === true || update.cbv3Enabled === 'true';
+    if (Number.isFinite(update.cbv3LockHours)) update.cbv3LockHours = Math.max(0.5, Math.min(168, update.cbv3LockHours));
 
     // FIX-2026-08-03: bulk-update Martingale-requires-DCA validation
     //   - bulk mode applies same settings to many bots — must check that after merge,

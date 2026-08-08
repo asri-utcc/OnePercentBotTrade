@@ -155,6 +155,29 @@ function isCBAt(i, opens, closes, lower) {
   return true;
 }
 
+// FIX-2026-08-06: Circuit-breaker V2 (CBv2) — sustained 3-candle breach lock (stricter than CB)
+//   - matches user's Pine:
+//       sls12 = close<lowerKC and open<lowerKC and close[1]<lowerKC[1] and open[1]<lowerKC[1]
+//             and close[2]<lowerKC[2] and open[2]<lowerKC[2]
+//             and open>close and open[1]>close[1] and open[2]>close[2]
+//       cbv2  = sls12 and sls12[1]
+//   - ในทางปฏิบัติ CBv2 ≡ isCBAt(i) AND isCBAt(i-1) ≡ 4 แท่งติด red AND fully below lowerKC
+//   - ต่างจาก CB (3 แท่ง + previous 3) ตรงที่ต้องเป็น 4 แท่ง consecutive จริงๆ (no warmup gap)
+//
+//   Inputs:
+//     i        - index ของ current candle (ต้อง >= 4 เพราะต้องการ candle i, i-1, i-2, i-3)
+//     opens    - array ของ open prices
+//     closes   - array ของ close prices
+//     lower    - array ของ lowerKC (จาก computeBgStates)
+//
+//   Returns: true ถ้า candle มี sustained 3-candle breach (caller force-close + lock บอท cbv2LockHours ชั่วโมง)
+function isCBv2At(i, opens, closes, lower) {
+  if (i < 4) return false;
+  if (!isCBAt(i, opens, closes, lower)) return false;
+  if (!isCBAt(i - 1, opens, closes, lower)) return false;
+  return true;
+}
+
 /**
  * รับ array ของ klines [{openTime, open, high, low, close, volume}, ...]
  * คืน array ของ signal objects (S1 ที่เจอ) + bg array ทั้งหมด
@@ -587,6 +610,7 @@ module.exports = {
   isS1At,
   isXS1At,
   isCBAt,    // FIX-2026-07-30: CB panic-sell pattern (3-candle lowerKC breach) — เดิมชื่อ isSLS1At
+  isCBv2At,  // FIX-2026-08-06: CBv2 sustained 3-candle breach (4 consecutive red candles fully below lowerKC) — used by _checkCBv2PanicClose to lock bot cbv2LockHours hours
   detectS1Signals,
   checkS1OnLatestCandle,
   isWarmedUp,

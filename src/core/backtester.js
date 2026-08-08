@@ -539,11 +539,13 @@ function summarize(trades) {
   const belowMinNotional = trades.filter((t) => t.exitReason === 'below_min_notional').length;
   // FIX-2026-07-31: นับ exit ใหม่ — cb_panic + stop_loss_upper_kc (per-bot toggle)
   const cbPanic = trades.filter((t) => t.exitReason === 'cb_panic').length;
+  // FIX-2026-08-06: CBv2 sustained panic-sell (sustained 3-candle breach lock)
+  const cbv2Panic = trades.filter((t) => t.exitReason === 'cbv2_panic').length;
   const stopLossUpperKc = trades.filter((t) => t.exitReason === 'stop_loss_upper_kc').length;
   // buyFilled = ทุก exit ที่เป็นการเปิดไม้จริง (รวม panic + SL exit)
-  const buyFilled = tpHit + stillHolding + cbPanic + stopLossUpperKc;
+  const buyFilled = tpHit + stillHolding + cbPanic + cbv2Panic + stopLossUpperKc;
   // sellFilled = ทุก exit ที่ปิดไม้จริง (ยังไม่ปิด = stillHolding)
-  const sellFilled = tpHit + cbPanic + stopLossUpperKc;
+  const sellFilled = tpHit + cbPanic + cbv2Panic + stopLossUpperKc;
 
   // wins/losses นับตาม realizedPnl จริง (ไม่ใช่สถานะ fill) — เพื่อให้สะท้อน P&L จริง
   const wins = trades.filter((t) => t.realizedPnl > 0).length;
@@ -569,6 +571,7 @@ function summarize(trades) {
   const exitClosedCount = sellFilled; // alias เพื่อความชัดเจน
   const exitTpPct = signals > 0 ? (tpHit / signals) * 100 : 0;
   const exitCbPct = signals > 0 ? (cbPanic / signals) * 100 : 0;
+  const exitCbv2Pct = signals > 0 ? (cbv2Panic / signals) * 100 : 0; // FIX-2026-08-06
   const exitStopLossPct = signals > 0 ? (stopLossUpperKc / signals) * 100 : 0;
 
   // Max drawdown บน equity curve (cumulative PnL) + consecutive losses
@@ -610,9 +613,11 @@ function summarize(trades) {
     belowMinNotionalCount: belowMinNotional,
     tpHitCount: tpHit,
     cbPanicCount: cbPanic,                  // FIX-2026-07-31: new exit reason
+    cbv2PanicCount: cbv2Panic,                  // FIX-2026-08-06: CBv2 sustained panic-sell
     stopLossUpperKcCount: stopLossUpperKc,      // FIX-2026-07-31: new exit reason
     exitTpPct,                                  // % exit by TP
     exitCbPct,                                // % exit by CB panic
+    exitCbv2Pct,                                // % exit by CBv2 panic  // FIX-2026-08-06
     exitStopLossPct,                            // % exit by upper-KC stop-loss
     wins,
     losses,
@@ -1585,6 +1590,8 @@ async function runMultiBacktest(params) {
       xs1Enabled: b.xs1Enabled !== false, // default true
       // FIX-2026-08-02: DCA mode forces CB off (no panic-sell in DCA mode per design)
       cbEnabled: b.dcaEnabled === true ? false : (b.cbEnabled !== false), // default true (parity กับ live bot)
+      // FIX-2026-08-06: CBv2 sustained panic-sell (default true, DCA mode disables per parity)
+      cbv2Enabled: b.dcaEnabled === true ? false : (b.cbv2Enabled !== false),
       stopLossOnUpperKC: b.stopLossOnUpperKC === true, // FIX-2026-07-31: default false (per user choice)
     };
     const sigResult = signalEngine.detectS1Signals(klines, signalOpts);
@@ -1917,13 +1924,24 @@ async function runMultiBacktest(params) {
     // FIX-2026-07-31 (BUG): อ่าน sig._lowerKC/_upperKC/_opensArr/_closesArr (ไม่ใช่ sig.lowerKC แบบเดิมที่ไม่ได้แนบ)
     let sellFilled = false;
     let sellCandleIdx = null;
-    let exitMode = 'tp'; // 'tp' | 'cb_panic' | 'stop_loss_upper_kc'
+    let exitMode = 'tp'; // 'tp' | 'cb_panic' | 'cbv2_panic' | 'stop_loss_upper_kc'
     let exitPrice = null;
     for (let j = buyCandleIdx + 1; j < sig._klines.length; j += 1) {
       const candle = sig._klines[j];
       const candleClose = parseFloat(candle.close);
       const candleOpen = parseFloat(candle.open);
       const candleHigh = parseFloat(candle.high);
+      // FIX-2026-08-06: CBv2 sustained panic-sell (priority over CB) — 4 consecutive red candles below lowerKC
+      //   - เช็ค CBv2 ก่อน CB เพราะ CBv2 เป็น pattern ที่ stricter (ต้อง match ทั้ง i และ i-1)
+      //   - เมื่อ CBv2 match → exit ที่ cbv2_panic (ไม่ใช่ cb_panic เพราะ user-visible reason ต่างกัน)
+      if (cfg.cbv2Enabled && sig._lowerKC && sig._lowerKC[j] != null
+          && signalEngine.isCBv2At(j, sig._opensArr, sig._closesArr, sig._lowerKC)) {
+        sellFilled = true;
+        sellCandleIdx = j;
+        exitMode = 'cbv2_panic';
+        exitPrice = candleClose;
+        break;
+      }
       // 1) CB pattern (3 red candles below lowerKC) → panic-close at close (unconditional)
       if (cfg.cbEnabled && sig._lowerKC && sig._lowerKC[j] != null
           && signalEngine.isCBAt(j, sig._opensArr, sig._closesArr, sig._lowerKC)) {
@@ -2334,7 +2352,7 @@ async function runMultiBacktest(params) {
   //   below_min_notional, max_concurrent_skip, capital_exhausted_skip ได้ครบ
   // FIX-2026-07-31: opened/closed trades include cb_panic + stop_loss_upper_kc exits
   const openedExitReasons = new Set([
-    'tp_hit', 'still_holding', 'cb_panic', 'stop_loss_upper_kc',
+    'tp_hit', 'still_holding', 'cb_panic', 'cbv2_panic', 'stop_loss_upper_kc',
     // FIX-2026-08-02: DCA stack exit reasons — counted as opened "stacks"
     'dca_target_hit', 'dca_stack_stop_loss', 'dca_still_holding',
   ]);
@@ -2467,6 +2485,9 @@ async function runMultiBacktest(params) {
           capitalPerTrade: b.capitalPerTrade, maxConcurrentTrades: b.maxConcurrentTrades,
           xs1Enabled: b.xs1Enabled !== false,
           cbEnabled: b.cbEnabled !== false,
+          // FIX-2026-08-06: CBv2 sustained panic-sell (default true)
+          cbv2Enabled: b.cbv2Enabled !== false,
+          cbv2LockHours: b.cbv2LockHours != null ? parseFloat(b.cbv2LockHours) : 8,
           stopLossOnUpperKC: b.stopLossOnUpperKC === true,
           // FIX-2026-08-02: persist DCA params per bot
           dcaEnabled: b.dcaEnabled === true,

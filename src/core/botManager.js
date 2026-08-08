@@ -29,6 +29,10 @@ const RECONCILE_INTERVAL_MS = 5 * 60 * 1000;
 // FIX-2026-08-04: 5min → 10min (auto-pause check เป็น read-only volatility scan — ไม่กระทบ bot operations)
 const AUTO_PAUSE_INTERVAL_MS = 10 * 60 * 1000;
 let autoPauseTimer = null;
+// FIX-2026-08-06: delist scheduler — interval + forceCloseDays/blockBuyDays
+const DELIST_SCHEDULE_INTERVAL_MS = 5 * 60 * 1000; // ทุก 5 นา�ี ตรวจ delist schedule
+let delistSchedulerTimer = null;
+let delistSchedulerInFlight = false;
 
 // FIX-2026-08-03: Safe-trade filter #2 (trendline) — live status scanner
 //   - every 60s (matches trendlineForBot CACHE_TTL_MS) for bots with safeTradeTrendlineEnabled=true
@@ -138,6 +142,18 @@ class BotManager {
     });
     logger.info({ intervalMs: TRENDLINE_SCAN_INTERVAL_MS }, 'botManager: trendline status scanner scheduled');
 
+    // FIX-2026-08-06: delist scheduler — auto-pause + force-close บอทที่อยู่ใน delist schedule
+    //   - tick ทุก 5 นาที: scan delistMonitor.getScheduledSymbols() → บอทที่ trade symbol นั้น:
+    //     * force-close position ถ้า daysUntil <= 3
+    //     * auto-pause (set enabled=false) ถ้า daysUntil <= 7
+    //   - botManager scheduler handles BOTH enabled และ disabled bots (force-close ต้องทำแม้บอทปิด)
+    //   - emit telegram event (delistMonitor:scheduled ที่ telegramNotifier bind แล้ว)
+    delistSchedulerTimer = setInterval(() => {
+      checkDelistScheduleBots.call(this).catch((err) => logger.warn({ err: err.message }, 'botManager: delist scheduler tick failed'));
+    }, DELIST_SCHEDULE_INTERVAL_MS);
+    if (delistSchedulerTimer && typeof delistSchedulerTimer.unref === 'function') delistSchedulerTimer.unref();
+    logger.info({ intervalMs: DELIST_SCHEDULE_INTERVAL_MS }, 'botManager: delist scheduler scheduled');
+
     // FIX-2026-07-24: start Telegram notifier (subscribe eventBus + periodic PnL scan)
     const telegramNotifier = require('../services/telegramNotifier');
     telegramNotifier.start().catch((e) => logger.warn({ err: e.message }, 'telegramNotifier start failed'));
@@ -162,6 +178,8 @@ class BotManager {
     // FIX-2026-08-03: หยุด trendline status scanner timer + clear cache
     if (trendlineScanTimer) { clearInterval(trendlineScanTimer); trendlineScanTimer = null; }
     _trendlineStatusCache.clear();
+    // FIX-2026-08-06: หยุด delist scheduler
+    if (delistSchedulerTimer) { clearInterval(delistSchedulerTimer); delistSchedulerTimer = null; }
     // FIX-2026-07-24: หยุด Telegram notifier (clear listeners + timers)
     try { require('../services/telegramNotifier').stop(); } catch (e) { /* ignore */ }
     for (const [id, trader] of this.traders.entries()) {
@@ -550,6 +568,63 @@ class BotManager {
                   reason: 'orphan_reconcile_inline_mark',
                   reasonDetail: `SELL ${order.orderId} FILLED but DB was '${trade.state}' — inline mark-sold, PnL=${inlinePnl.net.toFixed(4)} USDT (${inlinePnl.pnlPercent.toFixed(2)}%)`,
                 });
+
+                // FIX-2026-08-08: DPS evaluation — inline mark-sold path ข้าม handleSellFilled
+                //   ดังนั้นต้องเรียก DPS ตรงนี้เพื่อให้ orphan ก็นับ resize ด้วย
+                //   - safe: evaluate() เช็ค disabled / DCA / cooldown / master-off
+                //   - emit dpsResize telegram ถ้า resize จริง
+                try {
+                  const dps = require('./dynamicPositionSizing');
+                  const telegramNotifier = require('../services/telegramNotifier');
+                  const masterConfig = require('./masterConfig');
+                  const masterToggles = await masterConfig.getMasterToggles();
+                  const dpsCfg = await masterConfig.getDpsConfig();
+                  const botSnap = await Bot.findById(trade.botId).lean();
+                  if (botSnap) {
+                    botSnap._masterDynamicSizeEnabled = masterToggles.masterDynamicSizeEnabled;
+                    const evalResult = dps.evaluate(botSnap, {
+                      closedAt: new Date(),
+                      pnlPct: inlinePnl.pnlPercent,
+                      isWin: inlinePnl.net > 0,
+                    }, dpsCfg);
+                    // FIX-2026-08-08 (rev2): persistState เขียน history เสมอ (แก้บั๊ก A1 — ดู trader.js)
+                    if (Array.isArray(evalResult.newHistory) || evalResult.changed) {
+                      await dps.persistState(Bot, trade.botId, evalResult);
+                    }
+                    if (evalResult.changed || (evalResult.dryRun && evalResult.wouldChange)) {
+                      logger.info({
+                        botId: trade.botId.toString(),
+                        tradeId: trade._id.toString(),
+                        reason: evalResult.reason,
+                        before: evalResult.before,
+                        after: evalResult.after,
+                        dryRun: !!evalResult.dryRun,
+                      }, 'botManager: orphan reconcile DPS — size/layers updated');
+                      // emit telegram (non-blocking)
+                      const botName = botSnap.name || botSnap.symbol || trade.botId.toString();
+                      telegramNotifier.sendNow('dpsResize', {
+                        botName,
+                        symbol: botSnap.symbol,
+                        timeframe: botSnap.timeframe,
+                        reason: evalResult.reason,
+                        beforeSize: evalResult.before.size,
+                        beforeLayers: evalResult.before.layers,
+                        afterSize: evalResult.after.size,
+                        afterLayers: evalResult.after.layers,
+                        pnlPct: inlinePnl.pnlPercent,
+                        isWin: inlinePnl.net > 0,
+                        dryRun: !!evalResult.dryRun,
+                        cooldownMinutes: Math.round((dpsCfg.cooldownMs || 0) / 60000),
+                        minSize: evalResult.bounds && evalResult.bounds.minSize,
+                        maxSize: evalResult.bounds && evalResult.bounds.maxSize,
+                        minLayers: evalResult.bounds && evalResult.bounds.minLayers,
+                        maxLayers: evalResult.bounds && evalResult.bounds.maxLayers,
+                      }).catch((err) => logger.warn({ err: err.message }, 'botManager: orphan DPS telegram failed'));
+                    }
+                  }
+                } catch (dpsErr) {
+                  logger.warn({ err: dpsErr.message, tradeId: trade._id.toString() }, 'botManager: orphan DPS evaluation failed (non-fatal)');
+                }
               }
             } else if ((order.status === 'CANCELED' || order.status === 'EXPIRED') && trade.state !== 'cancelled') {
               // FIX: SELL ถูก cancel/expire (เช่น manual cancel หรือ TTL) แต่ DB state ยังเป็น selling
@@ -765,6 +840,7 @@ class BotManager {
     }
     bot.enabled = false;
     bot.enabledAt = null;
+    bot.disabledAt = new Date(); // FIX-2026-08-08: anchor for autoDeleteBot downtime calc
     bot.status = 'idle';
     await bot.save();
     await this.stopTrader(botId);
@@ -832,6 +908,12 @@ async function checkAutoPauseBots() {
 
       const update = { autoPauseLastCheckedAt: now };
 
+      // FIX-2026-08-07: HYBRID mode — CBv2 cooldown ไม่ block Auto-pause/resume อีกต่อไป
+      //   - CBv2 แค่กั้น S1 BUY (cooldown window) — ไม่ disable บอท ไม่ override Auto-pause
+      //   - Auto-pause ทำงานปกติ: ถ้า Min-%KC ต่ำ → pause (reason='low_vol'); ถ้า recover → resume
+      //   - CBv2 cooldown อาจอยู่ระหว่าง Auto-pause ได้ (เป็นอิสระต่อกัน)
+      //   - ลบ CBv2 lock override block เดิม (FIX-2026-08-06) แล้ว — ไม่จำเป็นแล้วใน HYBRID mode
+
       if (minKcPct < threshold && b.enabled !== false) {
         // ─── PAUSE ────────────────────────────────────────────────────
         Object.assign(update, {
@@ -865,6 +947,9 @@ async function checkAutoPauseBots() {
         logger.info({ botId: String(b._id), minKcPct, threshold }, 'botManager: auto-paused bot (low Min-%KC)');
       } else if (minKcPct >= threshold && b.enabled === false && b.autoPauseReason === 'low_vol') {
         // ─── RESUME (เฉพาะบอทที่เคยถูก auto-pause) ──────────────────
+        // FIX-2026-08-07: HYBRID mode — CBv2 cooldown ไม่ block resume อีกต่อไป
+        //   - CBv2 cooldown แค่กั้น BUY — ไม่ disable บอท, ไม่ override auto-pause logic
+        //   - ลบ CBv2 lock override blocks เดิม (FIX-2026-08-06) — ไม่จำเป็นใน HYBRID mode
         Object.assign(update, {
           enabled: true,
           enabledAt: now,
@@ -894,6 +979,160 @@ async function checkAutoPauseBots() {
       }
     } catch (err) {
       logger.warn({ botId: String(b._id), err: err.message }, 'botManager: auto-pause check failed');
+    }
+  }
+}
+
+// FIX-2026-08-06: Delist scheduler — ทุก 5 นาที scan delistMonitor แล้ว auto-pause + force-close
+//   - Phase A: บอทที่ trade symbol ที่ delistTime - now <= 7d → auto-pause (set enabled=false)
+//     (force-close ทำใน Phase B แยก — Phase A แค่ mark + disable + telegram)
+//   - Phase B: �อทที่ trade symbol ที่ delistTime - now <= 3d → force-close open positions
+//     (ใช้ forceClose.forceCloseTrade ที่ positionWatchdog ใช้เช่นกัน — atomic state guard)
+//   - botManager scheduler จัดการทั้ง enabled และ disabled bots (force-close ต้องทำแม้บอทปิด)
+//   - skip on previous tick in-flight (กัน overlap)
+async function checkDelistScheduleBots() {
+  if (delistSchedulerInFlight) {
+    logger.debug('botManager: delist scheduler previous tick still in flight, skip');
+    return;
+  }
+  delistSchedulerInFlight = true;
+  let stats = { scheduledSymbols: 0, botsAffected: 0, paused: 0, forceClosed: 0, errors: 0 };
+  try {
+    const delistMonitor = require('../services/binanceDelistMonitor');
+    const forceClose = require('../core/forceClose');
+    const scheduled = delistMonitor.getScheduledSymbols();
+    stats.scheduledSymbols = scheduled.length;
+    if (scheduled.length === 0) return;
+
+    const scheduledSymbols = new Set(scheduled.map((s) => s.symbol));
+    const forceCloseSet = new Set(scheduled.filter((s) => s.daysUntil <= 3).map((s) => s.symbol));
+    const blockBuySet = new Set(scheduled.filter((s) => s.daysUntil <= 7).map((s) => s.symbol));
+
+    // Find bots trading these symbols (any enabled state — force-close must work on disabled too)
+    const bots = await Bot.find({ symbol: { $in: [...scheduledSymbols] } }).lean();
+    if (!bots || bots.length === 0) return;
+    stats.botsAffected = bots.length;
+
+    const telegramNotifier = require('../services/telegramNotifier');
+    const now = new Date();
+
+    for (const b of bots) {
+      const sym = b.symbol;
+      const delistEntry = scheduled.find((s) => s.symbol === sym);
+      if (!delistEntry) continue;
+
+      // Phase A: auto-pause if within 7d
+      if (blockBuySet.has(sym) && b.enabled !== false) {
+        try {
+          await Bot.updateOne(
+            { _id: b._id },
+            {
+              $set: {
+                enabled: false,
+                enabledAt: null,
+                status: 'idle',
+                autoPauseReason: 'binance_delist',
+                autoPauseLastActionAt: now,
+                autoPauseLastCheckedAt: now,
+              },
+            }
+          );
+          stats.paused++;
+          logger.warn({
+            botId: String(b._id),
+            symbol: sym,
+            daysUntil: delistEntry.daysUntil,
+            delistTime: delistEntry.delistDateIso,
+          }, 'botManager: delist auto-pause — symbol scheduled for delist');
+          eventBus.emit('bot:disabled', {
+            botId: String(b._id),
+            reason: 'auto_pause_binance_delist',
+            symbol: sym,
+            delistTime: delistEntry.delistTime,
+            daysUntil: delistEntry.daysUntil,
+          });
+          try {
+            await telegramNotifier.sendNow('botDisabled', {
+              botId: String(b._id),
+              botName: b.name || sym,
+              symbol: sym,
+              timeframe: b.timeframe,
+              reason: `auto-pause: symbol delist in ${delistEntry.daysUntil.toFixed(1)}d (${delistEntry.delistDateIso})`,
+            });
+          } catch (_) { /* non-fatal */ }
+          // stop trader if running
+          const trader = this.traders.get(String(b._id));
+          if (trader) {
+            this.traders.delete(String(b._id));
+            await trader.stop('auto_pause_binance_delist').catch(() => {});
+          }
+        } catch (err) {
+          stats.errors++;
+          logger.warn({ botId: String(b._id), err: err.message }, 'botManager: delist auto-pause failed');
+        }
+      }
+
+      // Phase B: force-close if within 3d (run regardless of enabled state — even disabled bots need closing)
+      if (forceCloseSet.has(sym)) {
+        const Trade = require('../db/models/Trade');
+        const OPEN_STATES = ['placed', 'partial_wait', 'filled', 'holding', 'selling', 'partial_sell_wait', 'retrying', 'stopping'];
+        const openTrades = await Trade.find({ botId: b._id, state: { $in: OPEN_STATES } }).lean();
+        for (const t of openTrades) {
+          try {
+            const fresh = await Trade.findById(t._id);
+            if (!fresh || !OPEN_STATES.includes(fresh.state)) continue;
+            const result = await forceClose.forceCloseTrade({ trade: fresh, bot: b, allowMarketSell: true });
+            if (result.ok) {
+              stats.forceClosed++;
+              logger.warn({
+                botId: String(b._id),
+                tradeId: String(t._id),
+                symbol: sym,
+                daysUntil: delistEntry.daysUntil,
+                mode: result.mode,
+                pnl: result.pnl,
+              }, 'botManager: delist force-close executed');
+              eventBus.emit('positionWatchdog:closed', {
+                tradeId: t._id,
+                botId: String(b._id),
+                symbol: sym,
+                isDcaStack: t.isDcaStack === true,
+                mode: result.mode,
+                pnl: result.pnl,
+                avgSellPrice: result.avgSellPrice,
+                source: 'delist_scheduler',
+                delistTime: delistEntry.delistTime,
+                daysUntil: delistEntry.daysUntil,
+              });
+              try {
+                await telegramNotifier.sendNow('positionForceClosed', {
+                  botId: String(b._id),
+                  botName: b.name || sym,
+                  symbol: sym,
+                  tradeId: String(t._id),
+                  pnl: result.pnl,
+                  mode: result.mode,
+                  reason: `binance delist in ${delistEntry.daysUntil.toFixed(1)}d (${delistEntry.delistDateIso})`,
+                });
+              } catch (_) { /* non-fatal */ }
+            } else {
+              stats.errors++;
+              logger.warn({ botId: String(b._id), tradeId: String(t._id), err: result.error }, 'botManager: delist force-close failed');
+            }
+          } catch (err) {
+            stats.errors++;
+            logger.warn({ botId: String(b._id), tradeId: String(t._id), err: err.message }, 'botManager: delist force-close exception');
+          }
+        }
+      }
+    }
+  } catch (err) {
+    stats.errors++;
+    logger.error({ err: err.message, stack: err.stack }, 'botManager: checkDelistScheduleBots failed');
+  } finally {
+    delistSchedulerInFlight = false;
+    if (stats.paused > 0 || stats.forceClosed > 0 || stats.errors > 0) {
+      logger.info({ ...stats }, 'botManager: delist scheduler tick summary');
     }
   }
 }

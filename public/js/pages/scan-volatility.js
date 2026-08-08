@@ -7,11 +7,13 @@
  * - click symbol → /chart.html?symbol=XXX&timeframe=YYY
  */
 
-// FIX-2026-07-31: cache รายชื่อ symbols ที่มีบอท enabled อยู่ — ใช้ mark 🔥 ในผลสแกน
-//   - Set<string> ของ symbols ที่มีบอทกำลังทำงาน
-//   - refresh ก่อนสแกนแต่ละครั้ง (กัน stale — user อาจ start/stop บอทระหว่างนี้)
+// FIX-2026-07-31: cache รายชื่อ symbols ที่ "มีบอทอยู่แล้ว" — ใช้ mark 🔥 ในผลสแกน
+//   - Set<string> ของ symbols ที่มีบอทในระบบ
+//   - FIX-2026-08-07: เกณฑ์คือ "มีบอทอยู่หรือไม่" ไม่สนใจ enabled/disabled
+//     เดิมกรอง `b.enabled` → บอทที่ปิดอยู่ยังขึ้นปุ่ม "+ สร้างบอท" → สร้างซ้ำ symbol เดิมได้
+//   - refresh ก่อนสแกนแต่ละครั้ง (กัน stale — user อาจสร้าง/ลบบอทระหว่างนี้)
 //   - ถ้า fetch ล้มเหลว → ไม่ mark (กัน false negative)
-let activeBotSymbols = new Set();
+let existingBotSymbols = new Set();
 
 // FIX-2026-08-01: escapeHtml helper (ใช้ใน coin info chip + cell — mirror bot-detail.js / bots.js)
 function escapeHtml(s) {
@@ -19,15 +21,197 @@ function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
-async function loadActiveBotSymbols() {
+async function loadExistingBotSymbols() {
   try {
     const resp = await API.get('/api/bots');
     const list = Array.isArray(resp && resp.bots) ? resp.bots : [];
-    activeBotSymbols = new Set(list.filter((b) => b.enabled).map((b) => String(b.symbol || '').toUpperCase()));
+    // FIX-2026-08-07: นับทุกบอท ไม่ว่าจะ enabled หรือ disabled
+    existingBotSymbols = new Set(list.map((b) => String(b.symbol || '').toUpperCase()).filter(Boolean));
   } catch (err) {
-    console.warn('scan-volatility: loadActiveBotSymbols failed', err && err.message);
+    console.warn('scan-volatility: loadExistingBotSymbols failed', err && err.message);
     // ไม่ทิ้ง Set เก่า — ถ้าเคยโหลดได้แล้ว ใช้ของเก่าต่อ
   }
+}
+
+// ─── FIX-2026-08-07: Auto Add New Bot quick card (scan page) ──
+//   - toggle on/off + Min %KC input + Run now button
+//   - full config (interval/scan params/telegram) lives at Settings → 7️⃣
+//   - pattern: load on init → toggle save with debounce → run-now POST /api/auto-add-bot/run
+let _autoAddBotConfig = null;
+async function loadAutoAddBotConfig() {
+  try {
+    const resp = await API.get('/api/auto-add-bot/config');
+    _autoAddBotConfig = resp;
+    const enabledEl = document.getElementById('aab-enabled');
+    const minKcEl = document.getElementById('aab-min-kc');
+    const enabledLabel = document.getElementById('aab-enabled-label');
+    const autoEnableEl = document.getElementById('aab-auto-enable');
+    const autoEnableLabel = document.getElementById('aab-auto-enable-label');
+    const runNowBtn = document.getElementById('aab-run-now');
+    const statusLine = document.getElementById('aab-status-line');
+    if (enabledEl) enabledEl.checked = !!resp.enabled;
+    if (minKcEl) minKcEl.value = Number(resp.minKcPct) || 2;
+    if (enabledLabel) enabledLabel.textContent = resp.enabled ? 'เปิดอยู่' : 'ปิดอยู่';
+    const aeOn = resp.autoEnable !== false; // FIX-2026-08-07: default true
+    if (autoEnableEl) autoEnableEl.checked = aeOn;
+    if (autoEnableLabel) autoEnableLabel.textContent = aeOn ? 'เปิด (เริ่มเทรดเลย)' : 'ปิด (สร้าง DISABLED)';
+    if (runNowBtn) runNowBtn.disabled = false;
+    if (statusLine) {
+      const intervalMin = resp.intervalMin || 60;
+      const aeTag = aeOn ? ' · ▶️ auto-enable' : ' · ⏸ auto-enable OFF';
+      statusLine.textContent = resp.enabled
+        ? `🟢 enabled · ทุก ${intervalMin} นาที · last run: ${formatTimeAgo(resp.lastRunAt)}${aeTag}`
+        : `⚪ disabled · ตั้งค่า interval ${intervalMin} นาที${aeTag}`;
+    }
+    renderAutoAddBotLastStats(resp.lastStats, resp.lastError);
+  } catch (err) {
+    console.warn('scan-volatility: loadAutoAddBotConfig failed', err && err.message);
+    const statusLine = document.getElementById('aab-status-line');
+    if (statusLine) statusLine.textContent = 'โหลดสถานะล้มเหลว';
+  }
+}
+
+function formatTimeAgo(iso) {
+  if (!iso) return '—';
+  const ts = new Date(iso).getTime();
+  if (!Number.isFinite(ts)) return '—';
+  const diffSec = Math.max(0, (Date.now() - ts) / 1000);
+  if (diffSec < 60) return `${Math.floor(diffSec)}s ago`;
+  if (diffSec < 3600) return `${Math.floor(diffSec / 60)}m ago`;
+  if (diffSec < 86400) return `${Math.floor(diffSec / 3600)}h ago`;
+  return `${Math.floor(diffSec / 86400)}d ago`;
+}
+
+function renderAutoAddBotLastStats(stats, error) {
+  const el = document.getElementById('aab-status');
+  if (!el) return;
+  if (error) {
+    el.innerHTML = `<div class="alert alert-danger py-2 px-3 mb-0 small">❌ Last run error: ${escapeHtml(String(error))}</div>`;
+    return;
+  }
+  if (!stats) {
+    el.innerHTML = '';
+    return;
+  }
+  if (stats.skipped) {
+    el.innerHTML = `<div class="alert alert-secondary py-2 px-3 mb-0 small">⏸ Last run: ${escapeHtml(stats.skipped)} (${stats.source || 'periodic'})</div>`;
+    return;
+  }
+  const createdList = (stats.createdList || []).map((b) => {
+    const enabledTag = b.autoEnabled ? ' ▶️' : ' ⏸';
+    const errTag = b.enableError ? ` (err: ${escapeHtml(b.enableError)})` : '';
+    return `<code>${escapeHtml(b.symbol)}</code>${enabledTag}${errTag}`;
+  }).join(', ') || '—';
+  const enabledCount = stats.createdEnabled != null ? ` · ▶️ enabled ${stats.createdEnabled}/${stats.created ?? 0}` : '';
+  el.innerHTML = `<div class="alert alert-info py-2 px-3 mb-0 small">
+    Last run: scanned <strong>${stats.scanned ?? '?'}</strong> · candidates <strong>${stats.candidates ?? 0}</strong> · created <strong>${stats.created ?? 0}</strong>${enabledCount}${stats.capped ? ` · capped ${stats.capped}` : ''}
+    ${stats.created > 0 ? '<br>Created: ' + createdList : ''}
+    ${stats.failedList && stats.failedList.length > 0 ? `<br>Failed: ${stats.failedList.map((f) => `<code>${escapeHtml(f.symbol)}</code>: ${escapeHtml(f.error)}`).join('; ')}` : ''}
+  </div>`;
+}
+
+function wireAutoAddBotHandlers() {
+  const enabledEl = document.getElementById('aab-enabled');
+  const minKcEl = document.getElementById('aab-min-kc');
+  const enabledLabel = document.getElementById('aab-enabled-label');
+  const autoEnableEl = document.getElementById('aab-auto-enable');
+  const autoEnableLabel = document.getElementById('aab-auto-enable-label');
+  const saveBtn = document.getElementById('aab-save');
+  const runNowBtn = document.getElementById('aab-run-now');
+  if (!saveBtn || !runNowBtn) return;
+
+  // toggle label sync (real-time)
+  if (enabledEl && enabledLabel) {
+    enabledEl.addEventListener('change', () => {
+      enabledLabel.textContent = enabledEl.checked ? 'เปิดอยู่' : 'ปิดอยู่';
+    });
+  }
+  if (autoEnableEl && autoEnableLabel) {
+    autoEnableEl.addEventListener('change', () => {
+      autoEnableLabel.textContent = autoEnableEl.checked ? 'เปิด (เริ่มเทรดเลย)' : 'ปิด (สร้าง DISABLED)';
+    });
+  }
+
+  // save button → PUT /api/auto-add-bot/config (enabled + minKcPct + autoEnable from quick card)
+  saveBtn.onclick = async () => {
+    const enabled = enabledEl ? enabledEl.checked : false;
+    const minKcPct = minKcEl ? parseFloat(minKcEl.value) : 2;
+    const autoEnable = autoEnableEl ? autoEnableEl.checked : true;
+    if (!Number.isFinite(minKcPct) || minKcPct < 0 || minKcPct > 50) {
+      renderAutoAddBotLastStats(null, 'Min %KC ต้องอยู่ระหว่าง 0 ถึง 50');
+      return;
+    }
+    saveBtn.disabled = true;
+    saveBtn.classList.add('is-loading');
+    try {
+      const resp = await API.put('/api/auto-add-bot/config', { enabled, minKcPct, autoEnable });
+      _autoAddBotConfig = resp;
+      const aeOn = resp.autoEnable !== false;
+      const statusLine = document.getElementById('aab-status-line');
+      if (statusLine) {
+        const intervalMin = resp.intervalMin || 60;
+        const aeTag = aeOn ? ' · ▶️ auto-enable' : ' · ⏸ auto-enable OFF';
+        statusLine.textContent = resp.enabled
+          ? `🟢 enabled · ทุก ${intervalMin} นาที · last run: ${formatTimeAgo(resp.lastRunAt)}${aeTag}`
+          : `⚪ disabled · ตั้งค่า interval ${intervalMin} นาที${aeTag}`;
+      }
+      const statusEl = document.getElementById('aab-status');
+      if (statusEl) statusEl.innerHTML = `<div class="alert alert-success py-2 px-3 mb-0 small">✅ บันทึกแล้ว · ${resp.enabled ? 'เปิดใช้งาน' : 'ปิดใช้งาน'} · Min %KC=${resp.minKcPct} · ${aeOn ? '▶️ auto-enable ON' : '⏸ auto-enable OFF'}</div>`;
+    } catch (err) {
+      renderAutoAddBotLastStats(null, err.message);
+    } finally {
+      saveBtn.disabled = false;
+      saveBtn.classList.remove('is-loading');
+    }
+  };
+
+  // run now button → POST /api/auto-add-bot/run (bypass enabled flag)
+  runNowBtn.onclick = async () => {
+    runNowBtn.disabled = true;
+    runNowBtn.classList.add('is-loading');
+    try {
+      const resp = await API.post('/api/auto-add-bot/run', {});
+      const r = resp.result || {};
+      const statusEl = document.getElementById('aab-status');
+      if (statusEl) {
+        if (r.created > 0) {
+          const list = (r.createdList || []).map((b) => {
+            const enabledTag = b.autoEnabled ? ' ▶️' : ' ⏸';
+            const errTag = b.enableError ? ` (err: ${escapeHtml(b.enableError)})` : '';
+            return `<code>${escapeHtml(b.symbol)}</code>${enabledTag}${errTag} (score ${b.score?.toFixed(2) || '?'}, kcMin ${b.kcMinPct?.toFixed(3) || '?'}%)`;
+          }).join(', ');
+          const enabledCount = (r.createdList || []).filter((b) => b.autoEnabled).length;
+          const helpLink = enabledCount > 0
+            ? `<br>▶️ <strong>${enabledCount}/${r.created}</strong> บอทเริ่มเทรดทันทีแล้ว (spawnTrader) · ดูสถานะที่ <a href="/bots.html">bots.html</a>`
+            : `<br>⏸ บอทอยู่ในสถานะ DISABLED — เปิดที่ <a href="/bots.html">bots.html</a>`;
+          statusEl.innerHTML = `<div class="alert alert-success py-2 px-3 mb-0 small">✅ สร้าง <strong>${r.created}</strong> บอทจาก ${r.candidates} candidates · ${list}${helpLink}</div>`;
+        } else if (r.candidates > 0) {
+          statusEl.innerHTML = `<div class="alert alert-warning py-2 px-3 mb-0 small">⚠️ มี <strong>${r.candidates}</strong> candidates แต่สร้าง 0 บอท (capped=${r.capped ?? 0} หรือ create ล้มเหลว)</div>`;
+        } else if (r.skipped) {
+          statusEl.innerHTML = `<div class="alert alert-secondary py-2 px-3 mb-0 small">⏸ ${escapeHtml(r.skipped)}</div>`;
+        } else {
+          statusEl.innerHTML = `<div class="alert alert-info py-2 px-3 mb-0 small">ℹ️ scanned ${r.scanned ?? '?'} · ไม่มี candidates ที่ผ่านเกณฑ์ (Min %KC)</div>`;
+        }
+      }
+      // refresh status line
+      const fresh = await API.get('/api/auto-add-bot/config');
+      _autoAddBotConfig = fresh;
+      const aeOn = fresh.autoEnable !== false;
+      const statusLine = document.getElementById('aab-status-line');
+      if (statusLine) {
+        const intervalMin = fresh.intervalMin || 60;
+        const aeTag = aeOn ? ' · ▶️ auto-enable' : ' · ⏸ auto-enable OFF';
+        statusLine.textContent = fresh.enabled
+          ? `🟢 enabled · ทุก ${intervalMin} นาที · last run: ${formatTimeAgo(fresh.lastRunAt)}${aeTag}`
+          : `⚪ disabled · ตั้งค่า interval ${intervalMin} นาที${aeTag}`;
+      }
+    } catch (err) {
+      renderAutoAddBotLastStats(null, err.message);
+    } finally {
+      runNowBtn.disabled = false;
+      runNowBtn.classList.remove('is-loading');
+    }
+  };
 }
 
 async function init() {
@@ -40,8 +224,12 @@ async function init() {
   const runBtn = document.getElementById('s-run');
   if (runBtn) runBtn.onclick = runScan;
 
-  // FIX-2026-07-31: preload active bot symbols (ใช้ mark 🔥 ในตาราง)
-  await loadActiveBotSymbols();
+  // FIX-2026-08-07: Auto Add New Bot quick card — load config + wire handlers
+  await loadAutoAddBotConfig();
+  wireAutoAddBotHandlers();
+
+  // FIX-2026-07-31: preload existing bot symbols (ใช้ mark 🔥 ในตาราง)
+  await loadExistingBotSymbols();
 }
 
 function readParams() {
@@ -100,8 +288,8 @@ async function runScan() {
   setLoading(true);
 
   try {
-    // FIX-2026-07-31: refresh active bot symbols ก่อนสแกน (กัน stale enable/disable state)
-    await loadActiveBotSymbols();
+    // FIX-2026-07-31: refresh existing bot symbols ก่อนสแกน (กัน stale หลังสร้าง/ลบบอท)
+    await loadExistingBotSymbols();
     const resp = await API.post('/api/scan/volatility', params);
     renderResult(resp, params);
   } catch (err) {
@@ -255,7 +443,7 @@ function renderResult(resp, params) {
       <div class="lux-header">
         <span class="title">🏆 Top ${ranked.length} Symbols</span>
         <span class="text-muted-2 small" id="scan-results-sub">
-          <span title="คู่เหรียญที่ยังไม่มีบอท enabled — นำไปเปิดบอทได้ทันที" style="cursor:help;">🔥 = ยังไม่มีบอท</span>
+          <span title="คู่เหรียญที่ยังไม่มีบอทในระบบ (ไม่ว่าจะรันหรือไม่) — นำไปสร้างบอทได้ทันที" style="cursor:help;">🔥 = ยังไม่มีบอท</span>
           · คลิกหัวคอลัมน์เพื่อเรียงใหม่ · trend filter: ${params.trends.join(', ')}
         </span>
       </div>
@@ -562,9 +750,9 @@ function renderSortedRowsHTML() {
       <tr>
         <td class="num">${i + 1}</td>
         <td>
-          ${activeBotSymbols.has(String(r.symbol || '').toUpperCase())
+          ${existingBotSymbols.has(String(r.symbol || '').toUpperCase())
             ? ''
-            : `<span class="hot-symbol" title="ยังไม่มีบอท enabled — พร้อมเปิดเทรด" aria-label="hot symbol">🔥</span>
+            : `<span class="hot-symbol" title="ยังไม่มีบอทของเหรียญนี้ — พร้อมสร้างใหม่" aria-label="hot symbol">🔥</span>
                <a href="/bots.html?newBot=1&symbol=${encodeURIComponent(r.symbol)}&tf=${encodeURIComponent(tf)}"
                   class="btn-create-bot-mini"
                   title="สร้างบอท ${encodeURIComponent(r.symbol)} ${encodeURIComponent(tf)} (auto-fill)">+ สร้างบอท</a> `}

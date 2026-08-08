@@ -24,11 +24,15 @@ const fxRoutes = require('./api/routes/fx.routes');
 const healthRoutes = require('./api/routes/health.routes');
 const scanRoutes = require('./api/routes/scan.routes');
 const bnbAutoBuyRoutes = require('./api/routes/bnbAutoBuy.routes'); // FIX-2026-08-05: auto-buy BNB
+const autoAddBotRoutes = require('./api/routes/autoAddBot.routes'); // FIX-2026-08-07: auto add new bot
+const adminRoutes = require('./api/routes/admin.routes'); // FIX-2026-08-08: master config + admin endpoints
 // FIX-2026-07-24: Telegram + History (ใหม่)
 const telegramRoutes = require('./api/routes/telegram.routes');
 const historyRoutes = require('./api/routes/history.routes');
 // FIX-2026-07-29: PnL Calendar + PnL Chart (ใหม่)
 const pnlRoutes = require('./api/routes/pnl.routes');
+// 2026-08-06: Daily Profit Target gauge (radial gauge below navbar)
+const dailyTargetRoutes = require('./api/routes/dailyTarget.routes');
 
 function createApp() {
   const app = express();
@@ -107,11 +111,14 @@ function createApp() {
   app.use('/api/health', healthRoutes);
   app.use('/api/scan', scanRoutes);
   app.use('/api/bnb-auto-buy', bnbAutoBuyRoutes); // FIX-2026-08-05
+  app.use('/api/auto-add-bot', autoAddBotRoutes); // FIX-2026-08-07
+  app.use('/api/admin', adminRoutes); // FIX-2026-08-08: master config + force-run autoDeleteBot
   // FIX-2026-07-24: register telegram + history
   app.use('/api/telegram', telegramRoutes);
   // FIX-2026-07-29: register pnl (calendar + series)
   app.use('/api/pnl', pnlRoutes);
   app.use('/api/history', historyRoutes);
+  app.use('/api/daily-target', dailyTargetRoutes); // 2026-08-06: Daily Profit Target gauge
   app.use('/api/coins', require('./api/routes/coin.routes')); // FIX-2026-08-01: coin info aggregator
 
   // Health

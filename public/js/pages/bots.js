@@ -107,6 +107,13 @@ function botMatchesFilters(b) {
   }
   // chip filters (AND — ทุก chip ที่ active ต้องผ่าน)
   if (botFilter.chips.size > 0) {
+    const now = Date.now();
+    // FIX-2026-08-08: Feature #4 — cooldown sub-categories
+    const cbv2Active = b.cbv2LockedUntil && new Date(b.cbv2LockedUntil).getTime() > now;
+    const cbv3Active = b.cbv3LockedUntil && new Date(b.cbv3LockedUntil).getTime() > now;
+    const dcaFrozen = b.dcaFrozen === true || b.dcaCooldownUntil && new Date(b.dcaCooldownUntil).getTime() > now;
+    const sellPartialFrozen = b.sellPartialFrozen === true;
+    const anyCooldown = cbv2Active || cbv3Active || dcaFrozen || sellPartialFrozen;
     for (const chip of botFilter.chips) {
       switch (chip) {
         case 'running':      if (!b.enabled) return false; break;
@@ -115,6 +122,10 @@ function botMatchesFilters(b) {
         case 'has-error':    if (!b.lastError)   return false; break;
         case 'has-warning':  if (!b.warning)     return false; break;
         case 'dca':          if (!b.dcaEnabled)  return false; break;
+        // FIX-2026-08-08: Feature #4 — Cooldown sub-categories
+        case 'cooldown':       if (!anyCooldown) return false; break;
+        case 'cbv2-cooldown':  if (!cbv2Active)  return false; break;
+        case 'cbv3-cooldown':  if (!cbv3Active)  return false; break;
         default: break; // unknown chip → ignore
       }
     }
@@ -339,6 +350,33 @@ function buildTrendlineBadge(b) {
   return `<span class="trendline-pill is-pending" title="Safe-trade #2 filter เปิดอยู่ — รอ scanner tick (≤ 60s)">📐 — pending</span>`;
 }
 
+// FIX-2026-08-06: delist badge — แสดงเมื่อ symbol มีความเสี่ยงจะถูก delist
+//   - isDelisted → ❌ DELISTED (red pill) — symbol ถูก delist ไปแล้ว
+//   - daysUntil <= 3 → 🚨 DELIST 2.4d (red) — ใกล้ถึงเวลา force-close
+//   - daysUntil <= 7 → ⚠️ DELIST 5.2d (orange) — ใกล้ถึงเวลา block BUY
+//   - daysUntil > 7 → 📅 DELIST 14d (yellow) — มี schedule แต่ยังมีเวลา
+//   - isAtRisk (Monitoring tag only, no schedule) → 👁️ MONITORING (gray) — early warning
+//   - ถ้าไม่มี flag ใดเลย → ไม่แสดง (empty)
+function buildDelistBadge(b) {
+  if (b.isDelisted === true) {
+    return `<span class="delist-pill is-delisted" title="Symbol ถูก delist ไปแล้ว">❌ DELISTED</span>`;
+  }
+  if (b.daysUntil != null && Number.isFinite(b.daysUntil)) {
+    const dt = b.delistDateIso ? new Date(b.delistDateIso).toLocaleString('th-TH') : '?';
+    const days = b.daysUntil.toFixed(1);
+    let cls = 'is-scheduled';
+    let icon = '📅';
+    if (b.daysUntil <= 3) { cls = 'is-urgent'; icon = '🚨'; }
+    else if (b.daysUntil <= 7) { cls = 'is-warning'; icon = '⚠️'; }
+    const tip = `Binance Delist Schedule\nDelist: ${dt}\nDays until: ${days}\n• ≤ 7d: block new BUY\n• ≤ 3d: force-close position`;
+    return `<span class="delist-pill ${cls}" title="${escapeHtml(tip)}">${icon} DELIST ${days}d</span>`;
+  }
+  if (b.isAtRisk === true) {
+    return `<span class="delist-pill is-monitoring" title="Binance ติด Monitoring tag — early warning">👁️ MONITORING</span>`;
+  }
+  return '';
+}
+
 
 async function init() {
   const me = await API.get('/api/auth/me').catch(() => null);
@@ -398,15 +436,13 @@ async function init() {
   // FIX-2026-07-31: deep-link จาก scan-volatility — ?newBot=1&symbol=BTCUSDT&tf=5m
   //   - pre-fill symbol/timeframe ใน create modal แล้วเปิดอัตโนมัติ
   //   - ลบ query params ออกจาก URL หลังเปิด modal (back/refresh ไม่ trigger ซ้ำ)
+  //   - FIX-2026-08-07: name auto-fill ย้ายไป show.bs.modal handler (autoFillNewBotName) — รูปแบบ "<BASE>(bAdd)"
   const params = new URLSearchParams(location.search);
   if (params.get('newBot') === '1') {
     const symbol = params.get('symbol');
     const tf = params.get('tf');
     if (symbol) document.getElementById('nb-symbol').value = String(symbol).toUpperCase();
     if (tf) document.getElementById('nb-timeframe').value = tf;
-    // suggest name = "<symbol> <tf>"
-    const nameEl = document.getElementById('nb-name');
-    if (nameEl && !nameEl.value && symbol && tf) nameEl.value = `${symbol} ${tf}`;
     // ลบ query ออกจาก URL
     const cleanUrl = location.pathname;
     history.replaceState(null, '', cleanUrl);
@@ -548,6 +584,48 @@ function setupEventHandlers() {
   // FIX-2026-07-29: shortcut → /pnl.html
   document.getElementById('pnl-shortcut-btn').onclick = () => { location.href = '/pnl.html'; };
 
+  // FIX-2026-08-07: New Bot modal life-cycle hooks
+  //   - บน show.bs.modal: auto-fill name จาก symbol (BTCUSDT → BTC(bAdd)) และ auto-trigger ✨ Get TP%
+  //   - ใช้ symbol change → re-derive name (ถ้า name ยังเป็น auto-fill pattern)
+  //   - ครอบคลุมทั้ง click "+ New Bot" และ deep-link จาก scan-volatility
+  const newBotModalEl = document.getElementById('newBotModal');
+  if (newBotModalEl) {
+    newBotModalEl.addEventListener('show.bs.modal', () => {
+      // delay เล็กน้อยเพื่อให้ deep-link handler (set nb-symbol/nb-timeframe) เสร็จก่อน
+      setTimeout(() => {
+        autoFillNewBotName();
+        // FIX-2026-08-07: auto-trigger ✨ Get เพื่อให้ TP% default = NET จาก Min %KC(window) + EMA20 trend
+        autoTriggerNewBotTp();
+        // FIX-2026-08-08: hide CBv2 OR CBv3 section based on AppConfig.cbVersion (master toggle)
+        applyCbVersionToNewBot();
+      }, 50);
+    });
+  }
+
+  // FIX-2026-08-08: apply cbVersion to new-bot modal — hide the inactive CB version
+  //   - fetched from /api/admin/app-config
+  //   - shows only the active version's section + matching badge text
+  //   - safe if endpoint returns 401 (fallback to v3 default)
+  async function applyCbVersionToNewBot() {
+    try {
+      const resp = await API.get('/api/admin/app-config');
+      const ver = resp?.config?.cbVersion || 'v3';
+      window._newBotCbVersion = ver;
+      const cbv2El = document.getElementById('nb-cbv2-section');
+      const cbv3El = document.getElementById('nb-cbv3-section');
+      if (cbv2El) cbv2El.style.display = ver === 'v2' ? '' : 'none';
+      if (cbv3El) cbv3El.style.display = ver === 'v3' ? '' : 'none';
+      const badge = document.getElementById('nb-cbv-version-badge');
+      if (badge) badge.textContent = ver;
+    } catch (e) {
+      window._newBotCbVersion = 'v3';
+      console.warn('applyCbVersionToNewBot failed:', e.message);
+    }
+  }
+  // ถ้า user เปลี่ยน symbol — re-derive name ถ้ายังเป็น auto-fill pattern
+  const symbolEl = document.getElementById('nb-symbol');
+  if (symbolEl) symbolEl.addEventListener('change', autoFillNewBotName);
+
   // 2026-07-30: Open Positions modal lifecycle + force-close handler
   const opModalEl = document.getElementById('openPositionsModal');
   if (opModalEl) {
@@ -606,18 +684,63 @@ async function refreshPnlShortcut() {
  *   - window = 500 bars
  *   - ใส่ suggestedTpPct ลงใน #nb-tp
  */
+/**
+ * FIX-2026-08-07: auto-fill bot name จาก symbol เมื่อเปิด New Bot modal
+ *   - BTCUSDT → "BTC(bAdd)" · HFTUSDT → "HFT(bAdd)"
+ *   - ตรวจ pattern เดิมเพื่อรู้ว่า name เป็น auto-fill หรือ user พิมพ์เอง
+ *   - ถ้า name ว่าง หรือ ตรง pattern "<BASE>(bAdd)" → re-derive
+ *   - ถ้า user พิมพ์อย่างอื่น → ไม่แตะ
+ */
+function autoFillNewBotName() {
+  const nameEl = document.getElementById('nb-name');
+  const symbolEl = document.getElementById('nb-symbol');
+  if (!nameEl || !symbolEl) return;
+  const symbol = String(symbolEl.value || '').toUpperCase().trim();
+  if (!symbol) return;
+  // base = strip "USDT" suffix (case-insensitive)
+  const base = symbol.endsWith('USDT') ? symbol.slice(0, -4) : symbol;
+  const autoName = `${base}(bAdd)`;
+  const current = String(nameEl.value || '').trim();
+  // auto-fill pattern: empty, or matches "<BASE>(bAdd)" (case-insensitive)
+  const isAutoPattern = !current || /^[A-Z0-9]+\(bAdd\)$/i.test(current);
+  if (isAutoPattern) {
+    nameEl.value = autoName;
+  }
+}
+
+/**
+ * FIX-2026-08-07: auto-trigger ✨ Get TP% on modal open
+ *   - หลังจาก nb-symbol + nb-timeframe ถูกตั้ง (จาก deep-link หรือ default)
+ *   - เรียก recommendNewBotTp() เพื่อให้ TP% default = NET จาก Min %KC(window) + EMA20 trend
+ *   - กัน trigger ซ้ำถ้าเพิ่งกดไปแล้ว (ใช้ flag)
+ */
+let _newBotTpAutoTriggered = false;
+function autoTriggerNewBotTp() {
+  if (_newBotTpAutoTriggered) return;
+  const symbolEl = document.getElementById('nb-symbol');
+  const tfEl = document.getElementById('nb-timeframe');
+  if (!symbolEl || !tfEl) return;
+  if (!symbolEl.value || !tfEl.value) return;
+  _newBotTpAutoTriggered = true;
+  // reset flag หลัง 2s (กัน modal ปิด-เปิดใหม่ trigger ซ้ำ)
+  setTimeout(() => { _newBotTpAutoTriggered = false; }, 2000);
+  recommendNewBotTp();
+}
+
 async function recommendNewBotTp() {
   const btn = document.getElementById('nb-tp-recommend');
   const hint = document.getElementById('nb-tp-hint');
   const symbol = document.getElementById('nb-symbol').value;
   const timeframe = document.getElementById('nb-timeframe').value;
+  // FIX-2026-08-07: อ่าน TP suggest window จาก input (default 30) ไม่ใช่ hardcoded 500
+  const suggestWindow = parseInt(document.getElementById('nb-suggest-tp-window').value, 10) || 30;
   const originalLabel = btn.innerHTML;
   btn.disabled = true;
   btn.classList.add('is-loading');
   btn.innerHTML = '⏳';
-  hint.innerHTML = '<span class="text-warning">กำลังคำนวณ Min %KC(500 bars) + EMA20 trend จาก Binance…</span>';
+  hint.innerHTML = `<span class="text-warning">กำลังคำนวณ Min %KC(${suggestWindow} bars) + EMA20 trend จาก Binance…</span>`;
   try {
-    const resp = await API.post('/api/bots/suggest-tp', { symbol, timeframe, window: 500 });
+    const resp = await API.post('/api/bots/suggest-tp', { symbol, timeframe, window: suggestWindow });
     const tpInput = document.getElementById('nb-tp');
     if (resp.suggestedTpPct == null) {
       hint.innerHTML = `<span class="text-warning">⚠️ trend ยัง warmup (${resp.trendTF || 'n/a'}) — ลองใหม่อีกครั้งในอีกสักครู่</span>`;
@@ -1215,6 +1338,52 @@ function updateBotCardInPlace(b) {
     warnEl.remove();
   }
 
+  // FIX-2026-08-07: CBv2 cooldown banner live update (HYBRID mode — บอทยัง enable)
+  const cbv2LockedUntil = b.cbv2LockedUntil && new Date(b.cbv2LockedUntil).getTime() > Date.now();
+  const lockEl = el.querySelector('.bc-cbv2-cooldown');
+  if (cbv2LockedUntil) {
+    const lockMsg = `⏸ CBv2 cooldown until ${new Date(b.cbv2LockedUntil).toLocaleString()} (${b.cbv2LockReason || 'cbv2_panic'}) — 🔓 ปลด cooldown`;
+    if (!lockEl) {
+      const ref = el.querySelector('.bc-warn') || el.querySelector('.bc-err') || el.querySelector('.bc-stats');
+      if (ref) {
+        const div = document.createElement('div');
+        div.className = 'bc-cbv2-cooldown';
+        div.innerHTML = `<span class="bc-cbv2-cooldown-msg">${lockMsg}</span>`;
+        ref.insertAdjacentHTML('afterend', div.outerHTML);
+      }
+    } else {
+      const msg = lockEl.querySelector('.bc-cbv2-cooldown-msg');
+      if (msg && msg.textContent !== lockMsg) msg.textContent = lockMsg;
+    }
+    if (!el.classList.contains('has-cbv2-cooldown')) el.classList.add('has-cbv2-cooldown');
+  } else if (lockEl) {
+    lockEl.remove();
+    el.classList.remove('has-cbv2-cooldown');
+  }
+
+  // FIX-2026-08-08: Feature #2 — CBv3 cooldown banner live update (mirror CBv2)
+  const cbv3LockedUntil = b.cbv3LockedUntil && new Date(b.cbv3LockedUntil).getTime() > Date.now();
+  const cbv3LockEl = el.querySelector('.bc-cbv3-cooldown');
+  if (cbv3LockedUntil) {
+    const cbv3LockMsg = `⏸ CBv3 cooldown until ${new Date(b.cbv3LockedUntil).toLocaleString()} (${b.cbv3LockReason || 'cbv3_panic'}) — 🔓 ปลด cooldown`;
+    if (!cbv3LockEl) {
+      const ref = el.querySelector('.bc-cbv2-cooldown') || el.querySelector('.bc-warn') || el.querySelector('.bc-err') || el.querySelector('.bc-stats');
+      if (ref) {
+        const div = document.createElement('div');
+        div.className = 'bc-cbv3-cooldown';
+        div.innerHTML = `<span class="bc-cbv3-cooldown-msg">${cbv3LockMsg}</span>`;
+        ref.insertAdjacentHTML('afterend', div.outerHTML);
+      }
+    } else {
+      const msg = cbv3LockEl.querySelector('.bc-cbv3-cooldown-msg');
+      if (msg && msg.textContent !== cbv3LockMsg) msg.textContent = cbv3LockMsg;
+    }
+    if (!el.classList.contains('has-cbv3-cooldown')) el.classList.add('has-cbv3-cooldown');
+  } else if (cbv3LockEl) {
+    cbv3LockEl.remove();
+    el.classList.remove('has-cbv3-cooldown');
+  }
+
   // Run/Stop badge (defensive — usually handled by page reload on toggle)
   const runBadge = el.querySelector('.run-badge');
   if (runBadge) {
@@ -1248,6 +1417,10 @@ function renderBotCard(b) {
   const hasPosition = (b.activePositionsCount || 0) > 0;
   const hasError = !!b.lastError;
   const hasWarning = !!b.warning;
+  // FIX-2026-08-06: CBv2 lock badge — แสดงเมื่อ cbv2LockedUntil > now
+  const hasCbv2Lock = b.cbv2LockedUntil && new Date(b.cbv2LockedUntil).getTime() > Date.now();
+  // FIX-2026-08-08: Feature #2 — CBv3 lock badge (mirror CBv2)
+  const hasCbv3Lock = b.cbv3LockedUntil && new Date(b.cbv3LockedUntil).getTime() > Date.now();
 
   // class flags for highlight
   const classes = ['bot-card-v2'];
@@ -1255,6 +1428,8 @@ function renderBotCard(b) {
   if (hasPosition) classes.push('has-position');
   if (hasError) classes.push('has-error');
   if (hasWarning) classes.push('has-warning');
+  if (hasCbv2Lock) classes.push('has-cbv2-cooldown');
+  if (hasCbv3Lock) classes.push('has-cbv3-cooldown');
   // FIX-2026-07-31: view mode (compact | expand) — drives CSS visibility of chart + tiles
   const viewMode = getBotViewMode();
   classes.push(viewMode === 'compact' ? 'is-compact' : 'is-expand');
@@ -1423,6 +1598,9 @@ function renderBotCard(b) {
   // FIX-2026-08-03: Safe-trade filter #2 (trendline) live badge — แสดงเมื่อ filter เปิด
   const trendlineBadge = buildTrendlineBadge(b);
 
+  // FIX-2026-08-06: Binance delist badge — แสดงเมื่อ symbol �ีความเสี่ยงจะถูก delist
+  const delistBadge = buildDelistBadge(b);
+
   return `
     <div class="${classes.join(' ')}" data-bot-id="${b._id}" data-symbol="${b.symbol}" data-timeframe="${b.timeframe}">
       <div class="bc-head">
@@ -1435,6 +1613,7 @@ function renderBotCard(b) {
             ${qualityBadge}
             ${dcaBadge}
             ${trendlineBadge}
+            ${delistBadge}
             ${coinChip}
           </div>
         </div>
@@ -1488,6 +1667,9 @@ function renderBotCard(b) {
       </div>
       ${b.lastError ? `<div class="bc-err"><span class="bc-err-msg">⚠️ ${escapeHtml(b.lastError)}</span><button class="bc-err-dismiss" type="button" title="ปิดการแจ้งเตือนนี้" aria-label="dismiss" onclick="dismissBotError('${b._id}', this)">×</button></div>` : ''}
       ${b.warning ? `<div class="bc-warn"><span class="bc-warn-msg">⏰ ${escapeHtml(b.warning)}</span><button class="bc-warn-dismiss" type="button" title="ปิดการแจ้งเตือนนี้" aria-label="dismiss" onclick="dismissBotWarning('${b._id}', this)">×</button></div>` : ''}
+      ${hasCbv2Lock ? `<div class="bc-cbv2-cooldown"><span class="bc-cbv2-cooldown-msg">⏸ CBv2 cooldown until ${new Date(b.cbv2LockedUntil).toLocaleString()} <span class="text-muted">(${escapeHtml(b.cbv2LockReason || 'cbv2_panic')})</span> — <a href="/bot-edit.html?id=${b._id}">🔓 ปลด cooldown</a></span></div>` : ''}
+      ${hasCbv3Lock ? `<div class="bc-cbv3-cooldown"><span class="bc-cbv3-cooldown-msg">⏸ CBv3 cooldown until ${new Date(b.cbv3LockedUntil).toLocaleString()} <span class="text-muted">(${escapeHtml(b.cbv3LockReason || 'cbv3_panic')})</span> — <a href="/bot-edit.html?id=${b._id}">🔓 ปลด cooldown</a></span></div>` : ''}
+      ${b.dynamicSizeEnabled === true ? `<div class="bc-dps-indicator" title="DPS — size ${b.dynamicSizeEffective || b.dynamicSizeCurrent || '?'} / layers ${b.dynamicLayersEffective || b.dynamicLayersCurrent || '?'}${b.dynamicSizeInCooldown ? ' (cooldown)' : ''}"><span class="bc-dps-label">📊 DPS</span><span class="bc-dps-value">$${b.dynamicSizeEffective || b.dynamicSizeCurrent || '?'} × ${b.dynamicLayersEffective || b.dynamicLayersCurrent || '?'} layers${b.dynamicSizeInCooldown ? ' ⏸' : ''}</span></div>` : ''}
       <div class="bc-actions">
         <a href="/bot-detail.html?id=${b._id}" class="btn-lux btn-info btn-sm">📊 Detail</a>
         <a href="/bot-edit.html?id=${b._id}" class="btn-lux btn-gold btn-sm">⚙️ Edit</a>
@@ -1680,6 +1862,17 @@ async function createBot() {
     s1OnlyDown: document.getElementById('nb-s1-only-down').checked, // FIX-2026-07-24: skip bg 2→1
     xs1Enabled: document.getElementById('nb-xs1-enabled').checked, // FIX-2026-07-25: per-bot XS1 anti-dump toggle (default true)
     cbEnabled: document.getElementById('nb-cb-enabled').checked, // FIX-2026-08-01: per-bot Circuit-breaker panic-sell toggle (default true) — เดิมชื่อ sls1Enabled
+    // FIX-2026-08-08: only send the ACTIVE CB version's fields (other section is display:none)
+    //   - cached cbVersion via window._mcCache?.cbVersion (set by applyCbVersionToNewBot)
+    cbv2Enabled: (window._newBotCbVersion || 'v3') === 'v2' ? document.getElementById('nb-cbv2-enabled').checked : true,
+    cbv2LockHours: (window._newBotCbVersion || 'v3') === 'v2' ? parseFloat(document.getElementById('nb-cbv2-lock-hours').value) : 8,
+    cbv3Enabled: (window._newBotCbVersion || 'v3') === 'v3' ? document.getElementById('nb-cbv3-enabled').checked : true,
+    cbv3LockHours: (window._newBotCbVersion || 'v3') === 'v3' ? parseFloat(document.getElementById('nb-cbv3-lock-hours').value) || 8 : 8,
+    // FIX-2026-08-08: Feature #3 — CB Auto-Unlock (opt-in, default false)
+    cbAutoUnlockEnabled: document.getElementById('nb-cb-auto-unlock-enabled') ? document.getElementById('nb-cb-auto-unlock-enabled').checked : false,
+    cbAutoUnlockThresholdPct: parseFloat(document.getElementById('nb-cb-auto-unlock-threshold') ? document.getElementById('nb-cb-auto-unlock-threshold').value : 1.0) || 1.0,
+    // FIX-2026-08-08: Feature #1 — Dynamic Position Sizing (default ON)
+    dynamicSizeEnabled: document.getElementById('nb-dynamic-size-enabled') ? document.getElementById('nb-dynamic-size-enabled').checked : true,
     safeTradeEnabled: document.getElementById('nb-safe-trade-enabled').checked, // FIX-2026-08-01: per-bot safe-trade filter (default ON)
     safeTradeTrendlineEnabled: document.getElementById('nb-safe-trade-trendline-enabled').checked, // FIX-2026-08-03: Safe-trade filter #2 (LuxAlgo trendline) — opt-in, default OFF
     safeTradeNoTradeEnabled: document.getElementById('nb-safe-trade-no-trade-enabled').checked, // FIX-2026-08-05: Safe-trade filter #3 (no-trade engulfing/SS) — opt-in, default OFF

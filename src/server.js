@@ -10,6 +10,9 @@ const botManager = require('./core/botManager');
 const healthMonitor = require('./services/healthMonitor');
 const positionWatchdog = require('./services/positionWatchdog');
 const autoBnbBuyer = require('./services/autoBnbBuyer'); // FIX-2026-08-05: auto-buy BNB service
+const autoAddBot = require('./services/autoAddBot'); // FIX-2026-08-07: auto-add new bot service
+const delistMonitor = require('./services/binanceDelistMonitor'); // FIX-2026-08-06: binance delist detection
+const autoDeleteBot = require('./services/autoDeleteBot'); // FIX-2026-08-08: auto-delete bot (soft delete + 30d restore)
 
 async function main() {
   logger.info({ env: config.env, port: config.port }, 'starting OnePercentBotTrade');
@@ -55,6 +58,20 @@ async function main() {
   //   user-configurable via /api/bnb-auto-buy/config (default OFF — must opt-in)
   autoBnbBuyer.start();
 
+  // FIX-2026-08-07: Auto Add New Bot — periodic scan + create bots for new symbols
+  //   user-configurable via /api/auto-add-bot/config (default OFF — must opt-in)
+  autoAddBot.start();
+
+  // FIX-2026-08-06: Delist Monitor — poll Binance marketing/symbol + /sapi/v1/spot/delist-schedule
+  //   - emits delistMonitor:scheduled → telegram + botManager auto-pause/force-close
+  //   - fail-open: fetch errors keep stale cache + warn only
+  delistMonitor.start();
+
+  // FIX-2026-08-08: Auto Delete Bot — periodic scan + soft-delete bots that are stopped > N days
+  //   - user-configurable via /api/telegram/config (autoDeleteBotEnabled, autoDeleteBotDays, autoDeleteBotWarningDays)
+  //   - default OFF — user must opt-in
+  autoDeleteBot.start();
+
   // Graceful shutdown
   let shuttingDown = false;
   const shutdown = async (signal) => {
@@ -64,6 +81,9 @@ async function main() {
     try { healthMonitor.stop(); } catch (e) { /* ignore */ }
     try { positionWatchdog.stop(); } catch (e) { /* ignore */ }
     try { autoBnbBuyer.stop(); } catch (e) { /* ignore */ }
+    try { autoAddBot.stop(); } catch (e) { /* ignore */ }
+    try { delistMonitor.stop(); } catch (e) { /* ignore */ }
+    try { autoDeleteBot.stop(); } catch (e) { /* ignore */ }
     try { await botManager.flushActiveTimeOnShutdown(); } catch (e) { /* ignore */ }
     try { await botManager.stop(); } catch (e) { /* ignore */ }
     server.close(() => {

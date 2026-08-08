@@ -177,6 +177,28 @@ async function getCoinInfo(symbol, { force = false } = {}) {
     circulatingSupply: marketing ? marketing.circulatingSupply : null,
     maxSupply: marketing ? marketing.maxSupply : null,
     totalSupply: marketing ? marketing.totalSupply : null,
+    // FIX-2026-08-06: delist risk fields — จาก binanceDelistMonitor
+    //   - isAtRisk: Binance Marketing "Monitoring" tag (early warning)
+    //   - isDelisted: delistTime has passed
+    //   - delistTime: epoch ms ของวันที่จะถูก delist (null ถ้ายังไม่มี schedule)
+    //   - delistDateIso: ISO string (UI แสดงสะดวก)
+    //   - daysUntil: จำนวนวันก่อน delist (null �้ายังไม่มี schedule)
+    //   - ทุก field อาจเป็น null/false ถ้า delistMonitor �ังไม่ start
+    ...(() => {
+      try {
+        const delistMonitor = require('../services/binanceDelistMonitor');
+        const risk = delistMonitor.getRiskInfoFor(sym);
+        return {
+          isAtRisk: risk ? risk.isAtRisk : false,
+          isDelisted: risk ? risk.isDelisted : false,
+          delistTime: risk ? risk.delistTime : null,
+          delistDateIso: risk ? risk.delistDateIso : null,
+          daysUntil: risk ? risk.daysUntil : null,
+        };
+      } catch (_) {
+        return { isAtRisk: false, isDelisted: false, delistTime: null, delistDateIso: null, daysUntil: null };
+      }
+    })(),
     fetchedAt: new Date().toISOString(),
   };
 

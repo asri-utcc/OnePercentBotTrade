@@ -15,6 +15,8 @@
     tp_hit:                  { label: 'TP',     emoji: '🎯', category: 'bull',    tooltip: 'TP target hit (normal LIMIT_MAKER fill)' },
     tp_trend_boosted:        { label: 'TP+',    emoji: '🎯', category: 'bull',    tooltip: 'TP hit with tpTrendMultiplier > 1 (trend-boosted)' },
     cb_panic:                { label: 'CB',     emoji: '🚨', category: 'bear',    tooltip: 'Circuit-breaker (3-candle lowerKC breach) — panic-close ALL positions' },
+    // FIX-2026-08-07: CBv2 sustained panic-sell (4 consecutive red candles below lowerKC) + cooldown BUY (HYBRID)
+    cbv2_panic:              { label: 'CBv2',   emoji: '💎', category: 'bear',    tooltip: 'CBv2 sustained panic-sell (4 consecutive red candles below lowerKC) + cooldown S1 BUY for cbv2LockHours hours (HYBRID — bot stays enabled)' },
     stop_loss_upper_kc:      { label: 'SL',     emoji: '🛑', category: 'bear',    tooltip: 'Stop-loss on upper-KC (close > upperKC + position at loss)' },
     market_fallback:         { label: 'MKT',    emoji: '⚠️', category: 'warn',    tooltip: 'MARKET fallback (LIMIT rejected / MIN_NOTIONAL breach / validation fail)' },
     manual_api_market:       { label: 'API',    emoji: '🔧', category: 'manual',  tooltip: 'Manual close via API (MARKET branch)' },

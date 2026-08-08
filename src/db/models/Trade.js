@@ -156,6 +156,7 @@ const tradeSchema = new mongoose.Schema(
         'tp_hit',                   // normal TP fill (LIMIT_MAKER filled ที่ TP target)
         'tp_trend_boosted',         // TP hit with tpTrendMultiplier > 1
         'cb_panic',                 // FIX-2026-08-01: Circuit-breaker (3-candle lowerKC breach) panic-close — เดิมชื่อ sls1_panic
+        'cbv2_panic',               // FIX-2026-08-06: CBv2 sustained 3-candle breach (4 consecutive red candles below lowerKC) panic-close + lock บอท cbv2LockHours ชั่วโมง
         'stop_loss_upper_kc',       // Stop loss on upper-KC
         'market_fallback',          // MARKET fallback (LIMIT reject / MIN_NOTIONAL breach / validation fail)
         'manual_api_market',        // Manual close via API (MARKET branch)

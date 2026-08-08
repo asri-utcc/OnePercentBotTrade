@@ -22,8 +22,13 @@ async function init() {
 
 async function loadBot() {
   try {
-    const resp = await API.get(`/api/bots/${botId}`);
+    // FIX-2026-08-08: fetch bot + AppConfig in parallel (cbVersion is global — needed to render the correct CB section)
+    const [resp, cfgResp] = await Promise.all([
+      API.get(`/api/bots/${botId}`),
+      API.get('/api/admin/app-config').catch(() => ({ config: {} })),
+    ]);
     bot = resp.bot;
+    bot.cbVersion = cfgResp?.config?.cbVersion || 'v3';
     render();
   } catch (err) {
     document.getElementById('bot-edit-content').innerHTML = `<div class="alert alert-danger">${err.message}</div>`;
@@ -150,6 +155,120 @@ function render() {
             → cancel SELL ค้าง + MARKET SELL ทันทีทุก position ในบอท (ทั้งกำไรและขาดทุน) เพื่อกันกราฟไหลลงแล้วไม่ขึ้นอีก
             · <strong>เปิด (default)</strong>: panic-close ทุก position เมื่อ pattern ตรง
             · <strong>ปิด</strong>: ไม่แตะ — ใช้ logic เดิม (อาจขาดทุนต่อถ้ากราฟไหล)
+          </small>
+        </div>
+        ${bot.cbVersion === 'v2' ? `
+        <div class="mb-3">
+          <label class="form-check">
+            <input type="checkbox" class="form-check-input" id="f-cbv2-enabled" ${bot.cbv2Enabled !== false ? 'checked' : ''} />
+            <span class="form-check-label">💎 <strong>CBv2 sustained panic-sell — ปิดทุก position + cooldown BUY เมื่อกราฟดิ่ง 4 แท่งติด</strong></span>
+          </label>
+          <div class="row g-2 mt-1 align-items-center">
+            <div class="col-auto">
+              <label for="f-cbv2-lock-hours" class="col-form-label small">Cooldown (ชั่วโมง):</label>
+            </div>
+            <div class="col-auto">
+              <input type="number" class="form-control form-control-sm" id="f-cbv2-lock-hours" min="0.5" max="168" step="0.5" value="${bot.cbv2LockHours != null ? bot.cbv2LockHours : 8}" style="width: 100px;" />
+            </div>
+            <div class="col-auto"><span class="text-muted small">(0.5–168 ชม., default 8)</span></div>
+          </div>
+          <small class="text-muted d-block mt-1">
+            · stricter กว่า CB: 4 แท่งติด red below lowerKC (CB pattern match ทั้ง i และ i-1)
+            → cancel SELL ค้าง + MARKET SELL + <strong>cooldown S1 BUY</strong> cbv2LockHours ชั่วโมง
+            · <strong>HYBRID mode (FIX-2026-08-07)</strong>: บอทยัง enable, Auto-pause/resume ยังทำงานปกติ (เป็นอิสระจาก CBv2 cooldown)
+            · <strong>เปิด (default)</strong>: panic-close + cooldown BUY
+            · <strong>ปิด</strong>: ไม่ใช้ CBv2 (CB ปกติยังทำงานถ้า cbEnabled=true)
+            · ผู้ใช้ปลด cooldown manual ได้ที่ 🔓 ปุ่มข้างล่าง (ต้องใช้ BOT_ACTION_PASSWORD)
+          </small>
+          ${bot.cbv2LockedUntil && new Date(bot.cbv2LockedUntil).getTime() > Date.now() ? `
+          <div class="alert alert-warning mt-2 mb-0 bc-cbv2-cooldown-banner" id="bc-cbv2-cooldown-banner">
+            <div class="d-flex align-items-center justify-content-between">
+              <div>
+                ⏸ <strong>CBv2 cooldown active</strong> until ${new Date(bot.cbv2LockedUntil).toLocaleString()}
+                <span class="text-muted ms-2" data-cbv2-countdown="${new Date(bot.cbv2LockedUntil).toISOString()}"></span>
+                <br />
+                <small class="text-muted">เหตุผล: ${bot.cbv2LockReason || 'cbv2_panic'} · HYBRID mode — บอทยัง enable, S1 BUY ถูกกั้นระหว่าง cooldown, Auto-pause/resume ยังทำงานแยก</small>
+              </div>
+              <button type="button" class="btn btn-sm btn-outline-warning" id="btn-unlock-cbv2" onclick="unlockCBv2Now('${bot._id}')">
+                🔓 ปลด cooldown ตอนนี้
+              </button>
+            </div>
+          </div>` : ''}
+        </div>
+        ` : `
+        <!-- FIX-2026-08-08: Feature #2 — CBv3 (CBv2 + ST3 upper-TF) — active version from AppConfig -->
+        <div class="mb-3">
+          <label class="form-check">
+            <input type="checkbox" class="form-check-input" id="f-cbv3-enabled" ${bot.cbv3Enabled !== false ? 'checked' : ''} />
+            <span class="form-check-label">💎 <strong>CBv3 panic-sell (CBv2 + ST3 upper-TF) — ปิดทุก position + cooldown BUY</strong></span>
+          </label>
+          <div class="row g-2 mt-1 align-items-center">
+            <div class="col-auto">
+              <label for="f-cbv3-lock-hours" class="col-form-label small">Cooldown (ชั่วโมง):</label>
+            </div>
+            <div class="col-auto">
+              <input type="number" class="form-control form-control-sm" id="f-cbv3-lock-hours" min="0.5" max="168" step="0.5" value="${bot.cbv3LockHours != null ? bot.cbv3LockHours : 8}" style="width: 100px;" />
+            </div>
+            <div class="col-auto"><span class="text-muted small">(0.5–168 ชม., default 8)</span></div>
+          </div>
+          <small class="text-muted d-block mt-1">
+            · CBv2 pattern (4 red below lowerKC) + ST3 no-trade pattern on <strong>upper-TF</strong> (TREND_TF_MAP: 3m/5m→1h, 15m→4h, 1h→1d) on SAME candle
+            · <strong>Active version:</strong> <span id="cbv-active-version-badge" class="lux-badge lux-badge-warn">${bot.cbVersion || 'v3'}</span> — เปลี่ยนได้ที่ <a href="/settings.html">Master Config ⚙️</a>
+            · mutually exclusive with CBv2 (CB version is global AppConfig setting)
+          </small>
+          ${bot.cbv3LockedUntil && new Date(bot.cbv3LockedUntil).getTime() > Date.now() ? `
+          <div class="alert alert-warning mt-2 mb-0 bc-cbv3-cooldown-banner">
+            <div class="d-flex align-items-center justify-content-between">
+              <div>
+                ⏸ <strong>CBv3 cooldown active</strong> until ${new Date(bot.cbv3LockedUntil).toLocaleString()}
+                <br />
+                <small class="text-muted">เหตุผล: ${bot.cbv3LockReason || 'cbv3_panic'} · HYBRID mode — บอทยัง enable, S1 BUY ถูกกั้นระหว่าง cooldown</small>
+              </div>
+            </div>
+          </div>` : ''}
+        </div>
+        `}
+
+        <!-- FIX-2026-08-08: Feature #3 — Auto Unlock Cooldown -->
+        <div class="mb-3">
+          <label class="form-check">
+            <input type="checkbox" class="form-check-input" id="f-cb-auto-unlock-enabled" ${bot.cbAutoUnlockEnabled === true ? 'checked' : ''} />
+            <span class="form-check-label">🔓 <strong>CB Auto-Unlock</strong> — ปลด cooldown อัตโนมัติเมื่อ 3+ profitable signals (Feature #3)</span>
+          </label>
+          <div class="row g-2 mt-1 align-items-center">
+            <div class="col-auto">
+              <label for="f-cb-auto-unlock-threshold" class="col-form-label small">Threshold (%):</label>
+            </div>
+            <div class="col-auto">
+              <input type="number" class="form-control form-control-sm" id="f-cb-auto-unlock-threshold" min="0.5" max="5" step="0.1" value="${bot.cbAutoUnlockThresholdPct != null ? bot.cbAutoUnlockThresholdPct : 1.0}" style="width: 100px;" />
+            </div>
+            <div class="col-auto"><span class="text-muted small">(0.5–5%, default 1%)</span></div>
+          </div>
+          <small class="text-muted d-block mt-1">
+            · Scan candles since last CB fire (cbv2LastFiredAt/cbv3LastFiredAt) for S1 signals where (next candle high - signal close) / signal close × 100 &gt; threshold%
+            · <strong>3+ signals → unlock ทันที</strong> (ไม่มี whipsaw guard ตามที่ user ระบุ)
+            · All math is candle-based (hypothetical profit, no real trades)
+            · Signals found: <code>${bot.cbAutoUnlockSignalsFound != null ? bot.cbAutoUnlockSignalsFound : 0}</code>
+          </small>
+        </div>
+
+        <!-- FIX-2026-08-08: Feature #1 — Dynamic Position Sizing -->
+        <div class="mb-3">
+          <label class="form-check">
+            <input type="checkbox" class="form-check-input" id="f-dynamic-size-enabled" ${bot.dynamicSizeEnabled !== false ? 'checked' : ''} />
+            <span class="form-check-label">📊 <strong>Dynamic Position Sizing (DPS)</strong> — ปรับ size/layers อัตโนมัติตาม trade history (Feature #1)</span>
+          </label>
+          <small class="text-muted d-block mt-1">
+            · <strong>Rules</strong>:
+            <ul class="mb-1" style="font-size: 0.85em;">
+              <li>3 consecutive wins → +1 USDT size, +1 layer</li>
+              <li>Last 2 trades &gt;2% profit each → +2 USDT size</li>
+              <li>Last trade loss → -2 USDT (clamp ≥6), -2 layers (clamp ≥1)</li>
+            </ul>
+            · <strong>Bounds</strong>: size 6..15 USDT · layers 1..5
+            · <strong>Default</strong>: เปิด · <strong>Skip</strong>: DCA mode + Martingale mode + cooldown active (5 min)
+            · Current: <code>$${bot.dynamicSizeEffective != null ? bot.dynamicSizeEffective : (bot.dynamicSizeCurrent != null ? bot.dynamicSizeCurrent : bot.capitalPerTrade)} × ${bot.dynamicLayersEffective != null ? bot.dynamicLayersEffective : (bot.dynamicLayersCurrent != null ? bot.dynamicLayersCurrent : bot.maxTrades)} layers</code>${bot.dynamicSizeInCooldown ? ' <span class="text-warning">⏸ cooldown</span>' : ''}
+            ${(bot.dcaEnabled || bot.martingaleEnabled) ? '<br /><span class="text-warning">⚠️ DPS จะ skip เมื่อเปิด DCA หรือ Martingale (mutually exclusive)</span>' : ''}
           </small>
         </div>
         <div class="mb-3">
@@ -864,6 +983,16 @@ async function save(e) {
     s1OnlyDown: document.getElementById('f-s1-only-down').checked, // FIX-2026-07-24: skip bg 2→1 (ซื้อตอนราคาสูง)
     xs1Enabled: document.getElementById('f-xs1-enabled').checked, // FIX-2026-07-25: per-bot XS1 anti-dump toggle (default true)
     cbEnabled: document.getElementById('f-cb-enabled').checked, // FIX-2026-08-01: per-bot Circuit-breaker panic-sell toggle (default true) — เดิมชื่อ sls1Enabled
+    // FIX-2026-08-08: only send CBv2 OR CBv3 (based on AppConfig.cbVersion) — the other section is hidden in UI
+    cbv2Enabled: bot.cbVersion === 'v2' ? document.getElementById('f-cbv2-enabled').checked : bot.cbv2Enabled, // FIX-2026-08-06: CBv2 sustained panic-sell toggle (default true)
+    cbv2LockHours: bot.cbVersion === 'v2' ? parseFloat(document.getElementById('f-cbv2-lock-hours').value) : bot.cbv2LockHours, // FIX-2026-08-06: CBv2 lock hours (0.5..168)
+    cbv3Enabled: bot.cbVersion === 'v3' ? document.getElementById('f-cbv3-enabled').checked : bot.cbv3Enabled, // FIX-2026-08-08: Feature #2 — CBv3 toggle + lock hours (mirror CBv2)
+    cbv3LockHours: bot.cbVersion === 'v3' ? parseFloat(document.getElementById('f-cbv3-lock-hours').value) : bot.cbv3LockHours,
+    // FIX-2026-08-08: Feature #3 — CB Auto-Unlock toggle + threshold
+    cbAutoUnlockEnabled: document.getElementById('f-cb-auto-unlock-enabled').checked,
+    cbAutoUnlockThresholdPct: parseFloat(document.getElementById('f-cb-auto-unlock-threshold').value),
+    // FIX-2026-08-08: Feature #1 — Dynamic Position Sizing toggle
+    dynamicSizeEnabled: document.getElementById('f-dynamic-size-enabled').checked,
     safeTradeEnabled: document.getElementById('f-safe-trade-enabled').checked, // FIX-2026-08-01: per-bot safe-trade filter (default ON)
     safeTradeTrendlineEnabled: document.getElementById('f-safe-trade-trendline-enabled').checked, // FIX-2026-08-03: Safe-trade filter #2 (LuxAlgo trendline) — opt-in, default OFF
     safeTradeNoTradeEnabled: document.getElementById('f-safe-trade-no-trade-enabled').checked, // FIX-2026-08-05: Safe-trade filter #3 (no-trade engulfing/SS) — opt-in, default OFF
@@ -897,6 +1026,54 @@ async function save(e) {
     document.getElementById('f-error').textContent = err.message;
   }
 }
+
+// FIX-2026-08-07: manual clear CBv2 cooldown (HYBRID mode) — ลบ cbv2LockedUntil + cbv2LockReason + reset trader._cbv2FiredAt
+//   - try ก่อนแบบไม่ใส่ password → ถ้า 403 → prompt แล้ว retry (mirror callBotWithPassword pattern)
+//   - ใช้ body.password แทน header X-Bot-Action-Password (ตรงกับ standard pattern ใน luxConfirm.callBotWithPassword)
+window.unlockCBv2Now = async (id) => {
+  if (!confirm('ปลด CBv2 cooldown ตอนนี้? (ต้องใช้ BOT_ACTION_PASSWORD)')) return;
+  const btn = document.getElementById('btn-unlock-cbv2');
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ กำลังปลด cooldown...'; }
+  try {
+    let resp;
+    try {
+      // first attempt — no password
+      resp = await API.post(`/api/bots/${id}/unlock-cbv2`, {});
+    } catch (err) {
+      if (!err || (err.status !== 403 && err.status !== 503)) throw err;
+      const pw = prompt('กรอก BOT_ACTION_PASSWORD:');
+      if (!pw) throw new Error('ยกเลิก (ไม่ได้ใส่รหัส)');
+      // retry — ใส่ password ใน body (backend รับ req.body.password)
+      resp = await API.post(`/api/bots/${id}/unlock-cbv2`, { password: pw });
+    }
+    alert('ปลด CBv2 cooldown เรียบร้อย — S1 BUY กลับมาทำงานตามปกติ');
+    if (resp && resp.bot) {
+      // refresh the page to clear the cooldown banner
+      location.reload();
+    }
+  } catch (err) {
+    alert('ปลด cooldown ล้มเหลว: ' + (err.response?.data?.error || err.body?.error || err.message));
+    if (btn) { btn.disabled = false; btn.textContent = '🔓 ปลด cooldown ตอนนี้'; }
+  }
+};
+
+// FIX-2026-08-06: live countdown for CBv2 lock banner (HH:MM:SS remaining)
+function startCbv2Countdown() {
+  const el = document.querySelector('[data-cbv2-countdown]');
+  if (!el) return;
+  const target = new Date(el.getAttribute('data-cbv2-countdown')).getTime();
+  function tick() {
+    const ms = target - Date.now();
+    if (ms <= 0) { el.textContent = '(expired → auto-resume pending)'; return; }
+    const hh = Math.floor(ms / 3600000);
+    const mm = Math.floor((ms % 3600000) / 60000);
+    const ss = Math.floor((ms % 60000) / 1000);
+    el.textContent = `(เหลือ ${hh.toString().padStart(2, '0')}:${mm.toString().padStart(2, '0')}:${ss.toString().padStart(2, '0')})`;
+    setTimeout(tick, 1000);
+  }
+  tick();
+}
+startCbv2Countdown();
 
 init();
 
