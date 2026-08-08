@@ -485,32 +485,31 @@
       transform: rotate(-90deg);
     }
     .cm-positions-card.is-collapsed #cm-positions-list,
-    .cm-positions-card.is-collapsed #cm-positions-refresh,
-    .cm-positions-card.is-collapsed #cm-positions-footer {
+    .cm-positions-card.is-collapsed #cm-positions-refresh {
       display: none !important;
     }
-    /* ─── 2026-08-08: Totals footer (Cost + Unrealized PnL) ─── */
-    .cm-positions-footer {
-      display: flex;
-      flex-wrap: wrap;
+    /* ─── 2026-08-08: Totals in header (next to title) — Cost + Unrealized PnL + THB ─── */
+    .cm-positions-totals {
+      display: inline-flex;
       align-items: baseline;
-      gap: 0.35rem 1rem;
-      padding: 0.45rem 0.65rem 0.2rem;
-      margin-top: 0.35rem;
-      border-top: 1px dashed rgba(255,255,255,0.1);
-      font-size: 0.72rem;
-      color: #94a3b8;
+      flex-wrap: wrap;
+      gap: 0.2rem 0.45rem;
+      font-size: 0.76rem;
+      color: #cbd5e1;
+      margin-right: 0.4rem;
     }
-    .cm-positions-footer[hidden] { display: none !important; }
-    .cm-pf-line { display: inline-flex; align-items: baseline; gap: 0.35rem; }
-    .cm-pf-key { color: #94a3b8; font-weight: 600; letter-spacing: 0.02em; }
-    .cm-pf-val { color: #e2e8f0; font-weight: 700; }
-    .cm-pf-val.pnl-bull { color: #00e5b8; }
-    .cm-pf-val.pnl-bear { color: #ff4d6d; }
-    .cm-pf-unit { color: #64748b; font-size: 0.9em; font-weight: 500; }
-    .cm-pf-sub { color: #94a3b8; font-size: 0.92em; margin-left: 0.15rem; }
+    .cm-positions-totals[hidden] { display: none !important; }
+    .cm-pt-line { display: inline-flex; align-items: baseline; gap: 0.3rem; }
+    .cm-pt-val { font-weight: 700; color: #e2e8f0; }
+    .cm-positions-totals .cm-pt-val.pnl-bull { color: #00e5b8; }
+    .cm-positions-totals .cm-pt-val.pnl-bear { color: #ff4d6d; }
+    .cm-pt-unit { color: #64748b; font-size: 0.88em; font-weight: 500; }
+    .cm-pt-sub { color: #94a3b8; font-size: 0.9em; margin-left: 0.15rem; font-weight: 500; }
+    .cm-pt-sep { color: #475569; opacity: 0.7; font-size: 0.85em; }
+    .cm-positions-totals .thb-eq { font-size: 0.78em; opacity: 0.75; }
     @media (max-width: 640px) {
-      .cm-positions-footer { font-size: 0.68rem; padding: 0.4rem 0.5rem 0.15rem; gap: 0.3rem 0.7rem; }
+      .cm-positions-totals { font-size: 0.68rem; gap: 0.15rem 0.35rem; margin-right: 0.2rem; }
+      .cm-positions-totals .thb-eq { display: none; } /* save space on mobile */
     }
     /* ─── 2026-08-08: Auto-refresh toggle for Open Positions ───
        Default OFF on every page load (state not persisted). */
@@ -687,6 +686,15 @@
     <div class="cm-positions-card is-collapsed" id="cm-positions-card">
       <div class="cm-positions-header" id="cm-positions-header" title="คลิกเพื่อยุบ/ขยาย">
         <span class="cm-positions-title">📂 Open Positions <span class="cm-positions-count" id="cm-positions-count">0</span></span>
+        <span class="cm-positions-totals" id="cm-positions-totals" hidden>
+          <span class="cm-pt-line">
+            💰 <span class="cm-pt-val mono" id="cm-pt-cost">0.00</span> <span class="cm-pt-unit">USDT</span><span class="thb-eq" id="cm-pt-cost-thb"></span>
+          </span>
+          <span class="cm-pt-sep">·</span>
+          <span class="cm-pt-line">
+            📊 <span class="cm-pt-val mono" id="cm-pt-pnl">+0.0000</span> <span class="cm-pt-unit">USDT</span><span class="cm-pt-sub mono" id="cm-pt-pnl-pct">(+0.000%)</span><span class="thb-eq" id="cm-pt-pnl-thb"></span>
+          </span>
+        </span>
         <span class="cm-positions-meta">
           <span id="cm-positions-sub">กำลังโหลด…</span>
           <button type="button" class="cm-positions-toggle" id="cm-positions-toggle" title="ยุบ/ขยาย" aria-label="ยุบ/ขยาย">▾</button>
@@ -698,20 +706,6 @@
       </div>
       <div id="cm-positions-list" class="cm-positions-grid">
         <div class="cm-positions-empty">⏳ กำลังโหลด…</div>
-      </div>
-      <!-- 2026-08-08: Totals footer (Cost + Unrealized PnL) — hidden when empty or collapsed -->
-      <div class="cm-positions-footer" id="cm-positions-footer" hidden>
-        <span class="cm-pf-line">
-          <span class="cm-pf-key">💰 Total Cost</span>
-          <span class="cm-pf-val mono" id="cm-pf-cost">0.00</span>
-          <span class="cm-pf-unit">USDT</span>
-        </span>
-        <span class="cm-pf-line">
-          <span class="cm-pf-key">📊 Unrealized PnL</span>
-          <span class="cm-pf-val mono" id="cm-pf-pnl">+0.0000</span>
-          <span class="cm-pf-unit">USDT</span>
-          <span class="cm-pf-sub mono" id="cm-pf-pnl-pct">(+0.000%)</span>
-        </span>
       </div>
     </div>
 
