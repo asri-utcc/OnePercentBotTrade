@@ -1191,10 +1191,16 @@ class Trader {
       }
 
       // คำนวณ lower-KC
+      // FIX-2026-08-08 ACTUSDT CB-CBv2/CBv3: parseFloat klines first
+      //   - เดิม klines[i].close/high/low อาจเป็น string จาก cache → computeBgStates ได้ NaN/string ใน lower[]
+      //   - กัน TypeError: Cannot read properties of undefined (reading 'toFixed') ที่ lastLower.toFixed(6)
+      const klineCloses = klines.map((k) => parseFloat(k.close));
+      const klineHighs = klines.map((k) => parseFloat(k.high));
+      const klineLows = klines.map((k) => parseFloat(k.low));
       const { lower } = signalEngine.computeBgStates({
-        closes: klines.map((k) => k.close),
-        highs: klines.map((k) => k.high),
-        lows: klines.map((k) => k.low),
+        closes: klineCloses,
+        highs: klineHighs,
+        lows: klineLows,
         length: 20,
         mult: this.bot.kcMult || 1.5,
         useTrueRange: true,
@@ -1215,8 +1221,15 @@ class Trader {
         if (found >= 0) lastIdx = found;
       }
       const lastLower = lower[lastIdx];
-      if (lastLower == null) {
-        logger.debug({ botId: this.bot._id.toString(), lastIdx }, 'trader: cb skip — lastLower null (warmup?)');
+      // FIX-2026-08-08 ACTUSDT CB-CBv2/CBv3: use Number.isFinite guard (catches NaN, strings, undefined)
+      //   - เดิม `lastLower == null` ตรวจแค่ null/undefined แต่ถ้า computeBgStates คืน NaN หรือ string จะหลุดไป lastLower.toFixed(6) แล้ว throw
+      if (typeof lastLower !== 'number' || !Number.isFinite(lastLower)) {
+        logger.debug({
+          botId: this.bot._id.toString(),
+          lastIdx,
+          lastLowerType: typeof lastLower,
+          lastLowerValue: lastLower,
+        }, 'trader: cb skip — lastLower invalid (warmup or bad kline)');
         return;
       }
 
@@ -1376,11 +1389,23 @@ class Trader {
         return;
       }
 
+      // FIX-2026-08-08: parseFloat klines first (mirror other code paths at L186-190)
+      //   - bug history: ACTUSDT 2026-08-07 21:33 — CBv2 fired, _forceCloseTradeNow threw
+      //     "Cannot read properties of undefined (reading 'toFixed')" at trader.js:1601:96
+      //     root cause: klineCache returns string close/high/low for some klines
+      //     → computeBgStates produced string lower[] values
+      //     → null-check `lastLower == null` did NOT catch strings (only null/undefined)
+      //     → lastLower.toFixed(6) in logger.warn threw → entire CBv2 force-close aborted
+      //     → SELL order stayed live on Binance for ~12h until TP filled
+      const klineCloses = klines.map((k) => parseFloat(k.close));
+      const klineHighs = klines.map((k) => parseFloat(k.high));
+      const klineLows = klines.map((k) => parseFloat(k.low));
+
       // คำนวณ lower-KC
       const { lower } = signalEngine.computeBgStates({
-        closes: klines.map((k) => k.close),
-        highs: klines.map((k) => k.high),
-        lows: klines.map((k) => k.low),
+        closes: klineCloses,
+        highs: klineHighs,
+        lows: klineLows,
         length: 20,
         mult: this.bot.kcMult || 1.5,
         useTrueRange: true,
@@ -1396,15 +1421,16 @@ class Trader {
         }
         if (found >= 0) lastIdx = found;
       }
+      // FIX-2026-08-08: strict type check (Number.isFinite) — guards against string / NaN / undefined
       const lastLower = lower[lastIdx];
-      if (lastLower == null) {
-        logger.debug({ botId: this.bot._id.toString(), lastIdx }, 'trader: cbv2 skip — lastLower null (warmup?)');
+      if (typeof lastLower !== 'number' || !Number.isFinite(lastLower)) {
+        logger.debug({ botId: this.bot._id.toString(), lastIdx, lastLowerType: typeof lastLower, lastLowerValue: lastLower }, 'trader: cbv2 skip — lastLower invalid (warmup or bad kline)');
         return;
       }
 
       // ตรวจ CBv2 pattern (4 consecutive red candles fully below lowerKC)
       const opens = klines.map((k) => parseFloat(k.open));
-      const closes = klines.map((k) => parseFloat(k.close));
+      const closes = klineCloses;
       if (!signalEngine.isCBv2At(lastIdx, opens, closes, lower)) return;
 
       // include 'partial_sell_wait' (mirror CB pattern)
@@ -1561,10 +1587,13 @@ class Trader {
         logger.debug({ botId: this.bot._id.toString(), klinesLen: klines?.length }, 'trader: cbv3 skip — klines not warm');
         return;
       }
+      // FIX-2026-08-08: parseFloat klines + Number.isFinite guard (mirror CBv2 fix at L1380+)
+      //   - bug history: ACTUSDT 2026-08-07 21:33 — same root cause as CBv2
+      const klineCloses = klines.map((k) => parseFloat(k.close));
       const { lower } = signalEngine.computeBgStates({
-        closes: klines.map((k) => k.close),
-        highs: klines.map((k) => k.high),
-        lows: klines.map((k) => k.low),
+        closes: klineCloses,
+        highs: klines.map((k) => parseFloat(k.high)),
+        lows: klines.map((k) => parseFloat(k.low)),
         length: 20,
         mult: this.bot.kcMult || 1.5,
         useTrueRange: true,
@@ -1579,13 +1608,14 @@ class Trader {
         if (found >= 0) lastIdx = found;
       }
       const lastLower = lower[lastIdx];
-      if (lastLower == null) {
-        logger.debug({ botId: this.bot._id.toString(), lastIdx }, 'trader: cbv3 skip — lastLower null');
+      // FIX-2026-08-08: strict type check (Number.isFinite) — guards against string / NaN / undefined
+      if (typeof lastLower !== 'number' || !Number.isFinite(lastLower)) {
+        logger.debug({ botId: this.bot._id.toString(), lastIdx, lastLowerType: typeof lastLower, lastLowerValue: lastLower }, 'trader: cbv3 skip — lastLower invalid (warmup or bad kline)');
         return;
       }
       // CBv2 base pattern check
       const opens = klines.map((k) => parseFloat(k.open));
-      const closes = klines.map((k) => parseFloat(k.close));
+      const closes = klineCloses;
       if (!signalEngine.isCBv2At(lastIdx, opens, closes, lower)) return;
 
       // FIX-2026-08-08: Feature #2 — ST3 no-trade on upper-TF (SAME candle)
