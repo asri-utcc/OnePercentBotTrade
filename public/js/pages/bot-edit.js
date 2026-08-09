@@ -37,6 +37,8 @@ async function loadBot() {
 
 function render() {
   const container = document.getElementById('bot-edit-content');
+  const hasActiveCbCooldown = [bot.cbv2LockedUntil, bot.cbv3LockedUntil]
+    .some((until) => until && new Date(until).getTime() > Date.now());
   // FIX-2026-08-03: tab-based layout — Classic + DCA tabs (single <form> wraps both panels)
   container.innerHTML = `
     <div class="lux-header"><span class="title">⚙️ ${escapeHtml(bot.name || bot.symbol)}</span><span class="text-muted-3" style="font-size:0.78rem;">${bot.symbol} · ${bot.timeframe}</span></div>
@@ -49,403 +51,334 @@ function render() {
       </div>
 
       <!-- TAB PANEL 1: Classic (default visible) -->
-      <section data-tab-panel="classic">
-        <div class="mb-3">
-          <label class="form-label">ชื่อบอท</label>
-          <input type="text" class="form-control" id="f-name" value="${bot.name || ''}" />
-        </div>
-        <div class="row">
-          <div class="col-md-6 mb-3">
-            <label class="form-label">คู่เทรด (แก้ไม่ได้)</label>
-            <input type="text" class="form-control" value="${bot.symbol}" disabled />
-          </div>
-          <div class="col-md-6 mb-3">
-            <label class="form-label">Timeframe</label>
-            <select class="form-select" id="f-timeframe">
-              ${['1m','3m','5m','15m','30m','1h','2h','4h','6h','8h','12h','1d','3d','1w','1M'].map((tf) =>
-                `<option value="${tf}" ${tf === bot.timeframe ? 'selected' : ''}>${tf}</option>`
-              ).join('')}
-            </select>
-          </div>
-        </div>
-        <div class="row">
-          <div class="col-md-6 mb-3">
-            <label class="form-label">ทุนต่อไม้ (USDT)</label>
-            <input type="number" class="form-control" id="f-capital" value="${bot.capitalPerTrade}" step="0.01" min="1" />
-          </div>
-          <div class="col-md-6 mb-3">
-            <label class="form-label">จำนวนไม้</label>
-            <input type="number" class="form-control" id="f-maxtrades" value="${bot.maxTrades}" step="1" min="1" max="100" />
-          </div>
-        </div>
-        <div class="row">
-          <div class="col-md-6 mb-3">
-            <label class="form-label d-flex justify-content-between align-items-center">
-              <span>TP %</span>
-              <button type="button" class="btn btn-sm btn-outline-warning" id="f-tp-recommend" title="คำนวณ TP% จาก Min %KC(500 bars) + trend(upper-TF)">
-                ✨ Get recommend TP%
-              </button>
-            </label>
-            <input type="number" class="form-control" id="f-tp" value="${bot.tpPercent}" step="0.01" min="0.001" />
-            <small class="text-muted" id="f-tp-hint">บอทจะบวก fee buffer (0.15-0.2%) อัตโนมัติ</small>
-          </div>
-          <div class="col-md-6 mb-3">
-            <label class="form-label">Retry time (นาที)</label>
-            <input type="number" class="form-control" id="f-retry" value="${bot.retryTimeMin}" step="0.1" min="0.1" max="60" />
-            <small class="text-muted">ทศนิยมได้ เช่น 0.5 = 30 วินาที, 0.1 = 6 วินาที (เหมาะกับ timeframe 1m/3m)</small>
-          </div>
-        </div>
-        <div class="row">
-          <div class="col-md-6 mb-3">
-            <label class="form-label">Retry max (ครั้งที่วางใหม่ได้)</label>
-            <input type="number" class="form-control" id="f-retry-max" value="${bot.retryMax ?? 1}" step="1" min="0" max="10" />
-            <small class="text-muted">0 = วางครั้งเดียว ไม่ retry; 1 = วางใหม่ได้ 1 ครั้งถ้า bid ขยับ</small>
-          </div>
-          <div class="col-md-6 mb-3">
-            <label class="form-label">KC Multiplier <span title="ความกว้างของ Keltner Channel (default 1.5) — ค่าน้อย KC แคบ → signal S1 บ่อย, ค่ามาก KC กว้าง → signal น้อย">ⓘ</span></label>
-            <input type="number" class="form-control" id="f-kc-mult" value="${bot.kcMult ?? 1.5}" step="0.1" min="0.5" max="5" />
-            <small class="text-muted">range 0.5–5 (default 1.5 เป็น KC ปกติ)</small>
-          </div>
-        </div>
-        <div class="row">
-          <div class="col-md-6 mb-3">
-            <label class="form-label">Min spread (ticks) <span title="จำนวน tick ขั้นต่ำที่ต้องมีระหว่าง bid-ask ก่อนวาง BUY — 1 = ใช้ bid ตรงๆ (post-only, เหมาะ low-cap), 2 = ต้องมี margin 1 tick (เหมาะ mid/high-cap)">ⓘ</span></label>
-            <input type="number" class="form-control" id="f-min-spread" value="${bot.minSpreadTicks ?? 1}" step="1" min="0" max="10" />
-            <small class="text-muted">0=ไม่สนใจ, 1=ใช้ bid (low-cap), 2=ต้อง margin 1 tick (default 1)</small>
-          </div>
-          <div class="col-md-6 mb-3"></div>
-        </div>
-        <div class="mb-3">
-          <label class="form-check">
-            <input type="checkbox" class="form-check-input" id="f-s1-only-down" ${bot.s1OnlyDown ? 'checked' : ''} />
-            <span class="form-check-label">📉 <strong>S1 = เฉพาะ bg 2→3 (ลงเท่านั้น)</strong> — ข้าม bg 2→1 (ซื้อตอนราคาสูง)</span>
-          </label>
-          <small class="text-muted d-block mt-1">
-            bg_state: 1=Strong Up (เขียว), 2=Weak Down (ม่วง), 3=Strong Down (แดง)
-            · S1 ปกติ = bg_prev=2 AND (bg=1 OR bg=3) · ถ้าเปิด toggle นี้ S1 = bg_prev=2 AND bg=3 (ลง) — ปลอดภัยกว่า
-          </small>
-        </div>
-        <div class="mb-3">
-          <label class="form-check">
-            <input type="checkbox" class="form-check-input" id="f-xs1-enabled" ${bot.xs1Enabled !== false ? 'checked' : ''} />
-            <span class="form-check-label">🚫 <strong>XS1 anti-dump gate</strong> — ข้าม S1 เมื่อ candle-wide dump (ป้องกันซื้อตอนราคาไหลเร็ว)</span>
-          </label>
-          <small class="text-muted d-block mt-1">
-            XS1 = (close &lt; lowerKC AND open &gt; basisKC) หรือ (open[1] &gt; basisKC[1] AND close[1] &lt; basisKC[1] AND close &lt; lowerKC AND open &lt; basisKC)
-            · <strong>เปิด (default)</strong>: skip S1 เมื่อเจอ candle-wide dump (XS1 pattern)
-            · <strong>ปิด</strong>: ใช้สัญญาณดั้งเดิม S1 ปกติ (ไม่ skip แม้ candle-wide dump)
-          </small>
-        </div>
-        <div class="mb-3">
-          <label class="form-check">
-            <input type="checkbox" class="form-check-input" id="f-stop-loss-upper-kc" ${bot.stopLossOnUpperKC ? 'checked' : ''} />
-            <span class="form-check-label">🛑 <strong>ปิด position อัตโนมัติเมื่อราคาปิดทะลุ upper-KC</strong> (เฉพาะตอนขาดทุน)</span>
-          </label>
-          <small class="text-muted d-block mt-1">
-            ตรวจทุก <code>kline:closed</code>: ถ้า <code>candle.close &gt; upperKC</code> และ position ยังขาดทุน → cancel LIMIT_MAKER SELL ค้าง + MARKET SELL ทันที
-          </small>
-        </div>
-        <div class="mb-3">
-          <label class="form-check">
-            <input type="checkbox" class="form-check-input" id="f-cb-enabled" ${bot.cbEnabled !== false ? 'checked' : ''} />
-            <span class="form-check-label">🚨 <strong>Circuit-breaker panic-sell — ปิดทุก position เมื่อกราฟดิ่ง 3 แท่งติด</strong></span>
-          </label>
-          <small class="text-muted d-block mt-1">
-            ตรวจทุก <code>kline:closed</code>: ถ้าแท่งปัจจุบัน + 3 แท่งก่อนหน้าทุกแท่ง "แดง (open &gt; close) AND open &lt; lowerKC AND close &lt; lowerKC"
-            → cancel SELL ค้าง + MARKET SELL ทันทีทุก position ในบอท (ทั้งกำไรและขาดทุน) เพื่อกันกราฟไหลลงแล้วไม่ขึ้นอีก
-            · <strong>เปิด (default)</strong>: panic-close ทุก position เมื่อ pattern ตรง
-            · <strong>ปิด</strong>: ไม่แตะ — ใช้ logic เดิม (อาจขาดทุนต่อถ้ากราฟไหล)
-          </small>
-        </div>
-        ${bot.cbVersion === 'v2' ? `
-        <div class="mb-3">
-          <label class="form-check">
-            <input type="checkbox" class="form-check-input" id="f-cbv2-enabled" ${bot.cbv2Enabled !== false ? 'checked' : ''} />
-            <span class="form-check-label">💎 <strong>CBv2 sustained panic-sell — ปิดทุก position + cooldown BUY เมื่อกราฟดิ่ง 4 แท่งติด</strong></span>
-          </label>
-          <div class="row g-2 mt-1 align-items-center">
-            <div class="col-auto">
-              <label for="f-cbv2-lock-hours" class="col-form-label small">Cooldown (ชั่วโมง):</label>
-            </div>
-            <div class="col-auto">
-              <input type="number" class="form-control form-control-sm" id="f-cbv2-lock-hours" min="0.5" max="168" step="0.5" value="${bot.cbv2LockHours != null ? bot.cbv2LockHours : 8}" style="width: 100px;" />
-            </div>
-            <div class="col-auto"><span class="text-muted small">(0.5–168 ชม., default 8)</span></div>
-          </div>
-          <small class="text-muted d-block mt-1">
-            · stricter กว่า CB: 4 แท่งติด red below lowerKC (CB pattern match ทั้ง i และ i-1)
-            → cancel SELL ค้าง + MARKET SELL + <strong>cooldown S1 BUY</strong> cbv2LockHours ชั่วโมง
-            · <strong>HYBRID mode (FIX-2026-08-07)</strong>: บอทยัง enable, Auto-pause/resume ยังทำงานปกติ (เป็นอิสระจาก CBv2 cooldown)
-            · <strong>เปิด (default)</strong>: panic-close + cooldown BUY
-            · <strong>ปิด</strong>: ไม่ใช้ CBv2 (CB ปกติยังทำงานถ้า cbEnabled=true)
-            · ผู้ใช้ปลด cooldown manual ได้ที่ 🔓 ปุ่มข้างล่าง (ต้องใช้ BOT_ACTION_PASSWORD)
-          </small>
-          ${bot.cbv2LockedUntil && new Date(bot.cbv2LockedUntil).getTime() > Date.now() ? `
-          <div class="alert alert-warning mt-2 mb-0 bc-cbv2-cooldown-banner" id="bc-cbv2-cooldown-banner">
-            <div class="d-flex align-items-center justify-content-between">
-              <div>
-                ⏸ <strong>CBv2 cooldown active</strong> until ${new Date(bot.cbv2LockedUntil).toLocaleString()}
-                <span class="text-muted ms-2" data-cbv2-countdown="${new Date(bot.cbv2LockedUntil).toISOString()}"></span>
-                <br />
-                <small class="text-muted">เหตุผล: ${bot.cbv2LockReason || 'cbv2_panic'} · HYBRID mode — บอทยัง enable, S1 BUY ถูกกั้นระหว่าง cooldown, Auto-pause/resume ยังทำงานแยก</small>
+      <section data-tab-panel="classic" class="bot-settings-form">
+        <details class="lux-details" id="f-group-basic" data-settings-group="basic" open>
+          <summary class="lux-details-summary">
+            <span class="bot-settings-group-icon">🪪</span>
+            <span class="bot-settings-group-title">ข้อมูลบอทและเงินทุน</span>
+            <span class="bot-settings-group-hint">ชื่อ · คู่เทรด · Timeframe · ทุน</span>
+          </summary>
+          <div class="lux-details-body">
+            <div class="bot-settings-grid">
+              <div class="bot-settings-field is-full">
+                <label class="form-label" for="f-name">ชื่อบอท</label>
+                <input type="text" class="form-control" id="f-name" value="${bot.name || ''}" />
               </div>
-              <button type="button" class="btn btn-sm btn-outline-warning" id="btn-unlock-cbv2" onclick="unlockCBv2Now('${bot._id}')">
-                🔓 ปลด cooldown ตอนนี้
-              </button>
-            </div>
-          </div>` : ''}
-        </div>
-        ` : `
-        <!-- FIX-2026-08-08: Feature #2 — CBv3 (CBv2 + ST3 upper-TF) — active version from AppConfig -->
-        <div class="mb-3">
-          <label class="form-check">
-            <input type="checkbox" class="form-check-input" id="f-cbv3-enabled" ${bot.cbv3Enabled !== false ? 'checked' : ''} />
-            <span class="form-check-label">💎 <strong>CBv3 panic-sell (CBv2 + ST3 upper-TF) — ปิดทุก position + cooldown BUY</strong></span>
-          </label>
-          <div class="row g-2 mt-1 align-items-center">
-            <div class="col-auto">
-              <label for="f-cbv3-lock-hours" class="col-form-label small">Cooldown (ชั่วโมง):</label>
-            </div>
-            <div class="col-auto">
-              <input type="number" class="form-control form-control-sm" id="f-cbv3-lock-hours" min="0.5" max="168" step="0.5" value="${bot.cbv3LockHours != null ? bot.cbv3LockHours : 8}" style="width: 100px;" />
-            </div>
-            <div class="col-auto"><span class="text-muted small">(0.5–168 ชม., default 8)</span></div>
-          </div>
-          <small class="text-muted d-block mt-1">
-            · CBv2 pattern (4 red below lowerKC) + ST3 no-trade pattern on <strong>upper-TF</strong> (TREND_TF_MAP: 3m/5m→1h, 15m→4h, 1h→1d) on SAME candle
-            · <strong>Active version:</strong> <span id="cbv-active-version-badge" class="lux-badge lux-badge-warn">${bot.cbVersion || 'v3'}</span> — เปลี่ยนได้ที่ <a href="/settings.html">Master Config ⚙️</a>
-            · mutually exclusive with CBv2 (CB version is global AppConfig setting)
-          </small>
-          ${bot.cbv3Enabled !== false && bot.safeTradeNoTradeEnabled !== true ? `
-          <div class="alert alert-info mt-2 mb-0" role="alert" data-testid="cbv3-decoupled-info">
-            <small>
-              <strong>ℹ️ Decoupled mode:</strong> ST3 (Safe-trade #3) ปิดอยู่ แต่ CBv3 ยังคงใช้ ST3 logic ภายในเพื่อ "เบรกเฉพาะเหวจริง" — ไม่ขึ้นกับ <code>safeTradeNoTradeEnabled</code>
-              <br />
-              · <strong>S1 BUY:</strong> ไม่ถูก block โดย ST3 (กล้าเข้ามากขึ้น)
-              <br />
-              · <strong>CBv3 force-close:</strong> ยังคง require ST3 match → เบรกเฉพาะตอนเหวจริง
-            </small>
-          </div>` : ''}
-          ${bot.cbv3LockedUntil && new Date(bot.cbv3LockedUntil).getTime() > Date.now() ? `
-          <div class="alert alert-warning mt-2 mb-0 bc-cbv3-cooldown-banner">
-            <div class="d-flex align-items-center justify-content-between">
-              <div>
-                ⏸ <strong>CBv3 cooldown active</strong> until ${new Date(bot.cbv3LockedUntil).toLocaleString()}
-                <br />
-                <small class="text-muted">เหตุผล: ${bot.cbv3LockReason || 'cbv3_panic'} · HYBRID mode — บอทยัง enable, S1 BUY ถูกกั้นระหว่าง cooldown</small>
+              <div class="bot-settings-field">
+                <label class="form-label">คู่เทรด (แก้ไขไม่ได้)</label>
+                <input type="text" class="form-control" value="${bot.symbol}" disabled />
               </div>
-              <!-- FIX-2026-08-09: unlock button was only inside CBv2 banner — when cbVersion='v3'
-                   CBv2 section is hidden so user had no way to unlock. POST /unlock-cbv2
-                   clears BOTH cbv2+cbv3 fields (see bot.routes.js:1627-1640), so this
-                   button works regardless of which cooldown is active. -->
-              <button type="button" class="btn btn-sm btn-outline-warning" id="btn-unlock-cbv3" onclick="unlockCBv2Now('${bot._id}')">
-                🔓 ปลด cooldown ตอนนี้
-              </button>
+              <div class="bot-settings-field">
+                <label class="form-label" for="f-timeframe">กรอบเวลา (Timeframe)</label>
+                <select class="form-select" id="f-timeframe">
+                  ${['1m','3m','5m','15m','30m','1h','2h','4h','6h','8h','12h','1d','3d','1w','1M'].map((tf) =>
+                    `<option value="${tf}" ${tf === bot.timeframe ? 'selected' : ''}>${tf}</option>`
+                  ).join('')}
+                </select>
+              </div>
+              <div class="bot-settings-field">
+                <label class="form-label" for="f-capital">ทุนต่อไม้ (USDT)</label>
+                <input type="number" class="form-control" id="f-capital" value="${bot.capitalPerTrade}" step="0.01" min="1" />
+              </div>
+              <div class="bot-settings-field">
+                <label class="form-label" for="f-maxtrades">จำนวนไม้สูงสุด</label>
+                <input type="number" class="form-control" id="f-maxtrades" value="${bot.maxTrades}" step="1" min="1" max="100" />
+              </div>
             </div>
-          </div>` : ''}
-        </div>
-        `}
+          </div>
+        </details>
 
-        <!-- FIX-2026-08-09: Cross-version cooldown banner — shows if EITHER cbv2 or cbv3
-             cooldown is still active, regardless of which cbVersion is selected in UI.
-             Defensive UI for cases like 1000CAT(bAdd) 2026-08-09 incident where
-             cbVersion='v3' but cbv2LockedUntil got wrongly written (watchdog Phase 3
-             fired CBv2 alert without cbVersion gate — now fixed).
-             Without this banner, user has no UI way to clear a "cross-version" cooldown. -->
-        ${(() => {
-          const cbv2Active = bot.cbv2LockedUntil && new Date(bot.cbv2LockedUntil).getTime() > Date.now();
-          const cbv3Active = bot.cbv3LockedUntil && new Date(bot.cbv3LockedUntil).getTime() > Date.now();
-          // Skip if the relevant banner already showed inside the cbVersion-conditional
-          if (bot.cbVersion === 'v2' && cbv2Active) return '';
-          if (bot.cbVersion === 'v3' && cbv3Active) return '';
-          // Otherwise show this cross-version banner
-          if (!cbv2Active && !cbv3Active) return '';
-          const activeUntil = (cbv2Active ? bot.cbv2LockedUntil : bot.cbv3LockedUntil);
-          const version = cbv2Active ? 'v2' : 'v3';
-          const reason = cbv2Active ? (bot.cbv2LockReason || 'cbv2_panic') : (bot.cbv3LockReason || 'cbv3_panic');
-          return `
-          <div class="alert alert-warning mt-2 mb-0 bc-cbv-cross-cooldown-banner">
-            <div class="d-flex align-items-center justify-content-between">
-              <div>
-                ⏸ <strong>CB${version} cooldown active (cross-version)</strong> until ${new Date(activeUntil).toLocaleString()}
-                <br />
-                <small class="text-muted">
-                  Active version คือ <strong>${bot.cbVersion || 'v3'}</strong> แต่ CB${version} cooldown ยังเหลืออยู่
-                  (เกิดจากการยิงข้าม version — fixed 2026-08-09) · เหตุผล: ${reason}
+        <details class="lux-details" id="f-group-entry" data-settings-group="entry">
+          <summary class="lux-details-summary">
+            <span class="bot-settings-group-icon">📥</span>
+            <span class="bot-settings-group-title">เงื่อนไขเข้าและการวาง BUY</span>
+            <span class="bot-settings-group-hint">S1 · XS1 · Retry · KC · Spread</span>
+          </summary>
+          <div class="lux-details-body">
+            <div class="bot-settings-grid">
+              <div class="bot-settings-field">
+                <label class="form-label" for="f-retry">เวลารอก่อนลองซื้อใหม่ (นาที)</label>
+                <input type="number" class="form-control" id="f-retry" value="${bot.retryTimeMin}" step="0.1" min="0.1" max="60" />
+                <small class="text-muted">ทศนิยมได้ เช่น 0.5 = 30 วินาที</small>
+              </div>
+              <div class="bot-settings-field">
+                <label class="form-label" for="f-retry-max">จำนวนครั้งที่ลองใหม่สูงสุด</label>
+                <input type="number" class="form-control" id="f-retry-max" value="${bot.retryMax ?? 1}" step="1" min="0" max="10" />
+                <small class="text-muted">0 = วางครั้งเดียว ไม่ retry</small>
+              </div>
+              <div class="bot-settings-field">
+                <label class="form-label" for="f-kc-mult">ความกว้าง KC (Multiplier)</label>
+                <input type="number" class="form-control" id="f-kc-mult" value="${bot.kcMult ?? 1.5}" step="0.1" min="0.5" max="5" />
+                <small class="text-muted">ค่าน้อย = channel แคบและเกิด S1 บ่อยขึ้น</small>
+              </div>
+              <div class="bot-settings-field">
+                <label class="form-label" for="f-min-spread">ระยะห่างราคา BUY ขั้นต่ำ (ticks)</label>
+                <input type="number" class="form-control" id="f-min-spread" value="${bot.minSpreadTicks ?? 1}" step="1" min="0" max="10" />
+                <small class="text-muted">0 = ไม่กรอง · 1 = ใช้ bid · 2 = ต้องมี margin 1 tick</small>
+              </div>
+              <div class="bot-settings-option is-full">
+                <label class="form-check form-switch">
+                  <input type="checkbox" class="form-check-input" id="f-s1-only-down" ${bot.s1OnlyDown ? 'checked' : ''} />
+                  <span class="form-check-label">📉 <strong>S1 เฉพาะ bg 2→3 (ขาลง)</strong> — ข้าม bg 2→1 เพื่อลดการซื้อราคาสูง</span>
+                </label>
+                <small class="text-muted d-block mt-1">เปิด: รับเฉพาะ bg_prev=2 และ bg=3 · ปิด: รับทั้ง bg=1 และ bg=3</small>
+              </div>
+              <div class="bot-settings-option is-full">
+                <label class="form-check form-switch">
+                  <input type="checkbox" class="form-check-input" id="f-xs1-enabled" ${bot.xs1Enabled !== false ? 'checked' : ''} />
+                  <span class="form-check-label">🚫 <strong>XS1 anti-dump gate</strong> — ข้าม S1 เมื่อพบ candle-wide dump</span>
+                </label>
+                <small class="text-muted d-block mt-1">ช่วยป้องกันการซื้อระหว่างราคากำลังไหลลงเร็ว</small>
+              </div>
+            </div>
+          </div>
+        </details>
+
+        <details class="lux-details" id="f-group-tp" data-settings-group="tp" open>
+          <summary class="lux-details-summary">
+            <span class="bot-settings-group-icon">🎯</span>
+            <span class="bot-settings-group-title">Take Profit และการขาย</span>
+            <span class="bot-settings-group-hint">TP% สุทธิ · Auto-update · Trend ×N</span>
+          </summary>
+          <div class="lux-details-body">
+            <div class="bot-settings-grid">
+              <div class="bot-settings-field">
+                <label class="form-label d-flex justify-content-between align-items-center" for="f-tp">
+                  <span>กำไรเป้าหมายสุทธิ (TP%)</span>
+                  <button type="button" class="btn btn-sm btn-outline-warning" id="f-tp-recommend" title="คำนวณ TP% จาก Min %KC + trend ของ upper-TF">✨ Get</button>
+                </label>
+                <input type="number" class="form-control" id="f-tp" value="${bot.tpPercent}" step="0.01" min="0.001" />
+                <small class="text-muted" id="f-tp-hint">ระบบบวก fee buffer ให้ตอนคำนวณราคาขาย</small>
+              </div>
+              <div class="bot-settings-field">
+                <label class="form-label" for="f-suggest-tp-window">ช่วงข้อมูลแนะนำ TP (แท่ง)</label>
+                <input type="number" class="form-control" id="f-suggest-tp-window" value="${bot.suggestTpWindow ?? 500}" step="10" min="30" max="1000" />
+                <small class="text-muted">จำนวนแท่งที่ใช้หา Min %KC สำหรับปุ่ม Get และ Auto-update</small>
+              </div>
+              <div class="bot-settings-option is-full">
+                <label class="form-check form-switch">
+                  <input type="checkbox" class="form-check-input" id="f-auto-update-tp" ${bot.autoUpdateTp ? 'checked' : ''} />
+                  <span class="form-check-label">⏰ <strong>อัปเดต TP% อัตโนมัติทุกต้นชั่วโมง</strong></span>
+                </label>
+                <small class="text-muted d-block mt-1">
+                  คำนวณใหม่จาก Min %KC และ EMA20 ของ upper-TF ทุก HH:00
+                  ${bot.updateTpAt ? `· ล่าสุด: <strong>${new Date(bot.updateTpAt).toLocaleString('th-TH')}</strong>` : '· ยังไม่เคยอัปเดตอัตโนมัติ'}
                 </small>
               </div>
-              <button type="button" class="btn btn-sm btn-outline-warning" id="btn-unlock-cbv-cross" onclick="unlockCBv2Now('${bot._id}')">
-                🔓 ปลด cooldown ตอนนี้
-              </button>
+              <div class="bot-settings-option is-full">
+                <label class="form-check form-switch mb-0">
+                  <input type="checkbox" class="form-check-input" id="f-tp-trend-enabled" ${bot.tpTrendEnabled !== false ? 'checked' : ''} />
+                  <span class="form-check-label">📈 <strong>ขยาย TP ตามแนวโน้ม (Trend ×N)</strong></span>
+                </label>
+                <div class="bot-settings-dependent">
+                  <label class="form-label" for="f-tp-trend-multiplier">ตัวคูณ TP เมื่อ upper-TF อยู่เหนือ EMA20</label>
+                  <input type="number" class="form-control" id="f-tp-trend-multiplier" value="${bot.tpTrendMultiplier ?? 2}" step="0.1" min="1" max="10" />
+                  <small class="text-muted">1 = ไม่คูณ · 2 = สองเท่า · มีผลเฉพาะ position ใหม่</small>
+                </div>
+              </div>
             </div>
-          </div>`;
-        })()}
+          </div>
+        </details>
 
-        <!-- FIX-2026-08-08: Feature #3 — Auto Unlock Cooldown -->
-        <div class="mb-3">
-          <label class="form-check">
-            <input type="checkbox" class="form-check-input" id="f-cb-auto-unlock-enabled" ${bot.cbAutoUnlockEnabled === true ? 'checked' : ''} />
-            <span class="form-check-label">🔓 <strong>CB Auto-Unlock</strong> — ปลด cooldown อัตโนมัติเมื่อ 3+ profitable signals (Feature #3)</span>
-          </label>
-          <div class="row g-2 mt-1 align-items-center">
-            <div class="col-auto">
-              <label for="f-cb-auto-unlock-threshold" class="col-form-label small">Threshold (%):</label>
+        <details class="lux-details" id="f-group-automation" data-settings-group="automation">
+          <summary class="lux-details-summary">
+            <span class="bot-settings-group-icon">⚙️</span>
+            <span class="bot-settings-group-title">ระบบอัตโนมัติและขนาด Position</span>
+            <span class="bot-settings-group-hint">DPS · Auto-pause</span>
+          </summary>
+          <div class="lux-details-body">
+            <div class="bot-settings-grid">
+              <div class="bot-settings-option">
+                <label class="form-check form-switch">
+                  <input type="checkbox" class="form-check-input" id="f-dynamic-size-enabled" ${bot.dynamicSizeEnabled !== false ? 'checked' : ''} />
+                  <span class="form-check-label">📊 <strong>Dynamic Position Sizing (DPS)</strong></span>
+                </label>
+                <small class="text-muted d-block mt-1">
+                  ปรับทุนและจำนวนไม้ตามประวัติเทรด · ข้ามเมื่อใช้ DCA/Martingale
+                  <br />Current: <code>$${bot.dynamicSizeEffective != null ? bot.dynamicSizeEffective : (bot.dynamicSizeCurrent != null ? bot.dynamicSizeCurrent : bot.capitalPerTrade)} × ${bot.dynamicLayersEffective != null ? bot.dynamicLayersEffective : (bot.dynamicLayersCurrent != null ? bot.dynamicLayersCurrent : bot.maxTrades)} layers</code>
+                </small>
+              </div>
+              <div class="bot-settings-option">
+                <label class="form-check form-switch mb-0">
+                  <input type="checkbox" class="form-check-input" id="f-auto-pause-enabled" ${bot.autoPauseEnabled !== false ? 'checked' : ''} />
+                  <span class="form-check-label">⏸️ <strong>หยุดบอทเมื่อ Min-%KC ต่ำ</strong></span>
+                </label>
+                <div class="bot-settings-dependent">
+                  <label class="form-label" for="f-auto-pause-min-kc">Min-%KC threshold (%)</label>
+                  <input type="number" class="form-control form-control-sm" id="f-auto-pause-min-kc" value="${bot.autoPauseMinKcPct ?? 2}" step="0.1" min="0.1" max="50" />
+                  <small class="text-muted">ต่ำกว่าค่านี้จะ pause และ auto-resume เมื่อ volatility กลับมา</small>
+                </div>
+              </div>
             </div>
-            <div class="col-auto">
-              <input type="number" class="form-control form-control-sm" id="f-cb-auto-unlock-threshold" min="0.5" max="5" step="0.1" value="${bot.cbAutoUnlockThresholdPct != null ? bot.cbAutoUnlockThresholdPct : 1.0}" style="width: 100px;" />
-            </div>
-            <div class="col-auto"><span class="text-muted small">(0.5–5%, default 1%)</span></div>
           </div>
-          <small class="text-muted d-block mt-1">
-            · Scan candles since last CB fire (cbv2LastFiredAt/cbv3LastFiredAt) for S1 signals where (next candle high - signal close) / signal close × 100 &gt; threshold%
-            · <strong>3+ signals → unlock ทันที</strong> (ไม่มี whipsaw guard ตามที่ user ระบุ)
-            · All math is candle-based (hypothetical profit, no real trades)
-            · Signals found: <code>${bot.cbAutoUnlockSignalsFound != null ? bot.cbAutoUnlockSignalsFound : 0}</code>
-          </small>
-        </div>
+        </details>
 
-        <!-- FIX-2026-08-08: Feature #1 — Dynamic Position Sizing -->
-        <div class="mb-3">
-          <label class="form-check">
-            <input type="checkbox" class="form-check-input" id="f-dynamic-size-enabled" ${bot.dynamicSizeEnabled !== false ? 'checked' : ''} />
-            <span class="form-check-label">📊 <strong>Dynamic Position Sizing (DPS)</strong> — ปรับ size/layers อัตโนมัติตาม trade history (Feature #1)</span>
-          </label>
-          <small class="text-muted d-block mt-1">
-            · <strong>Rules</strong>:
-            <ul class="mb-1" style="font-size: 0.85em;">
-              <li>3 consecutive wins → +1 USDT size, +1 layer</li>
-              <li>Last 2 trades &gt;2% profit each → +2 USDT size</li>
-              <li>Last trade loss → -2 USDT (clamp ≥6), -2 layers (clamp ≥1)</li>
-            </ul>
-            · <strong>Bounds</strong>: size 6..15 USDT · layers 1..5
-            · <strong>Default</strong>: เปิด · <strong>Skip</strong>: DCA mode + Martingale mode + cooldown active (5 min)
-            · Current: <code>$${bot.dynamicSizeEffective != null ? bot.dynamicSizeEffective : (bot.dynamicSizeCurrent != null ? bot.dynamicSizeCurrent : bot.capitalPerTrade)} × ${bot.dynamicLayersEffective != null ? bot.dynamicLayersEffective : (bot.dynamicLayersCurrent != null ? bot.dynamicLayersCurrent : bot.maxTrades)} layers</code>${bot.dynamicSizeInCooldown ? ' <span class="text-warning">⏸ cooldown</span>' : ''}
-            ${(bot.dcaEnabled || bot.martingaleEnabled) ? '<br /><span class="text-warning">⚠️ DPS จะ skip เมื่อเปิด DCA หรือ Martingale (mutually exclusive)</span>' : ''}
-          </small>
-        </div>
-        <div class="mb-3">
-          <label class="form-check">
-            <input type="checkbox" class="form-check-input" id="f-safe-trade-enabled" ${bot.safeTradeEnabled !== false ? 'checked' : ''} />
-            <span class="form-check-label">🛡️ <strong>Safe-trade filter</strong> — ก่อนซื้อตรวจ super-upper TF (3m/5m→4h, 15m→1d, 1h→1w)</span>
-          </label>
-          <small class="text-muted d-block mt-1">
-            · PASS = lastClose &gt; open (แท่งเขียว) OR lastClose &gt; ema20 (uptrend)
-            · FAIL-OPEN on Binance error
-          </small>
-        </div>
-        <div class="mb-3">
-          <label class="form-check">
-            <input type="checkbox" class="form-check-input" id="f-safe-trade-trendline-enabled" ${bot.safeTradeTrendlineEnabled === true ? 'checked' : ''} />
-            <span class="form-check-label">📐 <strong>Safe-trade filter #2 (trendline support)</strong> — ก่อนซื้อตรวจ upper-TF (TREND_TF_MAP) ว่าราคา "เ�นือ" เส้น LuxAlgo pivot-low trendline (⚠️ ไม่แนะนำสำหรับ DCA)</span>
-          </label>
-          <small class="text-muted d-block mt-1">
-            · PASS = lastClose &gt; trendline value → BUY
-            · FAIL-OPEN on Binance error / warmup
-            · <strong>default OFF</strong> (opt-in)
-          </small>
-        </div>
-        <div class="mb-3">
-          <label class="form-check">
-            <input type="checkbox" class="form-check-input" id="f-safe-trade-no-trade-enabled" ${bot.safeTradeNoTradeEnabled === true ? 'checked' : ''} />
-            <span class="form-check-label">🚫 <strong>Safe-trade filter #3 (no-trade engulfing / shooting star)</strong> — ก่อนซื้อตรวจ upper-TF (TREND_TF_MAP) ว่าแท่งล่าสุดมี "nt"/"nt1" pattern (⚠️ ไม่แนะนำสำหรับ DCA)</span>
-          </label>
-          <small class="text-muted d-block mt-1">
-            · Pine Script port: Bearish Engulfing (1-bar/2-bar) + Shooting Star ใน upper KC zone
-            · Keltner: kcLen=20, kcMult = <strong>bot.kcMult</strong> (FIX: ใช้ค่าบอทนี้ ให้ consistent กับ S1)
-            · State machine: เมื่อ trigger → ครอบคลุม 2 แท่งแดงถัดไป
-            · <strong>Real-time</strong>: ตรวจแม้แท่งยังไม่ close (Binance REST คืน close=live price)
-            · PASS = no nt/nt1 → BUY
-            · FAIL-OPEN on Binance error / insufficient data
-            · <strong>default OFF</strong> (opt-in)
-          </small>
-        </div>
-        <div class="mb-3">
-          <label class="form-check">
-            <input type="checkbox" class="form-check-input" id="f-auto-pause-enabled" ${bot.autoPauseEnabled !== false ? 'checked' : ''} />
-            <span class="form-check-label">⏸️ <strong>Auto-pause on low Min-%KC</strong> — หยุดบอทอัตโนมัติเมื่อ Min-%KC ต่ำกว่า threshold</span>
-          </label>
-        </div>
-        <div class="mb-3">
-          <label for="f-auto-pause-min-kc" class="form-label">📉 Auto-pause Min-%KC threshold (%)</label>
-          <input type="number" class="form-control form-control-sm" id="f-auto-pause-min-kc" value="${bot.autoPauseMinKcPct ?? 2}" step="0.1" min="0.1" max="50" />
-          <small class="text-muted d-block mt-1">ค่า default: 2% — ถ้า Min-%KC ต่ำกว่านี้จะ pause บอท (auto-resume เมื่อกลับมา)</small>
-        </div>
-        <div class="mb-3">
-          <label class="form-check">
-            <input type="checkbox" class="form-check-input" id="f-auto-arm-stop-loss-ukc" ${bot.autoArmStopLossOnUKC !== false ? 'checked' : ''} />
-            <span class="form-check-label">🛡️ <strong>Auto-arm SL-on-UKC สำหรับ position ที่ขาดทุนค้างนาน</strong> (ตั้ง loss % + age ได้ด้านล่าง)</span>
-          </label>
-          <small class="text-muted d-block mt-1">
-            ตรวจทุก <code>kline:closed</code>: ถ้า position ในบอทนี้อยู่ใน state <code>selling</code> และ <strong>ขาดทุน &gt; loss%</strong> + <strong>เปิดมา &gt; age ชม.</strong>
-            → ระบบจะ set <code>trade.useStopLossOnUKC = true</code> ให้อัตโนมัติ (per-trade flag) → จากนั้น <em>stop-loss on upper-KC</em> จะ trigger ทันทีที่ candle ปิดเหนือ upper-KC
-            · <strong>เปิด (default)</strong>: auto-arm flag เพื่อป้องกัน position ค้างยาวขาดทุนต่อ — <em>ทำงานแม้ global SL-UKC toggle ปิดอยู่</em> (F1 = per-position safety net)
-            · <strong>ปิด</strong>: ไม่ arm flag — SL-on-UKC จะไม่ trigger
-          </small>
-        </div>
-        <div class="row mb-3">
-          <div class="col-md-6">
-            <label class="form-label">🛡️ <strong>Auto-arm loss threshold (%)</strong></label>
-            <input type="number" class="form-control" id="f-auto-arm-loss-pct"
-                   value="${bot.autoArmLossPct ?? 10}" step="0.5" min="1" max="90" />
-            <small class="text-muted">% ขาดทุนของ position ที่จะ trigger auto-arm (range 1-90, default 10)</small>
+        <details class="lux-details" id="f-group-risk" data-settings-group="risk" ${hasActiveCbCooldown ? 'open' : ''}>
+          <summary class="lux-details-summary">
+            <span class="bot-settings-group-icon">🛑</span>
+            <span class="bot-settings-group-title">Stop Loss และ Circuit Breaker</span>
+            <span class="bot-settings-group-hint">SL-UKC · Auto-arm · CB · Cooldown</span>
+          </summary>
+          <div class="lux-details-body">
+            <div class="bot-settings-grid">
+              <div class="bot-settings-option is-full">
+                <label class="form-check form-switch">
+                  <input type="checkbox" class="form-check-input" id="f-stop-loss-upper-kc" ${bot.stopLossOnUpperKC ? 'checked' : ''} />
+                  <span class="form-check-label">🛑 <strong>Stop Loss เมื่อแท่งปิดเหนือ Upper-KC</strong></span>
+                </label>
+                <small class="text-muted d-block mt-1">เมื่อ position ขาดทุนและแท่งปิดเหนือ Upper-KC ระบบจะยกเลิก SELL เดิมแล้ว MARKET SELL</small>
+              </div>
+              <div class="bot-settings-option is-full">
+                <label class="form-check form-switch mb-0">
+                  <input type="checkbox" class="form-check-input" id="f-auto-arm-stop-loss-ukc" ${bot.autoArmStopLossOnUKC !== false ? 'checked' : ''} />
+                  <span class="form-check-label">🛡️ <strong>เปิดใช้ SL-UKC อัตโนมัติเมื่อขาดทุนนาน</strong></span>
+                </label>
+                <div class="bot-settings-dependent bot-settings-grid">
+                  <div>
+                    <label class="form-label" for="f-auto-arm-loss-pct">ขาดทุนขั้นต่ำ (%)</label>
+                    <input type="number" class="form-control" id="f-auto-arm-loss-pct" value="${bot.autoArmLossPct ?? 10}" step="0.5" min="1" max="90" />
+                  </div>
+                  <div>
+                    <label class="form-label" for="f-auto-arm-age-hours">อายุ Position ขั้นต่ำ (ชม.)</label>
+                    <input type="number" class="form-control" id="f-auto-arm-age-hours" value="${bot.autoArmAgeHours ?? 4}" step="0.5" min="0.5" max="168" />
+                  </div>
+                </div>
+                <small class="text-muted d-block mt-2">เมื่อครบทั้ง loss% และอายุ ระบบจะ arm safety flag ให้ position นั้น</small>
+              </div>
+              <div class="bot-settings-option is-full">
+                <label class="form-check form-switch">
+                  <input type="checkbox" class="form-check-input" id="f-sl-ukc-trigger-on-profit" ${bot.slUkcTriggerOnProfit ? 'checked' : ''} />
+                  <span class="form-check-label">💰 <strong>ให้ SL-UKC ปิด Position ที่กำไรด้วย</strong></span>
+                </label>
+                <small class="text-muted d-block mt-1">เปิด = exit at upper band ทั้งกำไรและขาดทุน · DCA ใช้ BEP loss-only เสมอ</small>
+              </div>
+              <div class="bot-settings-option is-full">
+                <label class="form-check form-switch">
+                  <input type="checkbox" class="form-check-input" id="f-cb-enabled" ${bot.cbEnabled !== false ? 'checked' : ''} />
+                  <span class="form-check-label">🚨 <strong>Circuit Breaker (CB)</strong> — Panic-sell เมื่อกราฟดิ่ง 3 แท่งติด</span>
+                </label>
+                <small class="text-muted d-block mt-1">DCA mode จะปิด CB อัตโนมัติ เพื่อคงนโยบาย no-cut-loss ของ stack</small>
+              </div>
+
+              ${bot.cbVersion === 'v2' ? `
+              <div class="bot-settings-option is-full">
+                <label class="form-check form-switch mb-0">
+                  <input type="checkbox" class="form-check-input" id="f-cbv2-enabled" ${bot.cbv2Enabled !== false ? 'checked' : ''} />
+                  <span class="form-check-label">💎 <strong>CBv2</strong> — Panic-sell 4 แท่ง + ล็อก S1 BUY</span>
+                </label>
+                <div class="bot-settings-dependent">
+                  <label for="f-cbv2-lock-hours" class="form-label">ระยะเวลา Cooldown (ชั่วโมง)</label>
+                  <input type="number" class="form-control form-control-sm" id="f-cbv2-lock-hours" min="0.5" max="168" step="0.5" value="${bot.cbv2LockHours != null ? bot.cbv2LockHours : 8}" />
+                  <small class="text-muted">0.5–168 ชม. · บอทยัง enable และ Auto-pause/resume ยังทำงานแยก</small>
+                </div>
+                ${bot.cbv2LockedUntil && new Date(bot.cbv2LockedUntil).getTime() > Date.now() ? `
+                <div class="alert alert-warning mt-2 mb-0 bc-cbv2-cooldown-banner" id="bc-cbv2-cooldown-banner">
+                  <div class="d-flex align-items-center justify-content-between flex-wrap gap-2">
+                    <div>
+                      ⏸ <strong>CBv2 cooldown active</strong> until ${new Date(bot.cbv2LockedUntil).toLocaleString()}
+                      <span class="text-muted ms-2" data-cbv2-countdown="${new Date(bot.cbv2LockedUntil).toISOString()}"></span>
+                      <br /><small class="text-muted">เหตุผล: ${bot.cbv2LockReason || 'cbv2_panic'}</small>
+                    </div>
+                    <button type="button" class="btn btn-sm btn-outline-warning" id="btn-unlock-cbv2" onclick="unlockCBv2Now('${bot._id}')">🔓 ปลด Cooldown ตอนนี้</button>
+                  </div>
+                </div>` : ''}
+              </div>
+              ` : `
+              <div class="bot-settings-option is-full">
+                <label class="form-check form-switch mb-0">
+                  <input type="checkbox" class="form-check-input" id="f-cbv3-enabled" ${bot.cbv3Enabled !== false ? 'checked' : ''} />
+                  <span class="form-check-label">💎 <strong>CBv3</strong> — CBv2 + ST3 บน Upper-TF</span>
+                </label>
+                <div class="bot-settings-dependent">
+                  <label for="f-cbv3-lock-hours" class="form-label">ระยะเวลา Cooldown (ชั่วโมง)</label>
+                  <input type="number" class="form-control form-control-sm" id="f-cbv3-lock-hours" min="0.5" max="168" step="0.5" value="${bot.cbv3LockHours != null ? bot.cbv3LockHours : 8}" />
+                  <small class="text-muted">0.5–168 ชม. · Active version: <span id="cbv-active-version-badge" class="lux-badge lux-badge-warn">${bot.cbVersion || 'v3'}</span></small>
+                </div>
+                ${bot.cbv3Enabled !== false && bot.safeTradeNoTradeEnabled !== true ? `
+                <div class="alert alert-info mt-2 mb-0" role="alert" data-testid="cbv3-decoupled-info">
+                  <small><strong>ℹ️ Decoupled mode:</strong> Safe Trade #3 ปิดอยู่ แต่ CBv3 ยังใช้ ST3 ภายในเพื่อเบรกเฉพาะเหวจริง</small>
+                </div>` : ''}
+                ${bot.cbv3LockedUntil && new Date(bot.cbv3LockedUntil).getTime() > Date.now() ? `
+                <div class="alert alert-warning mt-2 mb-0 bc-cbv3-cooldown-banner">
+                  <div class="d-flex align-items-center justify-content-between flex-wrap gap-2">
+                    <div>
+                      ⏸ <strong>CBv3 cooldown active</strong> until ${new Date(bot.cbv3LockedUntil).toLocaleString()}
+                      <br /><small class="text-muted">เหตุผล: ${bot.cbv3LockReason || 'cbv3_panic'}</small>
+                    </div>
+                    <button type="button" class="btn btn-sm btn-outline-warning" id="btn-unlock-cbv3" onclick="unlockCBv2Now('${bot._id}')">🔓 ปลด Cooldown ตอนนี้</button>
+                  </div>
+                </div>` : ''}
+              </div>
+              `}
+
+              ${(() => {
+                const cbv2Active = bot.cbv2LockedUntil && new Date(bot.cbv2LockedUntil).getTime() > Date.now();
+                const cbv3Active = bot.cbv3LockedUntil && new Date(bot.cbv3LockedUntil).getTime() > Date.now();
+                if (bot.cbVersion === 'v2' && cbv2Active) return '';
+                if (bot.cbVersion === 'v3' && cbv3Active) return '';
+                if (!cbv2Active && !cbv3Active) return '';
+                const activeUntil = cbv2Active ? bot.cbv2LockedUntil : bot.cbv3LockedUntil;
+                const version = cbv2Active ? 'v2' : 'v3';
+                const reason = cbv2Active ? (bot.cbv2LockReason || 'cbv2_panic') : (bot.cbv3LockReason || 'cbv3_panic');
+                return `
+                <div class="alert alert-warning mb-0 bc-cbv-cross-cooldown-banner is-full">
+                  <div class="d-flex align-items-center justify-content-between flex-wrap gap-2">
+                    <div>
+                      ⏸ <strong>CB${version} cooldown active (cross-version)</strong> until ${new Date(activeUntil).toLocaleString()}
+                      <br /><small class="text-muted">Active version คือ ${bot.cbVersion || 'v3'} · เหตุผล: ${reason}</small>
+                    </div>
+                    <button type="button" class="btn btn-sm btn-outline-warning" id="btn-unlock-cbv-cross" onclick="unlockCBv2Now('${bot._id}')">🔓 ปลด Cooldown ตอนนี้</button>
+                  </div>
+                </div>`;
+              })()}
+
+              <div class="bot-settings-option is-full">
+                <label class="form-check form-switch mb-0">
+                  <input type="checkbox" class="form-check-input" id="f-cb-auto-unlock-enabled" ${bot.cbAutoUnlockEnabled === true ? 'checked' : ''} />
+                  <span class="form-check-label">🔓 <strong>ปลด CB Cooldown อัตโนมัติ</strong></span>
+                </label>
+                <div class="bot-settings-dependent">
+                  <label for="f-cb-auto-unlock-threshold" class="form-label">กำไรขั้นต่ำของสัญญาณ (%)</label>
+                  <input type="number" class="form-control form-control-sm" id="f-cb-auto-unlock-threshold" min="0.5" max="5" step="0.1" value="${bot.cbAutoUnlockThresholdPct != null ? bot.cbAutoUnlockThresholdPct : 1.0}" />
+                  <small class="text-muted">ปลดเมื่อพบ profitable signals อย่างน้อย 3 ครั้ง · พบแล้ว: ${bot.cbAutoUnlockSignalsFound != null ? bot.cbAutoUnlockSignalsFound : 0}</small>
+                </div>
+              </div>
+            </div>
           </div>
-          <div class="col-md-6">
-            <label class="form-label">⏰ <strong>Auto-arm age threshold (ชม.)</strong></label>
-            <input type="number" class="form-control" id="f-auto-arm-age-hours"
-                   value="${bot.autoArmAgeHours ?? 4}" step="0.5" min="0.5" max="168" />
-            <small class="text-muted">อายุ position ขั้นต่ำ (range 0.5-168 ชม., default 4 — 168 = 1 สัปดาห์)</small>
+        </details>
+
+        <details class="lux-details" id="f-group-safe-trade" data-settings-group="safe-trade">
+          <summary class="lux-details-summary">
+            <span class="bot-settings-group-icon">🛡️</span>
+            <span class="bot-settings-group-title">ตัวกรอง Safe Trade ก่อนซื้อ</span>
+            <span class="bot-settings-group-hint">แนวโน้มใหญ่ · Trendline · Bearish pattern</span>
+          </summary>
+          <div class="lux-details-body">
+            <div class="bot-settings-grid">
+              <div class="bot-settings-option is-full">
+                <label class="form-check form-switch">
+                  <input type="checkbox" class="form-check-input" id="f-safe-trade-enabled" ${bot.safeTradeEnabled !== false ? 'checked' : ''} />
+                  <span class="form-check-label">🛡️ <strong>Safe Trade #1 — แนวโน้ม Super Upper-TF</strong></span>
+                </label>
+                <small class="text-muted d-block mt-1">ผ่านเมื่อแท่งล่าสุดเป็นเขียวหรือราคาปิดเหนือ EMA20 · FAIL-OPEN เมื่อ Binance error</small>
+              </div>
+              <div class="bot-settings-option is-full">
+                <label class="form-check form-switch">
+                  <input type="checkbox" class="form-check-input" id="f-safe-trade-trendline-enabled" ${bot.safeTradeTrendlineEnabled === true ? 'checked' : ''} />
+                  <span class="form-check-label">📐 <strong>Safe Trade #2 — Trendline Support</strong></span>
+                </label>
+                <small class="text-muted d-block mt-1">ข้าม BUY เมื่อราคาต่ำกว่าเส้น LuxAlgo pivot-low บน upper-TF · ไม่แนะนำสำหรับ DCA</small>
+              </div>
+              <div class="bot-settings-option is-full">
+                <label class="form-check form-switch">
+                  <input type="checkbox" class="form-check-input" id="f-safe-trade-no-trade-enabled" ${bot.safeTradeNoTradeEnabled === true ? 'checked' : ''} />
+                  <span class="form-check-label">🚫 <strong>Safe Trade #3 — Bearish Engulfing / Shooting Star</strong></span>
+                </label>
+                <small class="text-muted d-block mt-1">ข้าม BUY เมื่อ upper-TF มี no-trade pattern แบบ real-time · ไม่แนะนำสำหรับ DCA · FAIL-OPEN เมื่อข้อมูลไม่พอ</small>
+              </div>
+            </div>
           </div>
-        </div>
-        <div class="mb-3">
-          <label class="form-check">
-            <input type="checkbox" class="form-check-input" id="f-sl-ukc-trigger-on-profit" ${bot.slUkcTriggerOnProfit ? 'checked' : ''} />
-            <span class="form-check-label">💰 <strong>ให้ SL-UKC trigger ตอนกำไรด้วย</strong> (default: ปิด — trigger เฉพาะตอนขาดทุน)</span>
-          </label>
-          <small class="text-muted d-block mt-1">
-            เปิด: candle ปิดเหนือ upper-KC → force-close ทันที (ทั้งกำไรและขาดทุน) — เหมาะกับ strategy "exit at upper band"
-            · ปิด (default): trigger เฉพาะตอน position ขาดทุน — ให้ TP ทำงานปกติตอนกำไร
-            · DCA mode ใช้ BEP loss-only เสมอ (toggle นี้มีผลเฉพาะ non-DCA)
-          </small>
-        </div>
-        <div class="mb-3">
-          <label class="form-check">
-            <input type="checkbox" class="form-check-input" id="f-auto-update-tp" ${bot.autoUpdateTp ? 'checked' : ''} />
-            <span class="form-check-label">⏰ <strong>อัพเดท TP% อัตโนมัติทุกต้นชั่วโมง</strong></span>
-          </label>
-          <small class="text-muted d-block mt-1">
-            ระบบจะ recompute TP% จาก Min %KC(window) + EMA20 trend(upper-TF) แล้ว persist ทุก <code>HH:00:00</code> (top-of-hour)
-            ${bot.updateTpAt ? `· อัพเดทล่าสุด: <strong>${new Date(bot.updateTpAt).toLocaleString('th-TH')}</strong>` : '· ยังไม่เคยอัพเดทอัตโนมัติ'}
-          </small>
-        </div>
-        <div class="row mb-3">
-          <div class="col-md-6">
-            <label class="form-label">📏 <strong>TP suggestion window (bars)</strong></label>
-            <input type="number" class="form-control" id="f-suggest-tp-window" value="${bot.suggestTpWindow ?? 500}" step="10" min="30" max="1000" />
-            <small class="text-muted">
-              bars ที่ใช้คำนวณ Min %KC สำหรับ TP% — ใช้กับปุ่ม "Get recommend TP%" + auto-update
-              · ค่าน้อย (e.g. 100) = sensitive ต่อ squeeze ล่าสุด
-              · ค่ามาก (e.g. 800) = conservative จับ squeeze ที่ลึก
-              · default 500
-            </small>
-          </div>
-          <div class="col-md-6">
-            <label class="form-label">📈 <strong>TP trend multiplier ×N</strong> <span title="เมื่อ upper-TF (e.g. 1h for 3m bot) close > EMA20 → ใช้ tpPercent × multiplier ตอนเปิด position ใหม่">ⓘ</span></label>
-            <label class="form-check form-switch mb-2">
-              <input type="checkbox" class="form-check-input" id="f-tp-trend-enabled" ${bot.tpTrendEnabled !== false ? 'checked' : ''} />
-              <span class="form-check-label"><strong>เปิดใช้ TP trend ×N</strong> (default: เปิด)</span>
-            </label>
-            <input type="number" class="form-control" id="f-tp-trend-multiplier" value="${bot.tpTrendMultiplier ?? 2}" step="0.1" min="1" max="10" />
-            <small class="text-muted">
-              เมื่อ upper-TF trend above EMA20 → TP% จะคูณตัวนี้ (e.g. 0.2% × 2 = 0.4%)
-              · <strong>1</strong> = ไม่คูณ (no multiplier — ใช้ค่านี้เมื่อปิด toggle หรืออยากคงที่)
-              · <strong>2</strong> = double (default: 0.2% → 0.4%)
-              · <strong>3-10</strong> = aggressive
-              · apply เฉพาะ position ใหม่ — ไม่กระทบ in-flight SELL
-              · cache 60s + warmup/lower → ไม่คูณ
-              · <strong>ปิด toggle</strong> ด้านบน = ใช้ tpPercent ตรงๆ ไม่สนใจ trend + ไม่ call Binance API
-            </small>
-          </div>
-        </div>
+        </details>
       </section>
 
       <!-- TAB PANEL 2: DCA + BEP Stack (hidden by default) -->
@@ -707,10 +640,14 @@ function render() {
       </div>
 
       <!-- FOOTER — outside any panel, always visible -->
-      <div class="alert alert-info" id="f-total"></div>
-      <div class="text-danger small mb-3" id="f-error"></div>
-      <button type="submit" class="btn btn-primary">💾 บันทึก</button>
-      <a href="/bots.html" class="btn btn-secondary ms-2">กลับ</a>
+      <div class="bot-settings-actions mt-3">
+        <div class="bot-settings-status">
+          <div class="alert alert-info mb-1" id="f-total"></div>
+          <div class="text-danger small" id="f-error"></div>
+        </div>
+        <button type="submit" class="btn btn-primary">💾 บันทึก</button>
+        <a href="/bots.html" class="btn btn-secondary">กลับ</a>
+      </div>
     </form>
     </div>
   `;
@@ -729,7 +666,12 @@ function render() {
     btn.addEventListener('click', () => switchTab(btn.dataset.tab));
   });
 
-  document.getElementById('edit-form').onsubmit = save;
+  const editForm = document.getElementById('edit-form');
+  editForm.onsubmit = save;
+  editForm.addEventListener('invalid', (event) => {
+    const group = event.target.closest('details.lux-details');
+    if (group) group.open = true;
+  }, true);
   ['f-capital', 'f-maxtrades'].forEach((id) => {
     document.getElementById(id).addEventListener('input', () => {
       updateTotal();
@@ -780,6 +722,8 @@ function render() {
   if (_tpEditLink) {
     _tpEditLink.addEventListener('click', () => {
       switchTab('classic');
+      const tpGroup = document.getElementById('f-group-tp');
+      if (tpGroup) tpGroup.open = true;
       const tpInput = document.getElementById('f-tp');
       if (tpInput) {
         tpInput.focus();

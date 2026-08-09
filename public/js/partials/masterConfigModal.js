@@ -16,47 +16,51 @@
   //   - เลือก "—" (empty value) = ไม่เปลี่ยน TF
   //   - เลือกค่าอื่น → overwrite TF (backend จะ restart trader ให้อัตโนมัติ)
   const TIMEFRAMES = ['1m', '3m', '5m', '15m', '30m', '1h', '2h', '4h', '6h', '8h', '12h', '1d', '3d', '1w', '1M'];
+  const MASTER_SECTIONS = [
+    { id: 'basic', icon: '🪪', title: 'ข้อมูลบอทและเงินทุน', hint: 'Timeframe · ทุน · จำนวนไม้', open: true },
+    { id: 'entry', icon: '📥', title: 'เงื่อนไขเข้าและการวาง BUY', hint: 'S1 · XS1 · Retry · KC · Spread' },
+    { id: 'tp', icon: '🎯', title: 'Take Profit และการขาย', hint: 'TP% สุทธิ · Auto-update · Trend ×N', open: true },
+    { id: 'automation', icon: '⚙️', title: 'ระบบอัตโนมัติและขนาด Position', hint: 'DPS · Auto-pause' },
+    { id: 'risk', icon: '🛑', title: 'Stop Loss และ Circuit Breaker', hint: 'SL-UKC · Auto-arm · CB · Cooldown' },
+    { id: 'safe-trade', icon: '🛡️', title: 'ตัวกรอง Safe Trade ก่อนซื้อ', hint: 'แนวโน้มใหญ่ · Trendline · Bearish pattern' },
+  ];
+
   const FIELDS = [
-    { id: 'mc-capitalPerTrade',  key: 'capitalPerTrade',   type: 'number', step: '0.01', min: '0.00000001', label: '💵 ทุนต่อไม้ (USDT)' },
-    { id: 'mc-maxTrades',        key: 'maxTrades',         type: 'number', step: '1', min: '1', max: '1000', label: '🔢 จำนวนไม้สูงสุด' },
-    { id: 'mc-tpPercent',        key: 'tpPercent',         type: 'number', step: '0.05', min: '0.001', label: '🎯 TP%' },
-    { id: 'mc-retryTimeMin',     key: 'retryTimeMin',      type: 'number', step: '0.1', min: '0.1', max: '60', label: '⏱️ Retry min (นาที)' },
-    { id: 'mc-retryMax',         key: 'retryMax',          type: 'number', step: '1', min: '0', max: '10', label: '🔁 Retry max ครั้ง' },
-    { id: 'mc-kcMult',           key: 'kcMult',            type: 'number', step: '0.1', min: '0.5', max: '5', label: '📏 KC multiplier' },
-    { id: 'mc-minSpreadTicks',   key: 'minSpreadTicks',    type: 'number', step: '1', min: '0', max: '10', label: '📐 Min spread (ticks)' },
-    { id: 'mc-suggestTpWindow',  key: 'suggestTpWindow',   type: 'number', step: '10', min: '30', max: '1000', label: '🪟 Suggest TP window (bars)' },
-    { id: 'mc-tpTrendMultiplier', key: 'tpTrendMultiplier', type: 'number', step: '1', min: '1', max: '10', label: '✖️ TP trend multiplier' },
-    { id: 'mc-autoPauseMinKcPct', key: 'autoPauseMinKcPct', type: 'number', step: '0.1', min: '0.1', max: '50', label: '⏸️ Auto-pause Min-%KC threshold' },
-    { id: 'mc-autoArmLossPct',   key: 'autoArmLossPct',   type: 'number', step: '0.5', min: '1', max: '90', label: '🛡️ Auto-arm loss threshold (%)' },
-    { id: 'mc-autoArmAgeHours',  key: 'autoArmAgeHours',  type: 'number', step: '0.5', min: '0.5', max: '168', label: '⏰ Auto-arm age threshold (ชม.)' },
-    // FIX-2026-08-08: CB cooldown hours — use 'cbLockHours' key (master config picks v2 or v3 based on AppConfig.cbVersion)
-    //   - both fields rendered, but only active version's value applied
-    { id: 'mc-cbv2LockHours',   key: 'cbv2LockHours',   type: 'number', step: '0.5', min: '0.5', max: '168', label: '⏱ CBv2 cooldown hours (default 8)' },
-    { id: 'mc-cbv3LockHours',   key: 'cbv3LockHours',   type: 'number', step: '0.5', min: '0.5', max: '168', label: '⏱ CBv3 cooldown hours (default 8)' },
-    // FIX-2026-08-08: CB Auto-Unlock bulk threshold
-    { id: 'mc-cbAutoUnlockThreshold', key: 'cbAutoUnlockThresholdPct', type: 'number', step: '0.1', min: '0.5', max: '5', label: '🔓 CB Auto-Unlock threshold % (default 1)' },
-    { id: 'mc-timeframe',        key: 'timeframe',         type: 'select', options: TIMEFRAMES, label: '⏰ Timeframe (TF) · เปลี่ยนแล้ว restart trader' },
+    { id: 'mc-capitalPerTrade', key: 'capitalPerTrade', section: 'basic', order: 10, type: 'number', step: '0.01', min: '0.00000001', label: '💵 ทุนต่อไม้ (USDT)' },
+    { id: 'mc-maxTrades', key: 'maxTrades', section: 'basic', order: 20, type: 'number', step: '1', min: '1', max: '1000', label: '🔢 จำนวนไม้สูงสุด' },
+    { id: 'mc-timeframe', key: 'timeframe', section: 'basic', order: 30, type: 'select', options: TIMEFRAMES, label: '⏰ กรอบเวลา (Timeframe) · เปลี่ยนแล้ว restart trader' },
+    { id: 'mc-retryTimeMin', key: 'retryTimeMin', section: 'entry', order: 10, type: 'number', step: '0.1', min: '0.1', max: '60', label: '⏱️ เวลารอก่อนลองซื้อใหม่ (นาที)' },
+    { id: 'mc-retryMax', key: 'retryMax', section: 'entry', order: 20, type: 'number', step: '1', min: '0', max: '10', label: '🔁 จำนวนครั้งที่ลองใหม่สูงสุด' },
+    { id: 'mc-kcMult', key: 'kcMult', section: 'entry', order: 30, type: 'number', step: '0.1', min: '0.5', max: '5', label: '📏 ความกว้าง KC (Multiplier)' },
+    { id: 'mc-minSpreadTicks', key: 'minSpreadTicks', section: 'entry', order: 40, type: 'number', step: '1', min: '0', max: '10', label: '📐 ระยะห่างราคา BUY ขั้นต่ำ (ticks)' },
+    { id: 'mc-tpPercent', key: 'tpPercent', section: 'tp', order: 10, type: 'number', step: '0.05', min: '0.001', label: '🎯 กำไรเป้าหมายสุทธิ (TP%)' },
+    { id: 'mc-suggestTpWindow', key: 'suggestTpWindow', section: 'tp', order: 20, type: 'number', step: '10', min: '30', max: '1000', label: '🪟 ช่วงข้อมูลแนะนำ TP (แท่ง)' },
+    { id: 'mc-tpTrendMultiplier', key: 'tpTrendMultiplier', section: 'tp', order: 50, type: 'number', step: '1', min: '1', max: '10', label: '✖️ ตัวคูณ TP ตามแนวโน้ม' },
+    { id: 'mc-autoPauseMinKcPct', key: 'autoPauseMinKcPct', section: 'automation', order: 30, type: 'number', step: '0.1', min: '0.1', max: '50', label: '⏸️ Min-%KC threshold (%)' },
+    { id: 'mc-autoArmLossPct', key: 'autoArmLossPct', section: 'risk', order: 30, type: 'number', step: '0.5', min: '1', max: '90', label: '🛡️ ขาดทุนขั้นต่ำสำหรับ Auto-arm (%)' },
+    { id: 'mc-autoArmAgeHours', key: 'autoArmAgeHours', section: 'risk', order: 40, type: 'number', step: '0.5', min: '0.5', max: '168', label: '⏰ อายุ Position ขั้นต่ำสำหรับ Auto-arm (ชม.)' },
+    { id: 'mc-cbv2LockHours', key: 'cbv2LockHours', section: 'risk', order: 80, type: 'number', step: '0.5', min: '0.5', max: '168', label: '⏱ ระยะเวลา CBv2 Cooldown (ชม.)' },
+    { id: 'mc-cbv3LockHours', key: 'cbv3LockHours', section: 'risk', order: 80, type: 'number', step: '0.5', min: '0.5', max: '168', label: '⏱ ระยะเวลา CBv3 Cooldown (ชม.)' },
+    { id: 'mc-cbAutoUnlockThreshold', key: 'cbAutoUnlockThresholdPct', section: 'risk', order: 100, type: 'number', step: '0.1', min: '0.5', max: '5', label: '🔓 กำไรขั้นต่ำสำหรับ Auto-Unlock (%)' },
   ];
 
   const TOGGLES = [
-    { id: 'mc-s1OnlyDown',          key: 's1OnlyDown',          label: 'S1 only down (bg 2→3)' },
-    { id: 'mc-xs1Enabled',          key: 'xs1Enabled',          label: '🛡️ XS1 anti-dump gate' },
-    { id: 'mc-cbEnabled',           key: 'cbEnabled',           label: '🚨 Circuit-breaker panic-sell' },
-    // FIX-2026-08-08: CBv2/CBv3 toggle — only show active version (master config follows AppConfig.cbVersion)
-    //   - the inactive toggle is hidden in renderForm
-    { id: 'mc-cbv2Enabled',         key: 'cbv2Enabled',         label: '💎 CBv2 sustained panic-sell + cooldown' },
-    { id: 'mc-cbv3Enabled',         key: 'cbv3Enabled',         label: '💎 CBv3 sustained panic-sell (CBv2 + ST3) + cooldown' },
-    { id: 'mc-cbAutoUnlockEnabled', key: 'cbAutoUnlockEnabled', label: '🔓 CB Auto-Unlock (3+ profitable signals)' },
-    { id: 'mc-safeTradeEnabled',    key: 'safeTradeEnabled',    label: '🛡️ Safe-trade filter' },
-    { id: 'mc-safeTradeTrendlineEnabled', key: 'safeTradeTrendlineEnabled', label: '📐 Safe-trade trendline support (⚠️ ไม่แนะนำสำหรับ DCA)' },
-    { id: 'mc-safeTradeNoTradeEnabled', key: 'safeTradeNoTradeEnabled', label: '🚫 Safe-trade no-trade engulfing/SS filter (⚠️ ไม่แนะนำสำหรับ DCA)' },
-    { id: 'mc-stopLossOnUpperKC',   key: 'stopLossOnUpperKC',   label: '🛑 Stop-loss on upper KC' },
-    { id: 'mc-autoUpdateTp',        key: 'autoUpdateTp',        label: '⏰ Auto-update TP ทุกต้นชั่วโมง' },
-    { id: 'mc-autoArmStopLossOnUKC', key: 'autoArmStopLossOnUKC', label: '🛡️ Auto-arm SL-on-UKC' },
-    { id: 'mc-slUkcTriggerOnProfit', key: 'slUkcTriggerOnProfit', label: '💰 SL-UKC trigger on profit' },
-    { id: 'mc-tpTrendEnabled',      key: 'tpTrendEnabled',      label: '✖️ TP trend ×N enabled' },
-    { id: 'mc-autoPauseEnabled',    key: 'autoPauseEnabled',    label: '⏸️ Auto-pause on low Min-%KC' },
-    { id: 'mc-dynamicSizeEnabled',  key: 'dynamicSizeEnabled',  label: '📊 Dynamic Position Sizing (DPS)' },
+    { id: 'mc-s1OnlyDown', key: 's1OnlyDown', section: 'entry', order: 50, label: '📉 S1 เฉพาะ bg 2→3 (ขาลง)' },
+    { id: 'mc-xs1Enabled', key: 'xs1Enabled', section: 'entry', order: 60, label: '🚫 XS1 anti-dump gate' },
+    { id: 'mc-autoUpdateTp', key: 'autoUpdateTp', section: 'tp', order: 30, label: '⏰ อัปเดต TP% ทุกต้นชั่วโมง' },
+    { id: 'mc-tpTrendEnabled', key: 'tpTrendEnabled', section: 'tp', order: 40, label: '📈 ขยาย TP ตามแนวโน้ม (Trend ×N)' },
+    { id: 'mc-dynamicSizeEnabled', key: 'dynamicSizeEnabled', section: 'automation', order: 10, label: '📊 Dynamic Position Sizing (DPS)' },
+    { id: 'mc-autoPauseEnabled', key: 'autoPauseEnabled', section: 'automation', order: 20, label: '⏸️ หยุดบอทเมื่อ Min-%KC ต่ำ' },
+    { id: 'mc-stopLossOnUpperKC', key: 'stopLossOnUpperKC', section: 'risk', order: 10, label: '🛑 Stop Loss เมื่อแท่งปิดเหนือ Upper-KC' },
+    { id: 'mc-autoArmStopLossOnUKC', key: 'autoArmStopLossOnUKC', section: 'risk', order: 20, label: '🛡️ เปิดใช้ SL-UKC อัตโนมัติเมื่อขาดทุนนาน' },
+    { id: 'mc-slUkcTriggerOnProfit', key: 'slUkcTriggerOnProfit', section: 'risk', order: 50, label: '💰 ให้ SL-UKC ปิด Position ที่กำไรด้วย' },
+    { id: 'mc-cbEnabled', key: 'cbEnabled', section: 'risk', order: 60, label: '🚨 Circuit Breaker (CB)' },
+    { id: 'mc-cbv2Enabled', key: 'cbv2Enabled', section: 'risk', order: 70, label: '💎 CBv2 — Panic-sell + Cooldown' },
+    { id: 'mc-cbv3Enabled', key: 'cbv3Enabled', section: 'risk', order: 70, label: '💎 CBv3 — CBv2 + ST3 Upper-TF' },
+    { id: 'mc-cbAutoUnlockEnabled', key: 'cbAutoUnlockEnabled', section: 'risk', order: 90, label: '🔓 ปลด CB Cooldown อัตโนมัติ' },
+    { id: 'mc-safeTradeEnabled', key: 'safeTradeEnabled', section: 'safe-trade', order: 10, label: '🛡️ Safe Trade #1 — แนวโน้ม Super Upper-TF' },
+    { id: 'mc-safeTradeTrendlineEnabled', key: 'safeTradeTrendlineEnabled', section: 'safe-trade', order: 20, label: '📐 Safe Trade #2 — Trendline Support (ไม่แนะนำสำหรับ DCA)' },
+    { id: 'mc-safeTradeNoTradeEnabled', key: 'safeTradeNoTradeEnabled', section: 'safe-trade', order: 30, label: '🚫 Safe Trade #3 — Bearish Engulfing / Shooting Star (ไม่แนะนำสำหรับ DCA)' },
   ];
 
   function ensureSkeleton() {
@@ -112,13 +116,12 @@
   function renderForm(container, cfg) {
     cfg = cfg || {};
     const activeCbVersion = cfg.cbVersion || 'v3';
-    // FIX-2026-08-08: helper — returns true if field/toggle should be visible based on cbVersion
     const isCbVisible = (key) => {
       if (key === 'cbv2Enabled' || key === 'cbv2LockHours') return activeCbVersion === 'v2';
       if (key === 'cbv3Enabled' || key === 'cbv3LockHours') return activeCbVersion === 'v3';
       return true;
     };
-    // Bot checklist
+
     const botListHtml = cachedBots.map((b) => {
       const checked = b.enabled !== false ? 'checked' : '';
       const status = b.enabled !== false ? '🟢' : '⏸';
@@ -129,168 +132,204 @@
         </label>`;
     }).join('');
 
-    // FIX-2026-08-02: render type='select' แตกต่างจาก type='number' เพราะ options ต้อง list ตาม Binance intervals
-    // FIX-2026-08-08: filter out fields hidden by cbVersion (cbv2LockHours/cbv3LockHours)
-    const fieldHtml = FIELDS.filter(isCbVisible).map((f) => {
-      if (f.type === 'select') {
-        const optionsHtml = (f.options || []).map((opt) =>
+    const firstSelectedId = (cachedBots.find((b) => b.enabled !== false) || cachedBots[0] || {})._id;
+    const currentBot = cachedBots.find((b) => String(b._id) === String(firstSelectedId)) || {};
+
+    const renderField = (field) => {
+      if (field.type === 'select') {
+        const optionsHtml = (field.options || []).map((opt) =>
           `<option value="${escapeHtml(opt)}">${escapeHtml(opt)}</option>`
         ).join('');
         return `
-        <div class="col-md-6 mb-2">
-          <label class="form-label">${f.label}</label>
-          <select class="form-select form-select-sm mc-field mc-field-select" id="${f.id}" data-key="${f.key}">
-            <option value="" selected>(ไม่เปลี่ยน)</option>
-            ${optionsHtml}
-          </select>
-        </div>`;
+          <div class="bot-settings-field">
+            <label class="form-label" for="${field.id}">${field.label}</label>
+            <select class="form-select form-select-sm mc-field mc-field-select" id="${field.id}" data-key="${field.key}">
+              <option value="" selected>(ไม่เปลี่ยน)</option>
+              ${optionsHtml}
+            </select>
+          </div>`;
       }
       return `
-      <div class="col-md-6 mb-2">
-        <label class="form-label">${f.label}</label>
-        <input type="${f.type}" class="form-control form-control-sm mc-field" id="${f.id}" data-key="${f.key}" step="${f.step || ''}" min="${f.min || ''}" max="${f.max || ''}" placeholder="(ไม่เปลี่ยน)" />
-      </div>`;
-    }).join('');
+        <div class="bot-settings-field">
+          <label class="form-label" for="${field.id}">${field.label}</label>
+          <input type="${field.type}" class="form-control form-control-sm mc-field" id="${field.id}" data-key="${field.key}" step="${field.step || ''}" min="${field.min || ''}" max="${field.max || ''}" placeholder="(ไม่เปลี่ยน)" />
+        </div>`;
+    };
 
-    // FIX-2026-08-02: tri-state radios แทน checkbox — รองรับ ON / OFF / leave
-    //   - default = leave as-is (radio "" ไม่ส่ง key)
-    //   - "true" / "false" ส่งค่าจริง ทำให้เปิดสามารถ "ปิด" toggle เดิมที่เปิดอยู่ได้
-    //   - แสดง current value ของบอทแรกที่เลือก (hint) เพื่อให้ user รู้สถานะปัจจุบัน
-    // FIX-2026-08-08: filter toggles hidden by cbVersion (cbv2Enabled/cbv3Enabled)
-    const firstSelectedId = (cachedBots.find((b) => b.enabled !== false) || cachedBots[0] || {})._id;
-    const toggleHtml = TOGGLES.filter(isCbVisible).map((t) => {
-      const cur = (cachedBots.find((b) => String(b._id) === String(firstSelectedId)) || {})[t.key];
-      const curLabel = cur === true ? 'เปิด' : cur === false ? 'ปิด' : 'default';
+    const renderToggle = (toggle) => {
+      const current = currentBot[toggle.key];
+      const currentLabel = current === true ? 'เปิด' : current === false ? 'ปิด' : 'default';
       return `
-      <div class="col-md-6 mb-2 d-flex align-items-center gap-2">
-        <span class="flex-grow-1" style="font-size:0.85rem;">${t.label} <small class="text-muted-3">· ตอนนี้: <strong>${curLabel}</strong></small></span>
-        <label class="form-check-inline mb-0" title="ไม่เปลี่ยน">
-          <input type="radio" name="mc-tog-${t.id}" value="" class="form-check-input mc-toggle-mode" data-key="${t.key}" checked />
-          <span>—</span>
-        </label>
-        <label class="form-check-inline mb-0" title="เปิด">
-          <input type="radio" name="mc-tog-${t.id}" value="true" class="form-check-input mc-toggle-mode" data-key="${t.key}" />
-          <span style="color:#4ade80;">✅</span>
-        </label>
-        <label class="form-check-inline mb-0" title="ปิด">
-          <input type="radio" name="mc-tog-${t.id}" value="false" class="form-check-input mc-toggle-mode" data-key="${t.key}" />
-          <span style="color:#ff6b6b;">❌</span>
-        </label>
-      </div>`;
+        <div class="bot-settings-option">
+          <div class="bot-settings-master-row">
+            <div style="font-size:0.85rem;">
+              <strong>${toggle.label}</strong>
+              <small class="text-muted-3 d-block mt-1">ค่าปัจจุบันของบอทอ้างอิง: <strong>${currentLabel}</strong></small>
+            </div>
+            <div class="bot-settings-tristate" role="group" aria-label="${toggle.label}">
+              <label title="ไม่เปลี่ยน">
+                <input type="radio" name="mc-tog-${toggle.id}" value="" class="form-check-input mc-toggle-mode" data-key="${toggle.key}" checked />
+                <span>—</span>
+              </label>
+              <label title="เปิด">
+                <input type="radio" name="mc-tog-${toggle.id}" value="true" class="form-check-input mc-toggle-mode" data-key="${toggle.key}" />
+                <span style="color:#4ade80;">✅</span>
+              </label>
+              <label title="ปิด">
+                <input type="radio" name="mc-tog-${toggle.id}" value="false" class="form-check-input mc-toggle-mode" data-key="${toggle.key}" />
+                <span style="color:#ff6b6b;">❌</span>
+              </label>
+            </div>
+          </div>
+        </div>`;
+    };
+
+    const sectionsHtml = MASTER_SECTIONS.map((section) => {
+      const controls = [
+        ...FIELDS.filter((field) => field.section === section.id && isCbVisible(field.key)).map((field) => ({ ...field, kind: 'field' })),
+        ...TOGGLES.filter((toggle) => toggle.section === section.id && isCbVisible(toggle.key)).map((toggle) => ({ ...toggle, kind: 'toggle' })),
+      ].sort((a, b) => a.order - b.order);
+      const controlsHtml = controls.map((control) =>
+        control.kind === 'field' ? renderField(control) : renderToggle(control)
+      ).join('');
+      return `
+        <details class="lux-details" id="mc-group-${section.id}" data-settings-group="${section.id}" ${section.open ? 'open' : ''}>
+          <summary class="lux-details-summary">
+            <span class="bot-settings-group-icon">${section.icon}</span>
+            <span class="bot-settings-group-title">${section.title}</span>
+            <span class="bot-settings-group-hint">${section.hint}</span>
+          </summary>
+          <div class="lux-details-body">
+            <div class="bot-settings-grid">${controlsHtml}</div>
+          </div>
+        </details>`;
     }).join('');
 
     container.innerHTML = `
-      <div class="alert alert-warning" style="font-size:0.85rem;">
-        ⚠️ <strong>Clobber mode</strong>: ทุก field ที่ติ๊ก/กรอกจะ overwrite ค่าเดิมของบอทที่เลือก (fields ที่ไม่แตะจะไม่เปลี่ยน)
-        <br/>⏰ <strong>Timeframe</strong>: ถ้าเปลี่ยน TF ของบอทที่เปิดอยู่ ระบบจะ <u>restart trader</u> อัตโนมัติ (kline subscription + cache ต้อง rebuild) — กระทบไม้ที่ถืออยู่ชั่วครู่
-      </div>
-
-      <!-- FIX-2026-08-08: Master Config — System Toggles (DPS, CB Auto-Unlock, Auto Delete Bot, CB Version) -->
-      <div class="mb-3 p-3" style="background:rgba(99,102,241,0.06); border:1px solid rgba(99,102,241,0.25); border-radius:10px;">
-        <h6 class="text-muted-3 mb-2">🛠️ System Toggles (master switches · มีผลกับบอททั้งหมด)</h6>
-        <div class="row g-2">
-          <div class="col-md-3">
-            <label class="form-check form-switch d-flex align-items-center gap-2 mb-2" style="cursor:pointer;">
-              <input type="checkbox" class="form-check-input" id="mc-master-dps" ${cfg.masterDynamicSizeEnabled !== false ? 'checked' : ''} />
-              <span>📊 <strong>DPS Master</strong> <small class="text-muted-3 d-block">เปิด DPS ทั้งระบบ (default ON)</small></span>
-            </label>
-          </div>
-          <div class="col-md-3">
-            <label class="form-check form-switch d-flex align-items-center gap-2 mb-2" style="cursor:pointer;">
-              <input type="checkbox" class="form-check-input" id="mc-master-cb-au" ${cfg.masterCbAutoUnlockEnabled === true ? 'checked' : ''} />
-              <span>🔓 <strong>CB Auto-Unlock</strong> <small class="text-muted-3 d-block">master toggle (default OFF)</small></span>
-            </label>
-          </div>
-          <div class="col-md-3">
-            <label class="form-check form-switch d-flex align-items-center gap-2 mb-2" style="cursor:pointer;">
-              <input type="checkbox" class="form-check-input" id="mc-master-auto-delete" ${cfg.autoDeleteBotEnabled === true ? 'checked' : ''} />
-              <span>🗑️ <strong>Auto Delete Bot</strong> <small class="text-muted-3 d-block">master toggle (default OFF)</small></span>
-            </label>
-          </div>
-          <div class="col-md-3">
-            <label class="form-label small mb-1">💎 <strong>CB Version</strong> <small class="text-muted-3">(mutually exclusive)</small></label>
-            <select class="form-select form-select-sm" id="mc-cb-version">
-              <option value="v2" ${cfg.cbVersion === 'v2' ? 'selected' : ''}>v2 — CBv2 only (4 red candles below lowerKC)</option>
-              <option value="v3" ${(cfg.cbVersion || 'v3') === 'v3' ? 'selected' : ''}>v3 — CBv2 + ST3 upper-TF (recommended)</option>
-            </select>
-          </div>
+      <div class="bot-settings-form">
+        <div class="alert alert-warning mb-0" style="font-size:0.85rem;">
+          ⚠️ <strong>Bulk overwrite:</strong> ระบบเปลี่ยนเฉพาะช่องที่กรอกและ Toggle ที่เลือก ✅/❌ เท่านั้น
+          <br />ช่องว่างหรือ <strong>— ไม่เปลี่ยน</strong> จะคงค่าเดิม · การเปลี่ยน Timeframe จะ restart trader ของบอทที่เปิดอยู่ชั่วครู่
         </div>
-        <div class="row g-2 mt-1">
-          <div class="col-md-4">
-            <label class="form-label small">🗑️ Auto-delete threshold (วัน)</label>
-            <input type="number" class="form-control form-control-sm" id="mc-auto-delete-days" value="${cfg.autoDeleteBotDays ?? 30}" min="7" max="365" step="1" />
+
+        <details class="lux-details" id="mc-group-system" data-settings-group="system" open>
+          <summary class="lux-details-summary">
+            <span class="bot-settings-group-icon">🛠️</span>
+            <span class="bot-settings-group-title">ตั้งค่าระบบ</span>
+            <span class="bot-settings-group-hint">Master switches · CB Version · Auto Delete</span>
+          </summary>
+          <div class="lux-details-body">
+            <div class="bot-settings-note mb-3">ค่ากลุ่มนี้เป็นระดับระบบและมีผลแยกจากค่ารายบอทด้านล่าง กด “บันทึกค่าระบบ” เพื่อยืนยันเฉพาะกลุ่มนี้</div>
+            <div class="row g-3">
+              <div class="col-md-4">
+                <div class="bot-settings-option h-100">
+                  <label class="form-check form-switch d-flex align-items-start gap-2 mb-0" style="cursor:pointer;">
+                    <input type="checkbox" class="form-check-input" id="mc-master-dps" ${cfg.masterDynamicSizeEnabled !== false ? 'checked' : ''} />
+                    <span>📊 <strong>DPS Master</strong><small class="text-muted-3 d-block">เปิด DPS ทั้งระบบ</small></span>
+                  </label>
+                </div>
+              </div>
+              <div class="col-md-4">
+                <div class="bot-settings-option h-100">
+                  <label class="form-check form-switch d-flex align-items-start gap-2 mb-0" style="cursor:pointer;">
+                    <input type="checkbox" class="form-check-input" id="mc-master-cb-au" ${cfg.masterCbAutoUnlockEnabled === true ? 'checked' : ''} />
+                    <span>🔓 <strong>CB Auto-Unlock Master</strong><small class="text-muted-3 d-block">อนุญาต Auto-Unlock ทั้งระบบ</small></span>
+                  </label>
+                </div>
+              </div>
+              <div class="col-md-4">
+                <div class="bot-settings-option h-100">
+                  <label class="form-check form-switch d-flex align-items-start gap-2 mb-0" style="cursor:pointer;">
+                    <input type="checkbox" class="form-check-input" id="mc-master-auto-delete" ${cfg.autoDeleteBotEnabled === true ? 'checked' : ''} />
+                    <span>🗑️ <strong>Auto Delete Bot</strong><small class="text-muted-3 d-block">ลบบอทตามอายุที่กำหนด</small></span>
+                  </label>
+                </div>
+              </div>
+              <div class="col-md-6">
+                <div class="bot-settings-field h-100">
+                  <label class="form-label" for="mc-cb-version">💎 CB Version ที่ใช้ทั้งระบบ</label>
+                  <select class="form-select form-select-sm" id="mc-cb-version">
+                    <option value="v2" ${cfg.cbVersion === 'v2' ? 'selected' : ''}>v2 — 4 red candles below Lower-KC</option>
+                    <option value="v3" ${(cfg.cbVersion || 'v3') === 'v3' ? 'selected' : ''}>v3 — CBv2 + ST3 Upper-TF (แนะนำ)</option>
+                  </select>
+                </div>
+              </div>
+              <div class="col-md-3">
+                <div class="bot-settings-field h-100">
+                  <label class="form-label" for="mc-auto-delete-days">เกณฑ์ Auto-delete (วัน)</label>
+                  <input type="number" class="form-control form-control-sm" id="mc-auto-delete-days" value="${cfg.autoDeleteBotDays ?? 30}" min="7" max="365" step="1" />
+                </div>
+              </div>
+              <div class="col-md-3">
+                <div class="bot-settings-field h-100">
+                  <label class="form-label" for="mc-auto-delete-warndays">แจ้งเตือนล่วงหน้า (วัน)</label>
+                  <input type="number" class="form-control form-control-sm" id="mc-auto-delete-warndays" value="${cfg.autoDeleteBotWarningDays ?? 3}" min="1" max="30" step="1" />
+                </div>
+              </div>
+            </div>
+            <div class="bot-settings-actions mt-3">
+              <button type="button" class="btn btn-sm btn-outline-warning" id="mc-save-master">💾 บันทึกค่าระบบ</button>
+              <button type="button" class="btn btn-sm btn-outline-info" id="mc-run-auto-delete">▶ Run Auto Delete 1 รอบ</button>
+              <span id="mc-master-status" class="bot-settings-status small text-muted"></span>
+            </div>
+            <div class="small text-muted-3 mt-2">
+              Last run: <span id="mc-auto-delete-last-run">${cfg.autoDeleteBotLastRunAt ? new Date(cfg.autoDeleteBotLastRunAt).toLocaleString() : '—'}</span>
+              ${cfg.autoDeleteBotLastStats ? ` · ${escapeHtml(JSON.stringify(cfg.autoDeleteBotLastStats))}` : ''}
+            </div>
           </div>
-          <div class="col-md-4">
-            <label class="form-label small">⏰ แจ้งเตือนล่วงหน้า (วัน)</label>
-            <input type="number" class="form-control form-control-sm" id="mc-auto-delete-warndays" value="${cfg.autoDeleteBotWarningDays ?? 3}" min="1" max="30" step="1" />
+        </details>
+
+        <details class="lux-details" id="mc-group-targets" data-settings-group="targets" open>
+          <summary class="lux-details-summary">
+            <span class="bot-settings-group-icon">📋</span>
+            <span class="bot-settings-group-title">เลือกบอทและควบคุม Start/Stop</span>
+            <span class="bot-settings-group-hint">${cachedBots.length} บอท · เลือก enabled เป็นค่าเริ่มต้น</span>
+          </summary>
+          <div class="lux-details-body">
+            <div class="d-flex gap-2 flex-wrap mb-2">
+              <button type="button" class="btn btn-sm btn-outline-gold" id="mc-select-all">เลือกทั้งหมด</button>
+              <button type="button" class="btn btn-sm btn-outline-gold" id="mc-select-none">ไม่เลือกเลย</button>
+              <button type="button" class="btn btn-sm btn-outline-gold" id="mc-select-enabled">เฉพาะที่ Enabled</button>
+            </div>
+            <div class="mb-3 p-2" style="background:rgba(255,255,255,0.03); border:1px solid rgba(255,255,255,0.06); border-radius:8px; max-height:190px; overflow-y:auto;">
+              ${botListHtml}
+            </div>
+            <div class="bot-settings-actions">
+              <button type="button" class="btn btn-sm btn-outline-success" id="mc-toggle-start" title="เริ่ม scan ตลาดและเปิด order ตาม signal">▶️ Start ที่เลือก</button>
+              <button type="button" class="btn btn-sm btn-outline-warning" id="mc-toggle-stop" title="หยุดเปิดไม้ใหม่; position ที่ถืออยู่ยังทำงานต่อ">⏸ Stop ที่เลือก</button>
+              <span class="bot-settings-status text-muted small" id="mc-toggle-status"></span>
+            </div>
           </div>
-          <div class="col-md-4 d-flex align-items-end gap-2">
-            <button type="button" class="btn btn-sm btn-outline-warning" id="mc-save-master" title="บันทึก master toggles + auto-delete + CB version">💾 บันทึก</button>
-            <button type="button" class="btn btn-sm btn-outline-info" id="mc-run-auto-delete" title="Force run 1 cycle ของ autoDeleteBot ทันที">▶ Force run</button>
-            <span id="mc-master-status" class="small text-muted ms-2"></span>
-          </div>
+        </details>
+
+        ${sectionsHtml}
+
+        <div class="bot-settings-actions">
+          <button type="button" class="btn btn-primary" id="mc-submit">💾 ใช้ค่ากับบอทที่เลือก</button>
+          <button type="button" class="btn btn-secondary" id="mc-cancel">ยกเลิก</button>
+          <span class="bot-settings-status text-muted small" id="mc-status"></span>
         </div>
-        <div class="mt-2 small text-muted-3">
-          Last run: <span id="mc-auto-delete-last-run">${cfg.autoDeleteBotLastRunAt ? new Date(cfg.autoDeleteBotLastRunAt).toLocaleString() : '—'}</span>
-          ${cfg.autoDeleteBotLastStats ? ` · ${escapeHtml(JSON.stringify(cfg.autoDeleteBotLastStats))}` : ''}
-        </div>
-      </div>
-
-      <h6 class="text-muted-3 mb-2">📋 เลือกบอท (${cachedBots.length} ตัว · default: เฉพาะบอทที่ enabled)</h6>
-      <div class="mb-2 d-flex gap-2">
-        <button type="button" class="btn btn-sm btn-outline-gold" id="mc-select-all">เลือกทั้งหมด</button>
-        <button type="button" class="btn btn-sm btn-outline-gold" id="mc-select-none">ไม่เลือกเลย</button>
-        <button type="button" class="btn btn-sm btn-outline-gold" id="mc-select-enabled">เฉพาะที่ enabled</button>
-      </div>
-      <div class="mb-3 p-2" style="background:rgba(255,255,255,0.03); border:1px solid rgba(255,255,255,0.06); border-radius:8px; max-height:160px; overflow-y:auto;">
-        ${botListHtml}
-      </div>
-
-      <!-- FIX-2026-08-02: Master Config bulk enable/disable (lifecycle) — แยกจาก config update -->
-      <div class="mb-2 d-flex gap-2 flex-wrap">
-        <button type="button" class="btn btn-sm btn-outline-success" id="mc-toggle-start" title="บอทจะเริ่ม scan ตลาดและเปิด order ตาม signal">▶️ Start selected</button>
-        <button type="button" class="btn btn-sm btn-outline-warning" id="mc-toggle-stop" title="บอทจะหยุดเปิดไม้ใหม่ — trades ที่ถืออยู่ยังทำงานตามเดิม">⏸ Stop selected</button>
-        <span class="ms-2 text-muted small" id="mc-toggle-status"></span>
-      </div>
-
-      <hr />
-      <h6 class="text-muted-3 mb-2">🔢 ตัวเลข (กรอกเฉพาะ field ที่ต้องการเปลี่ยน)</h6>
-      <div class="row g-2 mb-3">${fieldHtml}</div>
-
-      <hr />
-      <h6 class="text-muted-3 mb-2">🔘 Toggle (— ไม่เปลี่ยน / ✅ เปิด / ❌ ปิด)</h6>
-      <div class="row g-2 mb-3">${toggleHtml}</div>
-
-      <div class="mt-3 d-flex align-items-center gap-2">
-        <button type="button" class="btn btn-primary" id="mc-submit">💾 Set to N bots</button>
-        <button type="button" class="btn btn-secondary" id="mc-cancel">ยกเลิก</button>
-        <span class="ms-2 text-muted small" id="mc-status"></span>
       </div>
     `;
 
-    // Bind select-all / select-none / select-enabled
     document.getElementById('mc-select-all').onclick = () => {
-      container.querySelectorAll('.mc-bot-check').forEach((c) => { c.checked = true; });
+      container.querySelectorAll('.mc-bot-check').forEach((checkbox) => { checkbox.checked = true; });
     };
     document.getElementById('mc-select-none').onclick = () => {
-      container.querySelectorAll('.mc-bot-check').forEach((c) => { c.checked = false; });
+      container.querySelectorAll('.mc-bot-check').forEach((checkbox) => { checkbox.checked = false; });
     };
     document.getElementById('mc-select-enabled').onclick = () => {
-      container.querySelectorAll('.mc-bot-check').forEach((c, i) => {
-        c.checked = (cachedBots[i] && cachedBots[i].enabled !== false);
+      container.querySelectorAll('.mc-bot-check').forEach((checkbox, index) => {
+        checkbox.checked = cachedBots[index] && cachedBots[index].enabled !== false;
       });
     };
     document.getElementById('mc-cancel').onclick = close;
-    // FIX-2026-08-02: Master Config bulk Start/Stop — แยก handler จาก config-submit
-    //   - callBotWithPassword จะ prompt password ผ่าน themed modal อัตโนมัติ (กรณี server ตอบ 403/503)
-    //   - on success: reload bot list + ปิด modal
     document.getElementById('mc-toggle-start').onclick = () => bulkToggle('enable', '▶️ Start');
     document.getElementById('mc-toggle-stop').onclick = () => bulkToggle('disable', '⏸ Stop');
-    // FIX-2026-08-08: master toggle bindings
     const saveMaster = document.getElementById('mc-save-master');
     if (saveMaster) saveMaster.onclick = saveMasterToggles;
-    const runAutoDel = document.getElementById('mc-run-auto-delete');
-    if (runAutoDel) runAutoDel.onclick = forceRunAutoDelete;
+    const runAutoDelete = document.getElementById('mc-run-auto-delete');
+    if (runAutoDelete) runAutoDelete.onclick = forceRunAutoDelete;
   }
 
   // FIX-2026-08-08: save master toggles (DPS / CB Auto-Unlock / Auto Delete Bot / CB Version)
