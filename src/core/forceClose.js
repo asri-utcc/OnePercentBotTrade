@@ -37,6 +37,10 @@ const eventBus = require('../services/eventBus');
 const Bot = require('../db/models/Bot');
 const Trade = require('../db/models/Trade');
 const botManager = require('./botManager');
+// FIX-2026-08-09: DPS loss-path coverage — every force-close MARKET branch must
+//   invoke dpsAfterClose so Rule 3 (loss-streak) actually fires. Synthetic close
+//   branch has no real PnL → skip DPS entirely.
+const dpsAfterClose = require('./dpsAfterClose');
 
 // Mirror OPEN_TRADE_STATES from bot-detail.js — duplicated to avoid circular require on trader.js
 // FIX-2026-07-23b: เพิ่ม 'stopping' เพื่อให้ manual force-close ทำงานได้ระหว่าง stop-loss atomic-claim window
@@ -400,6 +404,22 @@ async function forceCloseTrade({ trade, bot = null, allowMarketSell = true, sour
             $set: { status: 'idle' },
           }
         );
+        // FIX-2026-08-09: DPS loss-path coverage — real MARKET fill (Binance order filled).
+        //   - cbv3_panic / cbv2_panic / sl_ukc_f1_armed / manual_api_market / dca_stack_force_close
+        //     all funnel through here and previously bypassed DPS entirely
+        //   - source tag for logs: 'forceClose:market' lets ops see which close path fired
+        //   - DPS evaluates isWin=pnl.net>0 → Rule 3 (loss-streak) shrinks size on loss
+        try {
+          await dpsAfterClose.evaluateDpsAfterClose({
+            bot,
+            pnl: pnl.net,
+            pnlPct: pnl.pnlPercent,
+            source: `forceClose:market:${finalSellReason}`,
+          });
+        } catch (dpsErr) {
+          // dpsAfterClose already wraps in try/catch — this is defense-in-depth
+          logger.warn({ ...logCtx, err: dpsErr.message }, 'forceClose: dpsAfterClose failed (non-fatal)');
+        }
       }
       eventBus.emit('trade:update', {
         tradeId: trade._id,
@@ -495,6 +515,11 @@ async function forceCloseTrade_synthetic({ trade, logCtx, reason, source = 'api'
         $set: { status: 'idle' },
       }
     );
+    // FIX-2026-08-09: DPS — SKIP for synthetic close.
+    //   - synthetic close = no real Binance fill (asset missing / cleanup mode / etc.)
+    //   - pnl.net = 0 → tagging as loss would artificially shrink DPS size on what is
+    //     effectively an admin cleanup or stuck-position recovery, not a real loss
+    //   - DPS history is only meaningful for actual market fills
   }
   eventBus.emit('trade:update', {
     tradeId: trade._id,

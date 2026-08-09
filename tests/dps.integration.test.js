@@ -54,12 +54,12 @@ describe('DPS integration — handleSellFilled triggers DPS', () => {
     }, recent);
 
     const enteredIdx = messages.findIndex(m => m.includes('handleSellFilled entered'));
-    const preEvalIdx = messages.findIndex(m => m.includes('DPS — pre-eval reach'));
-    const enteringIdx = messages.findIndex(m => m.includes('DPS — entering eval block'));
+    const afterCloseIdx = messages.findIndex(m => m.includes('dpsAfterClose: size/layers updated'));
+    const skippedIdx = messages.findIndex(m => m.includes('dpsAfterClose: skipped') || m.includes('DPS — skipped'));
     console.log('DEBUG messages count:', messages.length);
     console.log('  handleSellFilled entered at index:', enteredIdx);
-    console.log('  DPS — pre-eval reach at index:', preEvalIdx);
-    console.log('  DPS — entering eval block at index:', enteringIdx);
-    console.log('  All DPS-related messages:', messages.filter(m => m.includes('DPS') || m.includes('handleSellFilled') || m.includes('round complete') || m.includes('SELL FILLED')));
+    console.log('  dpsAfterClose: size/layers updated at index:', afterCloseIdx);
+    console.log('  dpsAfterClose: skipped at index:', skippedIdx);
+    console.log('  All DPS-related messages:', messages.filter(m => m.includes('DPS') || m.includes('dpsAfterClose') || m.includes('handleSellFilled') || m.includes('round complete') || m.includes('SELL FILLED')));
   }, 30000);
 });

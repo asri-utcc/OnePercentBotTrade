@@ -2922,28 +2922,36 @@ class Trader {
       // FIX-2026-08-08: Feature #2 — CBv3 cooldown gate (mirror CBv2 schema)
       //   - mutually exclusive: cbVersion='v2' → CBv2 gate fires, 'v3' → CBv3 gate fires
       //   - both gates share the same unlock endpoint (POST /api/bots/:id/unlock-cbv2)
-      const cbv2CooldownMs = (Math.max(0.5, Math.min(168, Number(this.bot.cbv2LockHours) || 8))) * 3600 * 1000;
-      if (this._cbv2FiredAt > 0 && (Date.now() - this._cbv2FiredAt) < cbv2CooldownMs) {
-        const remainingMs = cbv2CooldownMs - (Date.now() - this._cbv2FiredAt);
+      const { evaluateCbCooldown } = require('./cbCooldownGate');
+      const cbv2Gate = evaluateCbCooldown(this, this.bot, 'v2', Date.now());
+      if (cbv2Gate.active) {
         logger.warn({
           botId: this.bot._id.toString(),
           signalId: signalDoc._id.toString(),
-          sinceCbv2Ms: Date.now() - this._cbv2FiredAt,
-          cooldownMs: cbv2CooldownMs,
-          remainingMs,
+          sinceCbv2Ms: this._cbv2FiredAt > 0 ? Date.now() - this._cbv2FiredAt : null,
+          cooldownMs: (Math.max(0.5, Math.min(168, Number(this.bot.cbv2LockHours) || 8))) * 3600 * 1000,
+          remainingMs: cbv2Gate.remainingMs,
+          cbv2LockedUntil: this.bot.cbv2LockedUntil,
+          source: cbv2Gate.source,
         }, 'trader: skip BUY — CBv2 cooldown active (hybrid mode)');
         await Signal.updateOne({ _id: signalDoc._id }, { outcome: 'skipped', note: 'cbv2_cooldown' });
         return;
       }
-      const cbv3CooldownMs = (Math.max(0.5, Math.min(168, Number(this.bot.cbv3LockHours) || 8))) * 3600 * 1000;
-      if (this._cbv3FiredAt > 0 && (Date.now() - this._cbv3FiredAt) < cbv3CooldownMs) {
-        const remainingMs = cbv3CooldownMs - (Date.now() - this._cbv3FiredAt);
+      // FIX-2026-08-09: ACEUSDT cooldown-bypass incident — CBv3 fired externally (positionWatchdog
+      //   Phase 4) writes DB `cbv3LastFiredAt` + `cbv3LockedUntil` but never sets `this._cbv3FiredAt`
+      //   in memory. Pre-fix gate only consulted in-memory flag → trader opened 5 BUYs in 2.5h.
+      //   Fix: ALSO consult DB `bot.cbv3LockedUntil` (authoritative across restart + external writers)
+      //   via cbCooldownGate.evaluateCbCooldown().
+      const cbv3Gate = evaluateCbCooldown(this, this.bot, 'v3', Date.now());
+      if (cbv3Gate.active) {
         logger.warn({
           botId: this.bot._id.toString(),
           signalId: signalDoc._id.toString(),
-          sinceCbv3Ms: Date.now() - this._cbv3FiredAt,
-          cooldownMs: cbv3CooldownMs,
-          remainingMs,
+          sinceCbv3Ms: this._cbv3FiredAt > 0 ? Date.now() - this._cbv3FiredAt : null,
+          cooldownMs: (Math.max(0.5, Math.min(168, Number(this.bot.cbv3LockHours) || 8))) * 3600 * 1000,
+          remainingMs: cbv3Gate.remainingMs,
+          cbv3LockedUntil: this.bot.cbv3LockedUntil,
+          source: cbv3Gate.source,
         }, 'trader: skip BUY — CBv3 cooldown active (hybrid mode)');
         await Signal.updateOne({ _id: signalDoc._id }, { outcome: 'skipped', note: 'cbv3_cooldown' });
         return;
@@ -3390,9 +3398,17 @@ class Trader {
       }
 
       // 8. วาง LIMIT_MAKER BUY (post-only) — ถ้า price จะ match ทันที = reject ทันที
-      //    FIX-2026-07-24 (v2): ถ้า -2010 post-only rejected → retry 1 ครั้ง ด้วย ask - tickSize
+      //    FIX-2026-07-24 (v2): ถ้า -2010 post-only rejected → retry ด้วย ask - tickSize
       //      - bookTicker อาจ stale 200-500ms (ask ขยับลง) → ใช้ fresh ask จากอีก call ก่อน retry
-      //      - ถ้า retry ก็ -2010 อีก → fail ตามเดิม (ไม่ infinite loop)
+      //    FIX-2026-08-09 (rev2): เพิ่มเป็น retry สูงสุด 2 ครั้ง (3 attempts รวม) พร้อม backoff
+      //      - backoff: [50ms, 200ms] + jitter ±20% — รอให้ ask settle ก่อนลองใหม่
+      //      - ถ้า retry ครบ 2 ครั้งแล้วยัง -2010 → fail ตามเดิม (ไม่ infinite loop)
+      //      - rationale: log 30 วัน → recovery rate attempt 2 = 44%, attempt 3 expected +5-10%
+      //        แต่ latency รวม ~250-400ms ยังอยู่ในกรอบที่ spread ไม่วิ่งหนี
+      const MAX_BUY_RETRIES = 2;
+      const RETRY_BACKOFFS_MS = [50, 200]; // backoff ก่อน retry แต่ละครั้ง
+      const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
       let orderResp = await binanceRest.newOrder({
         symbol: this.bot.symbol,
         side: 'BUY',
@@ -3403,14 +3419,28 @@ class Trader {
         recvWindow: config_recvWindow(),
       }).catch((err) => ({ error: binanceRest.formatBinanceError(err) }));
 
-      // FIX-2026-07-24 (v2): retry path — refetch fresh bookTicker แล้วลองด้วย ask - tickSize
-      if (orderResp.error && orderResp.error.code === -2010) {
+      // FIX-2026-08-09 (rev2): retry path — loop สูงสุด 2 ครั้ง
+      //   - แต่ละรอบ: backoff (jitter ±20%) → refetch bookTicker → ลองด้วย ask - tickSize
+      //   - ถ้า retry สำเร็จ: update trade.buyPrice + sync Map<clientOrderId> ทันที (P3.2)
+      //   - ถ้า retry ครบ 2 ครั้งแล้ว -2010 อีก → ออก loop ไป fail signal block
+      for (let attempt = 1; attempt <= MAX_BUY_RETRIES; attempt++) {
+        if (!(orderResp.error && orderResp.error.code === -2010)) break;
+
+        const backoffBase = RETRY_BACKOFFS_MS[attempt - 1] || 200;
+        const jitter = backoffBase * 0.2 * (Math.random() * 2 - 1); // ±20%
+        const backoffMs = Math.max(10, Math.round(backoffBase + jitter));
+
         logger.warn({
           botId: this.bot._id.toString(),
           symbol: this.bot.symbol,
+          attempt,
+          maxRetries: MAX_BUY_RETRIES,
+          backoffMs,
           placedPrice: buyPrice,
           binanceMsg: orderResp.error.msg,
-        }, 'trader: -2010 on first attempt — refetching bookTicker and retrying with ask - tickSize');
+        }, `trader: -2010 on attempt ${attempt} — sleeping ${backoffMs}ms then refetching bookTicker and retrying`);
+
+        await sleep(backoffMs);
 
         // refetch bookTicker (refresh stale data)
         try {
@@ -3418,13 +3448,15 @@ class Trader {
           if (fresh && fresh.bidPrice && fresh.askPrice) {
             const freshAsk = fresh.askPrice;
             const retryPrice = symbolInfo.floorPrice(new Decimal(freshAsk).minus(tickSize), tickSize).toString();
-            const retryClientOrderId = this.makeClientOrderId('buy', candle.closeTime, 1);
+            const retryClientOrderId = this.makeClientOrderId('buy', candle.closeTime, attempt);
             logger.info({
               botId: this.bot._id.toString(),
               symbol: this.bot.symbol,
+              attempt,
               freshAsk,
               retryPrice,
-            }, 'trader: retrying BUY with ask - tickSize (fresh bookTicker)');
+              retryClientOrderId,
+            }, `trader: retrying BUY attempt ${attempt} with ask - tickSize (fresh bookTicker)`);
             orderResp = await binanceRest.newOrder({
               symbol: this.bot.symbol,
               side: 'BUY',
@@ -3461,15 +3493,22 @@ class Trader {
               logger.info({
                 botId: this.bot._id.toString(),
                 symbol: this.bot.symbol,
+                attempt,
                 buyPrice: retryPrice,
                 oldClientOrderId,
                 newClientOrderId: retryClientOrderId,
               }, 'trader: retry succeeded — updated trade buyPrice + re-registered clientOrderId in Map');
+              break; // success — exit retry loop
             }
           }
         } catch (retryErr) {
-          logger.warn({ err: retryErr.message }, 'trader: retry refetch/place failed');
-          // fall through — orderResp.error ยังคงอยู่ → fail ตามปกติ
+          logger.warn({
+            botId: this.bot._id.toString(),
+            symbol: this.bot.symbol,
+            attempt,
+            err: retryErr.message,
+          }, `trader: retry refetch/place failed on attempt ${attempt}`);
+          // fall through — orderResp.error ยังคงอยู่ → loop รอบถัดไป (ถ้ามี) หรือ fail
         }
       }
 
@@ -3496,7 +3535,7 @@ class Trader {
         await Signal.updateOne({ _id: signalDoc._id }, {
           outcome: 'failed',
           note: isPostOnly
-            ? `BUY -2010 (placed ${buyPrice} ≥ ask ${ask} ตอนส่ง order) · snapshot bid=${bid} · Binance: ${binanceMsg}`
+            ? `BUY -2010 (placed ${buyPrice} ≥ ask ${ask} ตอนส่ง order) · snapshot bid=${bid} · retried ${MAX_BUY_RETRIES}× with backoff → Binance: ${binanceMsg}`
             : `BUY ${orderResp.error.code}: ${binanceMsg}`,
         });
         // FIX-2026-08-02: cancel any SELL orphaned by partial fill before resetting trade
@@ -4662,6 +4701,22 @@ class Trader {
           $set: { status: 'idle', lastError: '' },
         }
       );
+
+      // FIX-2026-08-09: DPS loss-path coverage — _emergencyMarketSell is the exit for
+      //   cb_panic / cbv2_panic(v1) / sl_ukc_manual / market_fallback / LIMIT reject paths.
+      //   before this hook, all those paths left DPS state untouched → Rule 3 (loss-streak)
+      //   never fired in production. Now routed through the same helper as forceClose + handleSellFilled.
+      try {
+        const dpsAfterClose = require('./dpsAfterClose');
+        await dpsAfterClose.evaluateDpsAfterClose({
+          bot: this.bot,
+          pnl: net,
+          pnlPct,
+          source: `trader:_emergencyMarketSell:${opts.reason || 'market_fallback'}`,
+        });
+      } catch (dpsErr) {
+        logger.warn({ err: dpsErr.message, tradeId: trade._id.toString() }, 'trader: _emergencyMarketSell DPS failed (non-fatal)');
+      }
 
       this._unregisterTrade(trade);
       this.currentTrade = null;
@@ -6902,25 +6957,20 @@ class Trader {
       // FIX-2026-08-08: master switch — read AppConfig.masterDynamicSizeEnabled (30s cache)
       //   - if master off → stamp _masterDynamicSizeEnabled=false on snapshot → dps.evaluate() returns 'master-off'
       // FIX-2026-08-08 (rev2): ย้าย getMasterToggles() เข้ามาใน try — DPS ต้องไม่มีทางกระทบ SELL flow
+      // FIX-2026-08-09: refactor → use dpsAfterClose.evaluateDpsAfterClose() helper
+      //   - single source of truth across handleSellFilled / _emergencyMarketSell / forceClose / botManager
+      //   - helper handles deps reload, master toggle, persistState, log + telegram
+      //   - caller syncs in-memory snapshot from evalResult so next BUY uses fresh size
       try {
-        const masterConfig = require('./masterConfig');
-        const masterToggles = await masterConfig.getMasterToggles();
-        const dpsCfg = await masterConfig.getDpsConfig();
-        this.bot._masterDynamicSizeEnabled = masterToggles.masterDynamicSizeEnabled;
-        this.bot._masterCbAutoUnlockEnabled = masterToggles.masterCbAutoUnlockEnabled;
-
-        const evalResult = dps.evaluate(this.bot, {
-          closedAt: new Date(),
+        const dpsAfterClose = require('./dpsAfterClose');
+        const evalResult = await dpsAfterClose.evaluateDpsAfterClose({
+          bot: this.bot,
+          pnl: pnl.net,
           pnlPct: pnl.pnlPercent,
-          isWin: pnl.net > 0,
-        }, dpsCfg);
-
-        // FIX-2026-08-08 (rev2): persistState เขียน history **เสมอ** (แก้บั๊ก A1)
-        //   เดิม persistEval() return ทันทีถ้า !changed → ไม้ชนะปกติ (reason='no-rule')
-        //   ไม่ถูกบันทึก → history ไม่มีวันยาวเกิน 1 → Rule ฝั่งชนะยิงไม่ได้ตลอดกาล
-        if (Array.isArray(evalResult.newHistory) || evalResult.changed) {
-          await dps.persistState(Bot, this.bot._id, evalResult);
-          // refresh in-memory snapshot so next eval/BUY เห็นค่าล่าสุด
+          source: 'trader:handleSellFilled',
+        });
+        // refresh in-memory snapshot so next eval/BUY เห็นค่าล่าสุด
+        if (evalResult) {
           if (Array.isArray(evalResult.newHistory)) {
             this.bot.dynamicSizeLastResults = evalResult.newHistory;
             this.bot.dynamicSizeLastEvaluatedAt = evalResult.appliedAt;
@@ -6930,47 +6980,13 @@ class Trader {
             this.bot.dynamicLayersCurrent = evalResult.after.layers;
             this.bot.dynamicSizeCooldownUntil = evalResult.cooldownUntil;
           }
-        }
-
-        if (evalResult.changed || (evalResult.dryRun && evalResult.wouldChange)) {
-          logger.info({
-            botId: this.bot._id.toString(),
-            reason: evalResult.reason,
-            before: evalResult.before,
-            after: evalResult.after,
-            dryRun: !!evalResult.dryRun,
-            pnlPct: pnl.pnlPercent.toFixed(4),
-          }, evalResult.dryRun ? 'trader: DPS — DRY-RUN (ไม่ได้ปรับจริง)' : 'trader: DPS — size/layers updated');
-          // FIX-2026-08-08: emit dpsResize telegram event — user wants visibility on DPS changes
-          //   - non-blocking (no await) so SELL flow ไม่หน่วง
-          try {
-            const botName = this.bot.name || this.bot.symbol || this.bot._id.toString();
-            telegramNotifier.sendNow('dpsResize', {
-              botName,
-              symbol: this.bot.symbol,
-              timeframe: this.bot.timeframe,
+          if (evalResult.skipped) {
+            logger.debug({
+              botId: this.bot._id.toString(),
+              skipped: evalResult.skipped,
               reason: evalResult.reason,
-              beforeSize: evalResult.before.size,
-              beforeLayers: evalResult.before.layers,
-              afterSize: evalResult.after.size,
-              afterLayers: evalResult.after.layers,
-              pnlPct: pnl.pnlPercent,
-              isWin: pnl.net > 0,
-              // FIX-2026-08-08 (rev2): ส่ง config จริงไปแสดงแทน hardcode ในข้อความ
-              dryRun: !!evalResult.dryRun,
-              cooldownMinutes: Math.round((dpsCfg.cooldownMs || 0) / 60000),
-              minSize: evalResult.bounds && evalResult.bounds.minSize,
-              maxSize: evalResult.bounds && evalResult.bounds.maxSize,
-              minLayers: evalResult.bounds && evalResult.bounds.minLayers,
-              maxLayers: evalResult.bounds && evalResult.bounds.maxLayers,
-            }).catch((err) => logger.warn({ err: err.message }, 'trader: DPS telegram sendNow failed'));
-          } catch (_) { /* non-fatal */ }
-        } else if (evalResult.skipped) {
-          logger.debug({
-            botId: this.bot._id.toString(),
-            skipped: evalResult.skipped,
-            reason: evalResult.reason,
-          }, 'trader: DPS — skipped');
+            }, 'trader: DPS — skipped');
+          }
         }
       } catch (dpsErr) {
         logger.warn({ err: dpsErr.message, botId: this.bot._id.toString() }, 'trader: DPS evaluation failed (non-fatal)');

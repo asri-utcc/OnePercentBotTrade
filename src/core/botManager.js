@@ -573,54 +573,21 @@ class BotManager {
                 //   ดังนั้นต้องเรียก DPS ตรงนี้เพื่อให้ orphan ก็นับ resize ด้วย
                 //   - safe: evaluate() เช็ค disabled / DCA / cooldown / master-off
                 //   - emit dpsResize telegram ถ้า resize จริง
+                // FIX-2026-08-09: refactor → use dpsAfterClose.evaluateDpsAfterClose() helper
+                //   - single source of truth across all SELL close paths
+                //   - helper handles deps reload, master toggle, persistState, log + telegram
                 try {
-                  const dps = require('./dynamicPositionSizing');
-                  const telegramNotifier = require('../services/telegramNotifier');
-                  const masterConfig = require('./masterConfig');
-                  const masterToggles = await masterConfig.getMasterToggles();
-                  const dpsCfg = await masterConfig.getDpsConfig();
+                  const dpsAfterClose = require('./dpsAfterClose');
+                  // reload bot snapshot fresh (helper will do this too, but we want it for the
+                  //   botName/symbol/timeframe in the inline-mark-sold log above to match)
                   const botSnap = await Bot.findById(trade.botId).lean();
                   if (botSnap) {
-                    botSnap._masterDynamicSizeEnabled = masterToggles.masterDynamicSizeEnabled;
-                    const evalResult = dps.evaluate(botSnap, {
-                      closedAt: new Date(),
+                    await dpsAfterClose.evaluateDpsAfterClose({
+                      bot: botSnap,
+                      pnl: inlinePnl.net,
                       pnlPct: inlinePnl.pnlPercent,
-                      isWin: inlinePnl.net > 0,
-                    }, dpsCfg);
-                    // FIX-2026-08-08 (rev2): persistState เขียน history เสมอ (แก้บั๊ก A1 — ดู trader.js)
-                    if (Array.isArray(evalResult.newHistory) || evalResult.changed) {
-                      await dps.persistState(Bot, trade.botId, evalResult);
-                    }
-                    if (evalResult.changed || (evalResult.dryRun && evalResult.wouldChange)) {
-                      logger.info({
-                        botId: trade.botId.toString(),
-                        tradeId: trade._id.toString(),
-                        reason: evalResult.reason,
-                        before: evalResult.before,
-                        after: evalResult.after,
-                        dryRun: !!evalResult.dryRun,
-                      }, 'botManager: orphan reconcile DPS — size/layers updated');
-                      // emit telegram (non-blocking)
-                      const botName = botSnap.name || botSnap.symbol || trade.botId.toString();
-                      telegramNotifier.sendNow('dpsResize', {
-                        botName,
-                        symbol: botSnap.symbol,
-                        timeframe: botSnap.timeframe,
-                        reason: evalResult.reason,
-                        beforeSize: evalResult.before.size,
-                        beforeLayers: evalResult.before.layers,
-                        afterSize: evalResult.after.size,
-                        afterLayers: evalResult.after.layers,
-                        pnlPct: inlinePnl.pnlPercent,
-                        isWin: inlinePnl.net > 0,
-                        dryRun: !!evalResult.dryRun,
-                        cooldownMinutes: Math.round((dpsCfg.cooldownMs || 0) / 60000),
-                        minSize: evalResult.bounds && evalResult.bounds.minSize,
-                        maxSize: evalResult.bounds && evalResult.bounds.maxSize,
-                        minLayers: evalResult.bounds && evalResult.bounds.minLayers,
-                        maxLayers: evalResult.bounds && evalResult.bounds.maxLayers,
-                      }).catch((err) => logger.warn({ err: err.message }, 'botManager: orphan DPS telegram failed'));
-                    }
+                      source: 'botManager:orphanReconcile',
+                    });
                   }
                 } catch (dpsErr) {
                   logger.warn({ err: dpsErr.message, tradeId: trade._id.toString() }, 'botManager: orphan DPS evaluation failed (non-fatal)');
