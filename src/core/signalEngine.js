@@ -123,31 +123,39 @@ function isXS1At(i, opens, closes, basis, lower) {
   return patternA || patternB;
 }
 
-// FIX-2026-07-30: Circuit-breaker (CB) panic-sell pattern (3-candle persistent lower-band breach) — เดิมชื่อ SLS1
-//   "กราฟไหลลงแล้วไม่ขึ้นอีกเลย" — 3 แท่งติด close<lowerKC AND open<lowerKC + แท่งปัจจุบันยังเป็นแดง
+// FIX-2026-07-30: Circuit-breaker (CB) panic-sell pattern — เดิมชื่อ SLS1
+//   "กราฟไหลลงแล้วไม่ขึ้นอีกเลย" — 3 แท่งติด RED + below lowerKC
+//
+//   FIX-2026-08-09: ปรับให้ตรง Pine "sls12" (3-candle) — เดิมใช้ 4 แท่ง (off-by-one)
+//     Pine sls12 = close<lowerKC and open<lowerKC and close[1]<lowerKC[1] and open[1]<lowerKC[1]
+//                       and close[2]<lowerKC[2] and open[2]<lowerKC[2]
+//                       and open>close and open[1]>close[1] and open[2]>close[2]
+//     = 3 candles (i, i-1, i-2) all RED AND fully below lowerKC
+//   - เดิม JS เช็ค 4 แท่ง (i, i-1, i-2, i-3) — เข้มงวดเกินไป 1 candle
+//   - ผลกระทบ: CB fires เร็วขึ้น (Pine-correct) — ตรงกับ Pine script ต้นฉบับ
 //
 //   CB[i] = (open[i]  > close[i])  AND   # current red candle (ยังไหลลง)
 //             (open[i-1] > close[i-1]) AND
 //             (open[i-2] > close[i-2]) AND
 //             (close[i]   < lowerKC[i])   AND (open[i]   < lowerKC[i])
-//             AND for k in [i-1, i-2, i-3]:
-//                  close[k] < lowerKC[k] AND open[k] < lowerKC[k]
+//             AND (close[i-1] < lowerKC[i-1]) AND (open[i-1] < lowerKC[i-1])
+//             AND (close[i-2] < lowerKC[i-2]) AND (open[i-2] < lowerKC[i-2])
 //
 //   Inputs:
-//     i        - index ของ current candle (ต้อง >= 3)
+//     i        - index ของ current candle (ต้อง >= 2)
 //     opens    - array ของ open prices
 //     closes   - array ของ close prices
 //     lower    - array ของ lowerKC (จาก computeBgStates)
 //
-//   Returns: true ถ้า candle มี panic-sell pattern (caller force-close ทุก position ในบอท)
+//   Returns: true ถ้า candle มี 3-candle panic-sell pattern (caller force-close ทุก position ในบอท)
 function isCBAt(i, opens, closes, lower) {
-  if (i < 3) return false;
+  if (i < 2) return false;
   // current bar must be valid + red + below lowerKC
   if (opens[i] == null || closes[i] == null || lower[i] == null) return false;
   if (opens[i] <= closes[i]) return false; // not a red candle
   if (!(closes[i] < lower[i] && opens[i] < lower[i])) return false;
-  // previous 3 bars must each be red AND fully below lowerKC
-  for (let k = i - 1; k >= i - 3; k -= 1) {
+  // previous 2 bars must each be red AND fully below lowerKC (Pine sls12 = 3 candles total)
+  for (let k = i - 1; k >= i - 2; k -= 1) {
     if (opens[k] == null || closes[k] == null || lower[k] == null) return false;
     if (opens[k] <= closes[k]) return false; // ไม่ใช่แท่งแดง
     if (!(closes[k] < lower[k] && opens[k] < lower[k])) return false;
@@ -155,24 +163,26 @@ function isCBAt(i, opens, closes, lower) {
   return true;
 }
 
-// FIX-2026-08-06: Circuit-breaker V2 (CBv2) — sustained 3-candle breach lock (stricter than CB)
-//   - matches user's Pine:
+// FIX-2026-08-06: Circuit-breaker V2 (CBv2) — sustained 4-candle breach lock (stricter than CB)
+//   - matches user's Pine (FIX-2026-08-09: corrected to Pine semantics):
 //       sls12 = close<lowerKC and open<lowerKC and close[1]<lowerKC[1] and open[1]<lowerKC[1]
 //             and close[2]<lowerKC[2] and open[2]<lowerKC[2]
 //             and open>close and open[1]>close[1] and open[2]>close[2]
 //       cbv2  = sls12 and sls12[1]
-//   - ในทางปฏิบัติ CBv2 ≡ isCBAt(i) AND isCBAt(i-1) ≡ 4 แท่งติด red AND fully below lowerKC
-//   - ต่างจาก CB (3 แท่ง + previous 3) ตรงที่ต้องเป็น 4 แท่ง consecutive จริงๆ (no warmup gap)
+//   - CBv2 = sls12(i) AND sls12(i-1) = 4 แท่ง consecutive (i-3, i-2, i-1, i) all RED+below lowerKC
+//   - ต่างจาก CB (3 แท่ง) ตรงที่ต้องมี 4 แท่ง consecutive จริงๆ (no warmup gap)
+//   - เดิม JS ใช้ isCBAt(i) AND isCBAt(i-1) แต่ isCBAt เคยเช็ค 4 แท่ง = รวม 5 แท่ง (off-by-one +1)
+//   - หลัง FIX-2026-08-09 isCBAt เช็ค 3 แท่ง (Pine sls12) → CBv2 = 4 แท่ง (Pine cbv2) ✓
 //
 //   Inputs:
-//     i        - index ของ current candle (ต้อง >= 4 เพราะต้องการ candle i, i-1, i-2, i-3)
+//     i        - index ของ current candle (ต้อง >= 3 เพราะ isCBAt(i-1) ต้องการ i-3)
 //     opens    - array ของ open prices
 //     closes   - array ของ close prices
 //     lower    - array ของ lowerKC (จาก computeBgStates)
 //
-//   Returns: true ถ้า candle มี sustained 3-candle breach (caller force-close + lock บอท cbv2LockHours ชั่วโมง)
+//   Returns: true ถ้า candle มี 4-candle sustained breach (caller force-close + lock บอท cbv2LockHours ชั่วโมง)
 function isCBv2At(i, opens, closes, lower) {
-  if (i < 4) return false;
+  if (i < 3) return false;
   if (!isCBAt(i, opens, closes, lower)) return false;
   if (!isCBAt(i - 1, opens, closes, lower)) return false;
   return true;
@@ -453,12 +463,13 @@ async function checkSafeTradeTrendline(bot, trendTF, binanceRest) {
 function isEngulf1BarAt(i, opens, closes, upperKC) {
   if (i < 1) return false;
   if (opens[i] == null || closes[i] == null || opens[i - 1] == null || closes[i - 1] == null) return false;
-  if (upperKC[i] == null || upperKC[i - 1] == null) return false;
+  if (upperKC[i] == null) return false;
   const greenPrev = closes[i - 1] > opens[i - 1];
   const redNow = closes[i] < opens[i];
   const coversHigh = opens[i] * 1.001 >= closes[i - 1];
   const dipsBelow = closes[i] * 0.999 <= opens[i - 1];
-  const inUpperZone = closes[i - 1] > upperKC[i - 1] || opens[i] > upperKC[i];
+  // FIX-2026-08-09: Pine `upperKC` (no index) = current bar's value — ใช้ upperKC[i] ทั้งคู่
+  const inUpperZone = closes[i - 1] > upperKC[i] || opens[i] > upperKC[i];
   return greenPrev && redNow && coversHigh && dipsBelow && inUpperZone;
 }
 
@@ -471,13 +482,14 @@ function isEngulf2BarAt(i, opens, closes, upperKC) {
   if (opens[i] == null || closes[i] == null
       || opens[i - 1] == null || closes[i - 1] == null
       || opens[i - 2] == null || closes[i - 2] == null) return false;
-  if (upperKC[i] == null || upperKC[i - 1] == null || upperKC[i - 2] == null) return false;
+  if (upperKC[i] == null) return false;
   const green2Ago = closes[i - 2] > opens[i - 2];
   const redOrDoji1Ago = closes[i - 1] <= opens[i - 1];
   const redNow = closes[i] < opens[i];
   const dipsBelow2Open = closes[i] * 0.999 <= opens[i - 2];
-  const inUpperZone = closes[i - 2] > upperKC[i - 2]
-    || closes[i - 1] > upperKC[i - 1]
+  // FIX-2026-08-09: Pine `upperKC` (no index) = current bar's value — ใช้ upperKC[i] ทั้งหมด
+  const inUpperZone = closes[i - 2] > upperKC[i]
+    || closes[i - 1] > upperKC[i]
     || opens[i] > upperKC[i];
   return green2Ago && redOrDoji1Ago && redNow && dipsBelow2Open && inUpperZone;
 }
@@ -560,8 +572,11 @@ function computeNoTradePerBar(klines, opts = {}) {
 //   - PASS = lastKind === 'none' → BUY
 //   - FAIL-OPEN on Binance error / insufficient data / no_trend_tf / warmup (mirror ST#1/ST#2)
 //   - **Real-time**: Binance REST returns last candle with close = live price → check ทันที
-async function checkNoTradeOnUpperTF(bot, trendTF, binanceRest) {
-  if (bot.safeTradeNoTradeEnabled !== true) {
+//   - FIX-2026-08-09: opts.bypassOptIn=true → ข้าม safeTradeNoTradeEnabled check ใช้สำหรับ CBv3 panic-sell gate
+//     (CBv3 ต้องการความ "มั่นใจว่าเป็นเหวจริง" เสมอ ไม่ควรขึ้นกับ opt-in flag ของ S1 BUY side)
+async function checkNoTradeOnUpperTF(bot, trendTF, binanceRest, opts = {}) {
+  const bypassOptIn = opts.bypassOptIn === true;
+  if (!bypassOptIn && bot.safeTradeNoTradeEnabled !== true) {
     return { skip: false, pass: true, reason: 'disabled', trendTF: null };
   }
   if (!trendTF) {
@@ -609,8 +624,8 @@ module.exports = {
   computeBgStates,
   isS1At,
   isXS1At,
-  isCBAt,    // FIX-2026-07-30: CB panic-sell pattern (3-candle lowerKC breach) — เดิมชื่อ isSLS1At
-  isCBv2At,  // FIX-2026-08-06: CBv2 sustained 3-candle breach (4 consecutive red candles fully below lowerKC) — used by _checkCBv2PanicClose to lock bot cbv2LockHours hours
+  isCBAt,    // FIX-2026-07-30: CB panic-sell pattern (Pine sls12 = 3 consecutive red below lowerKC) — เดิมชื่อ isSLS1At
+  isCBv2At,  // FIX-2026-08-06: CBv2 sustained 4-candle breach (Pine cbv2 = sls12 AND sls12[1]) — used by _checkCBv2PanicClose to lock bot cbv2LockHours hours
   detectS1Signals,
   checkS1OnLatestCandle,
   isWarmedUp,

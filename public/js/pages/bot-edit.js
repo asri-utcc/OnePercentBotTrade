@@ -216,6 +216,16 @@ function render() {
             · <strong>Active version:</strong> <span id="cbv-active-version-badge" class="lux-badge lux-badge-warn">${bot.cbVersion || 'v3'}</span> — เปลี่ยนได้ที่ <a href="/settings.html">Master Config ⚙️</a>
             · mutually exclusive with CBv2 (CB version is global AppConfig setting)
           </small>
+          ${bot.cbv3Enabled !== false && bot.safeTradeNoTradeEnabled !== true ? `
+          <div class="alert alert-info mt-2 mb-0" role="alert" data-testid="cbv3-decoupled-info">
+            <small>
+              <strong>ℹ️ Decoupled mode:</strong> ST3 (Safe-trade #3) ปิดอยู่ แต่ CBv3 ยังคงใช้ ST3 logic ภายในเพื่อ "เบรกเฉพาะเหวจริง" — ไม่ขึ้นกับ <code>safeTradeNoTradeEnabled</code>
+              <br />
+              · <strong>S1 BUY:</strong> ไม่ถูก block โดย ST3 (กล้าเข้ามากขึ้น)
+              <br />
+              · <strong>CBv3 force-close:</strong> ยังคง require ST3 match → เบรกเฉพาะตอนเหวจริง
+            </small>
+          </div>` : ''}
           ${bot.cbv3LockedUntil && new Date(bot.cbv3LockedUntil).getTime() > Date.now() ? `
           <div class="alert alert-warning mt-2 mb-0 bc-cbv3-cooldown-banner">
             <div class="d-flex align-items-center justify-content-between">
@@ -224,10 +234,52 @@ function render() {
                 <br />
                 <small class="text-muted">เหตุผล: ${bot.cbv3LockReason || 'cbv3_panic'} · HYBRID mode — บอทยัง enable, S1 BUY ถูกกั้นระหว่าง cooldown</small>
               </div>
+              <!-- FIX-2026-08-09: unlock button was only inside CBv2 banner — when cbVersion='v3'
+                   CBv2 section is hidden so user had no way to unlock. POST /unlock-cbv2
+                   clears BOTH cbv2+cbv3 fields (see bot.routes.js:1627-1640), so this
+                   button works regardless of which cooldown is active. -->
+              <button type="button" class="btn btn-sm btn-outline-warning" id="btn-unlock-cbv3" onclick="unlockCBv2Now('${bot._id}')">
+                🔓 ปลด cooldown ตอนนี้
+              </button>
             </div>
           </div>` : ''}
         </div>
         `}
+
+        <!-- FIX-2026-08-09: Cross-version cooldown banner — shows if EITHER cbv2 or cbv3
+             cooldown is still active, regardless of which cbVersion is selected in UI.
+             Defensive UI for cases like 1000CAT(bAdd) 2026-08-09 incident where
+             cbVersion='v3' but cbv2LockedUntil got wrongly written (watchdog Phase 3
+             fired CBv2 alert without cbVersion gate — now fixed).
+             Without this banner, user has no UI way to clear a "cross-version" cooldown. -->
+        ${(() => {
+          const cbv2Active = bot.cbv2LockedUntil && new Date(bot.cbv2LockedUntil).getTime() > Date.now();
+          const cbv3Active = bot.cbv3LockedUntil && new Date(bot.cbv3LockedUntil).getTime() > Date.now();
+          // Skip if the relevant banner already showed inside the cbVersion-conditional
+          if (bot.cbVersion === 'v2' && cbv2Active) return '';
+          if (bot.cbVersion === 'v3' && cbv3Active) return '';
+          // Otherwise show this cross-version banner
+          if (!cbv2Active && !cbv3Active) return '';
+          const activeUntil = (cbv2Active ? bot.cbv2LockedUntil : bot.cbv3LockedUntil);
+          const version = cbv2Active ? 'v2' : 'v3';
+          const reason = cbv2Active ? (bot.cbv2LockReason || 'cbv2_panic') : (bot.cbv3LockReason || 'cbv3_panic');
+          return `
+          <div class="alert alert-warning mt-2 mb-0 bc-cbv-cross-cooldown-banner">
+            <div class="d-flex align-items-center justify-content-between">
+              <div>
+                ⏸ <strong>CB${version} cooldown active (cross-version)</strong> until ${new Date(activeUntil).toLocaleString()}
+                <br />
+                <small class="text-muted">
+                  Active version คือ <strong>${bot.cbVersion || 'v3'}</strong> แต่ CB${version} cooldown ยังเหลืออยู่
+                  (เกิดจากการยิงข้าม version — fixed 2026-08-09) · เหตุผล: ${reason}
+                </small>
+              </div>
+              <button type="button" class="btn btn-sm btn-outline-warning" id="btn-unlock-cbv-cross" onclick="unlockCBv2Now('${bot._id}')">
+                🔓 ปลด cooldown ตอนนี้
+              </button>
+            </div>
+          </div>`;
+        })()}
 
         <!-- FIX-2026-08-08: Feature #3 — Auto Unlock Cooldown -->
         <div class="mb-3">

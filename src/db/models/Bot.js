@@ -226,11 +226,21 @@ const botSchema = new mongoose.Schema(
 
     // ═══════════════════════════════════════════════════════════════════════
     // FIX-2026-08-08: Feature #2 — CBv3 (CBv2 + ST3 same-candle on upper-TF)
-    //   - global setting only (AppConfig.cbVersion = 'v2' | 'v3', default 'v3')
-    //   - per-bot fields mirror CBv2 schema for parallel logic
+    //   - global routing: AppConfig.cbVersion = 'v2' | 'v3' (default 'v3')
+    //     - 'v2' → only CBv2 handler fires (CBv3 returns early)
+    //     - 'v3' → only CBv3 handler fires (CBv2 returns early)
+    //   - per-bot opt-out: cbv3Enabled=false → CBv3 handler skipped for that bot
+    //     (mirrors cbv2Enabled — useful when user wants CBv3 off but keep CBv2's
+    //      no-ST3 safety net by switching cbVersion='v2')
+    //   - cbv3LockHours (default 8, range 0.5..168): mirror CBv2
     //   - cbv3LockedUntil + cbv3LockReason persist across restart
     //   - cbv3LastFiredAt: audit + trader._cbv3FiredAt restore
+    //   - FIX-2026-08-09: cbv3Enabled + cbv3LockHours fields were MISSING from
+    //     schema before — Mongoose strict mode silently dropped them on save,
+    //     breaking per-bot opt-out UI. Added to mirror cbv2* fields.
     // ═══════════════════════════════════════════════════════════════════════
+    cbv3Enabled: { type: Boolean, default: true },
+    cbv3LockHours: { type: Number, default: 8, min: 0.5, max: 168 },
     cbv3LockedUntil: { type: Date, default: null },
     cbv3LockReason: { type: String, default: null }, // 'cbv3_panic' | null
     cbv3LastFiredAt: { type: Date, default: null },

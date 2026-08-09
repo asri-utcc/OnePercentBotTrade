@@ -2,12 +2,16 @@
 
 /**
  * FIX-2026-08-08: Feature #2 — CB Version routing (v2 vs v3)
- *   - cbVersion is a global AppConfig setting (default 'v3')
- *   - 'v2' = CBv2 only (4 red candles below lowerKC → cooldown)
- *   - 'v3' = CBv2 + ST3 same-candle on upper-TF (default)
- *   - Per-bot cbv3LockedUntil / cbv3LockReason / cbv3LastFiredAt mirror CBv2 schema
- *   - Per-bot cbv3 enabled is implied by AppConfig.cbVersion === 'v3' (no per-bot toggle)
- *     — keeping logic single-source-of-truth
+ *   - cbVersion is a global AppConfig setting (default 'v3') — selects WHICH
+ *     panic-sell handler fires (mutually exclusive):
+ *       'v2' → CBv2 handler fires (4 red candles below lowerKC → cooldown)
+ *       'v3' → CBv3 handler fires (CBv2 pattern + ST3 upper-TF same-candle)
+ *   - Per-bot opt-out (independent of cbVersion):
+ *       bot.cbv2Enabled === false → CBv2 handler skips this bot
+ *       bot.cbv3Enabled === false → CBv3 handler skips this bot
+ *     Default both = true. User can disable CBv3 per-bot even when cbVersion='v3'.
+ *   - FIX-2026-08-09: cbv3Enabled field added to Bot.js schema (was missing —
+ *     Mongoose strict mode silently dropped saves; per-bot opt-out UI broken).
  *   - effective version cached per tick (avoid Mongo roundtrip per candle)
  */
 
