@@ -355,7 +355,13 @@ async function openDayModal(day) {
     const params = new URLSearchParams({ from: day.date, to: day.date });
     if (currentBotId) params.set('botId', currentBotId);
     const data = await API.get(`/api/pnl/day?${params}`);
-    renderModalTrades(body, data.trades || []);
+    const trades = data.trades || [];
+    _modalOverlay._lastTrades = trades; // stash for column-toggle re-render
+    renderModalTrades(body, trades);
+    // update count badge
+    const countEl = overlay.querySelector('#pnl-col-count');
+    const defs = body._columnDefs || [];
+    if (countEl && defs.length) countEl.textContent = `${(body._currentVisibleIds || []).length}/${defs.length}`;
   } catch (err) {
     body.innerHTML = `<div class="text-center py-4 text-muted-3">โหลดล้มเหลว: ${escapeHtml(err.message || 'unknown')}</div>`;
   }
@@ -372,48 +378,128 @@ function renderModalTrades(container, trades) {
     const bt = b.sellFilledAt ? new Date(b.sellFilledAt).getTime() : 0;
     return bt - at;
   });
+
+  // FIX-2026-08-09: column definitions — แต่ละคอลัมน์มี id/label/render(t)/visible-by-default
+  //   - render(t) returns HTML for one cell
+  //   - defaultVisible บอกว่าจะโผล่ทันทีเมื่อ first-open หรือไม่
+  //     (mobile (<768px) ใช้ subset เพื่อกันตารางล้น: ซ่อน price ซ้ำซ้อน + เวลาแบบเต็ม)
+  //   - essential: true = ต้องแสดงเสมอ ไม่สามารถปิดได้ (เช่น PnL, Reason)
+  const isMobile = window.matchMedia && window.matchMedia('(max-width: 768px)').matches;
+  const COLUMN_DEFS = [
+    {
+      id: 'bot', label: 'Bot', essential: true, mobileDefault: true,
+      sample: 'SYN', render: (t) => `<span class="badge-bot">${escapeHtml(t.botName || '?')}</span>`,
+    },
+    {
+      id: 'symbol', label: 'Symbol', essential: true, mobileDefault: true,
+      sample: 'SYNUSDT',
+      render: (t) => {
+        const isDcaStack = t.isDcaStack === true;
+        const dcaBadge = isDcaStack
+          ? `<span class="dca-pill" title="DCA stack — ${t.dcaLayerCount || '?'} layers, BEP=${Number(t.stackBep || t.buyPrice || 0).toFixed(8)}">📚 L${t.dcaLayerCount || '?'}</span>`
+          : '';
+        return `${escapeHtml(t.symbol || '')} ${dcaBadge}`;
+      },
+    },
+    {
+      id: 'entryPrice', label: 'Entry', mobileDefault: !isMobile, sample: '0.00123',
+      render: (t) => {
+        const isDcaStack = t.isDcaStack === true;
+        return isDcaStack
+          ? `<span title="stack BEP">${t.stackBep ? PriceFormat.format(parseFloat(t.stackBep), t.symbol) : '—'}</span>`
+          : (t.entryPrice ? PriceFormat.format(parseFloat(t.entryPrice), t.symbol) : '—');
+      },
+    },
+    {
+      id: 'exitPrice', label: 'Exit', mobileDefault: !isMobile, sample: '0.00145',
+      render: (t) => t.exitPrice ? PriceFormat.format(parseFloat(t.exitPrice), t.symbol) : '—',
+    },
+    {
+      id: 'entryQty', label: 'Entry Qty', mobileDefault: false, sample: '1.5000',
+      render: (t) => {
+        const q = t.entryQty != null ? parseFloat(t.entryQty) : null;
+        return q != null && Number.isFinite(q) ? q.toFixed(4) : '—';
+      },
+    },
+    {
+      id: 'exitQty', label: 'Exit Qty', mobileDefault: false, sample: '1.4500',
+      render: (t) => {
+        const q = t.exitQty != null ? parseFloat(t.exitQty) : null;
+        if (q == null || !Number.isFinite(q)) return '—';
+        const isPartial = t.isPartialSell === true || (t.entryQty && q < parseFloat(t.entryQty));
+        const partialBadge = isPartial
+          ? ` <span class="partial-fill-warn" title="Partial-fill: SELL filled ${q} จาก ${t.entryQty} (ขาด ${(parseFloat(t.entryQty) - q).toFixed(4)})">⚠️</span>`
+          : '';
+        return `${q.toFixed(4)}${partialBadge}`;
+      },
+    },
+    {
+      id: 'pnl', label: 'PnL', essential: true, mobileDefault: true, sample: '+1.23',
+      render: (t) => {
+        const pnl = t.realizedPnl || 0;
+        const cls = pnl > 0 ? 'pnl-bull' : pnl < 0 ? 'pnl-bear' : '';
+        const thb = (window.__fx && window.__fx.rate) ? (pnl * window.__fx.rate) : null;
+        return `<span class="${cls}">${formatUsdt(pnl)}</span>${thb != null ? `<br><span class="thb-sub">≈ ฿${formatThbInline(thb)}</span>` : ''}`;
+      },
+    },
+    {
+      id: 'time', label: 'เวลา', mobileDefault: !isMobile, sample: '14:30',
+      render: (t) => {
+        const ts = t.sellFilledAt
+          ? new Date(t.sellFilledAt).toLocaleString('th-TH', { hour: '2-digit', minute: '2-digit', day: '2-digit', month: 'short' })
+          : '';
+        return `<span class="muted">${ts}</span>`;
+      },
+    },
+    {
+      id: 'reason', label: 'Reason', essential: true, mobileDefault: true, sample: '🎯',
+      render: (t) => SellReasons.renderSellReasonPill(t.sellReason, t.sellReasonDetail),
+    },
+  ];
+
+  // FIX-2026-08-09: load visibility from localStorage (with mobile-aware defaults for first visit)
+  const COL_STORAGE_KEY = 'pnl-modal-columns-v1';
+  function loadVisibleColumns() {
+    let saved = null;
+    try { saved = JSON.parse(localStorage.getItem(COL_STORAGE_KEY) || 'null'); } catch (_) {}
+    if (Array.isArray(saved) && saved.length > 0) {
+      // intersect with current column ids (กัน schema change → ไม่มี key ค้าง)
+      const validIds = new Set(COLUMN_DEFS.map((c) => c.id));
+      const filtered = saved.filter((id) => validIds.has(id));
+      // ensure essential columns are always present
+      for (const col of COLUMN_DEFS) {
+        if (col.essential && !filtered.includes(col.id)) filtered.push(col.id);
+      }
+      return filtered;
+    }
+    // first-time visit — use mobileDefault flags
+    return COLUMN_DEFS.filter((c) => c.mobileDefault || c.essential).map((c) => c.id);
+  }
+  const visibleIds = loadVisibleColumns();
+  const visibleCols = COLUMN_DEFS.filter((c) => visibleIds.includes(c.id));
+
   const rows = sortedTrades.map((t) => {
-    const pnl = t.realizedPnl || 0;
-    const cls = pnl > 0 ? 'pnl-bull' : pnl < 0 ? 'pnl-bear' : '';
-    const ts = t.sellFilledAt ? new Date(t.sellFilledAt).toLocaleString('th-TH', { hour: '2-digit', minute: '2-digit', day: '2-digit', month: 'short' }) : '';
-    const thb = (window.__fx && window.__fx.rate) ? (pnl * window.__fx.rate) : null;
-    // FIX-2026-08-02: DCA stack — show layer count + BEP instead of single-entry view
-    const isDcaStack = t.isDcaStack === true;
-    const dcaBadge = isDcaStack
-      ? `<span class="dca-pill" title="DCA stack — ${t.dcaLayerCount || '?'} layers, BEP=${Number(t.stackBep || t.buyPrice || 0).toFixed(8)}">📚 L${t.dcaLayerCount || '?'}</span>`
-      : '';
-    const entryDisplay = isDcaStack
-      ? `<span title="stack BEP">${t.stackBep ? PriceFormat.format(parseFloat(t.stackBep), t.symbol) : '—'}</span>`
-      : (t.entryPrice ? PriceFormat.format(parseFloat(t.entryPrice), t.symbol) : '—');
-    const qtyDisplay = isDcaStack
-      ? `${t.stackTotalQty ? parseFloat(t.stackTotalQty).toFixed(4) : (t.qty ? parseFloat(t.qty).toFixed(4) : '—')}`
-      : (t.qty ? parseFloat(t.qty).toFixed(4) : '—');
-    return `<tr>
-      <td><span class="badge-bot">${escapeHtml(t.botName || '?')}</span></td>
-      <td>${escapeHtml(t.symbol || '')} ${dcaBadge}</td>
-      <td class="text-end">${entryDisplay}</td>
-      <td class="text-end">${t.exitPrice ? PriceFormat.format(parseFloat(t.exitPrice), t.symbol) : '—'}</td>
-      <td class="text-end">${qtyDisplay}</td>
-      <td class="text-end ${cls}">${formatUsdt(pnl)}${thb != null ? `<br><span class="thb-sub">≈ ฿${formatThbInline(thb)}</span>` : ''}</td>
-      <td class="text-end muted">${ts}</td>
-      <td>${SellReasons.renderSellReasonPill(t.sellReason, t.sellReasonDetail)}</td>
-    </tr>`;
+    return `<tr>${visibleCols.map((c) => {
+      const align = ['entryPrice', 'exitPrice', 'entryQty', 'exitQty', 'pnl'].includes(c.id) ? 'text-end' : '';
+      return `<td class="${align}" data-col="${c.id}">${c.render(t)}</td>`;
+    }).join('')}</tr>`;
   }).join('');
+
+  const headerCells = visibleCols.map((c) => {
+    const align = ['entryPrice', 'exitPrice', 'entryQty', 'exitQty', 'pnl'].includes(c.id) ? 'text-end' : '';
+    const alignRight = c.id === 'pnl' ? 'text-end' : '';
+    return `<th class="${align}" data-col="${c.id}">${escapeHtml(c.label)}</th>`;
+  }).join('');
+
   container.innerHTML = `
-    <table class="pnl-modal-table">
-      <thead>
-        <tr>
-          <th>Bot</th><th>Symbol</th>
-          <th class="text-end">Entry</th><th class="text-end">Exit</th>
-          <th class="text-end">Qty</th>
-          <th class="text-end">PnL</th>
-          <th class="text-end">เวลา</th>
-          <th>Reason</th>
-        </tr>
-      </thead>
+    <table class="pnl-modal-table" data-visible-cols='${JSON.stringify(visibleIds)}'>
+      <thead><tr>${headerCells}</tr></thead>
       <tbody>${rows}</tbody>
     </table>
   `;
+  // expose for toggle handler
+  container._columnDefs = COLUMN_DEFS;
+  container._currentVisibleIds = visibleIds;
 }
 
 function buildModalSkeleton() {
@@ -423,7 +509,14 @@ function buildModalSkeleton() {
     <div class="pnl-modal-card">
       <div class="pnl-modal-header">
         <h5 id="pnl-modal-title">—</h5>
-        <button type="button" class="pnl-modal-close" aria-label="ปิด">✕</button>
+        <div class="pnl-modal-actions">
+          <button type="button" id="pnl-col-toggle" class="pnl-col-toggle-btn" aria-label="เลือกคอลัมน์">
+            <span>⚙️ คอลัมน์</span>
+            <span class="count" id="pnl-col-count">—</span>
+          </button>
+          <button type="button" class="pnl-modal-close" aria-label="ปิด">✕</button>
+        </div>
+        <div id="pnl-col-menu" class="pnl-col-menu" style="display:none;"></div>
       </div>
       <div id="pnl-modal-total" class="pnl-modal-total"></div>
       <div id="pnl-modal-body" class="pnl-modal-body"></div>
@@ -435,6 +528,104 @@ function buildModalSkeleton() {
   overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.classList.remove('is-open'); });
   document.addEventListener('keydown', (e) => { if (e.key === 'Escape') overlay.classList.remove('is-open'); });
   _modalOverlay = overlay;
+
+  // FIX-2026-08-09: column toggle handler
+  const toggleBtn = overlay.querySelector('#pnl-col-toggle');
+  const menu = overlay.querySelector('#pnl-col-menu');
+  toggleBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (menu.style.display === 'none') {
+      renderColumnMenu(menu);
+      menu.style.display = 'block';
+    } else {
+      menu.style.display = 'none';
+    }
+  });
+  // close menu when clicking outside
+  document.addEventListener('click', (e) => {
+    if (!menu.contains(e.target) && e.target !== toggleBtn && !toggleBtn.contains(e.target)) {
+      menu.style.display = 'none';
+    }
+  });
+}
+
+// FIX-2026-08-09: render column toggle menu (checkboxes + show-all/hide-non-essential)
+function renderColumnMenu(menu) {
+  const body = _modalOverlay.querySelector('#pnl-modal-body');
+  const defs = body._columnDefs || [];
+  const visibleIds = body._currentVisibleIds || [];
+  const isMobile = window.matchMedia && window.matchMedia('(max-width: 768px)').matches;
+
+  const items = defs.map((col) => {
+    const checked = visibleIds.includes(col.id);
+    const disabled = col.essential === true; // can't uncheck essential columns
+    const hint = disabled ? ' <span class="text-muted-3">(จำเป็น)</span>' : '';
+    return `<label class="pnl-col-menu-item${disabled ? ' is-disabled' : ''}">
+      <input type="checkbox" data-col="${col.id}" ${checked ? 'checked' : ''} ${disabled ? 'disabled' : ''}/>
+      <span>${escapeHtml(col.label)}${hint}</span>
+      <span class="col-sample">${escapeHtml(col.sample)}</span>
+    </label>`;
+  }).join('');
+
+  const mobileHint = isMobile
+    ? `<div class="pnl-col-menu-mobile-hint">📱 โหมดมือถือ — ปิดคอลัมน์ที่ไม่จำเป็นเพื่อให้อ่านง่าย</div>`
+    : '';
+
+  menu.innerHTML = `
+    <div class="pnl-col-menu-header">เลือกคอลัมน์ที่จะแสดง</div>
+    ${items}
+    ${mobileHint}
+    <div class="pnl-col-menu-actions">
+      <button type="button" data-action="all">แสดงทั้งหมด</button>
+      <button type="button" data-action="minimal">เฉพาะจำเป็น</button>
+      <button type="button" data-action="reset">รีเซ็ต</button>
+    </div>
+  `;
+
+  // checkbox handlers
+  menu.querySelectorAll('input[type="checkbox"]').forEach((cb) => {
+    cb.addEventListener('change', () => {
+      const colId = cb.getAttribute('data-col');
+      const col = defs.find((c) => c.id === colId);
+      if (!col || col.essential) return;
+      const current = new Set(body._currentVisibleIds || []);
+      if (cb.checked) current.add(colId); else current.delete(colId);
+      // always keep essential
+      for (const c of defs) if (c.essential) current.add(c.id);
+      saveAndReapply([...current], body);
+    });
+  });
+  // action buttons
+  menu.querySelectorAll('.pnl-col-menu-actions button').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const action = btn.getAttribute('data-action');
+      let ids;
+      if (action === 'all') ids = defs.map((c) => c.id);
+      else if (action === 'minimal') ids = defs.filter((c) => c.essential).map((c) => c.id);
+      else if (action === 'reset') {
+        // default = mobileDefault ∪ essential
+        ids = defs.filter((c) => c.mobileDefault || c.essential).map((c) => c.id);
+      }
+      saveAndReapply(ids, body);
+    });
+  });
+}
+
+function saveAndReapply(ids, body) {
+  try { localStorage.setItem('pnl-modal-columns-v1', JSON.stringify(ids)); } catch (_) {}
+  body._currentVisibleIds = ids;
+  const table = body.querySelector('table.pnl-modal-table');
+  if (!table) return;
+  // re-fetch last trades from modal state
+  if (!_modalOverlay._lastTrades) return;
+  renderModalTrades(body, _modalOverlay._lastTrades);
+  // re-render menu (อัพเดต checked state + count)
+  const menu = _modalOverlay.querySelector('#pnl-col-menu');
+  if (menu && menu.style.display !== 'none') renderColumnMenu(menu);
+  // update count badge
+  const defs = body._columnDefs || [];
+  const countEl = _modalOverlay.querySelector('#pnl-col-count');
+  if (countEl) countEl.textContent = `${ids.length}/${defs.length}`;
 }
 
 // ─── Chart load + render ─────────────────────────────

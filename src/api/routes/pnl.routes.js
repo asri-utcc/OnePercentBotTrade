@@ -256,8 +256,12 @@ router.get('/day', requireAuth, async (req, res) => {
     }
 
     const trades = await Trade.find(match)
-      // FIX-2026-08-09: include sellReason* fields so pnl.html modal can render pills (was empty)
-      .select('_id botId symbol entryPrice exitPrice qty realizedPnl sellFilledAt side sellReason sellReasonDetail sellReasonSource sellReasonAt')
+      // FIX-2026-08-09: include sellReason* + qty (entry/exit) fields so pnl.html modal can render pills + Entry/Exit Qty columns
+      //   - entryQty = buyQty (total bought)
+      //   - exitQty = sellFilledQty (actually filled on SELL; partial-fill → < buyQty)
+      //   - isPartialSell flag สำหรับบอกผู้ใช้เมื่อ partial-fill
+      //   - stackTotalQty / stackBep / dcaLayerCount สำหรับ DCA stack branch (เดิมมีอยู่แล้ว)
+      .select('_id botId symbol entryPrice exitPrice qty realizedPnl sellFilledAt side sellReason sellReasonDetail sellReasonSource sellReasonAt buyQty sellFilledQty sellQty isPartialSell isDcaStack stackTotalQty stackBep dcaLayerCount')
       .sort({ sellFilledAt: 1 })
       // FIX-2026-08-04: cap with .limit() to prevent unbounded single-day queries
       .limit(5000)
@@ -311,6 +315,18 @@ router.get('/day', requireAuth, async (req, res) => {
         sellReasonDetail: t.sellReasonDetail || null,
         sellReasonSource: t.sellReasonSource || null,
         sellReasonAt: t.sellReasonAt || null,
+        // FIX-2026-08-09: Entry/Exit Qty columns for pnl modal (mobile toggle-friendly)
+        //   - entryQty = buyQty (total bought)
+        //   - exitQty = sellFilledQty (actually filled on SELL; partial-fill → < buyQty)
+        //     - falls back to sellQty when sellFilledQty is null (fully-filled trades ส่วนใหญ่)
+        //   - DCA stack: stackTotalQty (aggregate of all layers)
+        entryQty: t.isDcaStack ? t.stackTotalQty : t.buyQty,
+        exitQty: t.sellFilledQty != null ? t.sellFilledQty : t.sellQty,
+        sellQtyOrdered: t.sellQty,
+        isPartialSell: t.isPartialSell === true || (t.buyQty && t.sellFilledQty && t.sellFilledQty < t.buyQty),
+        isDcaStack: t.isDcaStack === true,
+        dcaLayerCount: t.dcaLayerCount || null,
+        stackBep: t.stackBep || null,
       })),
     });
   } catch (err) {
