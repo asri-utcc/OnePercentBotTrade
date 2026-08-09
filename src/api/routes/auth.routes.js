@@ -11,6 +11,9 @@ const { LoginGuard } = require('../../utils/loginGuard');
 // 2026-08-09: Telegram Login (alternative login channel — NOT 2FA)
 const telegramOtp = require('../../services/telegramOtp');
 const telegramNotifier = require('../../services/telegramNotifier');
+// FIX-2026-08-09: connect-mongo v5 `all()` drops _id/expires + returns unserialized session only
+//   - ใช้ mongoose.connection.db.collection('sessions') เพื่อเข้าถึง full doc + sid
+const sessionStore = require('../../utils/sessionStore');
 
 // Brute-force protection สำหรับ /login (สำคัญมากถ้า expose port ออกเน็ต)
 const loginGuard = new LoginGuard({
@@ -311,16 +314,12 @@ router.post('/change-password', require('../middleware/auth').requireAuth, async
 
     let killedCount = 0;
     if (killOthers && req.sessionStore) {
-      // ฆ่าทุก session ยกเว้น current
+      // FIX-2026-08-09: ใช้ MongoDB collection ตรงๆ (connect-mongo v5 all() drops _id)
       try {
-        const allSids = await new Promise((resolve, reject) => {
-          req.sessionStore.all((err, sessions) => {
-            if (err) return reject(err);
-            resolve((sessions || []).map((s) => s.id || s._id || s.sessionID));
-          });
-        });
+        const docs = await sessionStore.getAllSessionDocs();
         const currentSid = req.sessionID;
-        for (const sid of allSids) {
+        for (const doc of docs) {
+          const sid = String(doc._id || '');
           if (!sid || sid === currentSid) continue;
           await new Promise((resolve) => {
             req.sessionStore.destroy(sid, () => resolve());
@@ -396,27 +395,20 @@ router.put('/password-info', require('../middleware/auth').requireAuth, async (r
   }
 });
 
+// FIX-2026-08-09: helper functions moved to src/utils/sessionStore.js
+//   - shared between auth.routes.js + tests (testable in isolation)
+
 // ─── GET /api/auth/sessions ──────────────────────────
-// 2026-08-09: Password & Sessions Manager — list active sessions
-//   - ใช้ req.sessionStore.all() (express-session store interface)
-//   - connect-mongo: each entry has { _id, session, expires }
-//   - filter: เฉพาะ session.authenticated === true
-//   - แต่ละ entry มี currentSid flag (== req.sessionID)
+// 2026-08-09 (rev2): fix connect-mongo v5 `all()` drops _id → query MongoDB directly
 router.get('/sessions', require('../middleware/auth').requireAuth, async (req, res) => {
   try {
-    if (!req.sessionStore) return res.status(503).json({ error: 'Session store not available' });
     const currentSid = req.sessionID;
-    const sessions = await new Promise((resolve, reject) => {
-      req.sessionStore.all((err, list) => {
-        if (err) return reject(err);
-        resolve(list || []);
-      });
-    });
+    const docs = await sessionStore.getAllSessionDocs();
     const out = [];
-    for (const s of sessions) {
-      const data = s.session || {};
+    for (const doc of docs) {
+      const data = sessionStore.unserializeSessionData(doc.session);
       if (!data.authenticated) continue; // skip non-authenticated sessions
-      const sid = s.id || s._id || data.id || '';
+      const sid = String(doc._id || ''); // MongoDB _id IS the session ID (computeStorageId is identity by default)
       const userAgent = data.userAgent || '';
       const deviceLabel = data.deviceLabel || parseDeviceLabel(userAgent);
       out.push({
@@ -469,20 +461,16 @@ router.delete('/sessions/:sid', require('../middleware/auth').requireAuth, async
 });
 
 // ─── POST /api/auth/sessions/kill-others ─────────────
-//   ฆ่าทุก session ยกเ�้น current
+//   ฆ่าทุก session ยกเว้น current
+// FIX-2026-08-09: ใช้ MongoDB collection ตรงๆ (connect-mongo v5 all() drops _id)
 router.post('/sessions/kill-others', require('../middleware/auth').requireAuth, async (req, res) => {
   try {
     if (!req.sessionStore) return res.status(503).json({ error: 'Session store not available' });
     const currentSid = req.sessionID;
-    const all = await new Promise((resolve, reject) => {
-      req.sessionStore.all((err, list) => {
-        if (err) return reject(err);
-        resolve(list || []);
-      });
-    });
+    const docs = await sessionStore.getAllSessionDocs();
     let killedCount = 0;
-    for (const s of all) {
-      const sid = s.id || s._id || s.session?.id || '';
+    for (const doc of docs) {
+      const sid = String(doc._id || '');
       if (!sid || sid === currentSid) continue;
       // eslint-disable-next-line no-await-in-loop
       await new Promise((resolve) => {
