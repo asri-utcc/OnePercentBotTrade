@@ -256,12 +256,14 @@ router.get('/day', requireAuth, async (req, res) => {
     }
 
     const trades = await Trade.find(match)
-      // FIX-2026-08-09: include sellReason* + qty (entry/exit) fields so pnl.html modal can render pills + Entry/Exit Qty columns
+      // FIX-2026-08-09: include sellReason* + qty (entry/exit) + entry/exit price fields so pnl.html modal can render pills + Entry/Exit Qty columns
+      //   - entryPrice = buyPrice (avg buy fill price)
+      //   - exitPrice = sellAvgPrice (avg SELL fill price) — fallback sellPrice
       //   - entryQty = buyQty (total bought)
       //   - exitQty = sellFilledQty (actually filled on SELL; partial-fill → < buyQty)
       //   - isPartialSell flag สำหรับบอกผู้ใช้เมื่อ partial-fill
       //   - stackTotalQty / stackBep / dcaLayerCount สำหรับ DCA stack branch (เดิมมีอยู่แล้ว)
-      .select('_id botId symbol entryPrice exitPrice qty realizedPnl sellFilledAt side sellReason sellReasonDetail sellReasonSource sellReasonAt buyQty sellFilledQty sellQty isPartialSell isDcaStack stackTotalQty stackBep dcaLayerCount')
+      .select('_id botId symbol buyPrice sellAvgPrice sellPrice qty realizedPnl sellFilledAt side sellReason sellReasonDetail sellReasonSource sellReasonAt buyQty sellFilledQty sellQty isPartialSell isDcaStack stackTotalQty stackBep dcaLayerCount')
       .sort({ sellFilledAt: 1 })
       // FIX-2026-08-04: cap with .limit() to prevent unbounded single-day queries
       .limit(5000)
@@ -305,8 +307,12 @@ router.get('/day', requireAuth, async (req, res) => {
         botName: botNameMap[String(t.botId)] || '?',
         symbol: t.symbol,
         side: t.side,
-        entryPrice: t.entryPrice,
-        exitPrice: t.exitPrice,
+        // FIX-2026-08-09: map schema fields buyPrice → entryPrice + sellAvgPrice → exitPrice
+        //   - เดิม frontend ใช้ t.entryPrice/t.exitPrice แต่ schema เก็บเป็น buyPrice/sellAvgPrice
+        //     → ผลลัพธ์คือ cell แสดง '—' ตลอด
+        //   - fallback: DCA stack → stackBep for entry, sellPrice for exit
+        entryPrice: t.isDcaStack ? t.stackBep : t.buyPrice,
+        exitPrice: t.sellAvgPrice != null ? t.sellAvgPrice : t.sellPrice,
         qty: t.qty,
         realizedPnl: t.realizedPnl,
         sellFilledAt: t.sellFilledAt,

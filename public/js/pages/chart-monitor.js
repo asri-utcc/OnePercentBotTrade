@@ -942,6 +942,14 @@ async function openTodayPnlModal() {
       </div>
     `;
     renderCmPnlModalTrades(body, data.trades || []);
+    // stash for column-toggle re-render + update count badge
+    _cmPnlModalOverlay._lastTrades = data.trades || [];
+    const countEl = overlay.querySelector('#cm-pnl-col-count');
+    if (countEl) {
+      const visibleIds = window.PnlModalColumns.loadVisibleColumns();
+      const total = window.PnlModalColumns.COLUMN_DEFS.length;
+      countEl.textContent = `${visibleIds.length}/${total}`;
+    }
   } catch (err) {
     body.innerHTML = `<div class="text-center py-4 text-muted-3">โหลดล้มเหลว: ${escapeHtml(err.message || 'unknown')}</div>`;
     totalEl.innerHTML = '';
@@ -953,58 +961,16 @@ function renderCmPnlModalTrades(container, trades) {
     container.innerHTML = '<div class="text-center py-4 text-muted-3">วันนี้ยังไม่มีเทรดปิด</div>';
     return;
   }
-  // เรียงจากใหม่สุดขึ้นก่อน (sellFilledAt DESC) — เหมือน pnl.js
-  const sorted = [...trades].sort((a, b) => {
-    const at = a.sellFilledAt ? new Date(a.sellFilledAt).getTime() : 0;
-    const bt = b.sellFilledAt ? new Date(b.sellFilledAt).getTime() : 0;
-    return bt - at;
+  // FIX-2026-08-09 (rev2): delegate to shared module — same as pnl.html modal
+  //   - entry/exit prices now come from t.entryPrice/t.exitPrice (set by pnl.routes.js from buyPrice/sellAvgPrice)
+  //   - entry/exit qty columns available
+  //   - column toggle UI in modal header (shared localStorage key with pnl.html)
+  const table = window.PnlModalColumns.buildTableHtml(trades, {
+    escHtml: escapeHtml,
+    formatUsdt: formatUsdtPnl,
+    formatThbInline: formatThbInlinePnl,
   });
-  const rows = sorted.map((t) => {
-    const pnl = t.realizedPnl || 0;
-    const cls = pnl > 0 ? 'pnl-bull' : pnl < 0 ? 'pnl-bear' : '';
-    const ts = t.sellFilledAt ? new Date(t.sellFilledAt).toLocaleString('th-TH', {
-      hour: '2-digit', minute: '2-digit', day: '2-digit', month: 'short', hour12: false, timeZone: 'Asia/Bangkok',
-    }) : '';
-    const thb = (window.__fx && window.__fx.rate) ? (pnl * window.__fx.rate) : null;
-    const isDcaStack = t.isDcaStack === true;
-    const dcaBadge = isDcaStack
-      ? `<span class="dca-pill" title="DCA stack — ${t.dcaLayerCount || '?'} layers">📚 L${t.dcaLayerCount || '?'}</span>`
-      : '';
-    const entryDisplay = isDcaStack
-      ? `<span title="stack BEP">${t.stackBep ? window.PriceFormat.format(parseFloat(t.stackBep), t.symbol) : '—'}</span>`
-      : (t.entryPrice ? window.PriceFormat.format(parseFloat(t.entryPrice), t.symbol) : '—');
-    const qtyDisplay = isDcaStack
-      ? `${t.stackTotalQty ? parseFloat(t.stackTotalQty).toFixed(4) : (t.qty ? parseFloat(t.qty).toFixed(4) : '—')}`
-      : (t.qty ? parseFloat(t.qty).toFixed(4) : '—');
-    const reasonPill = (window.SellReasons && window.SellReasons.renderSellReasonPill)
-      ? window.SellReasons.renderSellReasonPill(t.sellReason, t.sellReasonDetail)
-      : (t.sellReason || '—');
-    return `<tr>
-      <td><span class="badge-bot">${escapeHtml(t.botName || '?')}</span></td>
-      <td>${escapeHtml(t.symbol || '')} ${dcaBadge}</td>
-      <td class="text-end">${entryDisplay}</td>
-      <td class="text-end">${t.exitPrice ? window.PriceFormat.format(parseFloat(t.exitPrice), t.symbol) : '—'}</td>
-      <td class="text-end">${qtyDisplay}</td>
-      <td class="text-end ${cls}">${formatUsdtPnl(pnl)}${thb != null ? `<br><span class="thb-sub">≈ ฿${formatThbInlinePnl(thb)}</span>` : ''}</td>
-      <td class="text-end muted">${ts}</td>
-      <td>${reasonPill}</td>
-    </tr>`;
-  }).join('');
-  container.innerHTML = `
-    <table class="pnl-modal-table">
-      <thead>
-        <tr>
-          <th>Bot</th><th>Symbol</th>
-          <th class="text-end">Entry</th><th class="text-end">Exit</th>
-          <th class="text-end">Qty</th>
-          <th class="text-end">PnL</th>
-          <th class="text-end">เวลา</th>
-          <th>Reason</th>
-        </tr>
-      </thead>
-      <tbody>${rows}</tbody>
-    </table>
-  `;
+  container.innerHTML = `<table class="pnl-modal-table">${table.html}</table>`;
 }
 
 function buildCmPnlModalSkeleton() {
@@ -1014,7 +980,14 @@ function buildCmPnlModalSkeleton() {
     <div class="pnl-modal-card">
       <div class="pnl-modal-header">
         <h5 id="cm-pnl-modal-title">—</h5>
-        <button type="button" class="pnl-modal-close" aria-label="ปิด">✕</button>
+        <div class="pnl-modal-actions">
+          <button type="button" id="cm-pnl-col-toggle" class="pnl-col-toggle-btn" aria-label="เลือกคอลัมน์">
+            <span>⚙️ คอลัมน์</span>
+            <span class="count" id="cm-pnl-col-count">—</span>
+          </button>
+          <button type="button" class="pnl-modal-close" aria-label="ปิด">✕</button>
+        </div>
+        <div id="cm-pnl-col-menu" class="pnl-col-menu" style="display:none;"></div>
       </div>
       <div id="cm-pnl-modal-total" class="pnl-modal-total"></div>
       <div id="cm-pnl-modal-body" class="pnl-modal-body"></div>
@@ -1024,7 +997,41 @@ function buildCmPnlModalSkeleton() {
   overlay.querySelector('.pnl-modal-close').addEventListener('click', () => overlay.classList.remove('is-open'));
   overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.classList.remove('is-open'); });
   document.addEventListener('keydown', (e) => { if (e.key === 'Escape') overlay.classList.remove('is-open'); });
+
+  // FIX-2026-08-09 (rev2): column toggle handler — shared with pnl.html
+  const toggleBtn = overlay.querySelector('#cm-pnl-col-toggle');
+  const menu = overlay.querySelector('#cm-pnl-col-menu');
+  toggleBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (menu.style.display === 'none') {
+      renderCmColumnMenu(menu);
+      menu.style.display = 'block';
+    } else {
+      menu.style.display = 'none';
+    }
+  });
+  document.addEventListener('click', (e) => {
+    if (!menu.contains(e.target) && e.target !== toggleBtn && !toggleBtn.contains(e.target)) {
+      menu.style.display = 'none';
+    }
+  });
   _cmPnlModalOverlay = overlay;
+}
+
+function renderCmColumnMenu(menu) {
+  const onChange = () => {
+    const body = _cmPnlModalOverlay.querySelector('#cm-pnl-modal-body');
+    if (body && _cmPnlModalOverlay._lastTrades) {
+      renderCmPnlModalTrades(body, _cmPnlModalOverlay._lastTrades);
+    }
+    const countEl = _cmPnlModalOverlay.querySelector('#cm-pnl-col-count');
+    if (countEl) {
+      const visibleIds = window.PnlModalColumns.loadVisibleColumns();
+      const total = window.PnlModalColumns.COLUMN_DEFS.length;
+      countEl.textContent = `${visibleIds.length}/${total}`;
+    }
+  };
+  window.PnlModalColumns.renderColumnMenu(menu, onChange);
 }
 
 /* ════════════════════════════════════════════════════════════════════
