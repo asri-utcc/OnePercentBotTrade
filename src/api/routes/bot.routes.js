@@ -4,8 +4,8 @@ const express = require('express');
 const { requireAuth } = require('../middleware/auth');
 const Bot = require('../../db/models/Bot');
 const Trade = require('../../db/models/Trade');
-const AppConfig = require('../../db/models/AppConfig'); // FIX-2026-08-08 (rev3): Bot Defaults from AppConfig
 const config = require('../../../config');
+const { getBotDefaults, buildBotCreatePayload } = require('../../services/botDefaults'); // FIX-2026-08-09: share defaults source with autoAddBot
 const botManager = require('../../core/botManager');
 const symbolInfo = require('../../binance/symbolInfo');
 const forceClose = require('../../core/forceClose');
@@ -1043,24 +1043,14 @@ router.post('/', requireAuth, requireBotActionPassword, async (req, res) => {
     const data = req.body || {};
     const defaults = config.defaults;
 
-    // FIX-2026-08-08 (rev3): Bot Defaults — ใช้ค่า default จาก AppConfig (ตั้งได้จาก /settings.html)
-    //   - merge AppConfig.botDefaults กับ config.defaults (fallback)
-    //   - ถ้า client ส่ง field มา → ใช้ค่าจาก client; ถ้าไม่ส่ง → ใช้ AppConfig default
-    //   - read DB ตรงนี้ (ไม่ cache) — เพราะ create ไม่บ่อย + ต้องการ fresh value
-    let botDefaults = {};
-    try {
-      const cfg = await AppConfig.findOne({ key: 'singleton' }).lean();
-      if (cfg && cfg.botDefaults) botDefaults = cfg.botDefaults;
-    } catch (_) { /* ignore — fallback to schema defaults */ }
+    // FIX-2026-08-09: ใช้ botDefaults helper เดียวกับ autoAddBot
+    //   - ก่อนหน้านี้ inline `AppConfig.findOne({key:'singleton'})` + local pickDefault
+    //   - ตอนนี้: แชร์ logic กับ autoAddBot._createBotFor() — ไม่มี drift อีก
+    //   - ถ้า user แก้ Settings section 1️⃣ Bot Defaults → apply ทั้ง manual + auto paths
+    const botDefaults = await getBotDefaults();
 
-    // helper: เลือก AppConfig default ถ้า client ไม่ส่ง (สำหรับ boolean — explicit false ต้องผ่าน)
-    const pickDefault = (key, fallback) => {
-      if (botDefaults[key] !== undefined) return botDefaults[key];
-      return fallback;
-    };
-
-    const symbol = (data.symbol || pickDefault('defaultSymbol', defaults.symbol)).toUpperCase();
-    const timeframe = data.timeframe || pickDefault('defaultTimeframe', defaults.timeframe);
+    const symbol = (data.symbol || botDefaults.defaultSymbol || defaults.symbol).toString().toUpperCase();
+    const timeframe = data.timeframe || botDefaults.defaultTimeframe || defaults.timeframe;
 
     // validate timeframe
     if (!config.binanceIntervals.includes(timeframe)) {
@@ -1074,11 +1064,11 @@ router.post('/', requireAuth, requireBotActionPassword, async (req, res) => {
       if (!info.isSpotTradingAllowed) {
         return res.status(400).json({ error: `${symbol} ไม่อนุญาตให้เทรด spot` });
       }
-      // validate capital vs minNotional
-      const capital = parseFloat(data.capitalPerTrade ?? defaults.capitalPerTrade);
-      if (info.notional && capital < info.notional.minNotional.toNumber()) {
+      // validate capital vs minNotional (ใช้ resolve แล้วจาก buildBotCreatePayload ด้านล่าง แต่เช็คเบื้องต้นจาก override ก่อนเพื่อ fail-fast)
+      const capitalCandidate = parseFloat(data.capitalPerTrade ?? botDefaults.capitalPerTrade ?? defaults.capitalPerTrade);
+      if (info.notional && capitalCandidate < info.notional.minNotional.toNumber()) {
         return res.status(400).json({
-          error: `capitalPerTrade ${capital} ต่ำกว่า minNotional ${info.notional.minNotional.toString()} ของ ${symbol}`,
+          error: `capitalPerTrade ${capitalCandidate} ต่ำกว่า minNotional ${info.notional.minNotional.toString()} ของ ${symbol}`,
         });
       }
     } catch (err) {
@@ -1098,114 +1088,30 @@ router.post('/', requireAuth, requireBotActionPassword, async (req, res) => {
     //   - DPS adjusts size/layers per-trade based on win/loss history
     //   - DCA stack mode manages its own size/layers per layer (BEP-driven)
     //   - ทั้ง 2 ระบบปรับ size พร้อมกัน → conflict; user ต้องเลือกอย่างใดอย่างหนึ่ง
-    const dpsEnabled = data.dynamicSizeEnabled !== false; // default true
+    const dpsEnabled = data.dynamicSizeEnabled !== false; // default true (lenient)
     if (dpsEnabled && (data.dcaEnabled === true || data.martingaleEnabled === true)) {
       return res.status(400).json({
         error: 'dynamicSizeEnabled is mutually exclusive with dcaEnabled/martingaleEnabled (Dynamic Position Sizing adjusts size per-trade; DCA stack manages its own layers). Disable one of them.',
       });
     }
 
-    const bot = await Bot.create({
-      name: data.name || `${symbol} ${timeframe}`,
-      symbol,
-      timeframe,
-      // FIX-2026-08-08 (rev3): ใช้ AppConfig.botDefaults ถ้า client ไม่ส่ง
-      capitalPerTrade: parseFloat(data.capitalPerTrade ?? pickDefault('capitalPerTrade', defaults.capitalPerTrade)),
-      maxTrades: parseInt(data.maxTrades ?? pickDefault('maxTrades', defaults.maxTrades), 10),
-      tpPercent: parseFloat(data.tpPercent ?? pickDefault('tpPercent', defaults.tpPercent)),
-      // FIX-2026-08-02: DCA + BEP stack mode (opt-in, default off — backward compatible)
-      //   - false (default) → พฤติกรรมเดิม 1 BUY → 1 SELL (no change)
-      //   - true → 1 บอท = 1 open DCA stack, S1 แต่ละครั้งจะเพิ่ม layer เข้า stack
-      //   - dcaMaxLayers: จำนวน layer สูงสุด (default 3, range 1-100)
-      dcaEnabled: data.dcaEnabled !== undefined ? data.dcaEnabled === true : pickDefault('dcaEnabled', false),
-      dcaMaxLayers: Math.min(100, Math.max(1, parseInt(data.dcaMaxLayers ?? pickDefault('dcaMaxLayers', 3), 10))),
-      // FIX-2026-08-03: DCA + Martingale sizing (opt-in, default off — backward compatible 100%)
-      //   - martingaleEnabled requires dcaEnabled=true (validated below)
-      //   - layer N notional = capitalPerTrade × mult^(N-1), capped by martingaleMaxLayerNotional
-      //   - ปลอดภัย: ไม่มีบอทไหนถูกบังคับ Martingale อัตโนมัติ
-      martingaleEnabled: data.martingaleEnabled !== undefined ? data.martingaleEnabled === true : pickDefault('martingaleEnabled', false),
-      martingaleMultiplier: Math.min(3, Math.max(1, parseFloat(data.martingaleMultiplier ?? pickDefault('martingaleMultiplier', 1.5)))),
-      martingaleMaxLayerNotional: Math.min(10000, Math.max(1, parseFloat(data.martingaleMaxLayerNotional ?? pickDefault('martingaleMaxLayerNotional', 100)))),
-      // FIX-2026-07-24: parseFloat เพื่อรองรับทศนิยม (0.5 = 30 วินาที)
-      // FIX-2026-07-25: clamp 0.1..60 ตาม schema (mirror PUT route)
-      retryTimeMin: Math.min(60, Math.max(0.1, parseFloat(data.retryTimeMin ?? pickDefault('retryTimeMin', defaults.retryTimeMin)))),
-      retryMax: parseInt(data.retryMax ?? pickDefault('retryMax', 1), 10),
-      // FIX-2026-07-24: kcMult validation — clamp 0.5..5 (default 1.5)
-      kcMult: Math.min(5, Math.max(0.5, parseFloat(data.kcMult ?? pickDefault('kcMult', 1.5)))),
-      // FIX-2026-07-24: minSpreadTicks (0..10, default 1) — per-bot spread tolerance
-      minSpreadTicks: Math.min(10, Math.max(0, parseInt(data.minSpreadTicks ?? pickDefault('minSpreadTicks', 1), 10))),
-      // FIX-2026-07-25: suggestTpWindow (30..1000, default 500) — bars for Min %KC calc
-      suggestTpWindow: Math.min(1000, Math.max(30, parseInt(data.suggestTpWindow ?? pickDefault('suggestTpWindow', 500), 10))),
-      // FIX-2026-07-24: s1OnlyDown (default false) — skip bg 2→1 (ซื้อตอนราคาสูง)
-      s1OnlyDown: data.s1OnlyDown !== undefined ? data.s1OnlyDown === true : pickDefault('s1OnlyDown', false),
-      // FIX-2026-07-25: xs1Enabled (default true) — per-bot XS1 anti-dump gate toggle
-      //   - true (default): skip S1 เมื่อ candle-wide dump pattern
-      //   - false: ใช้สัญญาณดั้งเดิม (ไม่ skip)
-      xs1Enabled: data.xs1Enabled !== undefined ? data.xs1Enabled !== false : pickDefault('xs1Enabled', true),
-      // FIX-2026-08-01: cbEnabled (default true) — per-bot Circuit-breaker (CB) panic-sell toggle — เดิมชื่อ sls1Enabled
-      //   - true (default): panic-close ALL positions เมื่อ 3 แท่งติด close<lowerKC + open<lowerKC + แดง
-      //   - false: ไม่ panic-close (เสี่ยงขาดทุนต่อถ้ากราฟไหล)
-      cbEnabled: data.cbEnabled !== undefined ? data.cbEnabled !== false : pickDefault('cbEnabled', true),
-      // FIX-2026-08-06: CBv2 — sustained 3-candle breach lock (default true)
-      //   - true (default): panic-close + lock bot cbv2LockHours hours เมื่อ 4 แท่งติด red below lowerKC
-      //   - false: disable CBv2 lock (CB ปกติยังทำงานถ้า cbEnabled=true)
-      cbv2Enabled: data.cbv2Enabled !== undefined ? data.cbv2Enabled !== false : pickDefault('cbv2Enabled', true),
-      // FIX-2026-08-06: CBv2 lock duration hours (0.5..168, default 8)
-      cbv2LockHours: Math.min(168, Math.max(0.5, parseFloat(data.cbv2LockHours ?? pickDefault('cbv2LockHours', 8)))),
-      // FIX-2026-08-08: CBv3 lock duration hours (0.5..168, default 8) — applied alongside CBv2 per cbVersion
-      cbv3LockHours: Math.min(168, Math.max(0.5, parseFloat(data.cbv3LockHours ?? pickDefault('cbv3LockHours', 8)))),
-      // FIX-2026-08-01: safeTradeEnabled (default true) — per-bot safe-trade filter toggle
-      //   - true (default): ก่อนวาง BUY ให้เช็ค super-upper TF (4h/1d/1w ตาม bot TF) ว่าเป็นแท่งเขียว/เหนือ EMA20
-      //   - false: ซื้อทันที (พฤติกรรมเดิม)
-      safeTradeEnabled: data.safeTradeEnabled !== undefined ? data.safeTradeEnabled !== false : pickDefault('safeTradeEnabled', true),
-      // FIX-2026-08-03: safeTradeTrendlineEnabled (default false) — opt-in LuxAlgo red trendline filter
-      //   - true: BUY gate ตรวจราคา "เหนือ" trendline support บน upper-TF (TREND_TF_MAP)
-      //   - false (default): ไม่กรอง trendline — opt-in เท่านั้น
-      //   - ⚠️ ไม่แนะนำสำหรับบอท DCA (DCA ซื้อ dip — filter นี้ block dip-buy)
-      safeTradeTrendlineEnabled: data.safeTradeTrendlineEnabled !== undefined ? data.safeTradeTrendlineEnabled === true : pickDefault('safeTradeTrendlineEnabled', false),
-      // FIX-2026-08-05: safeTradeNoTradeEnabled (default false) — opt-in Pine "No-Trade Signal Engine" filter
-      //   - true: BUY gate ตรวจ upper-TF (TREND_TF_MAP) ว่าแท่งล่าสุดมี "nt"/"nt1" pattern (engulfing + shooting star)
-      //   - false (default): ไม่กรอง no-trade pattern — opt-in เท่านั้น
-      //   - ⚠️ ไม่แนะนำสำหรับบอท DCA (DCA ซื้อ dip — filter นี้ block dip-buy)
-      //   - Real-time: ตรวจแท่งที่ยังไม่ close ได้ (Binance REST คืน close=live price)
-      safeTradeNoTradeEnabled: data.safeTradeNoTradeEnabled !== undefined ? data.safeTradeNoTradeEnabled === true : pickDefault('safeTradeNoTradeEnabled', false),
-      // FIX-2026-08-01: autoPauseEnabled (default true) — per-bot auto-pause on low Min-%KC toggle
-      //   - true (default): ทุก 5 min ตรวจ Min-%KC(30 bars) — ถ้า < autoPauseMinKcPct → set enabled=false + auto-resume เมื่อกลับมา
-      //   - false: ไม่ตรวจ (พฤติกรรมเดิม)
-      autoPauseEnabled: data.autoPauseEnabled !== undefined ? data.autoPauseEnabled !== false : pickDefault('autoPauseEnabled', true),
-      autoPauseMinKcPct: Math.min(50, Math.max(0.1, parseFloat(data.autoPauseMinKcPct ?? pickDefault('autoPauseMinKcPct', 2)))),
-      // FIX-2026-07-31: autoArmStopLossOnUKC (default true) — per-bot auto-arm SL-on-UKC toggle
-      //   - true (default): auto-arm trade.useStopLossOnUKC=true เมื่อ position loss > autoArmLossPct + age > autoArmAgeHours
-      //   - false: ไม่ auto-arm (SL-on-UKC จะไม่ trigger)
-      autoArmStopLossOnUKC: data.autoArmStopLossOnUKC !== undefined ? data.autoArmStopLossOnUKC !== false : pickDefault('autoArmStopLossOnUKC', true),
-      // FIX-2026-08-03: per-bot auto-arm loss threshold % (1..90, default 10)
-      autoArmLossPct: Math.min(90, Math.max(1, parseFloat(data.autoArmLossPct ?? pickDefault('autoArmLossPct', 10)))),
-      // FIX-2026-08-03: per-bot auto-arm age threshold hours (0.5..168, default 4)
-      autoArmAgeHours: Math.min(168, Math.max(0.5, parseFloat(data.autoArmAgeHours ?? pickDefault('autoArmAgeHours', 4)))),
-      // FIX-2026-08-03: SL-UKC trigger on profitable positions (default false — loss only)
-      slUkcTriggerOnProfit: data.slUkcTriggerOnProfit !== undefined ? data.slUkcTriggerOnProfit === true : pickDefault('slUkcTriggerOnProfit', false),
-      // FIX-2026-07-31: tpTrendMultiplier (default 2, clamp 1..10) — TP ×N when upper-TF trend=upper
-      //   - 1 = off (no multiplier)
-      //   - 2 = double (default: 0.2% → 0.4%)
-      tpTrendMultiplier: Math.min(10, Math.max(1, parseFloat(data.tpTrendMultiplier ?? pickDefault('tpTrendMultiplier', 2)))),
-      // FIX-2026-08-01: tpTrendEnabled (per-bot toggle, default true)
-      //   - true → คูณ tpPercent ด้วย tpTrendMultiplier เมื่อ upper-TF trend=upper
-      //   - false → ใช้ tpPercent ตรงๆ (ไม่สนใจ trend)
-      tpTrendEnabled: data.tpTrendEnabled !== undefined ? data.tpTrendEnabled !== false : pickDefault('tpTrendEnabled', true),
-      stopLossOnUpperKC: data.stopLossOnUpperKC !== undefined ? data.stopLossOnUpperKC === true : pickDefault('stopLossOnUpperKC', false), // FIX-2026-07-23: stop-loss toggle
-      autoUpdateTp: data.autoUpdateTp !== undefined ? data.autoUpdateTp === true : pickDefault('autoUpdateTp', false), // FIX-2026-07-23: TP auto-update toggle
-      // FIX-2026-07-31: รับ enabled จาก client — ถ้า true → enable ทันทีหลัง create
-      //   - default: false (เดิม) — preserve current behavior
-      //   - enabled: true ถ้า client ส่ง data.enabled === true (atomic create+enable ใน 1 round-trip)
-      enabled: data.enabled === true,
-      status: data.enabled === true ? 'starting' : 'idle',
-      // FIX-2026-08-08: Feature #1 — Dynamic Position Sizing (default ON per user request)
-      //   - mutually exclusive กับ DCA / Martingale (validator ก่อนหน้านี้ enforce แล้ว)
-      dynamicSizeEnabled: data.dynamicSizeEnabled !== undefined ? data.dynamicSizeEnabled !== false : pickDefault('dynamicSizeEnabled', true),
-      // FIX-2026-08-08: Feature #3 — Auto Unlock Cooldown (per-bot, default OFF)
-      cbAutoUnlockEnabled: data.cbAutoUnlockEnabled !== undefined ? data.cbAutoUnlockEnabled === true : pickDefault('cbAutoUnlockEnabled', false),
-      cbAutoUnlockThresholdPct: Math.min(5.0, Math.max(0.5, parseFloat(data.cbAutoUnlockThresholdPct ?? pickDefault('cbAutoUnlockThresholdPct', 1.0)))),
+    // FIX-2026-08-09: build payload จาก helper เดียว (DRY — share with autoAddBot)
+    //   - data = req.body (explicit user input)
+    //   - botDefaults = AppConfig.botDefaults (Settings section 1️⃣)
+    //   - defaults = config.defaults (env-level fallback)
+    const payload = buildBotCreatePayload({
+      overrides: data,
+      botDefaults,
+      fallbacks: defaults,
     });
+
+    // `enabled` / `status` เป็น flow control (ไม่ใช่ default) — ใส่ที่นี่
+    //   - default: false (เดิม) — preserve current behavior
+    //   - enabled: true ถ้า client ส่ง data.enabled === true (atomic create+enable ใน 1 round-trip)
+    payload.enabled = data.enabled === true;
+    payload.status = data.enabled === true ? 'starting' : 'idle';
+
+    const bot = await Bot.create(payload);
 
     // FIX-2026-07-31: atomic auto-enable — ถ้า enabled=true ให้เริ่มเทรดทันที
     //   - ต้อง await enableBot เพื่อให้แน่ใจว่า trader spawn สำเร็จก่อนตอบ response
@@ -1973,7 +1879,24 @@ router.post('/:id/trades/:tradeId/force-close', requireAuth, requireBotActionPas
       return res.status(400).json({ error: `Trade state is "${trade.state}" — only ${forceClose.FORCE_OPEN_STATES.join('/')} are force-closable` });
     }
     const allowMarketSell = req.body.allowMarketSell !== false; // default true; allow override for cleanup scripts
-    const result = await forceClose.forceCloseTrade({ trade, bot, allowMarketSell });
+    // FIX-2026-08-09: pass source='api' (UI) → sellReason = 'manual_api_force_close_trade'
+    const result = await forceClose.forceCloseTrade({ trade, bot, allowMarketSell, source: 'api' });
+    if (!result.ok) {
+      return res.status(502).json({ error: result.error || 'force-close failed', result });
+    }
+    // FIX-2026-08-09: หลัง force-close เ�ร็จ — override sellReason ให้ระบุ source ชัด
+    //   - forceCloseTrade({source:'api'}) จะตั้ง sellReason='manual_api_market' (generic)
+    //   - เปลี่ยนเป็น 'manual_api_force_close_trade' เพื่อให้ filter/group รู้ว่าเป็น UI 1 trade
+    await Trade.updateOne(
+      { _id: trade._id, state: 'sold' },
+      {
+        $set: {
+          sellReason: 'manual_api_force_close_trade',
+          sellReasonSource: 'bot.routes.force-close-trade',
+          sellReasonAt: new Date(),
+        },
+      }
+    ).catch((err) => logger.warn({ err: err.message }, 'bot.routes: override sellReason after force-close-trade failed (non-fatal)'));
     if (!result.ok) {
       return res.status(502).json({ error: result.error || 'force-close failed', result });
     }
@@ -1999,11 +1922,28 @@ router.post('/:id/force-close', requireAuth, requireBotActionPassword, async (re
     if (!bot) return res.status(404).json({ error: 'Bot not found' });
     const allowMarketSell = req.body.allowMarketSell !== false;
     const disableBot = req.body.disableBot !== false; // default true
+    // FIX-2026-08-09: pass source='api' (UI) → sellReason = 'manual_api_force_close_bot'
     const result = await forceClose.forceCloseBot({
       botId: bot._id,
       allowMarketSell,
       disableBot,
+      source: 'api',
     });
+    // FIX-2026-08-09: override sellReason ของ trades ที่เพิ่งปิด → 'manual_api_force_close_bot'
+    //   - bulk update สำหรับ trades ที่เพิ่งถูก closed (state='sold')
+    if (result.closedTrades && result.closedTrades.length > 0) {
+      const tradeIds = result.closedTrades.map((t) => t.tradeId);
+      await Trade.updateMany(
+        { _id: { $in: tradeIds }, state: 'sold' },
+        {
+          $set: {
+            sellReason: 'manual_api_force_close_bot',
+            sellReasonSource: 'bot.routes.force-close-bot',
+            sellReasonAt: new Date(),
+          },
+        }
+      ).catch((err) => logger.warn({ err: err.message }, 'bot.routes: override sellReason after force-close-bot failed (non-fatal)'));
+    }
     logger.warn({
       botId: bot._id.toString(),
       closed: result.closedTrades.length,

@@ -30,6 +30,7 @@ const Bot = require('../db/models/Bot');
 const volatilityScanner = require('../core/volatilityScanner');
 const botManager = require('../core/botManager'); // FIX-2026-08-07: auto-enable บอทที่เพิ่งสร้าง (spawnTrader)
 const eventBus = require('./eventBus');
+const { getBotDefaults, buildBotCreatePayload } = require('./botDefaults'); // FIX-2026-08-09: share defaults source with manual POST /api/bots
 const logger = require('../utils/logger');
 
 const DEFAULT_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
@@ -303,13 +304,18 @@ class AutoAddBot {
 
   /**
    * Create a new bot in DISABLED state. User must manually enable after review.
-   * Settings mirror new-bot modal defaults (2026-08-07):
-   *   - name "${base}<namePrefix>" (strip USDT suffix; prefix configurable via Settings 7️⃣)
-   *   - 9 USDT/trade, 1 trade, TP from scan suggestedTpPct
-   *   - 0.2 min retry × 8, KC×1.2, spread 1 tick
-   *   - ST2 + ST3 on · CB off · Safe-trade off
-   *   - autoUpdateTp + auto-arm SL-UKC 6.3%/4h + SL-UKC on profit
-   *   - TP trend ×2 enabled
+   *
+   * FIX-2026-08-09: อ่านค่า default จาก AppConfig.botDefaults (Settings page section 1️⃣)
+   *   เพื่อให้ค่าตรงกับ New Bot modal — แก้บั๊กที่ autoAddBot hardcode ทุก field
+   *   แล้วค่าใน Settings ไม่ apply กับบอทที่ถูกสร้างอัตโนมัติ
+   *
+   * Precedence ต่อ field (ผ่าน buildBotCreatePayload):
+   *   1. scan result (symbol, timeframe, tpPercent, name)
+   *   2. AppConfig.botDefaults (user ตั้งใน Settings)
+   *   3. fallback (hardcoded schema default)
+   *
+   * `enabled: false` ตั้งข้างนอกเสมอ — เป็น SAFETY ไม่ใช่ default
+   *   (ถ้า autoEnable=true → botManager.enableBot() จะถูกเรียกตามหลัง return)
    */
   async _createBotFor(rank) {
     const symbol = String(rank.symbol || '').toUpperCase();
@@ -321,40 +327,29 @@ class AutoAddBot {
       ? this.config.namePrefix.trim()
       : '(bAdd)';
     const name = `${base}${prefix}`;
-    // tpPercent = suggestedTpPct (NET, x.xx1 format) — fallback 0.1 ถ้า scan ไม่ได้ส่งมา
-    const tpPercent = Number.isFinite(rank.suggestedTpPct) ? rank.suggestedTpPct : 0.1;
-    const bot = await Bot.create({
+
+    // FIX-2026-08-09: อ่าน AppConfig.botDefaults เพื่อ share defaults กับ manual POST /api/bots
+    //   - ก่อนหน้านี้: hardcode ทุก field → Settings ไม่มีผลกับบอทที่สร้างอัตโนมัติ
+    //   - ตอนนี้: user เปลี่ยนค่าใน Settings → บอทใหม่ที่ auto-spawn ใช้ค่านั้นทันที
+    const botDefaults = await getBotDefaults();
+
+    // Scan-specific overrides:
+    //   - name: "<base><prefix>" (ไม่ใช่ "<symbol> <timeframe>")
+    //   - symbol/timeframe: จาก scan โดยตรง (override botDefaults.defaultSymbol/defaultTimeframe)
+    //   - tpPercent: suggestedTpPct (NET from volatilityScanner) — ถ้า scan ไม่ส่ง → fallback ของ helper
+    const overrides = {
       name,
       symbol,
       timeframe: tf,
-      capitalPerTrade: 9,
-      maxTrades: 1,
-      tpPercent,
-      retryTimeMin: 0.2,
-      retryMax: 8,
-      kcMult: 1.2,
-      minSpreadTicks: 1,
-      suggestTpWindow: 30,
-      s1OnlyDown: true,
-      xs1Enabled: true,
-      stopLossOnUpperKC: false,
-      cbEnabled: false,
-      cbv2Enabled: true,
-      cbv2LockHours: 8,
-      safeTradeEnabled: false,
-      safeTradeTrendlineEnabled: true,
-      safeTradeNoTradeEnabled: true,
-      autoPauseEnabled: true,
-      autoPauseMinKcPct: 2,
-      autoUpdateTp: true,
-      autoArmStopLossOnUKC: true,
-      autoArmLossPct: 6.3,
-      autoArmAgeHours: 4,
-      slUkcTriggerOnProfit: true,
-      tpTrendEnabled: true,
-      tpTrendMultiplier: 2,
-      enabled: false, // SAFETY: don't auto-enable — user reviews + enables manually
-    });
+      tpPercent: Number.isFinite(rank.suggestedTpPct) ? rank.suggestedTpPct : undefined,
+    };
+
+    const payload = buildBotCreatePayload({ overrides, botDefaults });
+
+    // SAFETY: สร้างบอท disabled เสมอ — user (หรือ autoEnable flag) เปิดเองทีหลัง
+    payload.enabled = false;
+
+    const bot = await Bot.create(payload);
     return bot;
   }
 
