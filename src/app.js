@@ -3,6 +3,7 @@
 const express = require('express');
 const session = require('express-session');
 const MongoStore = require('connect-mongo');
+const cookieParser = require('cookie-parser'); // 2026-08-09: Telegram Login — read tg_login_token cookie
 const path = require('path');
 
 const config = require('../config');
@@ -70,6 +71,9 @@ function createApp() {
   app.use(express.json({ limit: '1mb' }));
   app.use(express.urlencoded({ extended: true, limit: '1mb' }));
 
+  // 2026-08-09: Cookie parser (ต้องมาก่อน session — ใช้ใน /api/auth/login-telegram/* เพื่ออ่าน tg_login_token)
+  app.use(cookieParser());
+
   // Session
   app.use(session({
     secret: config.sessionSecret,
@@ -88,6 +92,21 @@ function createApp() {
       ttl: 7 * 24 * 60 * 60,
     }),
   }));
+
+  // 2026-08-09: Password & Sessions Manager — update lastSeenAt ทุก authenticated request
+  //   - ใช้สำหรับแสดง "last active 5 min ago" ในหน้า Sessions Manager
+  //   - skip /api/auth/login + /api/auth/status (ยังไม่ authenticate)
+  //   - throttle: เขียน session ทุก 60s ต่อ session (กัน Mongo write storm)
+  app.use((req, res, next) => {
+    if (!req.session || !req.session.authenticated) return next();
+    if (req.path.startsWith('/api/auth/login') || req.path.startsWith('/api/auth/status')) return next();
+    const now = Date.now();
+    const last = req.session.lastSeenAt ? new Date(req.session.lastSeenAt).getTime() : 0;
+    if (now - last >= 60 * 1000) {
+      req.session.lastSeenAt = new Date().toISOString();
+    }
+    next();
+  });
 
   // Request log
   app.use((req, res, next) => {

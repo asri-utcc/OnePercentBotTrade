@@ -668,6 +668,9 @@ function renderTelegramEventsSection(ev) {
     { id: 'ev-autoDeleteBotWarning', k: 'autoDeleteBotWarning', icon: '⏰', title: 'Auto Delete — แจ้งล่วงหน้า', desc: 'แจ้งก่อน soft-delete', default: true },
     { id: 'ev-autoDeleteBotRemoved', k: 'autoDeleteBotRemoved', icon: '🗑', title: 'Auto Delete — soft-deleted', desc: 'แจ้งเมื่อ soft-delete (restore ได้ 30 วัน)', default: true },
     { id: 'ev-bnbLowBalance', k: 'bnbLowBalance', icon: '💎', title: 'BNB balance ต่ำ', desc: 'BNB value &lt; threshold', default: true },
+    // 2026-08-09: Telegram Login — alternative login channel (OTP 6 หลักเข้า Telegram แทน password)
+    //   - ปิดได้ถ้าไม่ต้องการให้ user login ผ่าน Telegram
+    { id: 'ev-telegramLogin', k: 'telegramLogin', icon: '📨', title: 'Telegram Login', desc: 'OTP 6 หลักสำหรับ login ผ่าน Telegram (ลืม password)', default: true },
   ];
 
   const cards = events.map((e) => {
@@ -1122,6 +1125,8 @@ async function saveEvents() {
     autoDeleteBotWarning:  document.getElementById('ev-autoDeleteBotWarning').checked,
     autoDeleteBotRemoved:  document.getElementById('ev-autoDeleteBotRemoved').checked,
     bnbLowBalance:      document.getElementById('ev-bnbLowBalance').checked,
+    // 2026-08-09: Telegram Login (alternative login channel)
+    telegramLogin:      document.getElementById('ev-telegramLogin').checked,
   };
   try {
     await API.put('/api/telegram/config', { events });

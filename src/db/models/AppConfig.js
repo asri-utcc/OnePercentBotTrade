@@ -6,9 +6,19 @@ const mongoose = require('mongoose');
 const appConfigSchema = new mongoose.Schema(
   {
     key: { type: String, default: 'singleton', unique: true },
-    // password hash จาก bcrypt (เก็บที่นี่เพื่อ persist ระหว่าง restart)
+    // password hash จาก bcrypt (เก�บที่นี่เพื่อ persist ระหว่าง restart)
     passwordHash: { type: String, default: '' },
     passwordSetAt: { type: Date, default: null },
+    // 2026-08-09: Password & Sessions Manager
+    //   - passwordHint: ข้อความเตือนควา�จำส่วนตัว (plain text, max 500) — ไม่ใช่ security feature
+    //     แสดงเฉพาะ admin ที่ login แล้ว ใช้เตือนตัวเอง (เช่น "อันที่ใช้กับเมลทำงาน")
+    //   - passwordNote: บันทึก security audit (plain text, max 1000) — เช่น
+    //     "rotated 2026-08-09 หลังเจอ login จาก IP 185.x.x.x ที่ไม่รู้จัก"
+    //   - passwordLastChangedAt / passwordLastChangedFromIp: audit trail (auto-fill เวลา change-password)
+    passwordHint: { type: String, default: '', maxlength: 500 },
+    passwordNote: { type: String, default: '', maxlength: 1000 },
+    passwordLastChangedAt: { type: Date, default: null },
+    passwordLastChangedFromIp: { type: String, default: '' },
 
     // Binance API keys (encrypted with AES-256-GCM)
     binanceApiKeyEnc: { type: String, default: '' },       // base64 ciphertext
@@ -44,6 +54,10 @@ const appConfigSchema = new mongoose.Schema(
         tpLowPnL: true,
         // FIX-2026-08-07: แจ้งเตือนเมื่อ Auto Add New Bot สร้างบอทใหม่อัตโนมัติ
         autoAddBotCreated: true,
+        // FIX-2026-08-09: Telegram Login — alternative login channel (ส่ง OTP 6 หลักเข้า Telegram แทน password)
+        //   - ไม่ใช่ 2FA — ใช้แทน password เมื่อลืม
+        //   - default ON (user ปิดเองได้ใน Settings > Telegram Events)
+        telegramLogin: true,
       }),
     },
     telegramThresholds: {

@@ -68,6 +68,10 @@ const DEFAULT_EVENTS = {
   //   - autoDeleteBotRemoved: แจ้งเมื่อ soft-delete แล้ว
   autoDeleteBotWarning: true,
   autoDeleteBotRemoved: true,
+  // FIX-2026-08-09: Telegram Login — alternative login channel (ส่ง OTP 6 หลักเข้า Telegram)
+  //   - ใช้แทน password เมื่อลืม — ไม่ใช่ 2FA
+  //   - default ON (user ปิดเองได้ใน Settings > Telegram Events)
+  telegramLogin: true,
 };
 const DEFAULT_THRESHOLDS = {
   positionLossPct: 2, positionProfitPct: 1, positionStuckMin: 30,
@@ -220,9 +224,14 @@ async function dispatch(eventKey, payload) {
   const cfg = await loadConfig();
   if (!cfg.enabled || !cfg.hasToken || !cfg.chatId) return false;
   if (!cfg.events[eventKey]) return false;
-  const text = renderMessage(eventKey, payload, cfg);
+  const result = renderMessage(eventKey, payload, cfg);
+  if (!result) return false;
+  // 2026-08-09: renderMessage อาจ return { text, parseMode } สำหรับ event ที่ต้องการ HTML
+  //   - backward-compat: ถ้า return string (เก่า) → ใช้ text ตรงๆ
+  const text = typeof result === 'string' ? result : result.text;
+  const parseMode = typeof result === 'object' ? result.parseMode : undefined;
   if (!text) return false;
-  return sendTelegram(cfg.token, cfg.chatId, text);
+  return sendTelegram(cfg.token, cfg.chatId, text, { parseMode });
 }
 
 function renderMessage(eventKey, p, cfg) {
@@ -473,7 +482,24 @@ function renderMessage(eventKey, p, cfg) {
         return `⏰ Auto Delete Bot — แจ้งล่วงหน้า\nBot: ${p.botName}\nSymbol: ${p.symbol}\nDowntime: ${p.downtimeDays || '?'} วัน (threshold ${p.thresholdDays || '?'} วัน)\nRemaining: ${p.remainingDays || '?'} วัน\n\n⚠️ บอทจะถูก soft-delete (เก็บ 30 วัน แล้วลบถาวร) — ถ้าต้องการเก็บไว้ → enable บอทในหน้า bots.html`;
       // FIX-2026-08-08: Feature #5 — Auto Delete Bot — soft-deleted (เก็บไว้ 30 วัน restore ได้)
       case 'autoDeleteBotRemoved':
-        return `🗑 Auto Delete Bot — soft-deleted\nBot: ${p.botName}\nSymbol: ${p.symbol}\nDowntime: ${p.downtimeDays || '?'} วัน (threshold ${p.thresholdDays || '?'} วัน)\n\n📌 Restore ได้ภายใน 30 วัน ผ่าน POST /api/bots/<id>/restore\n📌 หลัง 30 วัน จะถูกลบถาวร (admin cleanup script)`;
+        return `🗑 Auto Delete Bot — soft-deleted\nBot: ${p.botName}\nSymbol: ${p.symbol}\nDowntime: ${p.downtimeDays || '?'} วัน (threshold ${p.thresholdDays || '?'} �ัน)\n\n📌 Restore ได้ภายใน 30 วัน ผ่าน POST /api/bots/<id>/restore\n📌 หลัง 30 วัน จะถูกลบถาวร (admin cleanup script)`;
+      // FIX-2026-08-09: Telegram Login — alternative login channel (OTP 6 หลักใช้แทน password เมื่อลืม)
+      //   - NOT 2FA — ใช้แทน password
+      //   - HTML parse_mode สำหรับ <b>/<code> tag (return { text, parseMode: 'HTML' } แทน string)
+      case 'telegramLogin': {
+        const code = (p && p.code) || '------';
+        const mins = (p && p.expiresInMin) || 5;
+        return {
+          text:
+            `🔐 <b>Login OTP</b>\n\n` +
+            `รหัสเข้าสู่ระบบของคุณ: <code>${code}</code>\n\n` +
+            `⏱ หมดอายุใน ${mins} นาที\n` +
+            `ใช้ได้ครั้งเดียว\n\n` +
+            `📌 ถ้าไม่ได้ขอเข้าสู่ระบบ → ไม่ต้องสนใจ OTP นี้\n` +
+            `<i>OnePercentBotTrade · ${new Date().toISOString()}</i>`,
+          parseMode: 'HTML',
+        };
+      }
       // FIX-2026-08-02: DCA + BEP stack events (full notifications, not compact — per user request)
       case 'dcaLayerAdded': {
         const layerIdx = p.layerIndex || '?';
@@ -585,16 +611,19 @@ function formatPrice(p, symbol) {
 }
 
 // ─── HTTPS send (with 1 retry on transient errors) ────
-function sendTelegram(token, chatId, text) {
+// FIX-2026-08-09: opts.parseMode (string | undefined) — เมื่อตั้งค่าจะเพิ่ม `parse_mode` ใน body (HTML/MarkdownV2)
+function sendTelegram(token, chatId, text, opts = {}) {
   return new Promise((resolve) => {
     let attempt = 0;
     const tryOnce = () => {
       attempt += 1;
-      const body = JSON.stringify({
+      const payload = {
         chat_id: chatId,
         text,
         disable_web_page_preview: true,
-      });
+      };
+      if (opts.parseMode) payload.parse_mode = opts.parseMode;
+      const body = JSON.stringify(payload);
       const req = https.request({
         method: 'POST',
         hostname: 'api.telegram.org',

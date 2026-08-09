@@ -22,6 +22,11 @@ router.get('/config', requireAuth, async (req, res) => {
     res.json({
       chatId: (cfg && cfg.telegramChatId) || '',
       events: (cfg && cfg.telegramEvents) || {},
+      // 2026-08-09: expose telegramLogin toggle (alternative login channel — NOT 2FA)
+      //   - default true (mirror AppConfig schema default)
+      telegramLogin: (cfg && cfg.telegramEvents && typeof cfg.telegramEvents.telegramLogin === 'boolean')
+        ? cfg.telegramEvents.telegramLogin
+        : true,
       thresholds: (cfg && cfg.telegramThresholds) || {},
       enabled: !!(cfg && cfg.telegramEnabled),
       hasToken: !!(cfg && cfg.telegramBotTokenEnc),
@@ -58,6 +63,15 @@ router.put('/config', requireAuth, async (req, res) => {
     if (typeof body.chatId === 'string') update.telegramChatId = body.chatId.trim();
     if (body.events && typeof body.events === 'object' && !Array.isArray(body.events)) {
       update.telegramEvents = body.events;
+    }
+    // 2026-08-09: Telegram Login toggle (alternative login channel)
+    //   - รับ top-level `telegramLogin: bool` → merge เข้า telegramEvents
+    if (typeof body.telegramLogin === 'boolean') {
+      update.telegramEvents = Object.assign(
+        {},
+        update.telegramEvents || (await AppConfig.findOne({ key: 'singleton' }).lean())?.telegramEvents || {},
+        { telegramLogin: body.telegramLogin },
+      );
     }
     if (body.thresholds && typeof body.thresholds === 'object' && !Array.isArray(body.thresholds)) {
       update.telegramThresholds = body.thresholds;
