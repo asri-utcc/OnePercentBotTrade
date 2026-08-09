@@ -178,7 +178,8 @@ router.get('/series', requireAuth, async (req, res) => {
     }
 
     const trades = await Trade.find(match)
-      .select('_id botId symbol realizedPnl sellFilledAt')
+      // FIX-2026-08-09: include sellReason* fields so pnl.html can render pills + tooltip
+      .select('_id botId symbol realizedPnl sellFilledAt sellReason sellReasonDetail sellReasonSource sellReasonAt')
       .sort({ sellFilledAt: 1 }) // ascending — chart builds cumulative left→right
       // FIX-2026-08-04: cap with .limit() to prevent unbounded year-range queries (was 10k+ docs JSON-serialized)
       .limit(5000)
@@ -221,6 +222,11 @@ router.get('/series', requireAuth, async (req, res) => {
         symbol: t.symbol,
         realizedPnl: t.realizedPnl,
         sellFilledAt: t.sellFilledAt,
+        // FIX-2026-08-09: pass through sellReason fields so frontend can render pill + tooltip
+        sellReason: t.sellReason || null,
+        sellReasonDetail: t.sellReasonDetail || null,
+        sellReasonSource: t.sellReasonSource || null,
+        sellReasonAt: t.sellReasonAt || null,
       })),
     });
   } catch (err) {
@@ -250,7 +256,8 @@ router.get('/day', requireAuth, async (req, res) => {
     }
 
     const trades = await Trade.find(match)
-      .select('_id botId symbol entryPrice exitPrice qty realizedPnl sellFilledAt side')
+      // FIX-2026-08-09: include sellReason* fields so pnl.html modal can render pills (was empty)
+      .select('_id botId symbol entryPrice exitPrice qty realizedPnl sellFilledAt side sellReason sellReasonDetail sellReasonSource sellReasonAt')
       .sort({ sellFilledAt: 1 })
       // FIX-2026-08-04: cap with .limit() to prevent unbounded single-day queries
       .limit(5000)
@@ -299,6 +306,11 @@ router.get('/day', requireAuth, async (req, res) => {
         qty: t.qty,
         realizedPnl: t.realizedPnl,
         sellFilledAt: t.sellFilledAt,
+        // FIX-2026-08-09: pass through sellReason fields so pnl.html modal can render pill + tooltip
+        sellReason: t.sellReason || null,
+        sellReasonDetail: t.sellReasonDetail || null,
+        sellReasonSource: t.sellReasonSource || null,
+        sellReasonAt: t.sellReasonAt || null,
       })),
     });
   } catch (err) {

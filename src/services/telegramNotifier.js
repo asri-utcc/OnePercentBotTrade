@@ -298,10 +298,24 @@ function renderMessage(eventKey, p, cfg) {
         if (p.reason) {
           const truncate = (s, n) => (s && s.length > n ? s.slice(0, n - 1) + '…' : s);
           const REASON_LABELS = {
+            // FIX-2026-08-09: cbv3_panic — CRITICAL FIX (was missing from enum → silent data loss)
+            cbv3_panic:                      '💎 CBv3 sustained panic-close (CBv2 + ST3 upper-TF, HYBRID)',
+            // FIX-2026-08-09: แยก SL-UKC F1-armed vs manual
+            sl_ukc_f1_armed:                 '🛑 Stop-loss upper-KC (auto-armed by F1)',
+            sl_ukc_manual:                   '🛑 Stop-loss upper-KC (manually armed)',
+            // FIX-2026-08-09: แยก 4 sources ของ manual close
+            manual_api_force_close_trade:    '🔧 Force-close (UI 1 trade)',
+            manual_api_force_close_bot:      '🔧 Force-close bot (UI)',
+            manual_api_watchdog:             '🛡️ Watchdog force-close (DISABLED bot)',
+            manual_api_cleanup_script:       '🧹 Cleanup script (synthetic)',
+            // FIX-2026-08-09: DCA stack reasons
+            dca_target_hit:                  '📚 DCA stack target hit',
+            dca_stack_force_close:           '📚 DCA stack force-closed',
+            dca_stack_stop_loss:             '📚 DCA stack SL-UKC',
             tp_hit:                 '🎯 TP target hit',
             tp_trend_boosted:       '🎯 TP (trend-boosted)',
             cb_panic:                '🚨 Circuit-breaker panic-close',
-            cbv2_panic:              '💎 CBv2 sustained panic-close (bot locked)',
+            cbv2_panic:                      '💎 CBv2 sustained panic-close (HYBRID — bot stays enabled)',
             stop_loss_upper_kc:     '🛑 Stop-loss (upper KC)',
             market_fallback:        '⚠️ Market fallback',
             manual_api_market:      '🔧 Manual API (market)',
@@ -314,10 +328,17 @@ function renderMessage(eventKey, p, cfg) {
             unknown:                '❓ Unknown',
           };
           const reasonLabel = REASON_LABELS[p.reason] || p.reason;
+          // FIX-2026-08-09: shorten detail + add Context line for richer info (held duration, F1-armed, PnL%)
+          //   - detail was: 'manual close via API — MARKET @ 0.10753 qty=93.5' (redundant with Qty line)
+          //   - new: position context (held time, F1-armed, loss%) — answers 'why this triggered'
           const reasonDetail = p.reasonDetail ? truncate(String(p.reasonDetail), 80) : '';
+          const contextLine = p.context ? truncate(String(p.context), 100) : '';
           reasonLine = reasonDetail
             ? `\nReason: ${reasonLabel} (${reasonDetail})`
             : `\nReason: ${reasonLabel}`;
+          if (contextLine) {
+            reasonLine += `\nContext: ${contextLine}`;
+          }
         }
         return `${emoji} SELL filled\nBot: ${p.botName}\nSymbol: ${p.symbol}\nQty: ${formatQty(p.qty)} @${formatPrice(p.price, p.symbol)}\nP&L: ${sign}${pnl.toFixed(4)} USDT${pctInline}${reasonLine}${thbLine}${balLine}`;
       }
@@ -733,6 +754,31 @@ function bindEventHandlers() {
         }
         // FIX-2026-07-27: USDT balance remain หลัง SELL fill (fail-safe)
         const bal = await fetchUsdtBalance();
+        // FIX-2026-08-09: compute position Context (held duration, F1-armed signal, partial-fill flag)
+        //   - ใช้บอกผู้ใช้ว่า trade นี้อยู่ในสถานะอะไรก่อน close (ทำไมถึง trigger)
+        //   - cap at 100 chars ใน template (truncate helper)
+        const contextParts = [];
+        try {
+          const buyFilledAt = trade.buyFilledAt ? new Date(trade.buyFilledAt).getTime() : null;
+          const sellFilledAtMs = trade.sellFilledAt ? new Date(trade.sellFilledAt).getTime() : null;
+          if (buyFilledAt && sellFilledAtMs) {
+            const heldMs = sellFilledAtMs - buyFilledAt;
+            const heldMin = Math.round(heldMs / 60000);
+            const heldDisplay = heldMin < 60
+              ? `${heldMin} นาที`
+              : heldMin < 1440
+                ? `${(heldMin / 60).toFixed(1)} ชม.`
+                : `${Math.round(heldMin / 1440)} วัน`;
+            contextParts.push(`ถือ ${heldDisplay}`);
+          }
+          if (trade.useStopLossOnUKC === true && trade.autoArmedAt) {
+            contextParts.push('F1-armed SL-UKC');
+          }
+          if (trade.isPartialSell === true) {
+            contextParts.push('partial-fill');
+          }
+        } catch (_) { /* non-fatal */ }
+        const context = contextParts.join(' · ');
         await dispatch('sellFilled', {
           botId: trade.botId,
           botName: bot ? bot.name : '?',
@@ -749,6 +795,8 @@ function bindEventHandlers() {
           // FIX-2026-08-01: structured sellReason — render "Reason: …" line in template
           reason: trade.sellReason || null,
           reasonDetail: trade.sellReasonDetail || null,
+          // FIX-2026-08-09: position context line (held duration + F1-armed flag + partial-fill)
+          context: context || null,
         });
         // Reset anti-spam state เมื่อ trade จบ
         tradeNotifyState.delete(String(trade._id));

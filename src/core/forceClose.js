@@ -186,13 +186,19 @@ async function markTradeSold({ trade, sold, errorNote, reason, sellReason, sellR
  * Centralised force-close for one trade. Returns a structured result so the
  * API route can report `mode` ("market" / "synthetic") back to the client.
  *
+ * FIX-2026-08-09: เ�ิ่ม opts.source เพื่อแยก sellReason 4 sources:
+ *   - 'api' (default) — UI button → manual_api_market
+ *   - 'watchdog' — positionWatchdog force-close → manual_api_watchdog
+ *   - 'cleanup_script' — scripts/cleanup-orphan.js / recover-orphan-trades.js → manual_api_cleanup_script
+ *
  * @param {object} opts
  * @param {object} opts.trade   - Mongoose trade document (must have _id, symbol, botId, buyPrice, buyQty)
  * @param {object} [opts.bot]   - Optional; if omitted we look up by trade.botId (needed for symbol in cancel)
  * @param {boolean} [opts.allowMarketSell=true] - When false, never places a MARKET SELL (cleanup mode)
+ * @param {string} [opts.source='api'] - caller source for sellReason derivation
  * @returns {Promise<{ok: boolean, mode: string, executedQty: number, avgSellPrice: number|null, pnl: number, error?: string}>}
  */
-async function forceCloseTrade({ trade, bot = null, allowMarketSell = true }) {
+async function forceCloseTrade({ trade, bot = null, allowMarketSell = true, source = 'api' }) {
   const logCtx = { tradeId: trade._id && trade._id.toString(), symbol: trade.symbol };
   // FIX-2026-08-02: DCA stack branch — derive qty/buyPrice from stack fields
   const isDcaStack = trade.isDcaStack === true;
@@ -254,8 +260,9 @@ async function forceCloseTrade({ trade, bot = null, allowMarketSell = true }) {
     if (resolved.freeQty > 0) {
       if (!allowMarketSell) {
         // Cleanup mode — treat as synthetic close since caller said no MARKET.
+        // FIX-2026-08-09: forward source so synthetic close gets correct reason (cleanup_script vs api)
         return await forceCloseTrade_synthetic({
-          trade, logCtx, reason: 'cleanup-mode (allowMarketSell=false, freeQty present)',
+          trade, logCtx, reason: 'cleanup-mode (allowMarketSell=false, freeQty present)', source,
         });
       }
       const tradeSymbol = trade.symbol || bot.symbol;
@@ -293,7 +300,7 @@ async function forceCloseTrade({ trade, bot = null, allowMarketSell = true }) {
               minQty,
             }, 'forceClose: rounded qty below minQty — falling through to synthetic close');
             return await forceCloseTrade_synthetic({
-              trade, logCtx, reason: `rounded qty ${marketSellQty} < minQty ${minQty} (freeQty=${resolved.freeQty})`,
+              trade, logCtx, reason: `rounded qty ${marketSellQty} < minQty ${minQty} (freeQty=${resolved.freeQty})`, source,
             });
           }
           if (Math.abs(marketSellQty - candidateRaw) > 1e-12) {
@@ -335,13 +342,29 @@ async function forceCloseTrade({ trade, bot = null, allowMarketSell = true }) {
       });
 
       // FIX-2026-08-02: DCA stack — use dca_stack_force_close reason + stamp stackClosedAt
-      const finalSellReason = isDcaStack ? 'dca_stack_force_close' : 'manual_api_market';
+      // FIX-2026-08-09: source-aware sellReason — แยก 4 sources (api/watchdog/cleanup_script)
+      let finalSellReason;
+      let finalSellReasonSource;
+      if (isDcaStack) {
+        finalSellReason = 'dca_stack_force_close';
+        finalSellReasonSource = 'forceClose.forceCloseTrade_dca';
+      } else if (source === 'watchdog') {
+        finalSellReason = 'manual_api_watchdog';
+        finalSellReasonSource = 'forceClose.forceCloseTrade_watchdog';
+      } else if (source === 'cleanup_script') {
+        finalSellReason = 'manual_api_cleanup_script';
+        finalSellReasonSource = 'forceClose.forceCloseTrade_cleanup';
+      } else {
+        finalSellReason = 'manual_api_market';
+        finalSellReasonSource = 'forceClose.forceCloseTrade';
+      }
       const finalSellReasonDetail = isDcaStack
         ? `manual close via API (DCA stack) — MARKET @ ${avgSell} qty=${executed} stackBep=${stackBep} layers=${trade.dcaLayerCount || 0}`
-        : `manual close via API — MARKET @ ${avgSell} qty=${executed}`;
-      const finalSellReasonSource = isDcaStack
-        ? 'forceClose.forceCloseTrade_dca'
-        : 'forceClose.forceCloseTrade';
+        : source === 'cleanup_script'
+          ? `cleanup script (synthetic) — ${reason || 'asset missing'}`
+          : source === 'watchdog'
+            ? `positionWatchdog force-close — MARKET @ ${avgSell} qty=${executed}`
+            : `manual close via API — MARKET @ ${avgSell} qty=${executed}`;
 
       const marked = await markTradeSold({
         trade,
@@ -420,17 +443,28 @@ async function forceCloseTrade({ trade, bot = null, allowMarketSell = true }) {
  * eventually clearing its currentTrade pointer via WS / reconcile; the next
  * botManager.reconcilePendingTrades() will see the trade as 'sold' and skip.
  */
-async function forceCloseTrade_synthetic({ trade, logCtx, reason }) {
+async function forceCloseTrade_synthetic({ trade, logCtx, reason, source = 'api' }) {
   const now = new Date();
   // FIX-2026-08-02: DCA stack — use dca_stack_force_close + stamp stackClosedAt
+  // FIX-2026-08-09: source-aware sellReason — cleanup_script → manual_api_cleanup_script, others → manual_api_synthetic
   const isDcaStack = trade.isDcaStack === true;
-  const finalSellReason = isDcaStack ? 'dca_stack_force_close' : 'manual_api_synthetic';
+  let finalSellReason;
+  let finalSellReasonSource;
+  if (isDcaStack) {
+    finalSellReason = 'dca_stack_force_close';
+    finalSellReasonSource = 'forceClose.forceCloseTrade_synthetic_dca';
+  } else if (source === 'cleanup_script') {
+    finalSellReason = 'manual_api_cleanup_script';
+    finalSellReasonSource = 'forceClose.forceCloseTrade_cleanup_synthetic';
+  } else {
+    finalSellReason = 'manual_api_synthetic';
+    finalSellReasonSource = 'forceClose.forceCloseTrade_synthetic';
+  }
   const finalSellReasonDetail = isDcaStack
     ? `manual close via API (DCA stack, synthetic) — ${reason || 'asset missing'} layers=${trade.dcaLayerCount || 0}`
-    : (reason || 'asset missing on exchange');
-  const finalSellReasonSource = isDcaStack
-    ? 'forceClose.forceCloseTrade_synthetic_dca'
-    : 'forceClose.forceCloseTrade_synthetic';
+    : source === 'cleanup_script'
+      ? `cleanup script (synthetic) — ${reason || 'asset missing'}`
+      : (reason || 'asset missing on exchange');
   const marked = await markTradeSold({
     trade,
     sold: {
@@ -478,12 +512,16 @@ async function forceCloseTrade_synthetic({ trade, logCtx, reason }) {
  * Force-close ALL open trades for a bot and disable it. Sequential (one at a
  * time) to stay well under Binance weight limits.
  *
+ * FIX-2026-08-09: forward `source` param to per-trade forceCloseTrade so sellReason
+ *   correctly attributes UI vs watchdog vs script.
+ *
  * @param {object} opts
  * @param {string} opts.botId
  * @param {boolean} [opts.allowMarketSell=true]
  * @param {boolean} [opts.disableBot=true]   - if false, just close positions (don't disable)
+ * @param {string}  [opts.source='api']     - caller source forwarded to forceCloseTrade
  */
-async function forceCloseBot({ botId, allowMarketSell = true, disableBot = true }) {
+async function forceCloseBot({ botId, allowMarketSell = true, disableBot = true, source = 'api' }) {
   const results = { ok: true, closedTrades: [], errors: [], disabled: false };
   const bot = await Bot.findById(botId).catch(() => null);
   if (!bot) {
@@ -494,11 +532,11 @@ async function forceCloseBot({ botId, allowMarketSell = true, disableBot = true 
     state: { $in: FORCE_OPEN_STATES },
   });
   logger.warn({
-    botId: botId.toString(), symbol: bot.symbol, count: opens.length, allowMarketSell, disableBot,
+    botId: botId.toString(), symbol: bot.symbol, count: opens.length, allowMarketSell, disableBot, source,
   }, 'forceCloseBot: starting');
   for (const t of opens) {
     try {
-      const r = await forceCloseTrade({ trade: t, bot, allowMarketSell });
+      const r = await forceCloseTrade({ trade: t, bot, allowMarketSell, source });
       const entry = { tradeId: t._id.toString(), symbol: t.symbol, mode: r.mode, executedQty: r.executedQty, avgSellPrice: r.avgSellPrice, pnl: r.pnl };
       if (!r.ok) {
         results.errors.push({ ...entry, error: r.error || 'unknown' });

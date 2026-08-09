@@ -153,22 +153,36 @@ const tradeSchema = new mongoose.Schema(
     sellReason: {
       type: String,
       enum: [
+        // TP (target hit)
         'tp_hit',                   // normal TP fill (LIMIT_MAKER filled ที่ TP target)
         'tp_trend_boosted',         // TP hit with tpTrendMultiplier > 1
+        'dca_target_hit',           // FIX-2026-08-02: DCA stack aggregate SELL filled at BEP+TP
+        // SL-UKC (FIX-2026-08-09: แยก F1-armed vs manual — เดิมรวมเป็น stop_loss_upper_kc ทำให้ผู้ใช้แยกไม่ออก)
+        'sl_ukc_f1_armed',          // FIX-2026-08-09: auto-armed by F1 (loss>10% + age>4h) แล้ว close > upperKC → SL fired
+        'sl_ukc_manual',            // FIX-2026-08-09: manually armed (bot.stopLossOnUpperKC=true) แล้ว close > upperKC → SL fired
+        'stop_loss_upper_kc',       // legacy — trades เก่าก่อน schema update (backwards compat)
+        'dca_stack_stop_loss',      // FIX-2026-08-02: DCA stack SL-UKC force-close (stack BEP > close + loss threshold)
+        // Circuit breakers
         'cb_panic',                 // FIX-2026-08-01: Circuit-breaker (3-candle lowerKC breach) panic-close — เดิมชื่อ sls1_panic
-        'cbv2_panic',               // FIX-2026-08-06: CBv2 sustained 3-candle breach (4 consecutive red candles below lowerKC) panic-close + lock บอท cbv2LockHours ชั่วโมง
-        'stop_loss_upper_kc',       // Stop loss on upper-KC
+        'cbv2_panic',               // FIX-2026-08-06: CBv2 sustained 4-red-candle panic-close + HYBRID cooldown BUY
+        'cbv3_panic',               // FIX-2026-08-09: CRITICAL FIX — was missing from enum, Mongoose strict mode silently dropped saves. CBv3 CBv2 + ST3 upper-TF + HYBRID cooldown
+        // Market fallback / race
         'market_fallback',          // MARKET fallback (LIMIT reject / MIN_NOTIONAL breach / validation fail)
-        'manual_api_market',        // Manual close via API (MARKET branch)
-        'manual_api_synthetic',     // Manual close via API (synthetic — asset missing)
         'race_recovery_filled',     // Race recovery — SELL already filled at TP before SL cancelled
         'holding_retry_recovered',  // scheduleHoldingRetry recovered via MARKET
         'holding_retry_exhausted',  // Holding retry 10x exhausted
         'partial_sell_finalized',   // partial-sell freeze deadline finalization
-        'bot_disabled',             // bot disabled, forced close
-        'dca_target_hit',           // FIX-2026-08-02: DCA stack aggregate SELL filled at BEP+TP
+        // Manual closes (FIX-2026-08-09: แยก 4 sources — เดิม manual_api_market รวมหมด)
+        'manual_api_force_close_trade', // FIX-2026-08-09: UI /api/bots/:id/trades/:tradeId/force-close (single trade)
+        'manual_api_force_close_bot',   // FIX-2026-08-09: UI /api/bots/:id/force-close (close-all + disable bot)
+        'manual_api_watchdog',          // FIX-2026-08-09: positionWatchdog force-close (SL-UKC/CBv2/CBv3 for DISABLED/PAUSED bots)
+        'manual_api_cleanup_script',    // FIX-2026-08-09: scripts/cleanup-orphan.js + recover-orphan-trades.js synthetic close
+        'manual_api_market',            // generic fallback (legacy)
+        'manual_api_synthetic',         // legacy — asset missing on exchange
+        // DCA
         'dca_stack_force_close',    // FIX-2026-08-02: DCA stack force-close (user/API/bot disabled)
-        'dca_stack_stop_loss',      // FIX-2026-08-02: DCA stack SL-UKC force-close (stack BEP > close + loss threshold)
+        // Misc
+        'bot_disabled',             // bot disabled, forced close
         'unknown',                  // fallback (ไม่ควรเกิด — derive จาก prior state ไม่ได้)
       ],
       default: null,

@@ -1547,10 +1547,13 @@ class Trader {
   //     match on upper-TF (TREND_TF_MAP: 3m/5m→1h, 15m→4h, 1h→1d) SAME candle (lastCloseTime)
   //   - mutually exclusive with CBv2: cbVersion='v2' → early return (CBv2 handler already fires)
   //                        cbVersion='v3' → this handler fires (CBv2 handler returns early)
+  //   - per-bot opt-out: bot.cbv3Enabled === false → skip (mirrors cbv2Enabled)
   //   - HYBRID mode: force-close + cooldown only — ไม่ disable บอท, ไม่ override Auto-pause
   //     - bot stays enabled, BUY suppression = _cbv3FiredAt cooldown window (cbv3LockHours)
-  //     - manual unlock via POST /api/bots/:id/unlock-cbv2 (clears both cbv2+c bv3 fields)
-  //   - fields: bot.cbv3LockedUntil / cbv3LockReason / cbv3LastFiredAt (mirror CBv2 schema)
+  //     - manual unlock via POST /api/bots/:id/unlock-cbv2 (clears both cbv2+cbv3 fields)
+  //   - fields: bot.cbv3Enabled / cbv3LockHours / cbv3LockedUntil / cbv3LockReason /
+  //     cbv3LastFiredAt (mirror CBv2 schema — FIX-2026-08-09 added cbv3Enabled +
+  //     cbv3LockHours which were missing from schema before)
   //   - mutex cbv3CheckInFlight กัน concurrent invocations
   async _checkCBv3PanicClose(candle) {
     if (!this.running) {
@@ -1622,13 +1625,29 @@ class Trader {
       //   - resolves TREND_TF_MAP from volatilityScanner (no circular import — passed by reference via global require cache)
       //   - FAIL-OPEN: if Binance error or no trendTF → CBv3 still fires (treats it as pure CBv2)
       //     — ST3 is a "stricter" filter, but if we can't fetch upper-TF we shouldn't suppress the panic
+      //   - FIX-2026-08-09: bypassOptIn=true → ST3 logic runs INDEPENDENTLY of bot.safeTradeNoTradeEnabled
+      //     (CBv3 must remain a "safety net" even when user opts out of ST3 on S1 BUY side)
       const volatilityScanner = require('./volatilityScanner'); // FIX-2026-08-08: corrected path (volatilityScanner.js lives in src/core/, not src/services/)
       const trendTF = volatilityScanner.TREND_TF_MAP ? volatilityScanner.TREND_TF_MAP[this.bot.timeframe] : null;
       if (trendTF) {
         try {
-          const noTradeCheck = await signalEngine.checkNoTradeOnUpperTF(this.bot, trendTF, binanceRest);
+          const noTradeCheck = await signalEngine.checkNoTradeOnUpperTF(
+            this.bot, trendTF, binanceRest, { bypassOptIn: true },
+          );
           if (noTradeCheck.skip === true) {
             // ST3 pattern matched on upper-TF → CBv3 trigger
+            // FIX-2026-08-09: warn when ST3 was opt-out (decoupled mode) — ให้ user รู้ว่า CBv3 ทำงานอิสระ
+            if (this.bot.safeTradeNoTradeEnabled !== true) {
+              logger.warn({
+                botId: this.bot._id.toString(),
+                symbol: this.bot.symbol,
+                timeframe: this.bot.timeframe,
+                trendTF,
+                lastKind: noTradeCheck.lastKind,
+                candleCloseTime: candle.closeTime,
+                lastLower: lastLower.toFixed(6),
+              }, 'trader: CBv3 — CBv2 + ST3 (decoupled mode: safeTradeNoTradeEnabled=false but CBv3 still uses ST3 internally)');
+            }
             logger.warn({
               botId: this.bot._id.toString(),
               symbol: this.bot.symbol,
@@ -2363,15 +2382,27 @@ class Trader {
       return;
     }
 
+    // FIX-2026-08-09: แยก SL-UKC F1-armed (auto-armed by F1) vs manual (bot.stopLossOnUpperKC=true)
+    //   - F1 auto-arms useStopLossOnUKC=true + autoArmedAt เมื่อ loss>10% + age>4h
+    //   - manual = bot.stopLossOnUpperKC=true (admin enabled in bot config)
+    //   - DCA stack branch ใช้ dca_stack_stop_loss เหมือนเดิม (เป็น category แยก)
+    const wasF1Armed = !isStack
+      && trade.useStopLossOnUKC === true
+      && trade.autoArmedAt != null;
+    const slUkcReason = wasF1Armed ? 'sl_ukc_f1_armed' : 'sl_ukc_manual';
     const reasonText = isStack
-      ? `${stackReason} (stackBep=${stackBep?.toFixed(6)}, close=${ctx.closePrice} > upperKC=${ctx.upperKC.toFixed(6)})`
-      : `stop_loss_upper_kc (close=${ctx.closePrice} > upperKC=${ctx.upperKC.toFixed(6)})`;
+      ? `${stackReason} (stackBep=${stackBep?.toFixed(6)}, close=${ctx.closePrice} > upperKC=${ctx.upperKC.toFixed(6)}, f1Armed=${wasF1Armed})`
+      : `stop_loss_upper_kc (close=${ctx.closePrice} > upperKC=${ctx.upperKC.toFixed(6)}, f1Armed=${wasF1Armed})`;
     const ok = await this._emergencyMarketSell(
       claim,
       qty,
       buyPrice,
       targetSell,
       reasonText,
+      // FIX-2026-08-09: pass explicit sellReason (sl_ukc_f1_armed vs sl_ukc_manual)
+      //   - เดิมใช้ default 'stop_loss_upper_kc' แต่ไม่บอกว่าเป็น auto-armed หรือ manual
+      //   - DCA stack path ยังคงใช้ 'dca_stack_stop_loss' (override ใน post-sell block ด้านล่าง)
+      { reason: isStack ? 'dca_stack_stop_loss' : slUkcReason },
     );
 
     if (!ok) {

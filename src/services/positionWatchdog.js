@@ -46,6 +46,9 @@
  *   - bot.cbv2LockedUntil > now → Phase 3 skips (idempotent across watchdog ticks)
  *   - bot.cbv3Enabled === false → Phase 4 skips CBv3 for that bot (user opt-out)
  *   - bot.cbv3LockedUntil > now → Phase 4 skips (idempotent across watchdog ticks)
+ *     (cbv3Enabled/cbv3LockHours fields were MISSING from Bot.js schema before
+ *      FIX-2026-08-09 — Mongoose strict mode silently dropped saves; per-bot
+ *      opt-out UI was broken. Added to schema + backfill migration applied.)
  *   - Watchdog is read-heavy on Binance REST (≤2 getKlines per bot per tick); with
  *     ~10 disabled bots × 180s = ~33 calls/min — well under Binance 6000 weight/min.
  */
@@ -127,6 +130,7 @@ class PositionWatchdog {
         cbv2Scanned: 0, cbv2Triggered: 0, cbv2Closed: 0, cbv2Errors: 0,
         cbv2SkippedEnabled: 0, cbv2SkippedCooldown: 0, cbv2SkippedDca: 0,
         cbv2SkippedWarmup: 0, cbv2SkippedNoBot: 0, cbv2SkippedNoPositions: 0, cbv2SkippedKline: 0,
+        cbv2SkippedVersion: 0, // FIX-2026-08-09: Phase 3 cbVersion='v2' gate skip counter
         cbv3Scanned: 0, cbv3Triggered: 0, cbv3Closed: 0, cbv3Errors: 0,
         cbv3SkippedEnabled: 0, cbv3SkippedCooldown: 0, cbv3SkippedDca: 0,
         cbv3SkippedWarmup: 0, cbv3SkippedNoBot: 0, cbv3SkippedNoPositions: 0, cbv3SkippedKline: 0,
@@ -152,6 +156,7 @@ class PositionWatchdog {
       cbv2Scanned: 0, cbv2Triggered: 0, cbv2Closed: 0, cbv2Errors: 0,
       cbv2SkippedEnabled: 0, cbv2SkippedCooldown: 0, cbv2SkippedDca: 0,
       cbv2SkippedWarmup: 0, cbv2SkippedNoBot: 0, cbv2SkippedNoPositions: 0, cbv2SkippedKline: 0,
+      cbv2SkippedVersion: 0, // FIX-2026-08-09: Phase 3 cbVersion='v2' gate skip counter
       cbv3Scanned: 0, cbv3Triggered: 0, cbv3Closed: 0, cbv3Errors: 0,
       cbv3SkippedEnabled: 0, cbv3SkippedCooldown: 0, cbv3SkippedDca: 0,
       cbv3SkippedWarmup: 0, cbv3SkippedNoBot: 0, cbv3SkippedNoPositions: 0, cbv3SkippedKline: 0,
@@ -385,9 +390,25 @@ class PositionWatchdog {
         }, 'positionWatchdog: SL-UKC trigger — force-closing');
 
         try {
-          const result = await forceClose.forceCloseTrade({ trade: fresh, bot, allowMarketSell: true });
+          // FIX-2026-08-09: source='watchdog' — base sellReason 'manual_api_watchdog',
+          //   then overridden to 'sl_ukc_f1_armed' below (F1 auto-armed is the main use case)
+          const result = await forceClose.forceCloseTrade({ trade: fresh, bot, allowMarketSell: true, source: 'watchdog' });
           if (result.ok) {
             stats.closed++;
+            // FIX-2026-08-09: override sellReason → 'sl_ukc_f1_armed' (อันนี้คือ SL-UKC, ไม่ใช่ manual_api)
+            //   - positionWatchdog เป็น auto-system → default 'manual_api_watchdog' ไม่สื่อ
+            //   - เปลี่ยนเป็น 'sl_ukc_f1_armed' เพื่อให้ filter/group รู้ว่าเป็น SL-UKC auto-armed
+            Trade.updateOne(
+              { _id: fresh._id, state: 'sold' },
+              {
+                $set: {
+                  sellReason: 'sl_ukc_f1_armed',
+                  sellReasonDetail: `positionWatchdog SL-UKC — close=${lastClose} > upperKC=${upperKC.toFixed(6)}, triggerOnProfit=${triggerOnProfit}`,
+                  sellReasonSource: 'positionWatchdog.slUkc',
+                  sellReasonAt: new Date(),
+                },
+              }
+            ).catch(() => { /* non-fatal */ });
             eventBus.emit('positionWatchdog:closed', {
               tradeId: t._id,
               botId: botIdStr,
@@ -436,6 +457,14 @@ class PositionWatchdog {
   // so disabled/paused bots (which have no kline:closed handler) still get
   // panic-close protection when 4 consecutive red candles form below lower-KC.
   //
+  // FIX-2026-08-09: MUTUAL EXCLUSION with Phase 4 (CBv3)
+  //   - gated by AppConfig.cbVersion === 'v2' (mirror Phase 4's cbVersion='v3' gate)
+  //   - when cbVersion='v3' → Phase 3 returns early, Phase 4 (CBv3) is the
+  //     only panic-close that fires (CBv3 = CBv2 + ST3 upper-TF same candle)
+  //   - without this gate: 1000CAT(bAdd) on 2026-08-09 fired CBv2 alert
+  //     despite cbVersion='v3' — ST3 didn't match on 1h, so CBv3 didn't fire,
+  //     but Phase 3 ran anyway and wrote cbv2LockedUntil + sent CBv2 alert
+  //
   // Design contract (parity with trader path):
   //   - guarded by bot.cbv2Enabled !== false (opt-out)
   //   - guarded by bot.cbv2LockedUntil > now (idempotent across multi-tick)
@@ -451,6 +480,20 @@ class PositionWatchdog {
   //   This closes the "auto-resume + CBv2 replay collision" gap documented in
   //   the CBv2 memory file.
   async _checkCBv2PanicCloseForDisabled(stats) {
+    // FIX-2026-08-09: version gate — Phase 3 only runs when AppConfig.cbVersion='v2'
+    //   - mutually exclusive with Phase 4 (CBv3) which gates on cbVersion='v3'
+    //   - prevents Phase 3 from firing CBv2 alert when user opted into CBv3
+    //     (CBv3 is stricter — requires CBv2 pattern + ST3 upper-TF same candle;
+    //      if ST3 doesn't match, user chose not to panic-close for this candle)
+    const cbVer = await cbVersion.getActiveVersion();
+    if (cbVer !== 'v2') {
+      // FIX-2026-08-09: increment skippedVersion counter (mirror Phase 4 cbv3SkippedVersion)
+      //   - helps observability: can graph "how many watchdog ticks skipped CBv2
+      //     because user has cbVersion='v3'"
+      stats.cbv2SkippedVersion = (stats.cbv2SkippedVersion || 0) + 1;
+      // Not an error — Phase 3 is disabled when v3 is active (Phase 4 takes over)
+      return;
+    }
     // 1. Get ALL open-state trades — do not filter by bot.enabled because:
     //    - enabled bot has trader path active too, but its guard
     //      (cbv2LockedUntil > now) is set first → next watchdog tick sees cooldown
@@ -620,10 +663,13 @@ class PositionWatchdog {
         }
 
         try {
+          // FIX-2026-08-09: source='watchdog' — base sellReason 'manual_api_watchdog',
+          //   then overridden to 'cbv2_panic' below (already had this pattern)
           const result = await forceClose.forceCloseTrade({
             trade: fresh,
             bot,
             allowMarketSell: true,
+            source: 'watchdog',
           });
           if (result.ok) {
             closedCount++;
@@ -832,10 +878,14 @@ class PositionWatchdog {
       }
 
       // 7. ST3 no-trade on upper-TF (gating for CBv3)
+      // FIX-2026-08-09: bypassOptIn=true → ST3 logic runs independently of bot.safeTradeNoTradeEnabled
+      // (mirror trader.js fix — CBv3 panic-sell must remain a safety net for disabled/paused bots regardless of opt-in)
       const trendTF = volatilityScanner.TREND_TF_MAP ? volatilityScanner.TREND_TF_MAP[bot.timeframe] : null;
       if (trendTF) {
         try {
-          const noTradeCheck = await signalEngine.checkNoTradeOnUpperTF(bot, trendTF, binanceRest);
+          const noTradeCheck = await signalEngine.checkNoTradeOnUpperTF(
+            bot, trendTF, binanceRest, { bypassOptIn: true },
+          );
           if (noTradeCheck.skip !== true) {
             // CBv2 matched but ST3 cleared → no CBv3 fire (v3 strict gate)
             stats.cbv3SkippedSt3 += trades.length;
@@ -918,10 +968,13 @@ class PositionWatchdog {
           continue; // already handled by another path
         }
         try {
+          // FIX-2026-08-09: source='watchdog' — base sellReason 'manual_api_watchdog',
+          //   then overridden to 'cbv3_panic' below (already had this pattern)
           const result = await forceClose.forceCloseTrade({
             trade: fresh,
             bot,
             allowMarketSell: true,
+            source: 'watchdog',
           });
           if (result.ok) {
             closedCount++;
