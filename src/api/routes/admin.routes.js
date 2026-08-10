@@ -207,6 +207,7 @@ const BOT_DEFAULTS_CLAMP = {
   cbv3LockHours:             { min: 0.5,   max: 168 },
   cbAutoUnlockThresholdPct:  { min: 0.5,   max: 5.0 },
   autoPauseMinKcPct:         { min: 0.1,   max: 50 },
+  autoPauseMin24hVolUsdt:    { min: 0,     max: 1_000_000_000, int: true },
   autoArmLossPct:            { min: 1,     max: 90 },
   autoArmAgeHours:           { min: 0.5,   max: 168 },
   tpTrendMultiplier:         { min: 1,     max: 10 },
@@ -242,6 +243,7 @@ const BOT_DEFAULTS_SCHEMA = {
   safeTradeNoTradeEnabled: false,
   autoPauseEnabled: true,
   autoPauseMinKcPct: 2,
+  autoPauseMin24hVolUsdt: 1_000_000,
   autoArmStopLossOnUKC: true,
   autoArmLossPct: 6.3,
   autoArmAgeHours: 4,
@@ -295,7 +297,7 @@ router.put('/bot-defaults', requireAuth, requireSettingsPassword, async (req, re
       'kcMult', 'minSpreadTicks', 'suggestTpWindow',
       'dcaMaxLayers', 'martingaleMultiplier', 'martingaleMaxLayerNotional',
       'cbv2LockHours', 'cbv3LockHours', 'cbAutoUnlockThresholdPct',
-      'autoPauseMinKcPct', 'autoArmLossPct', 'autoArmAgeHours', 'tpTrendMultiplier',
+      'autoPauseMinKcPct', 'autoPauseMin24hVolUsdt', 'autoArmLossPct', 'autoArmAgeHours', 'tpTrendMultiplier',
     ];
     const STRING_FIELDS = ['defaultSymbol', 'defaultTimeframe'];
 

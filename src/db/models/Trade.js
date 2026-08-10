@@ -166,6 +166,7 @@ const tradeSchema = new mongoose.Schema(
         'cb_panic',                 // FIX-2026-08-01: Circuit-breaker (3-candle lowerKC breach) panic-close — เดิมชื่อ sls1_panic
         'cbv2_panic',               // FIX-2026-08-06: CBv2 sustained 4-red-candle panic-close + HYBRID cooldown BUY
         'cbv3_panic',               // FIX-2026-08-09: CRITICAL FIX — was missing from enum, Mongoose strict mode silently dropped saves. CBv3 CBv2 + ST3 upper-TF + HYBRID cooldown
+        'cbv5_panic',               // FIX-2026-08-10: CBv5 panic-close — Support Zone broken (lowerKC + deepest pivot low + bearish + volume spike)
         // Market fallback / race
         'market_fallback',          // MARKET fallback (LIMIT reject / MIN_NOTIONAL breach / validation fail)
         'race_recovery_filled',     // Race recovery — SELL already filled at TP before SL cancelled

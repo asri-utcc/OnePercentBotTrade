@@ -245,6 +245,19 @@ const appConfigSchema = new mongoose.Schema(
         cbv2LockHours: 8,
         cbv3Enabled: true,
         cbv3LockHours: 8,
+        // FIX-2026-08-10: CBv5 (Support Zone Circuit Breaker) defaults — independent of cbVersion
+        cbv5Enabled: true,
+        cbv5LockHours: 4,
+        cbv5KcLen: 20,
+        cbv5KcMult: 1.2,
+        cbv5PivotLookback: 3,
+        cbv5PivotLeftLen: 5,
+        cbv5PivotRightLen: 5,
+        cbv5StrictBreak: true,
+        cbv5UseVolume: true,
+        cbv5VolMaLen: 20,
+        cbv5VolMultiplier: 1.5,
+        cbv5DebounceCandles: 5,
         cbAutoUnlockEnabled: false,
         cbAutoUnlockThresholdPct: 1.0,
         dynamicSizeEnabled: true,
@@ -253,6 +266,7 @@ const appConfigSchema = new mongoose.Schema(
         safeTradeNoTradeEnabled: false,    // UI checked by default in modal; we use route default (off) for safer default
         autoPauseEnabled: true,
         autoPauseMinKcPct: 2,
+        autoPauseMin24hVolUsdt: 1_000_000,
         autoArmStopLossOnUKC: true,
         autoArmLossPct: 6.3,           // New Bot modal default
         autoArmAgeHours: 4,

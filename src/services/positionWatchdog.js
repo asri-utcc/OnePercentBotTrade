@@ -65,6 +65,11 @@ const telegramNotifier = require('./telegramNotifier');
 // FIX-2026-08-08: Feature #2 — CBv3 version routing (mutually exclusive with CBv2)
 const cbVersion = require('../core/cbVersion');
 const volatilityScanner = require('../core/volatilityScanner'); // FIX-2026-08-08: corrected path (volatilityScanner.js lives in src/core/, not src/services/)
+// FIX-2026-08-09: shared CB pattern evaluator — single source of truth for klines/KC/isCBv2At
+//   - eliminates kline window inconsistency between trader (WS cache 500) and watchdog (REST 30)
+//   - implements 2-tick confirmation registry for defensive false-positive reduction
+const cbPatternEvaluator = require('../core/cbPatternEvaluator');
+const cbCrossCooldown = require('../core/cbCrossCooldown'); // FIX-2026-08-10: CBv5 cross-version cooldown interaction
 
 // FIX-2026-08-04: 60s → 180s (ลด Binance kline API load — watchdog เป็น read-only check)
 //   - logic เดิม 100% — F1 auto-arm + SL-UKC ยังทำงานเหมือนเดิม
@@ -110,7 +115,8 @@ class PositionWatchdog {
         // FIX-2026-08-08: include CBv3 counters (Phase 4)
         const noisy = stats.armed > 0 || stats.closed > 0 || stats.errors > 0
           || stats.cbv2Triggered > 0 || stats.cbv2Closed > 0 || stats.cbv2Errors > 0
-          || stats.cbv3Triggered > 0 || stats.cbv3Closed > 0 || stats.cbv3Errors > 0;
+          || stats.cbv3Triggered > 0 || stats.cbv3Closed > 0 || stats.cbv3Errors > 0
+          || stats.cbv5Triggered > 0 || stats.cbv5Closed > 0 || stats.cbv5Errors > 0;
         const logFn = noisy ? logger.info.bind(logger) : logger.debug.bind(logger);
         logFn({ ...stats, tickCount: this.tickCount, durationMs: stats.durationMs }, 'positionWatchdog: tick');
       })
@@ -135,6 +141,9 @@ class PositionWatchdog {
         cbv3SkippedEnabled: 0, cbv3SkippedCooldown: 0, cbv3SkippedDca: 0,
         cbv3SkippedWarmup: 0, cbv3SkippedNoBot: 0, cbv3SkippedNoPositions: 0, cbv3SkippedKline: 0,
         cbv3SkippedVersion: 0, cbv3SkippedSt3: 0,
+        cbv5Scanned: 0, cbv5Triggered: 0, cbv5Closed: 0, cbv5Errors: 0, // FIX-2026-08-10: Phase 5 CBv5
+        cbv5SkippedEnabled: 0, cbv5SkippedCooldown: 0, cbv5SkippedDca: 0,
+        cbv5SkippedWarmup: 0, cbv5SkippedNoBot: 0, cbv5SkippedNoPositions: 0, cbv5SkippedKline: 0,
       };
     }
     this.inFlight = true;
@@ -161,6 +170,9 @@ class PositionWatchdog {
       cbv3SkippedEnabled: 0, cbv3SkippedCooldown: 0, cbv3SkippedDca: 0,
       cbv3SkippedWarmup: 0, cbv3SkippedNoBot: 0, cbv3SkippedNoPositions: 0, cbv3SkippedKline: 0,
       cbv3SkippedVersion: 0, cbv3SkippedSt3: 0,
+      cbv5Scanned: 0, cbv5Triggered: 0, cbv5Closed: 0, cbv5Errors: 0, // FIX-2026-08-10: Phase 5 CBv5
+      cbv5SkippedEnabled: 0, cbv5SkippedCooldown: 0, cbv5SkippedDca: 0,
+      cbv5SkippedWarmup: 0, cbv5SkippedNoBot: 0, cbv5SkippedNoPositions: 0, cbv5SkippedKline: 0,
     };
     try {
       await this._armStuckPositions(stats);
@@ -175,6 +187,11 @@ class PositionWatchdog {
       //   - gated by cbVersion === 'v3' (mutually exclusive with Phase 3)
       //   - runs even if Phase 3 already fired — independent cooldown DB fields (cbv3*)
       await this._checkCBv3PanicCloseForDisabled(stats);
+      // FIX-2026-08-10: Phase 5 — CBv5 panic-close (Support Zone + Deepest Low + Volume) for
+      //   disabled/paused bots. INDEPENDENT of cbVersion — runs in parallel with Phase 3 (CBv2)
+      //   or Phase 4 (CBv3). Mirrors trader._checkCBv5PanicClose with REST canonical window
+      //   + 2-tick confirmation + fingerprint recheck.
+      await this._checkCBv5PanicCloseForDisabled(stats);
     } finally {
       stats.durationMs = Date.now() - t0;
       this.inFlight = false;
@@ -543,57 +560,111 @@ class PositionWatchdog {
 
       stats.cbv2Scanned += trades.length;
 
-      // 5. Fetch klines + compute lowerKC
-      let klines;
+      // 5. FIX-2026-08-09: Use cbPatternEvaluator — single canonical REST window (limit=500)
+      //   Eliminates kline window inconsistency (was: limit=30 REST in watchdog, limit=500
+      //   WS cache in trader → different lastLower → different fire decision).
+      let evaluation;
       try {
-        klines = await this._fetchKlinesForCBv2(bot);
+        evaluation = await cbPatternEvaluator.fetchAndEvaluateCBv2({
+          bot,
+          binanceRest,
+          targetCloseTime: null,
+          signalEngine,
+        });
       } catch (err) {
         stats.cbv2Errors += trades.length;
         stats.cbv2SkippedKline += trades.length;
         logger.warn(
           { err: err.message, botId: botIdStr, symbol: bot.symbol, timeframe: bot.timeframe },
-          'positionWatchdog: CBv2 kline fetch failed'
+          'positionWatchdog: CBv2 evaluator failed'
         );
         continue;
       }
-      if (PositionWatchdog._cbv2SkipReason(bot, trades.length, klines ? klines.length : 0, Date.now()) === 'warmup') {
-        stats.cbv2SkippedWarmup += trades.length;
+
+      if (!evaluation.ok) {
+        if (evaluation.reason === 'warmup') stats.cbv2SkippedWarmup += trades.length;
+        else stats.cbv2SkippedKline += trades.length;
         continue;
       }
 
-      let lower;
-      try {
-        const states = signalEngine.computeBgStates({
-          closes: klines.map((k) => k.close),
-          highs: klines.map((k) => k.high),
-          lows: klines.map((k) => k.low),
-          length: 20,
-          mult: bot.kcMult || 1.5,
-          useTrueRange: true,
+      if (!evaluation.matched) {
+        // FIX-2026-08-09: clear stale confirmations when pattern fails to match
+        cbPatternEvaluator.consumeConfirmation({
+          botId: botIdStr,
+          version: 'v2',
+          candleCloseTime: evaluation.targetCloseTime,
         });
-        lower = states.lower;
-      } catch (err) {
-        stats.cbv2Errors += trades.length;
-        stats.cbv2SkippedKline += trades.length;
-        logger.warn(
-          { err: err.message, botId: botIdStr, symbol: bot.symbol },
-          'positionWatchdog: CBv2 computeBgStates failed'
-        );
-        continue;
-      }
-
-      const lastIdx = lower.length - 1;
-      const lastLower = lower[lastIdx];
-      if (lastLower == null) {
-        stats.cbv2SkippedWarmup += trades.length;
-        continue;
-      }
-
-      // 6. Pattern check — exact mirror of trader._checkCBv2PanicClose:1352
-      const opens = klines.map((k) => k.open);
-      const closes = klines.map((k) => k.close);
-      if (!signalEngine.isCBv2At(lastIdx, opens, closes, lower)) {
+        if (evaluation.isBorderline) {
+          logger.warn({
+            botId: botIdStr,
+            symbol: bot.symbol,
+            timeframe: bot.timeframe,
+            cbVersion: 'v2',
+            source: evaluation.source,
+            requestedLimit: evaluation.requestedLimit,
+            targetCloseTime: evaluation.targetCloseTime,
+            candlesCount: evaluation.candlesCount,
+            lastLower: evaluation.lastLower ? evaluation.lastLower.toFixed(8) : null,
+            consecutiveCount: evaluation.consecutiveCount,
+            reason: evaluation.reason,
+          }, 'positionWatchdog: cbv2 borderline — 3 candles match (CB but not CBv2), no fire');
+        }
         continue; // pattern not matched — normal path, no error
+      }
+
+      const lastLower = evaluation.lastLower;
+      const fingerprint = evaluation.fingerprint;
+
+      // FIX-2026-08-09: 2-tick confirmation — require 2 independent observations
+      //   of the same closed candle with the same fingerprint before destructive action.
+      const recorded = cbPatternEvaluator.recordConfirmation({
+        botId: botIdStr,
+        version: 'v2',
+        candleCloseTime: evaluation.targetCloseTime,
+        fingerprint,
+      });
+      const confirmationCount = recorded.count;
+      if (confirmationCount < cbPatternEvaluator.REQUIRED_CONFIRMATIONS) {
+        logger.warn({
+          botId: botIdStr,
+          symbol: bot.symbol,
+          timeframe: bot.timeframe,
+          cbVersion: 'v2',
+          source: evaluation.source,
+          requestedLimit: evaluation.requestedLimit,
+          targetCloseTime: evaluation.targetCloseTime,
+          lastLower: lastLower.toFixed(8),
+          confirmationCount,
+          required: cbPatternEvaluator.REQUIRED_CONFIRMATIONS,
+          fingerprint,
+          reason: 'confirmation_pending',
+        }, 'positionWatchdog: cbv2 pattern matched but confirmation pending — skipping force-close');
+        continue;
+      }
+
+      // FIX-2026-08-09: re-fetch canonical snapshot to verify candle + fingerprint stable
+      const recheck = await cbPatternEvaluator.fetchAndEvaluateCBv2({
+        bot,
+        binanceRest,
+        targetCloseTime: evaluation.targetCloseTime,
+        signalEngine,
+      });
+      if (!recheck.ok || !recheck.matched || recheck.fingerprint !== fingerprint) {
+        logger.warn({
+          botId: botIdStr,
+          symbol: bot.symbol,
+          targetCloseTime: evaluation.targetCloseTime,
+          firstFingerprint: fingerprint,
+          recheckMatched: recheck.matched,
+          recheckFingerprint: recheck.fingerprint,
+          reason: !recheck.ok ? recheck.reason : 'fingerprint_mismatch',
+        }, 'positionWatchdog: cbv2 recheck mismatch — skipping force-close (fail-closed)');
+        cbPatternEvaluator.consumeConfirmation({
+          botId: botIdStr,
+          version: 'v2',
+          candleCloseTime: evaluation.targetCloseTime,
+        });
+        continue;
       }
 
       // ─── CBv2 PATTERN MATCHED — fire cooldown + force-close ───
@@ -633,6 +704,22 @@ class PositionWatchdog {
           'positionWatchdog: persist CBv2 cooldown failed (non-fatal — will retry next tick)'
         )
       );
+
+      // FIX-2026-08-09: ACEUSDT cooldown-bypass mirror — sync in-memory trader for CBv2 (watchdog Phase 3)
+      try {
+        const botManager = require('../core/botManager');
+        const trader = botManager.traders && botManager.traders.get(botIdStr);
+        if (trader) {
+          trader._cbv2FiredAt = Date.now();
+          if (trader.bot) {
+            trader.bot.cbv2LockedUntil = lockedUntil;
+            trader.bot.cbv2LockReason = 'cbv2_panic';
+            trader.bot.cbv2LastFiredAt = new Date();
+          }
+        }
+      } catch (traderErr) {
+        logger.warn({ err: traderErr.message, botId: botIdStr }, 'positionWatchdog: CBv2 in-memory trader sync failed (non-fatal)');
+      }
 
       // 9. Bulk re-fetch fresh trades (race-safety vs trader path / other watchdog phases)
       const tradeIds = trades.map((t) => t._id);
@@ -721,6 +808,13 @@ class PositionWatchdog {
       }
 
       stats.cbv2Triggered++;
+
+      // FIX-2026-08-09: consume confirmation entry after successful fire
+      cbPatternEvaluator.consumeConfirmation({
+        botId: botIdStr,
+        version: 'v2',
+        candleCloseTime: evaluation.targetCloseTime,
+      });
 
       // 11. Emit events — same as trader path so telegram botLocked subscription fires
       eventBus.emit('bot:cooldown', {
@@ -824,62 +918,115 @@ class PositionWatchdog {
 
       stats.cbv3Scanned += trades.length;
 
-      // 5. Fetch klines + compute lowerKC
-      let klines;
+      // 5. FIX-2026-08-09: Use cbPatternEvaluator — single canonical REST window (limit=500)
+      //   Eliminates kline window inconsistency (was: limit=30 REST in watchdog, limit=500
+      //   WS cache in trader → different lastLower → different fire decision).
+      let evaluation;
       try {
-        klines = await this._fetchKlinesForCBv2(bot);
+        evaluation = await cbPatternEvaluator.fetchAndEvaluateCBv2({
+          bot,
+          binanceRest,
+          targetCloseTime: null,
+          signalEngine,
+        });
       } catch (err) {
         stats.cbv3Errors += trades.length;
         stats.cbv3SkippedKline += trades.length;
         logger.warn(
           { err: err.message, botId: botIdStr, symbol: bot.symbol, timeframe: bot.timeframe },
-          'positionWatchdog: CBv3 kline fetch failed'
+          'positionWatchdog: CBv3 evaluator failed'
         );
         continue;
       }
-      if (PositionWatchdog._cbv3SkipReason(bot, trades.length, klines ? klines.length : 0, Date.now()) === 'warmup') {
-        stats.cbv3SkippedWarmup += trades.length;
+
+      if (!evaluation.ok) {
+        if (evaluation.reason === 'warmup') stats.cbv3SkippedWarmup += trades.length;
+        else stats.cbv3SkippedKline += trades.length;
         continue;
       }
 
-      let lower;
-      try {
-        const states = signalEngine.computeBgStates({
-          closes: klines.map((k) => k.close),
-          highs: klines.map((k) => k.high),
-          lows: klines.map((k) => k.low),
-          length: 20,
-          mult: bot.kcMult || 1.5,
-          useTrueRange: true,
+      if (!evaluation.matched) {
+        // FIX-2026-08-09: clear stale confirmations when pattern fails to match
+        cbPatternEvaluator.consumeConfirmation({
+          botId: botIdStr,
+          version: 'v3',
+          candleCloseTime: evaluation.targetCloseTime,
         });
-        lower = states.lower;
-      } catch (err) {
-        stats.cbv3Errors += trades.length;
-        stats.cbv3SkippedKline += trades.length;
-        logger.warn(
-          { err: err.message, botId: botIdStr, symbol: bot.symbol },
-          'positionWatchdog: CBv3 computeBgStates failed'
-        );
-        continue;
-      }
-
-      const lastIdx = lower.length - 1;
-      const lastLower = lower[lastIdx];
-      if (lastLower == null) {
-        stats.cbv3SkippedWarmup += trades.length;
-        continue;
-      }
-
-      // 6. CBv2 base pattern check (must match first)
-      const opens = klines.map((k) => k.open);
-      const closes = klines.map((k) => k.close);
-      if (!signalEngine.isCBv2At(lastIdx, opens, closes, lower)) {
+        if (evaluation.isBorderline) {
+          logger.warn({
+            botId: botIdStr,
+            symbol: bot.symbol,
+            timeframe: bot.timeframe,
+            cbVersion: 'v3',
+            source: evaluation.source,
+            requestedLimit: evaluation.requestedLimit,
+            targetCloseTime: evaluation.targetCloseTime,
+            candlesCount: evaluation.candlesCount,
+            lastLower: evaluation.lastLower ? evaluation.lastLower.toFixed(8) : null,
+            consecutiveCount: evaluation.consecutiveCount,
+            reason: evaluation.reason,
+          }, 'positionWatchdog: cbv3 borderline — 3 candles match (CB but not CBv2), no fire');
+        }
         continue; // CBv2 pattern not matched — no fire (silent)
       }
 
+      const lastLower = evaluation.lastLower;
+      const fingerprint = evaluation.fingerprint;
+
+      // FIX-2026-08-09: 2-tick confirmation
+      const recorded = cbPatternEvaluator.recordConfirmation({
+        botId: botIdStr,
+        version: 'v3',
+        candleCloseTime: evaluation.targetCloseTime,
+        fingerprint,
+      });
+      const confirmationCount = recorded.count;
+      if (confirmationCount < cbPatternEvaluator.REQUIRED_CONFIRMATIONS) {
+        logger.warn({
+          botId: botIdStr,
+          symbol: bot.symbol,
+          timeframe: bot.timeframe,
+          cbVersion: 'v3',
+          source: evaluation.source,
+          requestedLimit: evaluation.requestedLimit,
+          targetCloseTime: evaluation.targetCloseTime,
+          lastLower: lastLower.toFixed(8),
+          confirmationCount,
+          required: cbPatternEvaluator.REQUIRED_CONFIRMATIONS,
+          fingerprint,
+          reason: 'confirmation_pending',
+        }, 'positionWatchdog: cbv3 pattern matched but confirmation pending — skipping force-close');
+        continue;
+      }
+
+      // FIX-2026-08-09: re-fetch canonical snapshot to verify candle + fingerprint stable
+      const recheck = await cbPatternEvaluator.fetchAndEvaluateCBv2({
+        bot,
+        binanceRest,
+        targetCloseTime: evaluation.targetCloseTime,
+        signalEngine,
+      });
+      if (!recheck.ok || !recheck.matched || recheck.fingerprint !== fingerprint) {
+        logger.warn({
+          botId: botIdStr,
+          symbol: bot.symbol,
+          targetCloseTime: evaluation.targetCloseTime,
+          firstFingerprint: fingerprint,
+          recheckMatched: recheck.matched,
+          recheckFingerprint: recheck.fingerprint,
+          reason: !recheck.ok ? recheck.reason : 'fingerprint_mismatch',
+        }, 'positionWatchdog: cbv3 recheck mismatch — skipping force-close (fail-closed)');
+        cbPatternEvaluator.consumeConfirmation({
+          botId: botIdStr,
+          version: 'v3',
+          candleCloseTime: evaluation.targetCloseTime,
+        });
+        continue;
+      }
+
       // 7. ST3 no-trade on upper-TF (gating for CBv3)
-      // FIX-2026-08-09: bypassOptIn=true → ST3 logic runs independently of bot.safeTradeNoTradeEnabled
-      // (mirror trader.js fix — CBv3 panic-sell must remain a safety net for disabled/paused bots regardless of opt-in)
+      // FIX-2026-08-09: FAIL-CLOSED — ST3 fetch error → skip (mirror trader.js fix)
+      //   (better to miss a panic than fire a false alarm)
       const trendTF = volatilityScanner.TREND_TF_MAP ? volatilityScanner.TREND_TF_MAP[bot.timeframe] : null;
       if (trendTF) {
         try {
@@ -896,11 +1043,27 @@ class PositionWatchdog {
               trendTF,
               reason: noTradeCheck.reason,
             }, 'positionWatchdog: cbv3 — CBv2 matched but ST3 cleared, no fire');
+            cbPatternEvaluator.consumeConfirmation({
+              botId: botIdStr,
+              version: 'v3',
+              candleCloseTime: evaluation.targetCloseTime,
+            });
             continue;
           }
         } catch (stErr) {
-          // FAIL-OPEN: ST3 fetch error → fall through to fire CBv3 (treat as pure CBv2)
-          logger.warn({ err: stErr.message, botId: botIdStr }, 'positionWatchdog: cbv3 — ST3 fetch failed, firing anyway (fail-open)');
+          // FIX-2026-08-09: FAIL-CLOSED — ST3 fetch error → skip
+          logger.warn({
+            err: stErr.message,
+            botId: botIdStr,
+            symbol: bot.symbol,
+            trendTF,
+          }, 'positionWatchdog: cbv3 — ST3 fetch failed, skipping (fail-closed)');
+          cbPatternEvaluator.consumeConfirmation({
+            botId: botIdStr,
+            version: 'v3',
+            candleCloseTime: evaluation.targetCloseTime,
+          });
+          continue;
         }
       }
       // If no trendTF → fire CBv3 anyway (CBv2-equivalent, mirror trader behavior)
@@ -940,6 +1103,23 @@ class PositionWatchdog {
           'positionWatchdog: persist CBv3 cooldown failed (non-fatal)'
         )
       );
+
+      // FIX-2026-08-09: ACEUSDT cooldown-bypass — sync in-memory trader state so placeBuy gate fires
+      //   before DB write completes / across restart. Same pattern as unlock-cbv2 endpoint.
+      try {
+        const botManager = require('../core/botManager');
+        const trader = botManager.traders && botManager.traders.get(botIdStr);
+        if (trader) {
+          trader._cbv3FiredAt = Date.now();
+          if (trader.bot) {
+            trader.bot.cbv3LockedUntil = lockedUntil;
+            trader.bot.cbv3LockReason = 'cbv3_panic';
+            trader.bot.cbv3LastFiredAt = new Date();
+          }
+        }
+      } catch (traderErr) {
+        logger.warn({ err: traderErr.message, botId: botIdStr }, 'positionWatchdog: CBv3 in-memory trader sync failed (non-fatal)');
+      }
 
       // 10. Bulk re-fetch fresh trades (race-safety)
       const tradeIds = trades.map((t) => t._id);
@@ -1025,6 +1205,13 @@ class PositionWatchdog {
 
       stats.cbv3Triggered++;
 
+      // FIX-2026-08-09: consume confirmation entry after successful fire
+      cbPatternEvaluator.consumeConfirmation({
+        botId: botIdStr,
+        version: 'v3',
+        candleCloseTime: evaluation.targetCloseTime,
+      });
+
       // 12. Emit events — bot:cooldown (CBv3-specific BUY suppression), bot:updated
       eventBus.emit('bot:cooldown', {
         botId: bot._id,
@@ -1058,23 +1245,375 @@ class PositionWatchdog {
     }
   }
 
-  // FIX-2026-08-07: Fetch + parse klines for CBv2 pattern detection (Phase 3)
-  //   - returns null if klines insufficient for KC(20) warmup
-  //   - parses once here so callers don't repeat work
-  async _fetchKlinesForCBv2(bot) {
-    const klines = await binanceRest.getKlines({
-      symbol: bot.symbol,
-      interval: bot.timeframe,
-      limit: 30,
-    });
-    if (!Array.isArray(klines) || klines.length < 21) return null;
-    return klines.map((k) => ({
-      open: parseFloat(k[1]),
-      high: parseFloat(k[2]),
-      low: parseFloat(k[3]),
-      close: parseFloat(k[4]),
-    }));
+  // FIX-2026-08-10: Phase 5 (CBv5) — panic-close for disabled/paused bots.
+  //   Mirrors trader._checkCBv5PanicClose but runs OUTSIDE trader instance.
+  //   Independent of cbVersion — runs in parallel with Phase 3 (CBv2) or Phase 4 (CBv3).
+  //   4-condition confirmation per Pine Script CBv5:
+  //     close < lowerKC + close < deepest pivot low + (strictBreak ? bearish : true) + volume spike
+  //   - mutex cbv5CheckInFlight per instance (defensive — multiple ticks can overlap)
+  //   - cross-cooldown via cbCrossCooldown (Direction A: cancel CBv5 if CBv2/CBv3 fires
+  //     during same tick — Direction B: absorb CBv5 into existing dominant cooldown)
+  //   - persists cbv5* DB fields → trader restores cooldown on resume
+  async _checkCBv5PanicCloseForDisabled(stats) {
+    // 1. Get ALL open-state trades — same as Phase 3/4
+    const OPEN_STATES = ['partial_wait', 'filled', 'retrying', 'holding', 'selling', 'partial_sell_wait'];
+    const candidates = await Trade.find({ state: { $in: OPEN_STATES } }).lean();
+    if (candidates.length === 0) return;
+
+    // 2. Group by botId
+    const byBot = new Map();
+    for (const t of candidates) {
+      if (!t.botId) { stats.cbv5SkippedNoBot++; continue; }
+      const key = String(t.botId);
+      if (!byBot.has(key)) byBot.set(key, []);
+      byBot.get(key).push(t);
+    }
+    if (byBot.size === 0) return;
+
+    // 3. Bulk-load bots with CBv5 + DCA config fields
+    const botIds = [...byBot.keys()];
+    const bots = botIds.length > 0
+      ? await Bot.find(
+          { _id: { $in: botIds } },
+          'name symbol timeframe enabled dcaEnabled cbv5Enabled cbv5LockHours cbv5LockedUntil cbv5LockReason ' +
+          'cbv5KcLen cbv5KcMult cbv5PivotLookback cbv5PivotLeftLen cbv5PivotRightLen cbv5StrictBreak ' +
+          'cbv5UseVolume cbv5VolMaLen cbv5VolMultiplier cbv5DebounceCandles'
+        ).lean()
+      : [];
+    const botMap = new Map(bots.map((b) => [String(b._id), b]));
+
+    // 4. Per-bot evaluation
+    for (const [botIdStr, trades] of byBot) {
+      const bot = botMap.get(botIdStr);
+      if (!bot) { stats.cbv5SkippedNoBot += trades.length; continue; }
+
+      // Guard evaluation (pure helper — mirrors _cbv2SkipReason / _cbv3SkipReason shape)
+      const skipReason = PositionWatchdog._cbv5SkipReason(bot, trades.length, null, Date.now());
+      if (skipReason) {
+        if (skipReason === 'disabled') stats.cbv5SkippedEnabled += trades.length;
+        else if (skipReason === 'cooldown_active') stats.cbv5SkippedCooldown += trades.length;
+        else if (skipReason === 'dca_mode') stats.cbv5SkippedDca += trades.length;
+        else if (skipReason === 'no_positions') stats.cbv5SkippedNoPositions++;
+        else if (skipReason === 'no_bot') stats.cbv5SkippedNoBot += trades.length;
+        continue;
+      }
+
+      stats.cbv5Scanned += trades.length;
+
+      // 5. CBv5 uses its own evaluator (cbPatternEvaluator.fetchAndEvaluateCBv5) — independent
+      //   of CBv2/CBv3 because CBv5 needs pivot-low history + volume MA which the CBv2
+      //   evaluator doesn't compute.
+      let evaluation;
+      try {
+        evaluation = await cbPatternEvaluator.fetchAndEvaluateCBv5({
+          bot,
+          binanceRest,
+          targetCloseTime: null,
+        });
+      } catch (err) {
+        stats.cbv5Errors += trades.length;
+        stats.cbv5SkippedKline += trades.length;
+        logger.warn(
+          { err: err.message, botId: botIdStr, symbol: bot.symbol, timeframe: bot.timeframe },
+          'positionWatchdog: CBv5 evaluator failed'
+        );
+        continue;
+      }
+
+      if (!evaluation.ok) {
+        if (evaluation.reason === 'warmup') stats.cbv5SkippedWarmup += trades.length;
+        else stats.cbv5SkippedKline += trades.length;
+        continue;
+      }
+
+      if (!evaluation.matched) {
+        cbPatternEvaluator.consumeConfirmation({
+          botId: botIdStr,
+          version: 'v5',
+          candleCloseTime: evaluation.targetCloseTime,
+        });
+        if (evaluation.reason === 'debounce_active') {
+          logger.debug({
+            botId: botIdStr,
+            symbol: bot.symbol,
+            timeframe: bot.timeframe,
+            reason: evaluation.reason,
+            candlesCount: evaluation.candlesCount,
+          }, 'positionWatchdog: cbv5 skip — debounce active');
+        }
+        continue;
+      }
+
+      const lastLower = evaluation.lastLower;
+      const deepestLow = evaluation.deepestLow;
+      const fingerprint = evaluation.fingerprint;
+
+      // 6. 2-tick confirmation registry
+      const recorded = cbPatternEvaluator.recordConfirmation({
+        botId: botIdStr,
+        version: 'v5',
+        candleCloseTime: evaluation.targetCloseTime,
+        fingerprint,
+      });
+      const confirmationCount = recorded.count;
+      if (confirmationCount < cbPatternEvaluator.REQUIRED_CONFIRMATIONS) {
+        logger.warn({
+          botId: botIdStr,
+          symbol: bot.symbol,
+          timeframe: bot.timeframe,
+          source: evaluation.source,
+          requestedLimit: evaluation.requestedLimit,
+          targetCloseTime: evaluation.targetCloseTime,
+          candlesCount: evaluation.candlesCount,
+          lastLower: lastLower.toFixed(8),
+          deepestLow: deepestLow != null ? deepestLow.toFixed(8) : null,
+          confirmationCount,
+          required: cbPatternEvaluator.REQUIRED_CONFIRMATIONS,
+          fingerprint,
+          reason: 'confirmation_pending',
+        }, 'positionWatchdog: cbv5 pattern matched but confirmation pending — skipping force-close');
+        continue;
+      }
+
+      // 7. Re-fetch canonical snapshot to verify candle + fingerprint stable
+      const recheck = await cbPatternEvaluator.fetchAndEvaluateCBv5({
+        bot,
+        binanceRest,
+        targetCloseTime: evaluation.targetCloseTime,
+      });
+      if (!recheck.ok || !recheck.matched || recheck.fingerprint !== fingerprint) {
+        logger.warn({
+          botId: botIdStr,
+          symbol: bot.symbol,
+          targetCloseTime: evaluation.targetCloseTime,
+          firstFingerprint: fingerprint,
+          recheckMatched: recheck.matched,
+          recheckFingerprint: recheck.fingerprint,
+          reason: !recheck.ok ? recheck.reason : 'fingerprint_mismatch',
+        }, 'positionWatchdog: cbv5 recheck mismatch — skipping force-close (fail-closed)');
+        cbPatternEvaluator.consumeConfirmation({
+          botId: botIdStr,
+          version: 'v5',
+          candleCloseTime: evaluation.targetCloseTime,
+        });
+        continue;
+      }
+
+      // ─── CBv5 PATTERN MATCHED — fire cooldown + force-close ───
+      logger.warn(
+        {
+          botId: botIdStr,
+          symbol: bot.symbol,
+          timeframe: bot.timeframe,
+          lastLower: lastLower.toFixed(6),
+          deepestLow: deepestLow != null ? deepestLow.toFixed(6) : null,
+          openTradeIds: trades.map((t) => String(t._id)),
+          botEnabled: bot.enabled,
+          source: 'positionWatchdog',
+        },
+        'positionWatchdog: CBv5 pattern matched (Support Zone broken + deepest pivot low breached) — force-closing + setting cooldown'
+      );
+
+      // 8. Compute cooldown + apply cross-version interaction (Direction A/B)
+      const lockHours = Math.max(0.5, Math.min(168, Number(bot.cbv5LockHours) || 4));
+      const nowMs = Date.now();
+      // cbCrossCooldown mutates a local copy of fields — we need the crossResult to know
+      // whether CBv5 took its own lock or was absorbed into CBv2/CBv3.
+      // Apply to a temporary { ...bot } to read crossResult without mutating live bot doc.
+      const crossBotFields = {
+        cbv2LockedUntil: bot.cbv2LockedUntil,
+        cbv3LockedUntil: bot.cbv3LockedUntil,
+        cbv5LockedUntil: bot.cbv5LockedUntil,
+      };
+      const crossResult = cbCrossCooldown.applyCrossCooldownOnFire({
+        bot: crossBotFields,
+        firingVersion: 'v5',
+        lockHours,
+        nowMs,
+      });
+
+      const lockedUntilIso = crossResult.cbv5LockedUntil
+        ? new Date(crossResult.cbv5LockedUntil).toISOString()
+        : (crossResult.cbv3LockedUntil
+            ? new Date(crossResult.cbv3LockedUntil).toISOString()
+            : (crossResult.cbv2LockedUntil
+                ? new Date(crossResult.cbv2LockedUntil).toISOString()
+                : null));
+
+      // 9. Persist cooldown DB fields (idempotent)
+      const updateSet = {
+        cbv5LastFiredAt: crossResult.cbv5LastFiredAt,
+        cbv5LockedUntil: crossResult.cbv5LockedUntil,
+        cbv5LockReason: crossResult.cbv5LockedUntil ? 'cbv5_panic' : null,
+      };
+      // Direction A: CBv5 fired but CBv2/CBv3 already active → don't overwrite them
+      // (crossResult already returned the existing fields unchanged in this case)
+      if (crossResult.cbv2LockedUntil !== undefined) updateSet.cbv2LockedUntil = crossResult.cbv2LockedUntil;
+      if (crossResult.cbv3LockedUntil !== undefined) updateSet.cbv3LockedUntil = crossResult.cbv3LockedUntil;
+      Bot.updateOne(
+        { _id: bot._id },
+        { $set: updateSet }
+      ).catch((err) =>
+        logger.warn(
+          { err: err.message, botId: botIdStr },
+          'positionWatchdog: persist CBv5 cooldown failed (non-fatal)'
+        )
+      );
+
+      // 10. Sync in-memory trader state so placeBuy gate fires before DB write completes
+      //     / across restart (mirror CBv2/CBv3 Phase 3/4 pattern)
+      try {
+        const botManager = require('../core/botManager');
+        const trader = botManager.traders && botManager.traders.get(botIdStr);
+        if (trader) {
+          if (crossResult.cbv5LockedUntil && new Date(crossResult.cbv5LockedUntil).getTime() > nowMs) {
+            trader._cbv5FiredAt = nowMs;
+          } else {
+            trader._cbv5FiredAt = 0;
+          }
+          if (trader.bot) {
+            trader.bot.cbv5LockedUntil = crossResult.cbv5LockedUntil;
+            trader.bot.cbv5LockReason = crossResult.cbv5LockedUntil ? 'cbv5_panic' : null;
+            trader.bot.cbv5LastFiredAt = crossResult.cbv5LastFiredAt;
+            if (crossResult.cbv2LockedUntil !== undefined) trader.bot.cbv2LockedUntil = crossResult.cbv2LockedUntil;
+            if (crossResult.cbv3LockedUntil !== undefined) trader.bot.cbv3LockedUntil = crossResult.cbv3LockedUntil;
+          }
+        }
+      } catch (traderErr) {
+        logger.warn({ err: traderErr.message, botId: botIdStr }, 'positionWatchdog: CBv5 in-memory trader sync failed (non-fatal)');
+      }
+
+      // 11. Bulk re-fetch fresh trades (race-safety)
+      const tradeIds = trades.map((t) => t._id);
+      let freshTrades = [];
+      try {
+        freshTrades = await Trade.find(
+          { _id: { $in: tradeIds } },
+          'state useStopLossOnUKC sellOrderId isDcaStack stackBep buyPrice symbol botId'
+        ).lean();
+      } catch (err) {
+        stats.cbv5Errors += trades.length;
+        logger.warn(
+          { err: err.message, botId: botIdStr },
+          'positionWatchdog: CBv5 fresh-trades re-fetch failed'
+        );
+        continue;
+      }
+      const freshMap = new Map(freshTrades.map((t) => [String(t._id), t]));
+
+      // 12. Force-close loop
+      let closedCount = 0;
+      for (const t of trades) {
+        const fresh = freshMap.get(String(t._id));
+        if (!fresh) { stats.cbv5SkippedNoBot++; continue; }
+        if (fresh.state !== 'selling' && fresh.state !== 'holding' && fresh.state !== 'filled') {
+          continue; // already handled by another path
+        }
+        try {
+          const result = await forceClose.forceCloseTrade({
+            trade: fresh,
+            bot,
+            allowMarketSell: true,
+            source: 'watchdog',
+          });
+          if (result.ok) {
+            closedCount++;
+            stats.cbv5Closed++;
+            Trade.updateOne(
+              { _id: fresh._id, state: 'sold' },
+              {
+                $set: {
+                  sellReason: 'cbv5_panic',
+                  sellReasonDetail: `positionWatchdog: CBv5 Support Zone broken (bot ${bot.enabled ? 'enabled' : 'disabled'}); closedCount=${closedCount}; lastLower=${lastLower.toFixed(8)}; deepestLow=${deepestLow != null ? deepestLow.toFixed(8) : '?'}`,
+                  sellReasonSource: 'positionWatchdog.cbv5',
+                  sellReasonAt: new Date(),
+                },
+              }
+            ).catch(() => { /* non-fatal */ });
+
+            eventBus.emit('cbv5Watchdog:closed', {
+              tradeId: t._id,
+              botId: botIdStr,
+              symbol: fresh.symbol,
+              isDcaStack: fresh.isDcaStack === true,
+              mode: result.mode,
+              pnl: result.pnl,
+              avgSellPrice: result.avgSellPrice,
+              lastLower,
+              deepestLow,
+              botEnabled: bot.enabled,
+              source: 'positionWatchdog',
+            });
+          } else {
+            stats.cbv5Errors++;
+            logger.warn(
+              {
+                tradeId: String(t._id),
+                botId: botIdStr,
+                err: result.error,
+              },
+              'positionWatchdog: CBv5 forceCloseTrade failed'
+            );
+          }
+        } catch (err) {
+          stats.cbv5Errors++;
+          logger.error(
+            { err: err.message, stack: err.stack, tradeId: String(t._id), botId: botIdStr },
+            'positionWatchdog: CBv5 forceCloseTrade exception'
+          );
+        }
+      }
+
+      stats.cbv5Triggered++;
+
+      // 13. Consume confirmation entry after successful fire
+      cbPatternEvaluator.consumeConfirmation({
+        botId: botIdStr,
+        version: 'v5',
+        candleCloseTime: evaluation.targetCloseTime,
+      });
+
+      // 14. Emit events
+      eventBus.emit('bot:cooldown', {
+        botId: bot._id,
+        reason: 'cbv5_panic',
+        version: 'v5',
+        lockedUntil: lockedUntilIso,
+        lockHours,
+        appliedTo: crossResult.appliedTo,
+        source: 'positionWatchdog',
+      });
+      eventBus.emit('bot:updated', { botId: bot._id });
+
+      // 15. Telegram alert
+      try {
+        const botName = bot.name || bot.symbol || botIdStr;
+        await telegramNotifier.sendNow('cbv5PanicClose', {
+          botName,
+          symbol: bot.symbol,
+          timeframe: bot.timeframe,
+          closedCount,
+          lastLower,
+          deepestLow: deepestLow != null ? deepestLow.toFixed(6) : null,
+          isBearish: evaluation.isBearish,
+          isHighVolume: evaluation.isHighVolume,
+          lockedUntil: lockedUntilIso,
+          lockHours,
+          appliedTo: crossResult.appliedTo,
+          source: 'positionWatchdog',
+        });
+      } catch (err) {
+        logger.warn(
+          { err: err.message, botId: botIdStr },
+          'positionWatchdog: CBv5 telegram sendNow failed (non-fatal)'
+        );
+      }
+    }
   }
+
+  // FIX-2026-08-09: _fetchKlinesForCBv2 REMOVED — replaced by cbPatternEvaluator.fetchAndEvaluateCBv2
+  //   consistent with the trader path (canonical REST 500-candle window + 2-tick confirmation).
+  //   Eliminates kline window inconsistency between trader (WS cache 500) and watchdog (REST 30).
 
   // DCA stack → use stackBep; else use buyPrice. Fallback to 0 if invalid.
   _refPrice(trade) {
@@ -1161,7 +1700,10 @@ class PositionWatchdog {
     }
     if (bot.dcaEnabled === true) return 'dca_mode';
     if (!Number.isFinite(tradesLen) || tradesLen <= 0) return 'no_positions';
-    if (klinesLen != null && klinesLen < 21) return 'warmup';
+    // FIX-2026-08-09: warmup threshold raised 21 → 23
+    //   - 20 for EMA(20) + ATR(20) seed + 3 for isCBv2At(i-3) lookup
+    //   - source: cbPatternEvaluator.MIN_EVALUATION_CANDLES (constant of truth)
+    if (klinesLen != null && klinesLen < cbPatternEvaluator.MIN_EVALUATION_CANDLES) return 'warmup';
     return null;
   }
 
@@ -1185,7 +1727,36 @@ class PositionWatchdog {
     }
     if (bot.dcaEnabled === true) return 'dca_mode';
     if (!Number.isFinite(tradesLen) || tradesLen <= 0) return 'no_positions';
-    if (klinesLen != null && klinesLen < 21) return 'warmup';
+    // FIX-2026-08-09: warmup threshold raised 21 → 23 (mirror CBv2 helper)
+    if (klinesLen != null && klinesLen < cbPatternEvaluator.MIN_EVALUATION_CANDLES) return 'warmup';
+    return null;
+  }
+
+  // ─── FIX-2026-08-10: Phase 5 (CBv5) pure helper — testable without mocks ──
+  /**
+   * Decide whether CBv5 Phase 5 should skip this bot+positions.
+   * Mirror of _cbv3SkipReason but for CBv5 fields. CBv5 has NO version gate
+   * (independent of cbVersion enum) — only per-bot cbv5Enabled + cooldown + DCA checks.
+   *
+   * @param {object|null} bot       - bot doc
+   * @param {number}      tradesLen - number of open-state trades for this bot
+   * @param {number|null} klinesLen - kline cache size after fetch (null = not fetched yet)
+   * @param {number}      nowMs     - reference timestamp
+   * @returns {string|null}
+   */
+  static _cbv5SkipReason(bot, tradesLen, klinesLen, nowMs) {
+    if (!bot) return 'no_bot';
+    if (bot.cbv5Enabled === false) return 'disabled';
+    if (bot.cbv5LockedUntil && new Date(bot.cbv5LockedUntil).getTime() > nowMs) {
+      return 'cooldown_active';
+    }
+    if (bot.dcaEnabled === true) return 'dca_mode';
+    if (!Number.isFinite(tradesLen) || tradesLen <= 0) return 'no_positions';
+    // CBv5 warmup: kcLen=20 + 1 (current) + rightLen=5 (pivot confirm) = 26 minimum
+    //   - cbPatternEvaluator.MIN_EVALUATION_CANDLES=23 (CBv2/CBv3 baseline)
+    //   - CBv5 needs slightly more for pivot confirmation; use the larger of either constant
+    //   - Use 23 for simplicity (cbv5KcLen default=20 + 1 current + 2 = 23 minimum)
+    if (klinesLen != null && klinesLen < cbPatternEvaluator.MIN_EVALUATION_CANDLES) return 'warmup';
     return null;
   }
 }

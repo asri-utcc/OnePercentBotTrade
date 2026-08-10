@@ -55,21 +55,24 @@ async function evaluate(bot) {
   }
   const threshold = Math.max(0.5, Math.min(5.0, Number(bot.cbAutoUnlockThresholdPct) || 1.0));
 
-  // Determine cooldown state
+  // Determine cooldown state (FIX-2026-08-10: CBv5 added — scan all 3 lock fields)
   const now = Date.now();
   const cbv2LockedUntilMs = bot.cbv2LockedUntil ? new Date(bot.cbv2LockedUntil).getTime() : 0;
   const cbv3LockedUntilMs = bot.cbv3LockedUntil ? new Date(bot.cbv3LockedUntil).getTime() : 0;
+  const cbv5LockedUntilMs = bot.cbv5LockedUntil ? new Date(bot.cbv5LockedUntil).getTime() : 0;
   const cbv2Active = cbv2LockedUntilMs > now;
   const cbv3Active = cbv3LockedUntilMs > now;
-  if (!cbv2Active && !cbv3Active) {
+  const cbv5Active = cbv5LockedUntilMs > now;
+  if (!cbv2Active && !cbv3Active && !cbv5Active) {
     // No cooldown → reset counter
     return { unlocked: false, skipped: 'no-cooldown', signalsFound: 0, threshold };
   }
 
-  // Determine last CB fire timestamp (use whichever is more recent)
+  // Determine last CB fire timestamp (use whichever is most recent across v2/v3/v5)
   const lastCbv2Ms = bot.cbv2LastFiredAt ? new Date(bot.cbv2LastFiredAt).getTime() : 0;
   const lastCbv3Ms = bot.cbv3LastFiredAt ? new Date(bot.cbv3LastFiredAt).getTime() : 0;
-  const lastFireMs = Math.max(lastCbv2Ms, lastCbv3Ms);
+  const lastCbv5Ms = bot.cbv5LastFiredAt ? new Date(bot.cbv5LastFiredAt).getTime() : 0;
+  const lastFireMs = Math.max(lastCbv2Ms, lastCbv3Ms, lastCbv5Ms);
   if (lastFireMs === 0) {
     return { unlocked: false, skipped: 'no-fire-timestamp', signalsFound: 0, threshold };
   }
@@ -159,6 +162,7 @@ async function evaluate(bot) {
 async function applyUnlock(bot, evalResult) {
   if (!evalResult || !evalResult.unlocked) return { ok: false, reason: 'not-unlocked' };
   const now = new Date();
+  // FIX-2026-08-10: CBv5 added — clear cbv5 fields too (HYBRID unlock covers all 3 versions)
   const update = {
     cbv2LockedUntil: null,
     cbv2LockReason: null,
@@ -166,6 +170,9 @@ async function applyUnlock(bot, evalResult) {
     cbv3LockedUntil: null,
     cbv3LockReason: null,
     cbv3LastFiredAt: null,
+    cbv5LockedUntil: null,
+    cbv5LockReason: null,
+    cbv5LastFiredAt: null,
     cbAutoUnlockSignalsFound: 0,
     cbAutoUnlockCheckedAt: now,
   };
@@ -183,6 +190,8 @@ async function applyUnlock(bot, evalResult) {
     if (trader) {
       if (Number.isFinite(trader._cbv2FiredAt)) trader._cbv2FiredAt = 0;
       if (Number.isFinite(trader._cbv3FiredAt)) trader._cbv3FiredAt = 0;
+      // FIX-2026-08-10: reset cbv5 in-memory gate
+      if (Number.isFinite(trader._cbv5FiredAt)) trader._cbv5FiredAt = 0;
     }
   } catch (traderErr) {
     logger.warn({ err: traderErr.message }, 'cbAutoUnlock: trader reset failed (non-fatal)');

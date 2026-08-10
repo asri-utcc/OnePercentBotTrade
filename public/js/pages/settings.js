@@ -352,6 +352,10 @@ function renderBotDefaultsSection() {
         <input type="number" class="form-control" id="bd-auto-pause-min-kc" value="${d.autoPauseMinKcPct}" step="0.1" min="0.1" max="50" />
       </div>
       <div class="col-md-3">
+        <label class="form-label">Auto-pause 24h Min Vol (USDT)</label>
+        <input type="number" class="form-control" id="bd-auto-pause-min-24h-vol" value="${d.autoPauseMin24hVolUsdt}" step="1000" min="0" />
+      </div>
+      <div class="col-md-3">
         <label class="form-label">Auto-arm loss (%)</label>
         <input type="number" class="form-control" id="bd-auto-arm-loss-pct" value="${d.autoArmLossPct}" step="0.5" min="1" max="90" />
       </div>
@@ -1466,6 +1470,7 @@ const BD_RECOMMENDED = {
   safeTradeNoTradeEnabled: false,
   autoPauseEnabled: true,
   autoPauseMinKcPct: 2,
+  autoPauseMin24hVolUsdt: 1_000_000,
   autoArmStopLossOnUKC: true,
   autoArmLossPct: 6.3,
   autoArmAgeHours: 4,
@@ -1511,6 +1516,7 @@ async function saveBotDefaults() {
     safeTradeNoTradeEnabled: isChecked('bd-safe-trade-no-trade-enabled'),
     autoPauseEnabled: isChecked('bd-auto-pause-enabled'),
     autoPauseMinKcPct: num('bd-auto-pause-min-kc'),
+    autoPauseMin24hVolUsdt: num('bd-auto-pause-min-24h-vol'),
     autoArmStopLossOnUKC: isChecked('bd-auto-arm-stop-loss-ukc'),
     autoArmLossPct: num('bd-auto-arm-loss-pct'),
     autoArmAgeHours: num('bd-auto-arm-age-hours'),

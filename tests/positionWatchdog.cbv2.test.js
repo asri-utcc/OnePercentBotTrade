@@ -170,7 +170,9 @@ describe('PositionWatchdog._cbv2SkipReason (Phase 3 guard helper)', () => {
   });
 
   // ─── Guard 5: kline warmup ──────────────────────────────────────────────
-  describe('Guard 5: klines.length < 21 (warmup)', () => {
+  // FIX-2026-08-09: threshold raised 21 → 23 (cbPatternEvaluator.MIN_EVALUATION_CANDLES)
+  //   - 20 for EMA(20) + ATR(20) seed + 3 for isCBv2At(i-3) lookup
+  describe('Guard 5: klines.length < 23 (warmup)', () => {
     test('klines null (not fetched) → no skip from this guard yet', () => {
       // The first decision uses klinesLen=null because klines not fetched yet;
       // warmup check happens AFTER kline fetch in the runtime loop.
@@ -183,14 +185,14 @@ describe('PositionWatchdog._cbv2SkipReason (Phase 3 guard helper)', () => {
       expect(PositionWatchdog._cbv2SkipReason(bot, 5, 0, FIXED_NOW)).toBe('warmup');
     });
 
-    test('20 klines (just below threshold) → skip with "warmup"', () => {
+    test('22 klines (just below threshold) → skip with "warmup"', () => {
       const bot = mkBot();
-      expect(PositionWatchdog._cbv2SkipReason(bot, 5, 20, FIXED_NOW)).toBe('warmup');
+      expect(PositionWatchdog._cbv2SkipReason(bot, 5, 22, FIXED_NOW)).toBe('warmup');
     });
 
-    test('21 klines (exactly threshold) → no skip', () => {
+    test('23 klines (exactly threshold) → no skip', () => {
       const bot = mkBot();
-      expect(PositionWatchdog._cbv2SkipReason(bot, 5, 21, FIXED_NOW)).toBeNull();
+      expect(PositionWatchdog._cbv2SkipReason(bot, 5, 23, FIXED_NOW)).toBeNull();
     });
 
     test('30 klines (typical) → no skip', () => {

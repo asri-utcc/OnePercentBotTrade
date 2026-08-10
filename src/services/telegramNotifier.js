@@ -60,6 +60,8 @@ const DEFAULT_EVENTS = {
   dpsResize: true,
   // FIX-2026-08-08: Feature #2 — CBv3 panic-close (mirror cbv2PanicClose but with ST3 upper-TF)
   cbv3PanicClose: true,
+  // FIX-2026-08-10: Feature #6 — CBv5 panic-close (Support Zone broken — independent of cbVersion)
+  cbv5PanicClose: true,
   // FIX-2026-08-08: Feature #3 — Auto unlock cooldown (CB auto-unlocked after 3 profitable signals)
   //   - แจ้งเมื่อระบบปลด cooldown ให้บอทอัตโนมัติ (3+ signals > threshold)
   botAutoUnlocked: true,
@@ -325,6 +327,7 @@ function renderMessage(eventKey, p, cfg) {
             tp_trend_boosted:       '🎯 TP (trend-boosted)',
             cb_panic:                '🚨 Circuit-breaker panic-close',
             cbv2_panic:                      '💎 CBv2 sustained panic-close (HYBRID — bot stays enabled)',
+            cbv5_panic:                      '💎 CBv5 panic-close (Support Zone broken — deepest pivot low + lowerKC)',
             stop_loss_upper_kc:     '🛑 Stop-loss (upper KC)',
             market_fallback:        '⚠️ Market fallback',
             manual_api_market:      '🔧 Manual API (market)',
@@ -459,6 +462,11 @@ function renderMessage(eventKey, p, cfg) {
       // FIX-2026-08-08: Feature #2 — CBv3 panic-close (mirror cbv2PanicClose but with ST3 upper-TF gate)
       case 'cbv3PanicClose':
         return `💎 CBv3 panic-sell (CBv2 + ST3) — ปิดทุก position + cooldown BUY\nBot: ${p.botName}\nSymbol: ${p.symbol} (${p.timeframe || '?'})\nCBv2 + ST3 no-trade on upper-TF → กันกราฟไหลต่อเนื่อง\nClosed: ${p.closedCount} ไม้\nCooldown: ${p.lockHours || '?'} ชั่วโมง (until ${p.lockedUntil || '?'})\nLowerKC: ${p.lastLower || '?'}\n\n⏸ บอทยัง enable + Auto-pause/resume ยังทำงานปกติ — แค่กั้น S1 BUY ระหว่าง cooldown\n📌 Manual clear cooldown: POST /api/bots/<id>/unlock-cbv2`;
+      // FIX-2026-08-10: CBv5 — Support Zone broken (lowerKC + deepest pivot low + bearish + volume spike)
+      //   - HYBRID mode: bot stays enabled, blocks S1 BUY until cooldown expires
+      //   - independent of cbVersion enum (works alongside CBv2 or CBv3)
+      case 'cbv5PanicClose':
+        return `💎 CBv5 panic-sell (Support Zone broken) — ปิดทุก position + cooldown BUY\nBot: ${p.botName}\nSymbol: ${p.symbol} (${p.timeframe || '?'})\nLowerKC break + ทลาย deepest pivot low (${p.deepestLow != null ? p.deepestLow.toFixed(6) : '?'}) + ${p.isBearish ? 'bearish' : 'wick'} + ${p.isHighVolume ? 'volume spike' : 'normal vol'} → โครงสร้าง support พัง\nClosed: ${p.closedCount} ไม้\nCooldown: ${p.lockHours || '?'} ชั่วโมง (until ${p.lockedUntil || '?'})\nLowerKC: ${p.lastLower != null ? p.lastLower.toFixed(6) : '?'}\n\n⏸ บอทยัง enable + Auto-pause/resume ยังทำงานปกติ — แค่กั้น S1 BUY ระหว่าง cooldown\n📌 Manual clear cooldown: POST /api/bots/<id>/unlock-cbv2`;
       // FIX-2026-08-08: Feature #1 — Dynamic Position Sizing resize (size/layers changed)
       //   - reason: '3-wins' | '2-wins-2pct' | 'loss' (ตัวเลขเปลี่ยนตาม config)
       //   - before/after show current USDT size + layer count

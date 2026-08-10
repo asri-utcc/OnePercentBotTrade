@@ -261,6 +261,15 @@ function isWarmedUp(klinesLength, length = KC_LEN) {
   return klinesLength >= length * 2;
 }
 
+// FIX-2026-08-09: minimum candles required for CBv2/CBv3 evaluation
+//   - EMA(20)+ATR(20) need 20 warmup (lowerKC[i] valid when i >= 19)
+//   - isCBv2At(i) at lastIdx needs lowerKC[i-3] valid → lastIdx >= 22 → array length >= 23
+//   - Returns length + 3 = 23 for default KC_LEN=20
+//   - Used by cbPatternEvaluator + positionWatchdog (was hardcoded as 21 in trader/watchdog — INCORRECT)
+function minimumCBv2Warmup(length = KC_LEN) {
+  return length + 3;
+}
+
 // FIX-2026-08-01: Safe-trade super-upper TF map (separate from TREND_TF_MAP — thresholds differ)
 //   - 3m/5m → 4h (ตรวจ 4h ว่าเป็นแท่งเขียว/เหนือ EMA20 ก่อนซื้อ)
 //   - 15m → 1d
@@ -629,6 +638,7 @@ module.exports = {
   detectS1Signals,
   checkS1OnLatestCandle,
   isWarmedUp,
+  minimumCBv2Warmup, // FIX-2026-08-09: CBv2/CBv3 minimum candles (= KC_LEN + 3 = 23 for default)
   KC_LEN,
   KC_MULT,
   // FIX-2026-08-01: Safe-trade filter exports

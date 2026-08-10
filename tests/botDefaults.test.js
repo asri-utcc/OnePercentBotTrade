@@ -97,6 +97,19 @@ describe('botDefaults — pickScalar (numeric + clamp)', () => {
   test('returns null when fallback is null and no override', () => {
     expect(pickScalar({}, {}, 'x', null)).toBe(null);
   });
+  // FIX-2026-08-10: 24h vol guard for Auto Pause-Resume (clamp [0, 1e9])
+  test('autoPauseMin24hVolUsdt default = 1_000_000', () => {
+    expect(pickScalar({}, {}, 'autoPauseMin24hVolUsdt', 1_000_000)).toBe(1_000_000);
+  });
+  test('autoPauseMin24hVolUsdt clamps above max (1e9)', () => {
+    expect(pickScalar({ autoPauseMin24hVolUsdt: 5e9 }, {}, 'autoPauseMin24hVolUsdt', 1_000_000, { clamp: [0, 1_000_000_000] })).toBe(1_000_000_000);
+  });
+  test('autoPauseMin24hVolUsdt clamps below min (0)', () => {
+    expect(pickScalar({ autoPauseMin24hVolUsdt: -100 }, {}, 'autoPauseMin24hVolUsdt', 1_000_000, { clamp: [0, 1_000_000_000] })).toBe(0);
+  });
+  test('autoPauseMin24hVolUsdt accepts override within range', () => {
+    expect(pickScalar({ autoPauseMin24hVolUsdt: 5_000_000 }, {}, 'autoPauseMin24hVolUsdt', 1_000_000, { clamp: [0, 1_000_000_000] })).toBe(5_000_000);
+  });
 });
 
 describe('botDefaults — buildBotCreatePayload (full integration)', () => {

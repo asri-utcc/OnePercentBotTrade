@@ -860,6 +860,31 @@ async function checkAutoPauseBots() {
   const telegramNotifier = require('../services/telegramNotifier');
   const now = new Date();
 
+  // FIX-2026-08-10: bulk fetch 24h tickers (weight 80 once/tick) → build symbol→quoteVolume Map
+  //   - pattern mirrors volatilityScanner.js:227 + qualityIndicator.js:103
+  //   - on failure: volMap stays empty → per-bot lookup returns 0 → all bots evaluate as "low 24h vol"
+  //     (safer to pause than to miss illiquid coins)
+  const volMap = new Map();
+  try {
+    const all = await binanceRest.get24hrTickers();
+    for (const t of (all || [])) {
+      if (!t || !t.symbol) continue;
+      const qv = parseFloat(t.quoteVolume);
+      if (Number.isFinite(qv)) volMap.set(String(t.symbol).toUpperCase(), qv);
+    }
+  } catch (err) {
+    logger.warn({ err: err.message }, 'botManager: checkAutoPauseBots — 24h tickers bulk fetch failed');
+  }
+
+  // Local helper: format USDT for telegram (e.g. 1234567 → "$1.2M")
+  const fmtUsdt = (n) => {
+    if (!Number.isFinite(n)) return '$0';
+    if (n >= 1e9) return `$${(n / 1e9).toFixed(2)}B`;
+    if (n >= 1e6) return `$${(n / 1e6).toFixed(n >= 1e7 ? 1 : 2)}M`;
+    if (n >= 1e3) return `$${(n / 1e3).toFixed(1)}K`;
+    return `$${Math.round(n)}`;
+  };
+
   for (const b of bots) {
     try {
       const raw = await binanceRest.getKlines({ symbol: b.symbol, interval: b.timeframe, limit: 50 });
@@ -871,34 +896,62 @@ async function checkAutoPauseBots() {
       const tail = kc.width.slice(-30).filter((w) => w != null && Number.isFinite(w));
       if (tail.length < 5) continue;
       const minKcPct = Math.min(...tail);
-      const threshold = b.autoPauseMinKcPct != null ? b.autoPauseMinKcPct : 2;
+      const kcThreshold = b.autoPauseMinKcPct != null ? b.autoPauseMinKcPct : 2;
+      const volThreshold = b.autoPauseMin24hVolUsdt != null ? b.autoPauseMin24hVolUsdt : 1_000_000;
+      const quoteVolume24h = volMap.get(String(b.symbol).toUpperCase()) || 0;
+      const kcLow = minKcPct < kcThreshold;
+      const volLow = quoteVolume24h < volThreshold;
 
       const update = { autoPauseLastCheckedAt: now };
 
       // FIX-2026-08-07: HYBRID mode — CBv2 cooldown ไม่ block Auto-pause/resume อีกต่อไป
       //   - CBv2 แค่กั้น S1 BUY (cooldown window) — ไม่ disable บอท ไม่ override Auto-pause
-      //   - Auto-pause ทำงานปกติ: ถ้า Min-%KC ต่ำ → pause (reason='low_vol'); ถ้า recover → resume
+      //   - Auto-pause ทำงานปกติ: ถ้า Min-%KC ต่ำ OR 24hVol ต่ำ → pause
+      //     (priority: %KC ก่อน → 'low_vol', ถ้า %KC OK แต่ 24hVol ต่ำ → 'low_24h_vol')
+      //   - Resume ต้องผ่านทั้ง 2 เงื่อนไข (AND)
       //   - CBv2 cooldown อาจอยู่ระหว่าง Auto-pause ได้ (เป็นอิสระต่อกัน)
       //   - ลบ CBv2 lock override block เดิม (FIX-2026-08-06) แล้ว — ไม่จำเป็นแล้วใน HYBRID mode
 
-      if (minKcPct < threshold && b.enabled !== false) {
+      // FIX-2026-08-10: เพิ่มเงื่อนไขที่ 2 (24h volume) — pause ถ้าเงื่อนไขใดเงื่อนไขหนึ่งผิดพลาด
+      //   - reason priority: 'low_vol' (KC) ก่อน 'low_24h_vol' — เก็บ backward-compat กับ event consumers
+      let pauseReason = null;
+      if (kcLow) pauseReason = 'low_vol';
+      else if (volLow) pauseReason = 'low_24h_vol';
+
+      // Build telegram reason: แสดงทั้ง 2 metrics เสมอ (ชัดเจนสำหรับ debug + UI)
+      const pauseReasonStr =
+        pauseReason === 'low_vol'
+          ? `auto-pause: Min-%KC=${minKcPct.toFixed(2)}% < ${kcThreshold}% AND 24hVol=${fmtUsdt(quoteVolume24h)} < ${fmtUsdt(volThreshold)}`
+          : pauseReason === 'low_24h_vol'
+            ? `auto-pause: Min-%KC=${minKcPct.toFixed(2)}% ≥ ${kcThreshold}% (OK) BUT 24hVol=${fmtUsdt(quoteVolume24h)} < ${fmtUsdt(volThreshold)}`
+            : null;
+      const resumeReasonStr = `auto-resume: Min-%KC=${minKcPct.toFixed(2)}% ≥ ${kcThreshold}% AND 24hVol=${fmtUsdt(quoteVolume24h)} ≥ ${fmtUsdt(volThreshold)}`;
+
+      if (pauseReason && b.enabled !== false) {
         // ─── PAUSE ────────────────────────────────────────────────────
         Object.assign(update, {
           enabled: false,
           enabledAt: null,
           status: 'idle',
           autoPauseLastActionAt: now,
-          autoPauseReason: 'low_vol',
+          autoPauseReason: pauseReason,
         });
         await Bot.updateOne({ _id: b._id }, { $set: update });
-        eventBus.emit('bot:disabled', { botId: String(b._id), reason: 'auto_pause_low_kc', minKcPct });
+        const stopReason = pauseReason === 'low_vol' ? 'auto_pause_low_kc' : 'auto_pause_low_24h_vol';
+        eventBus.emit('bot:disabled', {
+          botId: String(b._id),
+          reason: stopReason,
+          minKcPct,
+          quoteVolume24h,
+          pauseReason,
+        });
         try {
           await telegramNotifier.sendNow('botDisabled', {
             botId: String(b._id),
             botName: b.name || b.symbol,
             symbol: b.symbol,
             timeframe: b.timeframe,
-            reason: `auto-pause: Min-%KC=${minKcPct.toFixed(2)}% < ${threshold}%`,
+            reason: pauseReasonStr,
           });
         } catch (_) { /* non-fatal */ }
         const trader = this.traders.get(String(b._id));
@@ -909,14 +962,27 @@ async function checkAutoPauseBots() {
           //   - reconcile orphan handler calls trader.handleBuyFilled etc. → bails at if (!this.running) return
           //   - delete ก่อน → spawnTrader จะสร้าง instance ใหม่ได้ตอน auto-resume (clean restart)
           this.traders.delete(String(b._id));
-          await trader.stop('auto_pause_low_kc').catch(() => {});
+          await trader.stop(stopReason).catch(() => {});
         }
-        logger.info({ botId: String(b._id), minKcPct, threshold }, 'botManager: auto-paused bot (low Min-%KC)');
-      } else if (minKcPct >= threshold && b.enabled === false && b.autoPauseReason === 'low_vol') {
+        logger.info({
+          botId: String(b._id),
+          minKcPct,
+          kcThreshold,
+          quoteVolume24h,
+          volThreshold,
+          pauseReason,
+        }, 'botManager: auto-paused bot');
+      } else if (
+        !kcLow && !volLow
+        && b.enabled === false
+        && (b.autoPauseReason === 'low_vol' || b.autoPauseReason === 'low_24h_vol')
+      ) {
         // ─── RESUME (เฉพาะบอทที่เคยถูก auto-pause) ──────────────────
         // FIX-2026-08-07: HYBRID mode — CBv2 cooldown ไม่ block resume อีกต่อไป
         //   - CBv2 cooldown แค่กั้น BUY — ไม่ disable บอท, ไม่ override auto-pause logic
         //   - ลบ CBv2 lock override blocks เดิม (FIX-2026-08-06) — ไม่จำเป็นใน HYBRID mode
+        // FIX-2026-08-10: resume gate ต้องการทั้ง 2 เงื่อนไข healthy + reason ∈ {low_vol, low_24h_vol}
+        //   - บอทที่ user ปิดเอง (reason=null) หรือ delist (reason='binance_delist') → ไม่ auto-resume
         Object.assign(update, {
           enabled: true,
           enabledAt: now,
@@ -927,19 +993,30 @@ async function checkAutoPauseBots() {
         // FIX 2026-08-05 (GIGGLE): reset stale cursor ก่อน spawnTrader (กัน ghost BUY จาก reconcileKlines replay)
         //   - b เป็น plain object จาก .find() → mutate directly แล้ว persist ผ่าน helper
         await this._resetStaleReplayCursorOnEnable(b);
-        eventBus.emit('bot:enabled', { botId: String(b._id), reason: 'auto_resume_vol_recovered', minKcPct });
+        eventBus.emit('bot:enabled', {
+          botId: String(b._id),
+          reason: 'auto_resume_vol_recovered',
+          minKcPct,
+          quoteVolume24h,
+        });
         try {
           await telegramNotifier.sendNow('botEnabled', {
             botId: String(b._id),
             botName: b.name || b.symbol,
             symbol: b.symbol,
             timeframe: b.timeframe,
-            reason: `auto-resume: Min-%KC=${minKcPct.toFixed(2)}% ≥ ${threshold}%`,
+            reason: resumeReasonStr,
           });
         } catch (_) { /* non-fatal */ }
         // re-spawn trader (mirror enableBot behavior — without totalActiveMs accrual since autoPause is short)
         await this.spawnTrader({ _id: b._id, ...b }).catch((err) => logger.warn({ botId: String(b._id), err: err.message }, 'botManager: auto-resume spawn failed'));
-        logger.info({ botId: String(b._id), minKcPct, threshold }, 'botManager: auto-resumed bot (vol recovered)');
+        logger.info({
+          botId: String(b._id),
+          minKcPct,
+          kcThreshold,
+          quoteVolume24h,
+          volThreshold,
+        }, 'botManager: auto-resumed bot (vol recovered)');
       } else {
         // ปกติ: แค่ update timestamp
         await Bot.updateOne({ _id: b._id }, { $set: update });

@@ -17,61 +17,12 @@
       <div class="page-sub text-muted-2">สแกนหาเหรียญที่ "เหวี่ยง" มากที่สุดในกรอบเวลาที่กำหนด · เรียงตาม multi-factor score</div>
     </div>
 
-    <!-- FIX-2026-08-07: Auto Add New Bot quick card (toggle + minKcPct + Run now) -->
-    <div class="lux-card mb-3" id="auto-add-bot-card">
-      <div class="lux-header">
-        <span class="title">🤖 Auto Add New Bot <span class="text-muted-2 small">(ทุก N นาที ตามตั้งค่า)</span></span>
-        <span class="text-muted-2 small" id="aab-status-line">กำลังโหลด…</span>
-      </div>
-      <div class="lux-body">
-        <div class="row g-2 align-items-end">
-          <div class="col-6 col-md-3">
-            <label class="form-label">เปิดใช้งาน</label>
-            <div class="form-check form-switch">
-              <input class="form-check-input" type="checkbox" id="aab-enabled" />
-              <label class="form-check-label" for="aab-enabled">
-                <span id="aab-enabled-label">ปิดอยู่</span>
-              </label>
-            </div>
-          </div>
-          <div class="col-6 col-md-3">
-            <label class="form-label">Min %KC (filter)</label>
-            <input type="number" class="form-control form-control-sm" id="aab-min-kc" step="0.1" min="0" max="50" value="2" />
-            <small class="text-muted-2">สร้างบอทเฉพาะ symbol ที่ Min %KC มากกว่าค่านี้</small>
-          </div>
-          <div class="col-6 col-md-3">
-            <label class="form-label">▶️ Auto-enable</label>
-            <div class="form-check form-switch">
-              <input class="form-check-input" type="checkbox" id="aab-auto-enable" />
-              <label class="form-check-label" for="aab-auto-enable">
-                <span id="aab-auto-enable-label">ปิดอยู่</span>
-              </label>
-            </div>
-            <small class="text-muted-2">เปิด = spawnTrader ทันทีหลัง create (default ON)</small>
-          </div>
-          <div class="col-6 col-md-3">
-            <button type="button" class="btn btn-outline-primary w-100" id="aab-save">
-              <span class="btn-glyph">💾</span>
-              <span class="btn-label">บันทึก</span>
-            </button>
-          </div>
-          <div class="col-6 col-md-3">
-            <button type="button" class="btn btn-warning w-100" id="aab-run-now" disabled>
-              <span class="btn-glyph">⚡</span>
-              <span class="btn-label">Run now</span>
-              <span class="btn-spinner" aria-hidden="true"></span>
-            </button>
-          </div>
-        </div>
-        <div class="row g-2 mt-1">
-          <div class="col-12 small text-muted-2">
-            💡 ตั้งค่า scan + interval + max-per-run + telegram เพิ่มเติมได้ที่ <a href="/settings.html">⚙️ Settings → 7️⃣ Auto Add Bot</a>
-            · ถ้า <strong>▶️ Auto-enable = ON</strong> (default) บอทจะเริ่มเทรดทันที (spawnTrader)
-            · ถ้าปิด บอทจะอยู่ในสถานะ <strong>DISABLED</strong> ต้องเปิดเองที่หน้า <a href="/bots.html">bots.html</a>
-          </div>
-        </div>
-        <div id="aab-status" class="mt-2"></div>
-      </div>
+    <!-- FIX-2026-08-10: Auto Add Bot config moved entirely to Settings → 🤖 Auto Add New Bot
+         (เดิมมี quick card ที่นี่ ทำให้หน้า Scan รก — ย้ายไปรวมไว้ที่เดียว) -->
+    <div class="alert alert-info py-2 px-3 mb-3 small" id="auto-add-bot-hint">
+      🤖 <strong>Auto Add New Bot</strong> — ตั้งค่า + เปิด/ปิด + Run now ได้ที่
+      <a href="/settings.html">⚙️ Settings → 🤖 บอท → Auto Add New Bot</a>
+      · บอทที่สแกนเจอจะถูกสร้างในสถานะ DISABLED หรือ auto-enable ทันที ตามค่าที่ตั้งไว้
     </div>
 
     <div class="lux-card mb-3">

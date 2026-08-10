@@ -201,12 +201,21 @@ function render() {
               <div class="bot-settings-option">
                 <label class="form-check form-switch mb-0">
                   <input type="checkbox" class="form-check-input" id="f-auto-pause-enabled" ${bot.autoPauseEnabled !== false ? 'checked' : ''} />
-                  <span class="form-check-label">⏸️ <strong>หยุดบอทเมื่อ Min-%KC ต่ำ</strong></span>
+                  <span class="form-check-label">⏸️ <strong>หยุดบอทเมื่อ Min-%KC หรือ 24h Vol ต่ำ</strong></span>
                 </label>
                 <div class="bot-settings-dependent">
-                  <label class="form-label" for="f-auto-pause-min-kc">Min-%KC threshold (%)</label>
-                  <input type="number" class="form-control form-control-sm" id="f-auto-pause-min-kc" value="${bot.autoPauseMinKcPct ?? 2}" step="0.1" min="0.1" max="50" />
-                  <small class="text-muted">ต่ำกว่าค่านี้จะ pause และ auto-resume เมื่อ volatility กลับมา</small>
+                  <div class="row g-2">
+                    <div class="col-md-6">
+                      <label class="form-label" for="f-auto-pause-min-kc">Min-%KC threshold (%)</label>
+                      <input type="number" class="form-control form-control-sm" id="f-auto-pause-min-kc" value="${bot.autoPauseMinKcPct ?? 2}" step="0.1" min="0.1" max="50" />
+                      <small class="text-muted">pause เมื่อ Keltner Channel width ต่ำกว่า</small>
+                    </div>
+                    <div class="col-md-6">
+                      <label class="form-label" for="f-auto-pause-min-24h-vol">Min 24h Vol (USDT)</label>
+                      <input type="number" class="form-control form-control-sm" id="f-auto-pause-min-24h-vol" value="${bot.autoPauseMin24hVolUsdt ?? 1000000}" step="1000" min="0" />
+                      <small class="text-muted">pause เมื่อ 24h quote-volume ต่ำกว่า; resume ต้องผ่านทั้ง 2 เงื่อนไข</small>
+                    </div>
+                  </div>
                 </div>
               </div>
             </div>
@@ -331,6 +340,53 @@ function render() {
                   </div>
                 </div>`;
               })()}
+
+              <!-- FIX-2026-08-10: CBv5 (Support Zone Circuit Breaker) — independent of cbVersion -->
+              <div class="bot-settings-option is-full" id="cbv5-section">
+                <label class="form-check form-switch mb-0">
+                  <input type="checkbox" class="form-check-input" id="f-cbv5-enabled" ${bot.cbv5Enabled !== false ? 'checked' : ''} />
+                  <span class="form-check-label">💎 <strong>CBv5</strong> — Support Zone + Deepest Low + Volume</span>
+                </label>
+                <div class="bot-settings-dependent">
+                  <label for="f-cbv5-lock-hours" class="form-label">ระยะเวลา Cooldown (ชั่วโมง)</label>
+                  <input type="number" class="form-control form-control-sm" id="f-cbv5-lock-hours" min="0.5" max="168" step="0.5" value="${bot.cbv5LockHours != null ? bot.cbv5LockHours : 4}" />
+                  <small class="text-muted">0.5–168 ชม. · ทำงานขนานกับ CBv2/CBv3 (อิสระจาก cbVersion) — 4-condition confirmation: lower-KC + deepest pivot low + bearish + volume spike</small>
+                  <button type="button" class="btn btn-sm btn-link ps-0 mt-1" id="f-cbv5-advanced-toggle">⚙️ ขั้นสูง (KC + Pivot + Volume)</button>
+                  <div id="f-cbv5-advanced" style="display:none">
+                    <div class="row g-2 mt-1">
+                      <div class="col-6"><label class="form-label small">KC length</label><input type="number" class="form-control form-control-sm" id="f-cbv5-kc-len" min="5" max="100" step="1" value="${bot.cbv5KcLen != null ? bot.cbv5KcLen : 20}" /></div>
+                      <div class="col-6"><label class="form-label small">KC multiplier</label><input type="number" class="form-control form-control-sm" id="f-cbv5-kc-mult" min="0.5" max="5" step="0.1" value="${bot.cbv5KcMult != null ? bot.cbv5KcMult : 1.2}" /></div>
+                      <div class="col-6"><label class="form-label small">Pivot lookback (count)</label><input type="number" class="form-control form-control-sm" id="f-cbv5-pivot-lookback" min="2" max="10" step="1" value="${bot.cbv5PivotLookback != null ? bot.cbv5PivotLookback : 3}" /></div>
+                      <div class="col-6"><label class="form-label small">Pivot left length</label><input type="number" class="form-control form-control-sm" id="f-cbv5-pivot-left" min="2" max="50" step="1" value="${bot.cbv5PivotLeftLen != null ? bot.cbv5PivotLeftLen : 5}" /></div>
+                      <div class="col-6"><label class="form-label small">Pivot right length</label><input type="number" class="form-control form-control-sm" id="f-cbv5-pivot-right" min="2" max="50" step="1" value="${bot.cbv5PivotRightLen != null ? bot.cbv5PivotRightLen : 5}" /></div>
+                      <div class="col-6"><label class="form-label small">Volume MA length</label><input type="number" class="form-control form-control-sm" id="f-cbv5-vol-ma-len" min="5" max="100" step="1" value="${bot.cbv5VolMaLen != null ? bot.cbv5VolMaLen : 20}" /></div>
+                      <div class="col-6"><label class="form-label small">Volume multiplier</label><input type="number" class="form-control form-control-sm" id="f-cbv5-vol-mult" min="1.0" max="10" step="0.1" value="${bot.cbv5VolMultiplier != null ? bot.cbv5VolMultiplier : 1.5}" /></div>
+                      <div class="col-6"><label class="form-label small">Debounce candles</label><input type="number" class="form-control form-control-sm" id="f-cbv5-debounce" min="1" max="20" step="1" value="${bot.cbv5DebounceCandles != null ? bot.cbv5DebounceCandles : 5}" /></div>
+                      <div class="col-12 mt-2">
+                        <label class="form-check form-switch mb-0">
+                          <input type="checkbox" class="form-check-input" id="f-cbv5-strict-break" ${bot.cbv5StrictBreak !== false ? 'checked' : ''} />
+                          <span class="form-check-label small">ต้องเป็น bearish candle (close &lt; open)</span>
+                        </label>
+                        <label class="form-check form-switch mb-0 mt-1">
+                          <input type="checkbox" class="form-check-input" id="f-cbv5-use-volume" ${bot.cbv5UseVolume !== false ? 'checked' : ''} />
+                          <span class="form-check-label small">ใช้ volume filter (volume &gt; MA × multiplier)</span>
+                        </label>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+                ${bot.cbv5LockedUntil && new Date(bot.cbv5LockedUntil).getTime() > Date.now() ? `
+                <div class="alert alert-warning mt-2 mb-0 bc-cbv5-cooldown-banner">
+                  <div class="d-flex align-items-center justify-content-between flex-wrap gap-2">
+                    <div>
+                      ⏸ <strong>CBv5 cooldown active</strong> until ${new Date(bot.cbv5LockedUntil).toLocaleString()}
+                      <span class="text-muted ms-2" data-cbv5-countdown="${new Date(bot.cbv5LockedUntil).toISOString()}"></span>
+                      <br /><small class="text-muted">เหตุผล: ${bot.cbv5LockReason || 'cbv5_panic'}</small>
+                    </div>
+                    <button type="button" class="btn btn-sm btn-outline-warning" id="btn-unlock-cbv5" onclick="unlockCBv2Now('${bot._id}')">🔓 ปลด Cooldown ตอนนี้</button>
+                  </div>
+                </div>` : ''}
+              </div>
 
               <div class="bot-settings-option is-full">
                 <label class="form-check form-switch mb-0">
@@ -906,6 +962,17 @@ function render() {
     if (el) el.addEventListener('change', updateDcaExitPolicy);
   });
 
+  // FIX-2026-08-10: CBv5 ⚙️ ขั้นสูง toggle (advanced params)
+  const advToggle = document.getElementById('f-cbv5-advanced-toggle');
+  const adv = document.getElementById('f-cbv5-advanced');
+  if (advToggle && adv) {
+    advToggle.addEventListener('click', () => {
+      const show = adv.style.display === 'none';
+      adv.style.display = show ? '' : 'none';
+      advToggle.textContent = show ? '⚙️ ซ่อนขั้นสูง' : '⚙️ ขั้นสูง (KC + Pivot + Volume)';
+    });
+  }
+
   updateTotal();
 }
 
@@ -984,6 +1051,19 @@ async function save(e) {
     cbv2LockHours: bot.cbVersion === 'v2' ? parseFloat(document.getElementById('f-cbv2-lock-hours').value) : bot.cbv2LockHours, // FIX-2026-08-06: CBv2 lock hours (0.5..168)
     cbv3Enabled: bot.cbVersion === 'v3' ? document.getElementById('f-cbv3-enabled').checked : bot.cbv3Enabled, // FIX-2026-08-08: Feature #2 — CBv3 toggle + lock hours (mirror CBv2)
     cbv3LockHours: bot.cbVersion === 'v3' ? parseFloat(document.getElementById('f-cbv3-lock-hours').value) : bot.cbv3LockHours,
+    // FIX-2026-08-10: CBv5 (Support Zone + Deepest Low + Volume Filter) — independent of cbVersion
+    cbv5Enabled: document.getElementById('f-cbv5-enabled').checked,
+    cbv5LockHours: parseFloat(document.getElementById('f-cbv5-lock-hours').value) || 4,
+    cbv5KcLen: parseInt(document.getElementById('f-cbv5-kc-len').value, 10) || 20,
+    cbv5KcMult: parseFloat(document.getElementById('f-cbv5-kc-mult').value) || 1.2,
+    cbv5PivotLookback: parseInt(document.getElementById('f-cbv5-pivot-lookback').value, 10) || 3,
+    cbv5PivotLeftLen: parseInt(document.getElementById('f-cbv5-pivot-left').value, 10) || 5,
+    cbv5PivotRightLen: parseInt(document.getElementById('f-cbv5-pivot-right').value, 10) || 5,
+    cbv5StrictBreak: document.getElementById('f-cbv5-strict-break').checked,
+    cbv5UseVolume: document.getElementById('f-cbv5-use-volume').checked,
+    cbv5VolMaLen: parseInt(document.getElementById('f-cbv5-vol-ma-len').value, 10) || 20,
+    cbv5VolMultiplier: parseFloat(document.getElementById('f-cbv5-vol-mult').value) || 1.5,
+    cbv5DebounceCandles: parseInt(document.getElementById('f-cbv5-debounce').value, 10) || 5,
     // FIX-2026-08-08: Feature #3 — CB Auto-Unlock toggle + threshold
     cbAutoUnlockEnabled: document.getElementById('f-cb-auto-unlock-enabled').checked,
     cbAutoUnlockThresholdPct: parseFloat(document.getElementById('f-cb-auto-unlock-threshold').value),
@@ -994,6 +1074,7 @@ async function save(e) {
     safeTradeNoTradeEnabled: document.getElementById('f-safe-trade-no-trade-enabled').checked, // FIX-2026-08-05: Safe-trade filter #3 (no-trade engulfing/SS) — opt-in, default OFF
     autoPauseEnabled: document.getElementById('f-auto-pause-enabled').checked, // FIX-2026-08-01: per-bot auto-pause on low Min-%KC (default ON)
     autoPauseMinKcPct: parseFloat(document.getElementById('f-auto-pause-min-kc').value) || 2, // FIX-2026-08-01: auto-pause threshold %
+    autoPauseMin24hVolUsdt: parseFloat(document.getElementById('f-auto-pause-min-24h-vol').value) || 1000000, // FIX-2026-08-10: 24h volume guard (USDT, default 1M)
     autoArmStopLossOnUKC: document.getElementById('f-auto-arm-stop-loss-ukc').checked, // FIX-2026-07-31 (F1): per-bot auto-arm SL-on-UKC toggle (default true)
     autoArmLossPct: parseFloat(document.getElementById('f-auto-arm-loss-pct').value) || 10, // FIX-2026-08-03: per-bot F1 loss threshold (1..90, default 10)
     autoArmAgeHours: parseFloat(document.getElementById('f-auto-arm-age-hours').value) || 4, // FIX-2026-08-03: per-bot F1 age threshold (0.5..168, default 4)

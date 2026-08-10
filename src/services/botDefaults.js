@@ -184,6 +184,19 @@ function buildBotCreatePayload({ overrides = {}, botDefaults = {}, fallbacks = {
     cbv2LockHours: pickScalar(o, b, 'cbv2LockHours', 8, { clamp: [0.5, 168] }),
     cbv3Enabled: pickBool(o, b, 'cbv3Enabled', true),
     cbv3LockHours: pickScalar(o, b, 'cbv3LockHours', 8, { clamp: [0.5, 168] }),
+    // FIX-2026-08-10: CBv5 (Support Zone Circuit Breaker) — independent of cbVersion
+    cbv5Enabled: pickBool(o, b, 'cbv5Enabled', true),
+    cbv5LockHours: pickScalar(o, b, 'cbv5LockHours', 4, { clamp: [0.5, 168] }),
+    cbv5KcLen: pickScalar(o, b, 'cbv5KcLen', 20, { clamp: [5, 100], int: true }),
+    cbv5KcMult: pickScalar(o, b, 'cbv5KcMult', 1.2, { clamp: [0.5, 5.0] }),
+    cbv5PivotLookback: pickScalar(o, b, 'cbv5PivotLookback', 3, { clamp: [2, 10], int: true }),
+    cbv5PivotLeftLen: pickScalar(o, b, 'cbv5PivotLeftLen', 5, { clamp: [2, 50], int: true }),
+    cbv5PivotRightLen: pickScalar(o, b, 'cbv5PivotRightLen', 5, { clamp: [2, 50], int: true }),
+    cbv5StrictBreak: pickBool(o, b, 'cbv5StrictBreak', true),
+    cbv5UseVolume: pickBool(o, b, 'cbv5UseVolume', true),
+    cbv5VolMaLen: pickScalar(o, b, 'cbv5VolMaLen', 20, { clamp: [5, 100], int: true }),
+    cbv5VolMultiplier: pickScalar(o, b, 'cbv5VolMultiplier', 1.5, { clamp: [1.0, 10.0] }),
+    cbv5DebounceCandles: pickScalar(o, b, 'cbv5DebounceCandles', 5, { clamp: [1, 20], int: true }),
 
     // ── Safe-trade filters ──
     safeTradeEnabled: pickBool(o, b, 'safeTradeEnabled', true),
@@ -193,6 +206,8 @@ function buildBotCreatePayload({ overrides = {}, botDefaults = {}, fallbacks = {
     // ── Auto-pause on low volatility ──
     autoPauseEnabled: pickBool(o, b, 'autoPauseEnabled', true),
     autoPauseMinKcPct: pickScalar(o, b, 'autoPauseMinKcPct', 2, { clamp: [0.1, 50] }),
+    // FIX-2026-08-10: 24h volume guard (paired with autoPauseMinKcPct)
+    autoPauseMin24hVolUsdt: pickScalar(o, b, 'autoPauseMin24hVolUsdt', 1_000_000, { clamp: [0, 1_000_000_000] }),
 
     // ── Auto-arm SL-UKC (F1) ──
     autoArmStopLossOnUKC: pickBool(o, b, 'autoArmStopLossOnUKC', true),

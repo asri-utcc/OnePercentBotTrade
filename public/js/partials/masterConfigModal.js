@@ -37,11 +37,33 @@
     { id: 'mc-suggestTpWindow', key: 'suggestTpWindow', section: 'tp', order: 20, type: 'number', step: '10', min: '30', max: '1000', label: '🪟 ช่วงข้อมูลแนะนำ TP (แท่ง)' },
     { id: 'mc-tpTrendMultiplier', key: 'tpTrendMultiplier', section: 'tp', order: 50, type: 'number', step: '1', min: '1', max: '10', label: '✖️ ตัวคูณ TP ตามแนวโน้ม' },
     { id: 'mc-autoPauseMinKcPct', key: 'autoPauseMinKcPct', section: 'automation', order: 30, type: 'number', step: '0.1', min: '0.1', max: '50', label: '⏸️ Min-%KC threshold (%)' },
+    { id: 'mc-autoPauseMin24hVolUsdt', key: 'autoPauseMin24hVolUsdt', section: 'automation', order: 31, type: 'number', step: '1000', min: '0', label: '💵 Auto-pause Min 24h Vol (USDT)' },
     { id: 'mc-autoArmLossPct', key: 'autoArmLossPct', section: 'risk', order: 30, type: 'number', step: '0.5', min: '1', max: '90', label: '🛡️ ขาดทุนขั้นต่ำสำหรับ Auto-arm (%)' },
     { id: 'mc-autoArmAgeHours', key: 'autoArmAgeHours', section: 'risk', order: 40, type: 'number', step: '0.5', min: '0.5', max: '168', label: '⏰ อายุ Position ขั้นต่ำสำหรับ Auto-arm (ชม.)' },
     { id: 'mc-cbv2LockHours', key: 'cbv2LockHours', section: 'risk', order: 80, type: 'number', step: '0.5', min: '0.5', max: '168', label: '⏱ ระยะเวลา CBv2 Cooldown (ชม.)' },
     { id: 'mc-cbv3LockHours', key: 'cbv3LockHours', section: 'risk', order: 80, type: 'number', step: '0.5', min: '0.5', max: '168', label: '⏱ ระยะเวลา CBv3 Cooldown (ชม.)' },
+    { id: 'mc-cbv5LockHours', key: 'cbv5LockHours', section: 'risk', order: 81, type: 'number', step: '0.5', min: '0.5', max: '168', label: '⏱ ระยะเวลา CBv5 Cooldown (ชม.) · default 4' },
     { id: 'mc-cbAutoUnlockThreshold', key: 'cbAutoUnlockThresholdPct', section: 'risk', order: 100, type: 'number', step: '0.1', min: '0.5', max: '5', label: '🔓 กำไรขั้นต่ำสำหรับ Auto-Unlock (%)' },
+  ];
+
+  // FIX-2026-08-10: CBv5 advanced params (KC + Pivot + Volume) — displayed under a
+  //   collapsible "ขั้นสูง" panel inside the risk section. Independent of cbVersion.
+  //   Same defaults as botDefaults.js: kcLen=20, kcMult=1.2, pivot×3, volMaLen=20,
+  //   volMultiplier=1.5, debounce=5, strictBreak=true, useVolume=true.
+  const CBV5_ADVANCED_FIELDS = [
+    { id: 'mc-cbv5-kc-len', key: 'cbv5KcLen', type: 'number', step: '1', min: '5', max: '100', label: '📏 KC length (EMA+ATR period)' },
+    { id: 'mc-cbv5-kc-mult', key: 'cbv5KcMult', type: 'number', step: '0.1', min: '0.5', max: '5', label: '📐 KC multiplier (ความกว้าง band)' },
+    { id: 'mc-cbv5-pivot-lookback', key: 'cbv5PivotLookback', type: 'number', step: '1', min: '2', max: '10', label: '🔍 Pivot lookback (จำนวน pivot lows ที่ใช้)' },
+    { id: 'mc-cbv5-pivot-left', key: 'cbv5PivotLeftLen', type: 'number', step: '1', min: '2', max: '50', label: '◀ Pivot left length (แท่งซ้ายยืนยัน)' },
+    { id: 'mc-cbv5-pivot-right', key: 'cbv5PivotRightLen', type: 'number', step: '1', min: '2', max: '50', label: '▶ Pivot right length (แท่งขวายืนยัน)' },
+    { id: 'mc-cbv5-vol-ma-len', key: 'cbv5VolMaLen', type: 'number', step: '1', min: '5', max: '100', label: '📊 Volume MA length' },
+    { id: 'mc-cbv5-vol-mult', key: 'cbv5VolMultiplier', type: 'number', step: '0.1', min: '1.0', max: '10', label: '📈 Volume spike multiplier' },
+    { id: 'mc-cbv5-debounce', key: 'cbv5DebounceCandles', type: 'number', step: '1', min: '1', max: '20', label: '⏳ Debounce candles (กันยิงซ้ำติด)' },
+  ];
+
+  const CBV5_ADVANCED_TOGGLES = [
+    { id: 'mc-cbv5-strict-break', key: 'cbv5StrictBreak', label: '🐻 Strict break · ต้อง bearish (close < open)' },
+    { id: 'mc-cbv5-use-volume', key: 'cbv5UseVolume', label: '📈 ใช้ volume spike filter' },
   ];
 
   const TOGGLES = [
@@ -50,13 +72,14 @@
     { id: 'mc-autoUpdateTp', key: 'autoUpdateTp', section: 'tp', order: 30, label: '⏰ อัปเดต TP% ทุกต้นชั่วโมง' },
     { id: 'mc-tpTrendEnabled', key: 'tpTrendEnabled', section: 'tp', order: 40, label: '📈 ขยาย TP ตามแนวโน้ม (Trend ×N)' },
     { id: 'mc-dynamicSizeEnabled', key: 'dynamicSizeEnabled', section: 'automation', order: 10, label: '📊 Dynamic Position Sizing (DPS)' },
-    { id: 'mc-autoPauseEnabled', key: 'autoPauseEnabled', section: 'automation', order: 20, label: '⏸️ หยุดบอทเมื่อ Min-%KC ต่ำ' },
+    { id: 'mc-autoPauseEnabled', key: 'autoPauseEnabled', section: 'automation', order: 20, label: '⏸️ หยุดบอทเมื่อ Min-%KC หรือ 24h Vol ต่ำ' },
     { id: 'mc-stopLossOnUpperKC', key: 'stopLossOnUpperKC', section: 'risk', order: 10, label: '🛑 Stop Loss เมื่อแท่งปิดเหนือ Upper-KC' },
     { id: 'mc-autoArmStopLossOnUKC', key: 'autoArmStopLossOnUKC', section: 'risk', order: 20, label: '🛡️ เปิดใช้ SL-UKC อัตโนมัติเมื่อขาดทุนนาน' },
     { id: 'mc-slUkcTriggerOnProfit', key: 'slUkcTriggerOnProfit', section: 'risk', order: 50, label: '💰 ให้ SL-UKC ปิด Position ที่กำไรด้วย' },
     { id: 'mc-cbEnabled', key: 'cbEnabled', section: 'risk', order: 60, label: '🚨 Circuit Breaker (CB)' },
     { id: 'mc-cbv2Enabled', key: 'cbv2Enabled', section: 'risk', order: 70, label: '💎 CBv2 — Panic-sell + Cooldown' },
     { id: 'mc-cbv3Enabled', key: 'cbv3Enabled', section: 'risk', order: 70, label: '💎 CBv3 — CBv2 + ST3 Upper-TF' },
+    { id: 'mc-cbv5Enabled', key: 'cbv5Enabled', section: 'risk', order: 75, label: '💎 CBv5 — Support Zone + Deepest Low + Volume (อิสระจาก CB Version)' },
     { id: 'mc-cbAutoUnlockEnabled', key: 'cbAutoUnlockEnabled', section: 'risk', order: 90, label: '🔓 ปลด CB Cooldown อัตโนมัติ' },
     { id: 'mc-safeTradeEnabled', key: 'safeTradeEnabled', section: 'safe-trade', order: 10, label: '🛡️ Safe Trade #1 — แนวโน้ม Super Upper-TF' },
     { id: 'mc-safeTradeTrendlineEnabled', key: 'safeTradeTrendlineEnabled', section: 'safe-trade', order: 20, label: '📐 Safe Trade #2 — Trendline Support (ไม่แนะนำสำหรับ DCA)' },
@@ -119,6 +142,7 @@
     const isCbVisible = (key) => {
       if (key === 'cbv2Enabled' || key === 'cbv2LockHours') return activeCbVersion === 'v2';
       if (key === 'cbv3Enabled' || key === 'cbv3LockHours') return activeCbVersion === 'v3';
+      // FIX-2026-08-10: CBv5 is independent of cbVersion — always visible
       return true;
     };
 
@@ -192,6 +216,23 @@
       const controlsHtml = controls.map((control) =>
         control.kind === 'field' ? renderField(control) : renderToggle(control)
       ).join('');
+      // FIX-2026-08-10: CBv5 advanced params panel (collapsible) — inject หลัง risk section
+      const cbv5AdvancedHtml = section.id === 'risk' ? `
+        <details class="lux-details mt-2" id="mc-cbv5-advanced-panel">
+          <summary class="lux-details-summary" style="cursor:pointer;">
+            <span class="bot-settings-group-icon">💎</span>
+            <span class="bot-settings-group-title">CBv5 — ขั้นสูง (KC + Pivot + Volume)</span>
+            <span class="bot-settings-group-hint">ปรับ kcLen, kcMult, pivot×3, vol×2, debounce, strictBreak, useVolume</span>
+          </summary>
+          <div class="lux-details-body">
+            <div class="bot-settings-note mb-2">ค่าขั้นสูงของ CBv5 — เปลี่ยนแล้วมีผลกับการประเมิน panic-close ทันที (ไม่ต้อง restart trader) ปล่อยว่าง = ไม่เปลี่ยน</div>
+            <div class="bot-settings-grid">
+              ${CBV5_ADVANCED_FIELDS.map((f) => renderField({ ...f, key: f.key, id: f.id, label: f.label, type: f.type, step: f.step, min: f.min, max: f.max })).join('')}
+              ${CBV5_ADVANCED_TOGGLES.map((t) => renderToggle({ ...t, key: t.key, id: t.id, label: t.label, section: 'risk' })).join('')}
+            </div>
+          </div>
+        </details>
+      ` : '';
       return `
         <details class="lux-details" id="mc-group-${section.id}" data-settings-group="${section.id}" ${section.open ? 'open' : ''}>
           <summary class="lux-details-summary">
@@ -201,6 +242,7 @@
           </summary>
           <div class="lux-details-body">
             <div class="bot-settings-grid">${controlsHtml}</div>
+            ${cbv5AdvancedHtml}
           </div>
         </details>`;
     }).join('');

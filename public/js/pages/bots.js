@@ -600,6 +600,17 @@ function setupEventHandlers() {
         // FIX-2026-08-07: auto-trigger ✨ Get เพื่อให้ TP% default = NET จาก Min %KC(window) + EMA20 trend
         autoTriggerNewBotTp();
         // FIX-2026-08-08: hide CBv2 OR CBv3 section based on AppConfig.cbVersion (master toggle)
+        // FIX-2026-08-10: CBv5 ⚙️ ขั้นสูง toggle (advanced params)
+        const advToggle = document.getElementById('nb-cbv5-advanced-toggle');
+        const adv = document.getElementById('nb-cbv5-advanced');
+        if (advToggle && adv && !advToggle._cbv5AdvBound) {
+          advToggle._cbv5AdvBound = true;
+          advToggle.addEventListener('click', () => {
+            const show = adv.style.display === 'none';
+            adv.style.display = show ? '' : 'none';
+            advToggle.textContent = show ? '⚙️ ซ่อนขั้นสูง' : '⚙️ ขั้นสูง (KC + Pivot + Volume)';
+          });
+        }
         applyCbVersionToNewBot();
       }, 50);
     });
@@ -618,6 +629,9 @@ function setupEventHandlers() {
       const cbv3El = document.getElementById('nb-cbv3-section');
       if (cbv2El) cbv2El.style.display = ver === 'v2' ? '' : 'none';
       if (cbv3El) cbv3El.style.display = ver === 'v3' ? '' : 'none';
+      // FIX-2026-08-10: CBv5 always visible (independent of cbVersion)
+      const cbv5El = document.getElementById('nb-cbv5-section');
+      if (cbv5El) cbv5El.style.display = '';
       const badge = document.getElementById('nb-cbv-version-badge');
       if (badge) badge.textContent = ver;
     } catch (e) {
@@ -648,8 +662,19 @@ function setupEventHandlers() {
       set('nb-dca-max-layers', d.dcaMaxLayers);
       set('nb-cbv2-lock-hours', d.cbv2LockHours);
       set('nb-cbv3-lock-hours', d.cbv3LockHours);
+      // FIX-2026-08-10: CBv5 (Support Zone CB) defaults
+      set('nb-cbv5-lock-hours', d.cbv5LockHours);
+      set('nb-cbv5-kc-len', d.cbv5KcLen);
+      set('nb-cbv5-kc-mult', d.cbv5KcMult);
+      set('nb-cbv5-pivot-lookback', d.cbv5PivotLookback);
+      set('nb-cbv5-pivot-left', d.cbv5PivotLeftLen);
+      set('nb-cbv5-pivot-right', d.cbv5PivotRightLen);
+      set('nb-cbv5-vol-ma-len', d.cbv5VolMaLen);
+      set('nb-cbv5-vol-mult', d.cbv5VolMultiplier);
+      set('nb-cbv5-debounce', d.cbv5DebounceCandles);
       set('nb-cb-auto-unlock-threshold', d.cbAutoUnlockThresholdPct);
       set('nb-auto-pause-min-kc', d.autoPauseMinKcPct);
+      set('nb-auto-pause-min-24h-vol', d.autoPauseMin24hVolUsdt); // FIX-2026-08-10: 24h vol guard
       set('nb-auto-arm-loss-pct', d.autoArmLossPct);
       set('nb-auto-arm-age-hours', d.autoArmAgeHours);
       set('nb-tp-trend-multiplier', d.tpTrendMultiplier);
@@ -659,6 +684,10 @@ function setupEventHandlers() {
       setChecked('nb-cb-enabled', d.cbEnabled);
       setChecked('nb-cbv2-enabled', d.cbv2Enabled);
       setChecked('nb-cbv3-enabled', d.cbv3Enabled);
+      // FIX-2026-08-10: CBv5 booleans
+      setChecked('nb-cbv5-enabled', d.cbv5Enabled);
+      setChecked('nb-cbv5-strict-break', d.cbv5StrictBreak);
+      setChecked('nb-cbv5-use-volume', d.cbv5UseVolume);
       setChecked('nb-cb-auto-unlock-enabled', d.cbAutoUnlockEnabled);
       setChecked('nb-dynamic-size-enabled', d.dynamicSizeEnabled);
       setChecked('nb-safe-trade-enabled', d.safeTradeEnabled);
@@ -1928,6 +1957,19 @@ async function createBot() {
     cbv2LockHours: (window._newBotCbVersion || 'v3') === 'v2' ? parseFloat(document.getElementById('nb-cbv2-lock-hours').value) : 8,
     cbv3Enabled: (window._newBotCbVersion || 'v3') === 'v3' ? document.getElementById('nb-cbv3-enabled').checked : true,
     cbv3LockHours: (window._newBotCbVersion || 'v3') === 'v3' ? parseFloat(document.getElementById('nb-cbv3-lock-hours').value) || 8 : 8,
+    // FIX-2026-08-10: CBv5 (Support Zone + Deepest Low + Volume Filter) — independent of cbVersion
+    cbv5Enabled: document.getElementById('nb-cbv5-enabled') ? document.getElementById('nb-cbv5-enabled').checked : true,
+    cbv5LockHours: parseFloat(document.getElementById('nb-cbv5-lock-hours').value) || 4,
+    cbv5KcLen: parseInt(document.getElementById('nb-cbv5-kc-len').value, 10) || 20,
+    cbv5KcMult: parseFloat(document.getElementById('nb-cbv5-kc-mult').value) || 1.2,
+    cbv5PivotLookback: parseInt(document.getElementById('nb-cbv5-pivot-lookback').value, 10) || 3,
+    cbv5PivotLeftLen: parseInt(document.getElementById('nb-cbv5-pivot-left').value, 10) || 5,
+    cbv5PivotRightLen: parseInt(document.getElementById('nb-cbv5-pivot-right').value, 10) || 5,
+    cbv5StrictBreak: document.getElementById('nb-cbv5-strict-break').checked,
+    cbv5UseVolume: document.getElementById('nb-cbv5-use-volume').checked,
+    cbv5VolMaLen: parseInt(document.getElementById('nb-cbv5-vol-ma-len').value, 10) || 20,
+    cbv5VolMultiplier: parseFloat(document.getElementById('nb-cbv5-vol-mult').value) || 1.5,
+    cbv5DebounceCandles: parseInt(document.getElementById('nb-cbv5-debounce').value, 10) || 5,
     // FIX-2026-08-08: Feature #3 — CB Auto-Unlock (opt-in, default false)
     cbAutoUnlockEnabled: document.getElementById('nb-cb-auto-unlock-enabled') ? document.getElementById('nb-cb-auto-unlock-enabled').checked : false,
     cbAutoUnlockThresholdPct: parseFloat(document.getElementById('nb-cb-auto-unlock-threshold') ? document.getElementById('nb-cb-auto-unlock-threshold').value : 1.0) || 1.0,
@@ -1938,6 +1980,7 @@ async function createBot() {
     safeTradeNoTradeEnabled: document.getElementById('nb-safe-trade-no-trade-enabled').checked, // FIX-2026-08-05: Safe-trade filter #3 (no-trade engulfing/SS) — opt-in, default OFF
     autoPauseEnabled: document.getElementById('nb-auto-pause-enabled').checked, // FIX-2026-08-01: per-bot auto-pause on low Min-%KC (default ON)
     autoPauseMinKcPct: parseFloat(document.getElementById('nb-auto-pause-min-kc').value) || 2, // FIX-2026-08-01: auto-pause threshold %
+    autoPauseMin24hVolUsdt: parseFloat(document.getElementById('nb-auto-pause-min-24h-vol').value) || 1000000, // FIX-2026-08-10: 24h volume guard (USDT, default 1M)
     autoArmStopLossOnUKC: document.getElementById('nb-auto-arm-stop-loss-ukc').checked, // FIX-2026-07-31 (F1): per-bot auto-arm SL-on-UKC toggle (default true)
     autoArmLossPct: parseFloat(document.getElementById('nb-auto-arm-loss-pct').value) || 10, // FIX-2026-08-03: F1 loss threshold (1..90, default 10)
     autoArmAgeHours: parseFloat(document.getElementById('nb-auto-arm-age-hours').value) || 4, // FIX-2026-08-03: F1 age threshold (0.5..168, default 4)

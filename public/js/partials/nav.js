@@ -30,13 +30,14 @@
     { key: 'scan',          href: '/scan-volatility.html', label: '🎰 Scan' },
     { key: 'pnl',           href: '/pnl.html',      label: '📅 PnL' },               // FIX-2026-07-29
     { key: 'history',       href: '/history.html',  label: '📜 History' },           // FIX-2026-07-24
+    { key: 'security',      href: '/password-sessions.html', label: '🔑 Security' }, // 2026-08-09: Password & Sessions Manager
     { key: 'settings',      href: '/settings.html', label: '⚙️ Settings' },          // FIX-2026-07-24
   ].filter((l) => l.key !== 'detail' || botId); // hide detail if no botId
 
   const desktopHtml = `
     <div class="d-flex align-items-center gap-2 flex-wrap" style="max-width: 1400px; margin: 0 auto;">
       <a class="brand" href="/bots.html">
-        <span class="brand-mark"></span>
+        <img src="/favicon.svg" alt="OnePercentBotTrade" class="brand-logo" />
         <span>OnePercent<span style="color:var(--gold-1);">%</span>BotTrade</span>
       </a>
       <nav class="desktop-menu d-none d-md-flex align-items-center gap-1 ms-3">

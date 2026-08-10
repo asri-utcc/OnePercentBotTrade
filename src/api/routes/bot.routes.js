@@ -1147,7 +1147,7 @@ router.put('/:id', requireAuth, async (req, res) => {
     // FIX-2026-08-08 (rev2): จำค่าเดิมไว้ตรวจว่า user แก้ capital/maxTrades เองหรือไม่ (แก้บั๊ก A4)
     const _prevCapital = bot.capitalPerTrade;
     const _prevMaxTrades = bot.maxTrades;
-    const allowed = ['name', 'capitalPerTrade', 'maxTrades', 'tpPercent', 'retryTimeMin', 'retryMax', 'timeframe', 'stopLossOnUpperKC', 'autoUpdateTp', 'kcMult', 'minSpreadTicks', 's1OnlyDown', 'xs1Enabled', 'cbEnabled', 'cbv2Enabled', 'cbv2LockHours', 'cbv3Enabled', 'cbv3LockHours', 'safeTradeEnabled', 'safeTradeTrendlineEnabled', 'autoPauseEnabled', 'autoPauseMinKcPct', 'suggestTpWindow', 'autoArmStopLossOnUKC', 'autoArmLossPct', 'autoArmAgeHours', 'slUkcTriggerOnProfit', 'tpTrendMultiplier', 'tpTrendEnabled', 'dcaEnabled', 'dcaMaxLayers', 'martingaleEnabled', 'martingaleMultiplier', 'martingaleMaxLayerNotional', 'safeTradeNoTradeEnabled', 'dynamicSizeEnabled', 'cbAutoUnlockEnabled', 'cbAutoUnlockThresholdPct']; // FIX-2026-08-05: audit fix — missing from allowed list caused bot-edit save to silently drop the field  // FIX-2026-08-06: CBv2 fields (cbv2Enabled, cbv2LockHours)  // FIX-2026-08-08: Feature #1+3 (dynamicSizeEnabled, cbAutoUnlockEnabled, cbAutoUnlockThresholdPct)  // FIX-2026-08-08: CBv3 fields (cbv3Enabled, cbv3LockHours) — added to whitelist for bulk update + bot-edit save
+    const allowed = ['name', 'capitalPerTrade', 'maxTrades', 'tpPercent', 'retryTimeMin', 'retryMax', 'timeframe', 'stopLossOnUpperKC', 'autoUpdateTp', 'kcMult', 'minSpreadTicks', 's1OnlyDown', 'xs1Enabled', 'cbEnabled', 'cbv2Enabled', 'cbv2LockHours', 'cbv3Enabled', 'cbv3LockHours', 'safeTradeEnabled', 'safeTradeTrendlineEnabled', 'autoPauseEnabled', 'autoPauseMinKcPct', 'autoPauseMin24hVolUsdt', 'suggestTpWindow', 'autoArmStopLossOnUKC', 'autoArmLossPct', 'autoArmAgeHours', 'slUkcTriggerOnProfit', 'tpTrendMultiplier', 'tpTrendEnabled', 'dcaEnabled', 'dcaMaxLayers', 'martingaleEnabled', 'martingaleMultiplier', 'martingaleMaxLayerNotional', 'safeTradeNoTradeEnabled', 'dynamicSizeEnabled', 'cbAutoUnlockEnabled', 'cbAutoUnlockThresholdPct']; // FIX-2026-08-05: audit fix — missing from allowed list caused bot-edit save to silently drop the field  // FIX-2026-08-06: CBv2 fields (cbv2Enabled, cbv2LockHours)  // FIX-2026-08-08: Feature #1+3 (dynamicSizeEnabled, cbAutoUnlockEnabled, cbAutoUnlockThresholdPct)  // FIX-2026-08-08: CBv3 fields (cbv3Enabled, cbv3LockHours) — added to whitelist for bulk update + bot-edit save  // FIX-2026-08-10: 24h vol guard field for Auto Pause-Resume
 
     for (const k of allowed) {
       if (data[k] !== undefined) {
@@ -1202,6 +1202,9 @@ router.put('/:id', requireAuth, async (req, res) => {
         } else if (k === 'cbAutoUnlockThresholdPct') {
           // FIX-2026-08-08: Feature #3 — threshold Pct (0.5..5.0, default 1.0)
           bot[k] = Math.min(5.0, Math.max(0.5, parseFloat(data[k])));
+        } else if (k === 'autoPauseMin24hVolUsdt') {
+          // FIX-2026-08-10: 24h volume guard for Auto Pause-Resume (0..1B USDT, default 1M, integer)
+          bot[k] = Math.min(1_000_000_000, Math.max(0, Math.round(parseFloat(data[k]))));
         } else if (k === 'maxTrades' || k === 'retryTimeMin' || k === 'retryMax' || k === 'minSpreadTicks' || k === 'suggestTpWindow') {
           // FIX-2026-07-24: minSpreadTicks clamp 0..10
           // FIX-2026-07-25: retryTimeMin ต้อง parseFloat (รองรับ 0.1..60) ไม่ใช่ parseInt — เดิมใช้ parseInt ตัดทศนิยมทิ้ง → "0.1" กลายเป็น 0 → validation fail
@@ -1511,39 +1514,49 @@ router.post('/:id/clear-warning', requireAuth, async (req, res) => {
 //   - ส่ง bot:updated + bot:unlocked event
 //   - ใช้ requireBotActionPassword เพราะ unlock = admin-level action
 // FIX-2026-08-08: Feature #2 — ปลด CBv3 ด้วยพร้อมกัน (shared endpoint — mutually exclusive in time but both fields cleared for cleanliness)
+// FIX-2026-08-10: CBv5 added — clear CBv5 fields too (HYBRID unlock covers all 3 versions)
 router.post('/:id/unlock-cbv2', requireAuth, requireBotActionPassword, async (req, res) => {
   try {
     const bot = await Bot.findById(req.params.id);
     if (!bot) return res.status(404).json({ error: 'Bot not found' });
-    if (!bot.cbv2LockReason && !bot.cbv3LockReason) {
+    if (!bot.cbv2LockReason && !bot.cbv3LockReason && !bot.cbv5LockReason) {
       return res.status(400).json({
         error: 'Bot is not CB-cooldown',
         cbv2LockedUntil: bot.cbv2LockedUntil,
         cbv3LockedUntil: bot.cbv3LockedUntil,
+        cbv5LockedUntil: bot.cbv5LockedUntil,
       });
     }
     const wasLockedUntil = bot.cbv2LockedUntil;
     const wasLockReason = bot.cbv2LockReason;
     const wasCbv3LockedUntil = bot.cbv3LockedUntil;
     const wasCbv3LockReason = bot.cbv3LockReason;
+    const wasCbv5LockedUntil = bot.cbv5LockedUntil;
+    const wasCbv5LockReason = bot.cbv5LockReason;
     // FIX-2026-08-08: clear BOTH CBv2 + CBv3 fields (shared unlock endpoint)
+    // FIX-2026-08-10: also clear CBv5 fields
     bot.cbv2LockedUntil = null;
     bot.cbv2LockReason = null;
     bot.cbv2LastFiredAt = null;
     bot.cbv3LockedUntil = null;
     bot.cbv3LockReason = null;
     bot.cbv3LastFiredAt = null;
+    bot.cbv5LockedUntil = null;
+    bot.cbv5LockReason = null;
+    bot.cbv5LastFiredAt = null;
     await bot.save();
 
     // FIX-2026-08-07: reset in-memory trader._cbv2FiredAt (เพื่อให้ BUY gate ปลดทันที ไม่ต้องรอ restart)
     // FIX-2026-08-08: also reset _cbv3FiredAt
+    // FIX-2026-08-10: also reset _cbv5FiredAt
     try {
       const botManager = require('../../core/botManager');
       const trader = botManager.traders && botManager.traders.get(String(req.params.id));
       if (trader) {
         trader._cbv2FiredAt = 0;
         trader._cbv3FiredAt = 0;
-        logger.info({ botId: req.params.id.toString() }, 'bot: unlock-cbv2 — trader._cbv2FiredAt + _cbv3FiredAt reset');
+        trader._cbv5FiredAt = 0;
+        logger.info({ botId: req.params.id.toString() }, 'bot: unlock-cbv2 — trader._cbv2FiredAt + _cbv3FiredAt + _cbv5FiredAt reset');
       }
     } catch (err) {
       // non-fatal: trader instance may not exist (bot disabled / not running)
@@ -1556,12 +1569,14 @@ router.post('/:id/unlock-cbv2', requireAuth, requireBotActionPassword, async (re
       source: 'manual',
       wasLockedUntil, wasLockReason,
       wasCbv3LockedUntil, wasCbv3LockReason,
+      wasCbv5LockedUntil, wasCbv5LockReason,
     });
     logger.info({
       botId: req.params.id.toString(),
       wasLockedUntil, wasLockReason,
       wasCbv3LockedUntil, wasCbv3LockReason,
-    }, 'bot: unlock-cbv2 — CBv2+CBv3 cooldown cleared by user');
+      wasCbv5LockedUntil, wasCbv5LockReason,
+    }, 'bot: unlock-cbv2 — CBv2+CBv3+CBv5 cooldown cleared by user');
     const fresh = await Bot.findById(req.params.id).lean();
     res.json({ ok: true, bot: fresh });
   } catch (err) {
@@ -2070,7 +2085,7 @@ router.post('/bulk-update', requireAuth, async (req, res) => {
       'safeTradeTrendlineEnabled',
       // FIX-2026-08-05: Safe-trade filter #3 (no-trade engulfing/SS) — bulk-update support
       'safeTradeNoTradeEnabled',
-      'autoPauseEnabled', 'autoPauseMinKcPct',
+      'autoPauseEnabled', 'autoPauseMinKcPct', 'autoPauseMin24hVolUsdt',
       'suggestTpWindow', 'autoArmStopLossOnUKC', 'autoArmLossPct', 'autoArmAgeHours', 'slUkcTriggerOnProfit',
       'tpTrendMultiplier', 'tpTrendEnabled',
       'dcaEnabled', 'dcaMaxLayers',
@@ -2078,12 +2093,23 @@ router.post('/bulk-update', requireAuth, async (req, res) => {
       'martingaleEnabled', 'martingaleMultiplier', 'martingaleMaxLayerNotional',
       // FIX-2026-08-08: Feature #1+3 — DPS + Auto Unlock Cooldown (Master Config support)
       'dynamicSizeEnabled', 'cbAutoUnlockEnabled', 'cbAutoUnlockThresholdPct',
+      // FIX-2026-08-10: CBv5 (Support Zone + Deepest Low + Volume Filter) — bulk-update support
+      //   CBv5 is independent of cbVersion enum — runs parallel with CBv2/CBv3.
+      'cbv5Enabled', 'cbv5LockHours',
+      // CBv5 advanced params (KC + Pivot + Volume + Debounce)
+      'cbv5KcLen', 'cbv5KcMult',
+      'cbv5PivotLookback', 'cbv5PivotLeftLen', 'cbv5PivotRightLen',
+      'cbv5StrictBreak', 'cbv5UseVolume',
+      'cbv5VolMaLen', 'cbv5VolMultiplier',
+      'cbv5DebounceCandles',
     ];
     const update = {};
     for (const k of allowed) {
       if (k in settings) update[k] = settings[k];
     }
     if (Number.isFinite(update.autoPauseMinKcPct)) update.autoPauseMinKcPct = Math.max(0.1, Math.min(50, update.autoPauseMinKcPct));
+    // FIX-2026-08-10: 24h vol guard clamp (0..1B USDT, integer)
+    if (Number.isFinite(update.autoPauseMin24hVolUsdt)) update.autoPauseMin24hVolUsdt = Math.max(0, Math.min(1_000_000_000, Math.round(update.autoPauseMin24hVolUsdt)));
     // FIX-2026-08-03: F1 auto-arm thresholds + profit trigger (bulk-update support)
     if (Number.isFinite(update.autoArmLossPct)) update.autoArmLossPct = Math.max(1, Math.min(90, update.autoArmLossPct));
     if (Number.isFinite(update.autoArmAgeHours)) update.autoArmAgeHours = Math.max(0.5, Math.min(168, update.autoArmAgeHours));
@@ -2104,6 +2130,20 @@ router.post('/bulk-update', requireAuth, async (req, res) => {
     // FIX-2026-08-08: CBv3 field validation (bulk-update support)
     if ('cbv3Enabled' in update) update.cbv3Enabled = update.cbv3Enabled === true || update.cbv3Enabled === 'true';
     if (Number.isFinite(update.cbv3LockHours)) update.cbv3LockHours = Math.max(0.5, Math.min(168, update.cbv3LockHours));
+    // FIX-2026-08-10: CBv5 field validation (bulk-update support)
+    if ('cbv5Enabled' in update) update.cbv5Enabled = update.cbv5Enabled === true || update.cbv5Enabled === 'true';
+    if (Number.isFinite(update.cbv5LockHours)) update.cbv5LockHours = Math.max(0.5, Math.min(168, update.cbv5LockHours));
+    // FIX-2026-08-10: CBv5 advanced params validation (KC + Pivot + Volume + Debounce)
+    if (Number.isFinite(update.cbv5KcLen)) update.cbv5KcLen = Math.max(5, Math.min(100, Math.floor(update.cbv5KcLen)));
+    if (Number.isFinite(update.cbv5KcMult)) update.cbv5KcMult = Math.max(0.5, Math.min(5, update.cbv5KcMult));
+    if (Number.isFinite(update.cbv5PivotLookback)) update.cbv5PivotLookback = Math.max(2, Math.min(10, Math.floor(update.cbv5PivotLookback)));
+    if (Number.isFinite(update.cbv5PivotLeftLen)) update.cbv5PivotLeftLen = Math.max(2, Math.min(50, Math.floor(update.cbv5PivotLeftLen)));
+    if (Number.isFinite(update.cbv5PivotRightLen)) update.cbv5PivotRightLen = Math.max(2, Math.min(50, Math.floor(update.cbv5PivotRightLen)));
+    if ('cbv5StrictBreak' in update) update.cbv5StrictBreak = update.cbv5StrictBreak === true || update.cbv5StrictBreak === 'true';
+    if ('cbv5UseVolume' in update) update.cbv5UseVolume = update.cbv5UseVolume === true || update.cbv5UseVolume === 'true';
+    if (Number.isFinite(update.cbv5VolMaLen)) update.cbv5VolMaLen = Math.max(5, Math.min(100, Math.floor(update.cbv5VolMaLen)));
+    if (Number.isFinite(update.cbv5VolMultiplier)) update.cbv5VolMultiplier = Math.max(1.0, Math.min(10, update.cbv5VolMultiplier));
+    if (Number.isFinite(update.cbv5DebounceCandles)) update.cbv5DebounceCandles = Math.max(1, Math.min(20, Math.floor(update.cbv5DebounceCandles)));
 
     // FIX-2026-08-03: bulk-update Martingale-requires-DCA validation
     //   - bulk mode applies same settings to many bots — must check that after merge,

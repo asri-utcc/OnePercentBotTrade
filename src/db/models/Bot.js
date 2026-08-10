@@ -158,9 +158,14 @@ const botSchema = new mongoose.Schema(
     //   - ดูแลใน botManager.checkAutoPauseBots()
     autoPauseEnabled: { type: Boolean, default: true },
     autoPauseMinKcPct: { type: Number, default: 2, min: 0.1, max: 50 },
+    // FIX-2026-08-10: per-bot 24h quote-volume guard for Auto Pause-Resume
+    //   - เพิ่มเงื่อนไขที่ 2: นอกจาก Min-%KC ต่ำแล้ว ถ้า 24h Vol (USDT) < threshold ก็ pause
+    //   - resume gate ต้องผ่านทั้ง 2 เงื่อนไข (%KC healthy AND 24h vol healthy)
+    //   - default 1,000,000 USDT กรองเหรียญเล็ก-illiquid ออก; clamp [0, 1e9]
+    autoPauseMin24hVolUsdt: { type: Number, default: 1_000_000, min: 0, max: 1_000_000_000 },
     autoPauseLastCheckedAt: { type: Date, default: null },
     autoPauseLastActionAt: { type: Date, default: null },
-    autoPauseReason: { type: String, default: null }, // 'low_vol' | 'vol_recovered' | null
+    autoPauseReason: { type: String, default: null }, // 'low_vol' | 'low_24h_vol' | 'vol_recovered' | 'binance_delist' | null
     // FIX-2026-07-31: auto-arm SL-on-UKC for stuck losing positions (per-bot toggle, default true)
     //   - เมื่อ position ขาดทุน > autoArmLossPct + เปิดมา > autoArmAgeHours → trader set trade.useStopLossOnUKC=true
     //   - _checkStopLossOnUpperKC จะยอม trigger เฉพาะ trade ที่มี flag นี้
@@ -244,6 +249,39 @@ const botSchema = new mongoose.Schema(
     cbv3LockedUntil: { type: Date, default: null },
     cbv3LockReason: { type: String, default: null }, // 'cbv3_panic' | null
     cbv3LastFiredAt: { type: Date, default: null },
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // FIX-2026-08-10: Feature #6 — CBv5 (Support Zone Circuit Breaker)
+    //   - independent of cbVersion enum (CBv5 works alongside CBv2 OR CBv3)
+    //   - trigger conditions (4-fold confirmation per Pine Script):
+    //       (1) close < lowerKC      — Keltner Channel breakout down
+    //       (2) close < deepestLow   — broken ALL recent pivot-low support
+    //       (3) close < open          — bearish candle (if strictBreak=true)
+    //       (4) volume > volMA × mult — volume spike (if useVolume=true)
+    //   - debounce: 5 candles (anti-spam, not confirmation) — same Pine default
+    //   - on fire: force-close all positions + lock บอทเป็นเวลา cbv5LockHours hours (default 4, range 0.5..168)
+    //   - cross-cooldown interaction with CBv2/CBv3 (see cbCrossCooldown.js):
+    //       Direction A (CBv5 → CBv2/v3 fires): cancel CBv5, apply CBv2/v3
+    //       Direction B (CBv2/v3 → CBv5 fires): take max(remaining, new CBv5)
+    //   - manual unlock via POST /api/bots/:id/unlock-cbv2 (HYBRID — clears all 3 versions)
+    //   - watchdog Phase 5 covers DISABLED/PAUSED bots (gated by bot.cbv5Enabled)
+    // ═══════════════════════════════════════════════════════════════════════
+    cbv5Enabled: { type: Boolean, default: true },
+    cbv5LockHours: { type: Number, default: 4, min: 0.5, max: 168 },
+    cbv5LockedUntil: { type: Date, default: null },
+    cbv5LockReason: { type: String, default: null }, // 'cbv5_panic' | null
+    cbv5LastFiredAt: { type: Date, default: null },
+    // CBv5 tunable parameters (per-bot, mirror Pine Script inputs)
+    cbv5KcLen: { type: Number, default: 20, min: 5, max: 100 },
+    cbv5KcMult: { type: Number, default: 1.2, min: 0.5, max: 5.0 },
+    cbv5PivotLookback: { type: Number, default: 3, min: 2, max: 10 },
+    cbv5PivotLeftLen: { type: Number, default: 5, min: 2, max: 50 },
+    cbv5PivotRightLen: { type: Number, default: 5, min: 2, max: 50 },
+    cbv5StrictBreak: { type: Boolean, default: true },
+    cbv5UseVolume: { type: Boolean, default: true },
+    cbv5VolMaLen: { type: Number, default: 20, min: 5, max: 100 },
+    cbv5VolMultiplier: { type: Number, default: 1.5, min: 1.0, max: 10.0 },
+    cbv5DebounceCandles: { type: Number, default: 5, min: 1, max: 20 },
 
     // ═══════════════════════════════════════════════════════════════════════
     // FIX-2026-08-08: Feature #3 — Auto Unlock Cooldown (CBv2/CBv3)

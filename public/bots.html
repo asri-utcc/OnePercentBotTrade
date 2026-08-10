@@ -381,12 +381,21 @@
                 <div class="bot-settings-option">
                   <label class="form-check form-switch mb-0">
                     <input class="form-check-input" type="checkbox" id="nb-auto-pause-enabled" checked />
-                    <span class="form-check-label">⏸️ <strong>หยุดบอทเมื่อ Min-%KC ต่ำ</strong></span>
+                    <span class="form-check-label">⏸️ <strong>หยุดบอทเมื่อ Min-%KC หรือ 24h Vol ต่ำ</strong></span>
                   </label>
                   <div class="bot-settings-dependent">
-                    <label class="form-label" for="nb-auto-pause-min-kc">Min-%KC threshold (%)</label>
-                    <input type="number" class="form-control form-control-sm" id="nb-auto-pause-min-kc" value="2" step="0.1" min="0.1" max="50" />
-                    <small class="text-muted">ต่ำกว่าค่านี้จะ pause และ auto-resume เมื่อ volatility กลับมา</small>
+                    <div class="row g-2">
+                      <div class="col-md-6">
+                        <label class="form-label" for="nb-auto-pause-min-kc">Min-%KC threshold (%)</label>
+                        <input type="number" class="form-control form-control-sm" id="nb-auto-pause-min-kc" value="2" step="0.1" min="0.1" max="50" />
+                        <small class="text-muted">pause เมื่อ Keltner Channel width ต่ำกว่า</small>
+                      </div>
+                      <div class="col-md-6">
+                        <label class="form-label" for="nb-auto-pause-min-24h-vol">Min 24h Vol (USDT)</label>
+                        <input type="number" class="form-control form-control-sm" id="nb-auto-pause-min-24h-vol" value="1000000" step="1000" min="0" />
+                        <small class="text-muted">pause เมื่อ 24h quote-volume ต่ำกว่า; resume ต้องผ่านทั้ง 2 เงื่อนไข</small>
+                      </div>
+                    </div>
                   </div>
                 </div>
               </div>
@@ -461,6 +470,41 @@
                     <label for="nb-cbv3-lock-hours" class="form-label">ระยะเวลา Cooldown (ชั่วโมง)</label>
                     <input type="number" class="form-control form-control-sm" id="nb-cbv3-lock-hours" min="0.5" max="168" step="0.5" value="8" />
                     <small class="text-muted">0.5–168 ชม. · Active version: <span id="nb-cbv-version-badge" class="lux-badge lux-badge-warn">v3</span></small>
+                  </div>
+                </div>
+                <!-- FIX-2026-08-10: CBv5 (Support Zone Circuit Breaker) — independent of cbVersion -->
+                <div id="nb-cbv5-section" class="bot-settings-option is-full">
+                  <label class="form-check form-switch mb-0">
+                    <input class="form-check-input" type="checkbox" id="nb-cbv5-enabled" checked />
+                    <span class="form-check-label">💎 <strong>CBv5</strong> — Support Zone + Deepest Low + Volume</span>
+                  </label>
+                  <div class="bot-settings-dependent">
+                    <label for="nb-cbv5-lock-hours" class="form-label">ระยะเวลา Cooldown (ชั่วโมง)</label>
+                    <input type="number" class="form-control form-control-sm" id="nb-cbv5-lock-hours" min="0.5" max="168" step="0.5" value="4" />
+                    <small class="text-muted">0.5–168 ชม. · ทำงานขนานกับ CBv2/CBv3 (อิสระจาก cbVersion) — ยิงเมื่อหลุด Lower-KC + ทลาย deepest pivot low + bearish + volume spike</small>
+                    <button type="button" class="btn btn-sm btn-link ps-0 mt-1" id="nb-cbv5-advanced-toggle">⚙️ ขั้นสูง (KC + Pivot + Volume)</button>
+                    <div id="nb-cbv5-advanced" style="display:none">
+                      <div class="row g-2 mt-1">
+                        <div class="col-6"><label class="form-label small">KC length</label><input type="number" class="form-control form-control-sm" id="nb-cbv5-kc-len" min="5" max="100" step="1" value="20" /></div>
+                        <div class="col-6"><label class="form-label small">KC multiplier</label><input type="number" class="form-control form-control-sm" id="nb-cbv5-kc-mult" min="0.5" max="5" step="0.1" value="1.2" /></div>
+                        <div class="col-6"><label class="form-label small">Pivot lookback (count)</label><input type="number" class="form-control form-control-sm" id="nb-cbv5-pivot-lookback" min="2" max="10" step="1" value="3" /></div>
+                        <div class="col-6"><label class="form-label small">Pivot left length</label><input type="number" class="form-control form-control-sm" id="nb-cbv5-pivot-left" min="2" max="50" step="1" value="5" /></div>
+                        <div class="col-6"><label class="form-label small">Pivot right length</label><input type="number" class="form-control form-control-sm" id="nb-cbv5-pivot-right" min="2" max="50" step="1" value="5" /></div>
+                        <div class="col-6"><label class="form-label small">Volume MA length</label><input type="number" class="form-control form-control-sm" id="nb-cbv5-vol-ma-len" min="5" max="100" step="1" value="20" /></div>
+                        <div class="col-6"><label class="form-label small">Volume multiplier</label><input type="number" class="form-control form-control-sm" id="nb-cbv5-vol-mult" min="1.0" max="10" step="0.1" value="1.5" /></div>
+                        <div class="col-6"><label class="form-label small">Debounce candles</label><input type="number" class="form-control form-control-sm" id="nb-cbv5-debounce" min="1" max="20" step="1" value="5" /></div>
+                        <div class="col-12 mt-2">
+                          <label class="form-check form-switch mb-0">
+                            <input class="form-check-input" type="checkbox" id="nb-cbv5-strict-break" checked />
+                            <span class="form-check-label small">ต้องเป็น bearish candle (close &lt; open)</span>
+                          </label>
+                          <label class="form-check form-switch mb-0 mt-1">
+                            <input class="form-check-input" type="checkbox" id="nb-cbv5-use-volume" checked />
+                            <span class="form-check-label small">ใช้ volume filter (volume &gt; MA × multiplier)</span>
+                          </label>
+                        </div>
+                      </div>
+                    </div>
                   </div>
                 </div>
                 <div class="bot-settings-option is-full">

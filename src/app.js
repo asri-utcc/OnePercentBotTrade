@@ -145,12 +145,58 @@ function createApp() {
     res.json({ ok: true, ts: Date.now() });
   });
 
-  // Static files (dashboard)
-  app.use(express.static(config.paths.public));
+  // ─── Static files (HTML auth-gated) ──────────────────────────────
+  // 2026-08-10: ล็อค HTML/JS ทุกหน้ายกเว้น login + favicon + CSS + /js/api.js
+  //   - ป้องกัน AI/AI-coding-tool scrape HTML/JS labels + feature names + modal flow
+  //   - session lookup จาก MongoDB เกิดขึ้นอยู่แล้ว (express-session global) → overhead ≈ 0
+  //   - ไฟล์ HTML ที่ต้อง auth → Cache-Control: no-store (กัน back-button cache leak หลัง logout)
+  //   - Public (whitelist): /login.html, /favicon.svg, /css/*, /js/api.js
+  //   - ทุก path อื่น → ต้อง session.authenticated === true ถึงจะเห็นเนื้อหา
+  const PUBLIC_EXACT = new Set(['/login.html', '/favicon.svg']);
+  const PUBLIC_PREFIXES = ['/css/', '/js/api.js'];
 
-  // SPA fallback: ส่ง index.html สำหรับ routes ที่ไม่ใช่ API
-  app.get(/^\/(?!api\/|health).*/, (req, res) => {
-    res.sendFile(path.join(config.paths.public, 'index.html'));
+  function isPublicStaticPath(p) {
+    if (PUBLIC_EXACT.has(p)) return true;
+    return PUBLIC_PREFIXES.some((prefix) => p.startsWith(prefix));
+  }
+
+  const serveStatic = express.static(config.paths.public, {
+    index: 'index.html',
+    setHeaders: (res, filePath) => {
+      // HTML ที่ต้อง auth → ห้าม cache (กัน back-button cache leak หลัง logout)
+      // Public HTML (login.html) → browser cache ได้ตามปกติ (Etag + 304)
+      if (filePath.endsWith('.html') && !filePath.endsWith('login.html')) {
+        res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+        res.setHeader('Pragma', 'no-cache');
+      }
+    },
+  });
+
+  app.get(/^\/(?!api\/|health).*/, (req, res, next) => {
+    // 1. Public static → serve ทันที ไม่ต้อง auth (login.html, favicon, CSS, core JS)
+    if (isPublicStaticPath(req.path)) {
+      return serveStatic(req, res, next);
+    }
+
+    // 2. Auth required
+    if (!req.session || req.session.authenticated !== true) {
+      // Programmatic / non-browser → JSON 401
+      if (!req.accepts('html')) {
+        return res.status(401).json({ error: 'Unauthorized' });
+      }
+      // Browser → redirect to login (เก็บ original URL ไว้ redirect กลับหลัง login)
+      const redirectTo = encodeURIComponent(req.originalUrl || req.path);
+      logger.debug({ path: req.path, ip: req.ip }, 'static: redirect to login (unauthenticated)');
+      return res.redirect(`/login.html?next=${redirectTo}`);
+    }
+
+    // 3. Authenticated → serve static. ถ้าไฟล์ไม่มี → fallback to index.html (SPA)
+    return serveStatic(req, res, (err) => {
+      if (err && err.statusCode === 404) {
+        return res.sendFile(path.join(config.paths.public, 'index.html'));
+      }
+      return next(err);
+    });
   });
 
   // Error handler

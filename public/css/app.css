@@ -93,17 +93,11 @@ a:hover { color: var(--gold-2); text-decoration: none; }
   color: var(--text-1) !important;
   letter-spacing: -0.01em;
 }
-.app-nav .brand-mark {
-  display: inline-flex; align-items: center; justify-content: center;
+.app-nav .brand-logo {
   width: 32px; height: 32px;
-  background: linear-gradient(135deg, var(--gold-1), #c79100);
   border-radius: 8px;
-  color: #1a1208; font-weight: 900;
   box-shadow: 0 0 0 1px rgba(255,255,255,0.08), 0 6px 20px rgba(245,184,0,0.25);
-  position: relative;
-}
-.app-nav .brand-mark::before {
-  content: '%'; font-size: 0.95rem; line-height: 1;
+  flex-shrink: 0;
 }
 .app-nav .nav-pill {
   display: inline-flex; align-items: center;
@@ -1272,15 +1266,12 @@ a:hover { color: var(--gold-2); text-decoration: none; }
   background: linear-gradient(90deg, transparent, var(--gold-1), transparent);
 }
 .login-brand { display: flex; align-items: center; gap: 0.7rem; margin-bottom: 1.5rem; }
-.login-brand .mark {
-  width: 44px; height: 44px; border-radius: 11px;
-  background: linear-gradient(135deg, var(--gold-1), #c79100);
-  display: inline-flex; align-items: center; justify-content: center;
-  color: #1a1208; font-weight: 900; font-size: 1.4rem;
+.login-brand .login-logo {
+  width: 44px; height: 44px;
+  border-radius: 11px;
   box-shadow: 0 0 0 1px rgba(255,255,255,0.10), 0 8px 28px rgba(245,184,0,0.30);
-  position: relative;
+  flex-shrink: 0;
 }
-.login-brand .mark::before { content: '%'; line-height: 1; }
 .login-brand .name { font-size: 1.25rem; font-weight: 800; letter-spacing: -0.01em; color: var(--text-1); }
 .login-brand .name small { display: block; font-size: 0.72rem; font-weight: 500; color: var(--text-3); letter-spacing: 0.08em; text-transform: uppercase; }
 .login-card h5 { color: var(--text-1); font-weight: 700; margin-bottom: 1rem; }
