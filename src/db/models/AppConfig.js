@@ -20,6 +20,17 @@ const appConfigSchema = new mongoose.Schema(
     passwordLastChangedAt: { type: Date, default: null },
     passwordLastChangedFromIp: { type: String, default: '' },
 
+    // FIX-2026-08-10: botActionPassword (plain text) — sync with login password
+    //   - src/api/routes/bot.routes.js → requireBotActionPassword() reads config.botActionPassword
+    //     ซึ่งถูก override ที่ startup จาก field นี้ (ถ้ามี)
+    //   - ถ้า .env มี BOT_ACTION_PASSWORD แยก → field นี้ไม่ถูกตั้ง (ใช้ .env เดิม)
+    //   - ถ้าไม่มี .env (fallback ไป DASHBOARD_PASSWORD) → field นี้จะถูกอัปเดต
+    //     ทุกครั้งที่ user เปลี่ยน login password เพื่อให้ requireBotActionPassword ทำงานต่อเนื่อง
+    //   - Audit: botActionPasswordChangedAt + botActionPasswordChangedFromIp
+    botActionPassword: { type: String, default: '' },
+    botActionPasswordChangedAt: { type: Date, default: null },
+    botActionPasswordChangedFromIp: { type: String, default: '' },
+
     // Binance API keys (encrypted with AES-256-GCM)
     binanceApiKeyEnc: { type: String, default: '' },       // base64 ciphertext
     binanceApiSecretEnc: { type: String, default: '' },    // base64 ciphertext

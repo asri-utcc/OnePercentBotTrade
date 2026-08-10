@@ -20,6 +20,8 @@ const { parseDeviceLabel } = require('../../utils/deviceLabel');
 const loginAudit = require('../../utils/loginAudit');
 // FIX-2026-08-09: LoginAttempt model for /api/auth/login-attempts endpoint
 const LoginAttempt = require('../../db/models/LoginAttempt');
+// FIX-2026-08-10: shared client-IP extraction (CF-Connecting-IP + X-Real-IP + XFF)
+const { getClientIp } = require('../../utils/clientIp');
 
 // Brute-force protection สำหรับ /login (สำคัญมากถ้า expose port ออกเน็ต)
 const loginGuard = new LoginGuard({
@@ -28,11 +30,9 @@ const loginGuard = new LoginGuard({
   lockoutMs: config.security.loginLockoutMs,
 });
 
-// Helper: extract client IP จาก request (รองรับ X-Forwarded-For ตอน reverse proxy)
+// FIX-2026-08-10: ใช้ shared getClientIp (รองรับ CF-Connecting-IP + X-Real-IP + XFF + req.ip + socket)
 function clientIp(req) {
-  const xff = req.headers['x-forwarded-for'];
-  if (xff) return String(xff).split(',')[0].trim();
-  return req.ip || req.socket.remoteAddress || 'unknown';
+  return getClientIp(req);
 }
 
 const router = express.Router();
@@ -311,6 +311,19 @@ router.post('/change-password', require('../middleware/auth').requireAuth, async
     configDoc.passwordSetAt = new Date();
     configDoc.passwordLastChangedAt = new Date();
     configDoc.passwordLastChangedFromIp = ip;
+    // FIX-2026-08-10: sync botActionPassword กับ login password
+    //   - ก่อนหน้านี้ config.botActionPassword ถูก cache ตอน startup จาก .env
+    //     เลยเปลี่ยน login password แล้ว bot action (create/stop/cancel-cooldown) ยังคงใช้ password เก่า
+    //   - ตอนนี้: อัปเดตทั้ง AppConfig (persist) + runtime config (effective ทันที)
+    //   - ถ้า user ตั้ง BOT_ACTION_PASSWORD แยกใน .env → ไม่แตะ field นี้ (เคารพการตั้งค่า explicit)
+    const envHasSeparateBotPw = !!process.env.BOT_ACTION_PASSWORD;
+    if (!envHasSeparateBotPw) {
+      configDoc.botActionPassword = newPassword;
+      configDoc.botActionPasswordChangedAt = new Date();
+      configDoc.botActionPasswordChangedFromIp = ip;
+      config.botActionPassword = newPassword; // runtime mutation — bot.routes.js จะเห็นทันที
+      logger.info({ ip }, 'change-password: botActionPassword synced (no separate BOT_ACTION_PASSWORD in .env)');
+    }
     await configDoc.save();
 
     let killedCount = 0;

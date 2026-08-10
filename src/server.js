@@ -13,6 +13,7 @@ const autoBnbBuyer = require('./services/autoBnbBuyer'); // FIX-2026-08-05: auto
 const autoAddBot = require('./services/autoAddBot'); // FIX-2026-08-07: auto-add new bot service
 const delistMonitor = require('./services/binanceDelistMonitor'); // FIX-2026-08-06: binance delist detection
 const autoDeleteBot = require('./services/autoDeleteBot'); // FIX-2026-08-08: auto-delete bot (soft delete + 30d restore)
+const { syncBotActionPasswordFromAppConfig } = require('./utils/botActionPasswordSync'); // FIX-2026-08-10: persist login password change to botActionPassword
 
 async function main() {
   logger.info({ env: config.env, port: config.port }, 'starting OnePercentBotTrade');
@@ -42,6 +43,16 @@ async function main() {
       await botManager.start();
     } catch (err) {
       logger.error({ err: err.message }, 'botManager start failed');
+    }
+    // FIX-2026-08-10: re-load botActionPassword from AppConfig
+    //   - ถ้า user เคยเปลี่ยน login password ผ่าน /change-password
+    //     ค่าใหม่จะถูก persist ที่ AppConfig.botActionPassword
+    //   - ที่นี่ re-apply เข้า runtime config เพื่อให้ requireBotActionPassword
+    //     ทำงานต่อเนื่องหลัง restart
+    try {
+      await syncBotActionPasswordFromAppConfig();
+    } catch (err) {
+      logger.warn({ err: err.message }, 'botActionPassword sync failed (non-fatal)');
     }
   }).catch((err) => {
     logger.error({ err: err.message }, 'mongoDB connect ultimately failed');
