@@ -40,6 +40,19 @@ async function syncBotActionPasswordFromAppConfig() {
       return { applied: false, source: 'env', value: config.botActionPassword || '' };
     }
     if (!dbValue) {
+      // FIX-2026-08-10: inconsistent state — DB has no botActionPassword yet (login password
+      // was changed BEFORE sync fix deployed) → runtime falls back to .env DASHBOARD_PASSWORD
+      // (which is the OLD password). User must click "Sync" button in Settings to fix.
+      if (config.botActionPassword && (doc.passwordLastChangedAt || doc.passwordSetAt)) {
+        logger.warn(
+          {
+            passwordLastChangedAt: doc.passwordLastChangedAt || doc.passwordSetAt,
+            runtimeLen: (config.botActionPassword || '').length,
+          },
+          'botActionPassword: inconsistent state — AppConfig.botActionPassword empty but login password was changed. ' +
+          'Click "Sync Bot Password" in Password & Sessions Manager to backfill.'
+        );
+      }
       // Nothing in DB — keep .env fallback (DASHBOARD_PASSWORD or empty)
       return { applied: false, source: 'env', value: config.botActionPassword || '' };
     }

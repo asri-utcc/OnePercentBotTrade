@@ -41,7 +41,10 @@ async function loadAll() {
   try {
     pwInfo = await API.get('/api/auth/password-info');
   } catch (e) {
-    pwInfo = { hint: '', note: '', lastChangedAt: null, lastChangedFromIp: '' };
+    pwInfo = {
+      hint: '', note: '', lastChangedAt: null, lastChangedFromIp: '',
+      botActionPasswordChangedAt: null, botActionPasswordChangedFromIp: '',
+    };
     console.warn('password-info load failed:', e.message);
   }
   try {
@@ -119,6 +122,7 @@ function render() {
   const pw = state.passwordInfo || {};
   const html = `
     ${renderChangePasswordSection()}
+    ${renderBotPasswordSyncSection()}
     ${renderHintSection(pw)}
     ${renderSessionsSection()}
     ${renderFailedLoginsSection()}
@@ -188,6 +192,56 @@ function renderChangePasswordSection() {
           <button class="btn btn-primary" id="pw-submit">🔑 เปลี่ยน Password</button>
           <span id="pw-status" class="small align-self-center"></span>
         </div>
+      </div>
+    </details>
+  `;
+}
+
+// 1b. Bot Password Sync section (FIX-2026-08-10)
+//   ใช้แก้กรณี unlock cooldown / สร้างบอท / หยุดบอท ยังใช้ password เก่า
+//   เพราะ AppConfig.botActionPassword ว่าง (เปลี่ยน login password ก่อน sync fix deploy)
+//   Sync จะ backfill botActionPassword = login password ปัจจุบัน (ต้อง verify ด้วย currentPassword)
+function renderBotPasswordSyncSection() {
+  const pw = state.passwordInfo || {};
+  const syncedAt = pw.botActionPasswordChangedAt;
+  const syncedIp = pw.botActionPasswordChangedFromIp || '';
+  let statusHtml;
+  if (syncedAt) {
+    statusHtml = `<span class="text-success small">✅ Synced: <strong>${escapeHtml(formatDateTime(syncedAt))}</strong> �าก IP <code>${escapeHtml(syncedIp || '—')}</code></span>`;
+  } else {
+    statusHtml = `<span class="text-warning small">⚠️ �ังไม่เคย sync — bot action (unlock cooldown / สร้า�บอท / หยุดบอท) อาจใช้ password เก่า</span>`;
+  }
+  return `
+    <details class="lux-details">
+      <summary class="lux-details-summary">
+        <span>🔄</span>
+        <span>Sync Bot Password (unlock cooldown / สร้างบอท)</span>
+      </summary>
+      <div class="lux-details-body">
+        <div class="alert alert-info small mb-3">
+          <strong>📋 ใช้เมื่อ:</strong> หน้า <strong>unlock cooldown</strong>, <strong>สร้างบอท</strong>, <strong>หยุดบอท</strong>
+          หรือ <strong>ยกเลิก cooldown</strong> ยังคงต้องใช้ password <strong>เก่า</strong> ที่ตั้งไว้ตอนแรก
+          · กด <strong>Sync</strong> เพื่อบังคับให้ใช้ password ปัจจุบัน (ต้องกรอก current password เพื่อยืนยัน)
+          · หลัง sync แล้ว <strong>ครั้งถัดไป</strong>ที่ unlock/create/stop จะใ�้ password ใหม่ได้ทันที
+        </div>
+
+        <div class="mb-2">
+          ${statusHtml}
+        </div>
+
+        <div class="row g-2 align-items-end">
+          <div class="col-md-7">
+            <label class="form-label small">Current login password (เพื่อยืนยันตัวตน)</label>
+            <div class="input-group">
+              <input type="password" class="form-control" id="botpw-current" autocomplete="current-password" />
+              <button class="btn btn-outline-secondary" type="button" data-toggle="botpw-current" title="แสดง/ซ่อน">👁</button>
+            </div>
+          </div>
+          <div class="col-md-5">
+            <button class="btn btn-warning w-100" id="botpw-sync-btn">🔄 Sync Bot Password กับ Login Password</button>
+          </div>
+        </div>
+        <div class="small mt-2" id="botpw-status"></div>
       </div>
     </details>
   `;
@@ -481,6 +535,14 @@ function bindEvents() {
     });
   });
 
+  // Bot password sync (FIX-2026-08-10)
+  const botpwBtn = document.getElementById('botpw-sync-btn');
+  if (botpwBtn) botpwBtn.addEventListener('click', onSyncBotPassword);
+  const botpwInput = document.getElementById('botpw-current');
+  if (botpwInput) botpwInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') onSyncBotPassword();
+  });
+
   // Hint + Note
   const hintEl = document.getElementById('pw-hint');
   const noteEl = document.getElementById('pw-note');
@@ -590,6 +652,30 @@ async function onChangePassword() {
     setStatus(statusEl, `❌ ${err.message}`, 'bear');
   } finally {
     submitBtn.disabled = false;
+  }
+}
+
+async function onSyncBotPassword() {
+  const current = document.getElementById('botpw-current').value;
+  const statusEl = document.getElementById('botpw-status');
+  const btn = document.getElementById('botpw-sync-btn');
+
+  if (!current) {
+    return setStatus(statusEl, '❌ กรอก current login password เพื่อยืนยัน', 'bear');
+  }
+
+  btn.disabled = true;
+  setStatus(statusEl, '⏳ กำลัง sync…', 'muted');
+  try {
+    await API.post('/api/auth/sync-bot-action-password', { currentPassword: current });
+    setStatus(statusEl, '✅ Sync สำเร็จ — unlock cooldown / สร้างบอท / หยุดบอท จะใช้ password นี้ทันที', 'bull');
+    document.getElementById('botpw-current').value = '';
+    // reload to update "Synced:" timestamp
+    setTimeout(() => loadAll(), 800);
+  } catch (err) {
+    setStatus(statusEl, `❌ ${err.message}`, 'bear');
+  } finally {
+    btn.disabled = false;
   }
 }
 

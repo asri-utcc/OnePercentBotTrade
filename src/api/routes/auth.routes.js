@@ -325,11 +325,23 @@ router.post('/change-password', require('../middleware/auth').requireAuth, async
     //   - ถ้า user ตั้ง BOT_ACTION_PASSWORD แยกใน .env → ไม่แตะ field นี้ (เคารพการตั้งค่า explicit)
     const envHasSeparateBotPw = !!process.env.BOT_ACTION_PASSWORD;
     if (!envHasSeparateBotPw) {
+      // FIX-2026-08-10 (extended): backfill case — ถ้า user เคยเปลี่ยน login password มาก่อน
+      //   ที่ fix นี้ถูก deploy จะทำให้ configDoc.botActionPassword ยังว่างอยู่
+      //   และ config.botActionPassword จะ fall back ไปใช้ .env DASHBOARD_PASSWORD (ตัวเก่า)
+      //   → บังคับให้ user เปลี่ยน password อีกครั้งเพื่อ trigger sync (ครั้งนี้จะเขียนทับ both DB + runtime)
+      const wasEmpty = !(configDoc.botActionPassword || '').trim();
       configDoc.botActionPassword = newPassword;
       configDoc.botActionPasswordChangedAt = new Date();
       configDoc.botActionPasswordChangedFromIp = ip;
       config.botActionPassword = newPassword; // runtime mutation — bot.routes.js จะเห็นทันที
-      logger.info({ ip }, 'change-password: botActionPassword synced (no separate BOT_ACTION_PASSWORD in .env)');
+      if (wasEmpty) {
+        logger.warn(
+          { ip },
+          'change-password: botActionPassword backfilled (was empty — previous password change predated sync fix)'
+        );
+      } else {
+        logger.info({ ip }, 'change-password: botActionPassword synced (no separate BOT_ACTION_PASSWORD in .env)');
+      }
     }
     await configDoc.save();
 
@@ -359,8 +371,61 @@ router.post('/change-password', require('../middleware/auth').requireAuth, async
   }
 });
 
+// ─── POST /api/auth/sync-bot-action-password ──────────
+// FIX-2026-08-10: emergency sync — user changes login password BEFORE sync fix deployed
+//   → AppConfig.botActionPassword stays empty → runtime falls back to .env DASHBOARD_PASSWORD (old)
+//   → unlock-cooldown / stop-bot / etc. still require the OLD password
+//
+//   This endpoint backfills botActionPassword with the CURRENT login password (without
+//   requiring a password change). After calling, unlock-cooldown accepts the login password.
+//
+//   Body: { currentPassword: string }
+//   Requires session auth (already logged in)
+router.post('/sync-bot-action-password', require('../middleware/auth').requireAuth, async (req, res) => {
+  try {
+    const { currentPassword } = req.body || {};
+    if (!currentPassword) {
+      return res.status(400).json({ error: 'currentPassword required' });
+    }
+    const configDoc = await AppConfig.findOne({ key: 'singleton' });
+    if (!configDoc) return res.status(400).json({ error: 'Setup not completed' });
+
+    const ok = await bcrypt.compare(currentPassword, configDoc.passwordHash);
+    if (!ok) return res.status(401).json({ error: 'currentPassword ไม่ถูกต้อง' });
+
+    // Skip if user explicitly set BOT_ACTION_PASSWORD in .env
+    const envHasSeparateBotPw = !!process.env.BOT_ACTION_PASSWORD;
+    if (envHasSeparateBotPw) {
+      return res.status(400).json({
+        error: 'มี BOT_ACTION_PASSWORD ใน .env — ตัว sync จะไม่ override ค่าที่ตั้งไว้',
+      });
+    }
+
+    const ip = clientIp(req);
+    const prevRuntimeLen = (config.botActionPassword || '').length;
+    const prevDbLen = (configDoc.botActionPassword || '').length;
+
+    // Persist + mutate runtime
+    configDoc.botActionPassword = currentPassword;
+    configDoc.botActionPasswordChangedAt = new Date();
+    configDoc.botActionPasswordChangedFromIp = ip;
+    config.botActionPassword = currentPassword;
+    await configDoc.save();
+
+    logger.warn(
+      { ip, prevRuntimeLen, prevDbLen },
+      'sync-bot-action-password: backfilled (prev pw was cached from .env — login password had drifted)'
+    );
+    res.json({ ok: true, synced: true });
+  } catch (err) {
+    logger.warn({ err: err.message }, 'sync-bot-action-password failed');
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ─── GET /api/auth/password-info ─────────────────────
 // 2026-08-09: Password & Sessions Manager — hint + note + last-changed audit
+// FIX-2026-08-10: + botActionPasswordChangedAt/FromIp for "Sync Bot Password" status badge
 router.get('/password-info', require('../middleware/auth').requireAuth, async (req, res) => {
   try {
     const configDoc = await AppConfig.findOne({ key: 'singleton' });
@@ -373,6 +438,9 @@ router.get('/password-info', require('../middleware/auth').requireAuth, async (r
       lastChangedAt: configDoc.passwordLastChangedAt || configDoc.passwordSetAt || null,
       lastChangedFromIp: configDoc.passwordLastChangedFromIp || '',
       passwordSetAt: configDoc.passwordSetAt || null,
+      // FIX-2026-08-10: bot password sync status (UI "Sync Bot Password" section)
+      botActionPasswordChangedAt: configDoc.botActionPasswordChangedAt || null,
+      botActionPasswordChangedFromIp: configDoc.botActionPasswordChangedFromIp || '',
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
