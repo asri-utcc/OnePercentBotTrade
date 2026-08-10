@@ -1091,6 +1091,37 @@ a:hover { color: var(--gold-2); text-decoration: none; }
 .btn-lux.btn-info:hover { background: rgba(93,196,255,0.18); border-color: rgba(93,196,255,0.55); color: var(--info-1); }
 .btn-lux.btn-ghost { border-color: transparent; background: transparent; }
 .btn-lux.btn-sm { padding: 0.22rem 0.55rem; font-size: 0.74rem; }
+.btn-lux:disabled { opacity: 0.4; cursor: not-allowed; }
+
+/* ============================================================
+   PASSWORD & SESSIONS MANAGER (2026-08-09)
+   ============================================================ */
+.session-row {
+  padding: 0.85rem 1rem;
+  border: 1px solid var(--border-soft);
+  border-radius: 10px;
+  background: rgba(255,255,255,0.02);
+  margin-bottom: 0.6rem;
+  transition: border-color 0.15s, background 0.15s;
+}
+.session-row:hover { border-color: var(--border-mid); background: rgba(255,255,255,0.03); }
+.session-row.is-current {
+  border-color: rgba(0,229,184,0.30);
+  background: linear-gradient(135deg, rgba(0,229,184,0.05), rgba(0,229,184,0.01));
+}
+.session-row .badge { font-weight: 500; font-size: 0.72rem; }
+
+/* FIX-2026-08-09: attempt-row (Failed Logins tab) — mirror session-row but with subtle warning tint */
+.attempt-row {
+  padding: 0.75rem 1rem;
+  border: 1px solid var(--border-soft);
+  border-radius: 10px;
+  margin-bottom: 0.5rem;
+  background: rgba(255, 80, 80, 0.03);
+  transition: border-color 0.15s, background 0.15s;
+}
+.attempt-row:hover { border-color: rgba(255, 80, 80, 0.30); background: rgba(255, 80, 80, 0.06); }
+.attempt-row .badge { font-weight: 500; font-size: 0.72rem; }
 
 /* ============================================================
    TABLES

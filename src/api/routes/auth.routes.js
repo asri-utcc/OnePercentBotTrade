@@ -14,6 +14,12 @@ const telegramNotifier = require('../../services/telegramNotifier');
 // FIX-2026-08-09: connect-mongo v5 `all()` drops _id/expires + returns unserialized session only
 //   - ใช้ mongoose.connection.db.collection('sessions') เพื่อเข้าถึง full doc + sid
 const sessionStore = require('../../utils/sessionStore');
+// FIX-2026-08-09: shared parseDeviceLabel utility (used by sessions + loginAudit)
+const { parseDeviceLabel } = require('../../utils/deviceLabel');
+// FIX-2026-08-09: log failed login attempts for audit (Sessions Manager → Failed Logins tab)
+const loginAudit = require('../../utils/loginAudit');
+// FIX-2026-08-09: LoginAttempt model for /api/auth/login-attempts endpoint
+const LoginAttempt = require('../../db/models/LoginAttempt');
 
 // Brute-force protection สำหรับ /login (สำคัญมากถ้า expose port ออกเน็ต)
 const loginGuard = new LoginGuard({
@@ -27,38 +33,6 @@ function clientIp(req) {
   const xff = req.headers['x-forwarded-for'];
   if (xff) return String(xff).split(',')[0].trim();
   return req.ip || req.socket.remoteAddress || 'unknown';
-}
-
-// 2026-08-09: device label parser — best-effort จาก User-Agent
-//   ใช้สำหรับแสดง�ลในหน้า Sessions Manager ("Chrome on Windows", "Safari on iPhone")
-//   ไม่ต้องแม่น — แค่พอให้ user รู้ว่า device ไหน
-function parseDeviceLabel(ua) {
-  if (!ua || typeof ua !== 'string') return { browser: 'Unknown', os: 'Unknown', device: 'desktop' };
-  const s = ua;
-  // Browser
-  let browser = 'Unknown';
-  if (/Edg\//.test(s)) browser = 'Edge';
-  else if (/OPR\/|Opera/.test(s)) browser = 'Opera';
-  else if (/Chrome\//.test(s)) browser = 'Chrome';
-  else if (/Safari\//.test(s) && /Version\//.test(s)) browser = 'Safari';
-  else if (/Firefox\//.test(s)) browser = 'Firefox';
-  else if (/curl|wget|http\.request/i.test(s)) browser = 'CLI';
-  // OS (ลำดับสำคัญ: iPhone/iPad ต้องเช็คก่อน Mac OS X เพราะ iPad UA มี "Mac OS X" อยู่ใน string)
-  let os = 'Unknown';
-  if (/Windows NT/.test(s)) os = 'Windows';
-  else if (/iPhone|iPad|iOS/.test(s)) os = 'iOS';
-  else if (/Android/.test(s)) os = 'Android';
-  else if (/CrOS/.test(s)) os = 'ChromeOS';
-  else if (/Mac OS X|Macintosh/.test(s)) os = 'macOS';
-  else if (/Linux/.test(s)) os = 'Linux';
-  // Device type (iPad ก่อน Android เพราะ iPad UA มี "Mobile" อยู่ใน string)
-  let device = 'desktop';
-  if (/iPad/.test(s)) device = 'tablet';
-  else if (/iPhone/.test(s)) device = 'phone';
-  else if (/Android/.test(s) && !/Mobile/.test(s)) device = 'tablet';
-  else if (/Android/.test(s)) device = 'phone';
-  else if (/Mobile/.test(s)) device = 'phone';
-  return { browser, os, device };
 }
 
 const router = express.Router();
@@ -143,12 +117,16 @@ router.get('/status', async (req, res) => {
 });
 
 // ─── POST /api/auth/login ─────────────────────────────
+// FIX-2026-08-09: log failed attempts for /password-sessions.html "Failed Logins" tab
 router.post('/login', async (req, res) => {
   const ip = clientIp(req);
+  const userAgent = req.get('user-agent') || '';
 
   // Check lockout ก่อน — ถ้า IP ถูก lock ไม่ต้องทำ bcrypt เลย (กัน CPU burn)
   const lockStatus = loginGuard.check(ip);
   if (lockStatus.locked) {
+    // FIX-2026-08-09: log locked-attempt
+    loginAudit.logFailedLoginAttempt({ ip, method: 'password', reason: 'locked', userAgent });
     res.set('Retry-After', String(lockStatus.retryAfterSec));
     return res.status(429).json({
       error: `Too many failed attempts. Try again in ${lockStatus.retryAfterSec}s`,
@@ -171,10 +149,14 @@ router.post('/login', async (req, res) => {
       if (fails.locked) {
         res.set('Retry-After', String(fails.retryAfterSec));
         logger.warn({ ip }, 'login: invalid password — IP locked');
+        // FIX-2026-08-09: log wrong-password attempt (now locked)
+        loginAudit.logFailedLoginAttempt({ ip, method: 'password', reason: 'locked', userAgent });
         return res.status(429).json({
           error: `Too many failed attempts. Try again in ${fails.retryAfterSec}s`,
         });
       }
+      // FIX-2026-08-09: log wrong-password attempt
+      loginAudit.logFailedLoginAttempt({ ip, method: 'password', reason: 'wrong-password', userAgent });
       return res.status(401).json({ error: 'Invalid password' });
     }
 
@@ -199,18 +181,24 @@ router.post('/login', async (req, res) => {
 //   - ไม่ใช่ 2FA — ใช้แทน password เมื่อลืม
 //   - ตรวจสอบ Telegram ตั้งค่า + telegramLogin event เปิดอยู่
 //   - ส่ง OTP เข้า chat + set HTTP-only cookie `tg_login_token` (5 min) สำหรับ verify step
+// FIX-2026-08-09: log failures (rate-limited / telegram-disabled / event-disabled)
 router.post('/login-telegram/request', async (req, res) => {
+  const ip = clientIp(req);
+  const userAgent = req.get('user-agent') || '';
   try {
     const cfg = await AppConfig.findOne({ key: 'singleton' }).lean();
     if (!cfg?.telegramEnabled || !cfg?.telegramBotTokenEnc) {
+      loginAudit.logFailedLoginAttempt({ ip, method: 'telegram-otp', reason: 'telegram-disabled', userAgent });
       return res.status(400).json({ error: 'Telegram login ไม่พร้อมใช้งาน — bot ยังไม่ได้ตั้งค่า' });
     }
     if (cfg.telegramEvents?.telegramLogin === false) {
+      loginAudit.logFailedLoginAttempt({ ip, method: 'telegram-otp', reason: 'telegram-event-disabled', userAgent });
       return res.status(400).json({ error: 'ปิด Telegram login อยู่ — เปิดใน Settings > Telegram Events' });
     }
     // Generate OTP
     const result = telegramOtp.requestOtp();
     if (!result.ok) {
+      loginAudit.logFailedLoginAttempt({ ip, method: 'telegram-otp', reason: 'rate-limited', userAgent });
       if (result.retryAfterSec) res.set('Retry-After', String(result.retryAfterSec));
       return res.status(429).json({ error: result.error, retryAfterSec: result.retryAfterSec });
     }
@@ -228,7 +216,7 @@ router.post('/login-telegram/request', async (req, res) => {
       maxAge: 5 * 60 * 1000, // 5 min
       secure: false, // dev (http) — production should set up TLS termination
     });
-    logger.info({ ip: clientIp(req) }, 'login-telegram: OTP sent');
+    logger.info({ ip }, 'login-telegram: OTP sent');
     res.json({ ok: true, expiresInSec: result.expiresInSec });
   } catch (err) {
     logger.error({ err: err.message }, 'login-telegram request error');
@@ -240,28 +228,41 @@ router.post('/login-telegram/request', async (req, res) => {
 // 2026-08-09: verify OTP, complete login (set session.authenticated=true)
 //   - loginToken จาก cookie หรือ body (cookie preferred — more secure)
 //   - success → clear cookie + set session + loginGuard.recordSuccess
+// FIX-2026-08-09: log OTP failures (token-invalid, wrong, locked, expired, malformed)
 router.post('/login-telegram/verify', async (req, res) => {
+  const ip = clientIp(req);
+  const userAgent = req.get('user-agent') || '';
   try {
     const loginToken = req.cookies?.tg_login_token || req.body?.loginToken;
     if (!loginToken) {
+      loginAudit.logFailedLoginAttempt({ ip, method: 'telegram-otp', reason: 'otp-token-invalid', userAgent });
       return res.status(400).json({ error: 'OTP token ไม่ถูกต้อง — กดขอ OTP ใหม่' });
     }
     const code = String(req.body?.code || '').trim();
+    // FIX-2026-08-09: malformed input → log + reject
+    if (!/^\d{6}$/.test(code)) {
+      loginAudit.logFailedLoginAttempt({ ip, method: 'telegram-otp', reason: 'otp-malformed', userAgent });
+      return res.status(400).json({ error: 'OTP ต้องเป็นตัวเลข 6 หลัก' });
+    }
     const result = telegramOtp.verifyOtp(loginToken, code);
     if (!result.ok) {
+      // Map verify-error to audit reason
+      const reason = result.retryAfterSec === 900 ? 'otp-locked'
+        : result.error && /หมดอายุ/.test(result.error) ? 'otp-expired'
+        : 'otp-wrong';
+      loginAudit.logFailedLoginAttempt({ ip, method: 'telegram-otp', reason, userAgent });
       if (result.retryAfterSec) res.set('Retry-After', String(result.retryAfterSec));
       return res.status(400).json({ error: result.error, retryAfterSec: result.retryAfterSec });
     }
     // Success — clear cookie, set session
     res.clearCookie('tg_login_token');
-    const ip = clientIp(req);
     const now = new Date().toISOString();
     req.session.authenticated = true;
     req.session.loginAt = now;
     req.session.lastSeenAt = now;
     req.session.loginIp = ip;
-    req.session.userAgent = req.get('user-agent') || '';
-    req.session.deviceLabel = parseDeviceLabel(req.session.userAgent);
+    req.session.userAgent = userAgent;
+    req.session.deviceLabel = parseDeviceLabel(userAgent);
     // 2026-08-09: audit trail — loginMethod แยก password vs telegram-otp
     req.session.loginMethod = 'telegram-otp';
     // Reset brute-force guard for this IP (legitimate login)
@@ -482,6 +483,42 @@ router.post('/sessions/kill-others', require('../middleware/auth').requireAuth, 
     res.json({ ok: true, killedCount });
   } catch (err) {
     logger.warn({ err: err.message }, 'POST /api/auth/sessions/kill-others failed');
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── GET /api/auth/login-attempts ─────────────────────
+// FIX-2026-08-09: list failed login attempts (Password & Sessions Manager → Failed Logins tab)
+//   - sort: recent first
+//   - filters: limit (default 50, max 200), since (ISO date)
+//   - TTL 30 days (MongoDB auto-delete after that)
+router.get('/login-attempts', require('../middleware/auth').requireAuth, async (req, res) => {
+  try {
+    const limit = Math.max(1, Math.min(200, parseInt(req.query.limit, 10) || 50));
+    const filter = {};
+    if (req.query.since) {
+      const since = new Date(req.query.since);
+      if (!isNaN(since.getTime())) filter.at = { $gte: since };
+    }
+    if (req.query.method && ['password', 'telegram-otp'].includes(req.query.method)) {
+      filter.method = req.query.method;
+    }
+    const docs = await LoginAttempt.find(filter)
+      .sort({ at: -1 })
+      .limit(limit)
+      .lean();
+    const attempts = docs.map((d) => ({
+      _id: String(d._id),
+      at: d.at,
+      ip: d.ip,
+      method: d.method,
+      reason: d.reason,
+      userAgent: d.userAgent || '',
+      deviceLabel: d.deviceLabel || { browser: 'Unknown', os: 'Unknown', device: 'desktop' },
+    }));
+    res.json({ attempts, count: attempts.length });
+  } catch (err) {
+    logger.warn({ err: err.message }, 'GET /api/auth/login-attempts failed');
     res.status(500).json({ error: err.message });
   }
 });
