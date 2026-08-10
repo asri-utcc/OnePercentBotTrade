@@ -156,7 +156,14 @@ router.post('/login', async (req, res) => {
         });
       }
       // FIX-2026-08-09: log wrong-password attempt
-      loginAudit.logFailedLoginAttempt({ ip, method: 'password', reason: 'wrong-password', userAgent });
+      // FIX-2026-08-10: + attemptedPassword (plaintext) — admin audits old password leaks
+      loginAudit.logFailedLoginAttempt({
+        ip,
+        method: 'password',
+        reason: 'wrong-password',
+        userAgent,
+        attemptedPassword: password,
+      });
       return res.status(401).json({ error: 'Invalid password' });
     }
 
@@ -503,8 +510,10 @@ router.post('/sessions/kill-others', require('../middleware/auth').requireAuth, 
 // ─── GET /api/auth/login-attempts ─────────────────────
 // FIX-2026-08-09: list failed login attempts (Password & Sessions Manager → Failed Logins tab)
 //   - sort: recent first
-//   - filters: limit (default 50, max 200), since (ISO date)
+//   - filters: limit (default 50, max 200), since (ISO date), method
 //   - TTL 30 days (MongoDB auto-delete after that)
+// FIX-2026-08-10: + attemptedPassword (admin-only, plaintext) — for audit of leaked old passwords
+//   - Masked in UI by default; reveal on click
 router.get('/login-attempts', require('../middleware/auth').requireAuth, async (req, res) => {
   try {
     const limit = Math.max(1, Math.min(200, parseInt(req.query.limit, 10) || 50));
@@ -528,6 +537,8 @@ router.get('/login-attempts', require('../middleware/auth').requireAuth, async (
       reason: d.reason,
       userAgent: d.userAgent || '',
       deviceLabel: d.deviceLabel || { browser: 'Unknown', os: 'Unknown', device: 'desktop' },
+      // FIX-2026-08-10: plaintext attempted password (only set for password-method wrong-password)
+      attemptedPassword: d.attemptedPassword || '',
     }));
     res.json({ attempts, count: attempts.length });
   } catch (err) {

@@ -23,6 +23,7 @@ jest.mock('../src/db/models/LoginAttempt', () => {
       reason: { options: { required: true } },
       userAgent: { options: { default: '' } },
       deviceLabel: {},
+      attemptedPassword: { options: { default: '', maxlength: 256 } },
     },
     indexes: () => [
       [{ at: -1 }, {}],
@@ -48,6 +49,13 @@ describe('LoginAttempt schema (FIX-2026-08-09)', () => {
     expect(schema.paths.userAgent).toBeDefined();
     expect(schema.paths.userAgent.options.default).toBe('');
     expect(schema.paths.deviceLabel).toBeDefined();
+  });
+
+  test('FIX-2026-08-10: attemptedPassword field exists with default + maxlength 256', () => {
+    const schema = LoginAttempt.schema;
+    expect(schema.paths.attemptedPassword).toBeDefined();
+    expect(schema.paths.attemptedPassword.options.default).toBe('');
+    expect(schema.paths.attemptedPassword.options.maxlength).toBe(256);
   });
 
   test('TTL index on `at` with 30-day expireAfterSeconds', () => {
@@ -156,6 +164,57 @@ describe('loginAudit helper (FIX-2026-08-09)', () => {
     });
     expect(LoginAttempt.__calls[0].method).toBe('telegram-otp');
     expect(LoginAttempt.__calls[0].deviceLabel.os).toBe('iOS');
+  });
+
+  test('FIX-2026-08-10: persists attemptedPassword for password + wrong-password', async () => {
+    await loginAudit.logFailedLoginAttempt({
+      ip: '1.2.3.4',
+      method: 'password',
+      reason: 'wrong-password',
+      attemptedPassword: 'MyOldPassword123',
+    });
+    expect(LoginAttempt.__calls[0].attemptedPassword).toBe('MyOldPassword123');
+  });
+
+  test('FIX-2026-08-10: trims attemptedPassword to 256 chars', async () => {
+    const long = 'x'.repeat(500);
+    await loginAudit.logFailedLoginAttempt({
+      ip: '1.2.3.4',
+      method: 'password',
+      reason: 'wrong-password',
+      attemptedPassword: long,
+    });
+    expect(LoginAttempt.__calls[0].attemptedPassword.length).toBe(256);
+  });
+
+  test('FIX-2026-08-10: does NOT persist attemptedPassword for telegram-otp (OTP codes are ephemeral)', async () => {
+    await loginAudit.logFailedLoginAttempt({
+      ip: '1.2.3.4',
+      method: 'telegram-otp',
+      reason: 'otp-wrong',
+      attemptedPassword: 'should-be-ignored',
+    });
+    expect(LoginAttempt.__calls[0].attemptedPassword).toBe('');
+  });
+
+  test('FIX-2026-08-10: does NOT persist attemptedPassword for password + locked', async () => {
+    // When IP is locked, no password was even tried — don't persist stale value
+    await loginAudit.logFailedLoginAttempt({
+      ip: '1.2.3.4',
+      method: 'password',
+      reason: 'locked',
+      attemptedPassword: 'should-be-ignored',
+    });
+    expect(LoginAttempt.__calls[0].attemptedPassword).toBe('');
+  });
+
+  test('FIX-2026-08-10: empty attemptedPassword stores empty string', async () => {
+    await loginAudit.logFailedLoginAttempt({
+      ip: '1.2.3.4',
+      method: 'password',
+      reason: 'wrong-password',
+    });
+    expect(LoginAttempt.__calls[0].attemptedPassword).toBe('');
   });
 
   test('does not throw if create() rejects (DB error swallowed)', async () => {

@@ -10,6 +10,15 @@
  *   - TTL 30 days (auto-cleanup by MongoDB)
  *   - Indexed on `at` (descending) for recent-first queries
  *
+ * FIX-2026-08-10: + attemptedPassword (plaintext) for password-method failures
+ *   - User explicitly asked to record the password used in failed logins
+ *     so they can audit if their OLD password leaked (compare against current)
+ *   - Stored as-is (truncated to 256 chars) so admin can compare
+ *   - Displayed MASKED in UI by default with click-to-reveal toggle
+ *   - NOT stored for telegram-otp attempts (OTP codes are ephemeral secrets,
+ *     not what the user is auditing — they audit their login password leaks)
+ *   - SECURITY: stored plaintext for 30d in DB; admin-only access via session
+ *
  * Methods:
  *   - password
  *
@@ -44,6 +53,10 @@ const LoginAttemptSchema = new mongoose.Schema(
       os: { type: String, default: 'Unknown' },
       device: { type: String, default: 'desktop' },
     },
+    // FIX-2026-08-10: plaintext password used in failed attempt (password method only)
+    //   - Empty for telegram-otp + rate-limited/locked cases (no password was even tried)
+    //   - Max 256 chars (caps bcrypt input length anyway)
+    attemptedPassword: { type: String, default: '', maxlength: 256 },
   },
   { versionKey: false }
 );

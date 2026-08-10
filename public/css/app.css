@@ -1122,6 +1122,19 @@ a:hover { color: var(--gold-2); text-decoration: none; }
 }
 .attempt-row:hover { border-color: rgba(255, 80, 80, 0.30); background: rgba(255, 80, 80, 0.06); }
 .attempt-row .badge { font-weight: 500; font-size: 0.72rem; }
+/* FIX-2026-08-10: attempted password display (click-to-reveal) */
+.attempt-row .attempt-pw {
+  background: rgba(0, 0, 0, 0.18);
+  padding: 0.1rem 0.4rem;
+  border-radius: 4px;
+  font-size: 0.85rem;
+  color: var(--text-1);
+}
+.attempt-row .toggle-pw-btn {
+  font-size: 0.75rem;
+  padding: 0.1rem 0.35rem;
+  line-height: 1;
+}
 
 /* ============================================================
    TABLES

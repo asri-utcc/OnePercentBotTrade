@@ -43,10 +43,13 @@ const VALID_REASONS = new Set([
  * @param {'password'|'telegram-otp'} args.method
  * @param {string} args.reason — see VALID_REASONS
  * @param {string} [args.userAgent] — request User-Agent
+ * @param {string} [args.attemptedPassword] — FIX-2026-08-10: password used (password method only).
+ *   Plaintext stored (max 256 chars) so admin can audit against their old passwords.
+ *   Ignored for telegram-otp + rate-limited/locked (no password was tried).
  */
 async function logFailedLoginAttempt(args) {
   try {
-    const { ip, method, reason, userAgent = '' } = args || {};
+    const { ip, method, reason, userAgent = '', attemptedPassword = '' } = args || {};
     if (!ip || !method || !reason) return;
     if (!VALID_METHODS.has(method)) return;
     if (!VALID_REASONS.has(reason)) {
@@ -54,12 +57,19 @@ async function logFailedLoginAttempt(args) {
       logger.warn({ method, reason }, 'loginAudit: unknown reason (skip)');
       return;
     }
+    // FIX-2026-08-10: only persist attemptedPassword for password method + actually-tried
+    // reasons (wrong-password). For telegram-otp + locked/rate-limited → empty.
+    const persistPw =
+      method === 'password' && reason === 'wrong-password' && attemptedPassword
+        ? String(attemptedPassword).slice(0, 256)
+        : '';
     await LoginAttempt.create({
       ip: String(ip).slice(0, 64),
       method,
       reason,
       userAgent: String(userAgent).slice(0, 500),
       deviceLabel: parseDeviceLabel(userAgent),
+      attemptedPassword: persistPw,
     });
   } catch (err) {
     logger.warn({ err: err.message }, 'loginAudit: failed to persist (non-fatal)');
