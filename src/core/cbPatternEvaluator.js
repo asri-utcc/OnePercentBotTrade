@@ -359,10 +359,31 @@ function evaluateCBv5Snapshot({ bot, klines, targetCloseTime, nowMs }) {
 
   const cbCondition = cbConditionAt(lastIdx);
 
-  // Debounce: must NOT have been true in previous N candles
+  // FIX-2026-08-11: Debounce + 2-tick confirmation coordination
+  //   - Original: Back-loop 5 candles บล็อก back-to-back WS confirms (06:03 → 06:05)
+  //   - Fix: ข้าม back-candles ที่มี pending v5 confirmation แล้ว (registry-driven)
+  //   - เพื่อให้ confirmation tick 2 (06:05) ไม่โดน debounce บล็อก
+  //   - fail-closed: ถ้า bot._id missing → fall back to current behavior (block via debounce)
+  //   - bypassedDebounce เปิด telemetry ให้ caller เห็นว่า debounce ถูก bypass
   let recentlyTriggered = false;
+  let bypassedDebounce = false;
+  const botIdKey = bot && bot._id ? String(bot._id) : (bot && bot.id ? String(bot.id) : null);
   for (let back = 1; back <= debounceCandles; back += 1) {
-    if (cbConditionAt(lastIdx - back)) { recentlyTriggered = true; break; }
+    const backIdx = lastIdx - back;
+    if (backIdx < 0) break;
+    const backCandle = klines[backIdx];
+    if (!backCandle) continue;
+    // Skip if this back candle already has a pending v5 confirmation
+    // (allows back-to-back WS confirmations: 06:03 → 06:05)
+    if (botIdKey && getConfirmationCount({
+      botId: botIdKey,
+      version: 'v5',
+      candleCloseTime: backCandle.closeTime,
+    }) > 0) {
+      bypassedDebounce = true;
+      continue;
+    }
+    if (cbConditionAt(backIdx)) { recentlyTriggered = true; break; }
   }
   const matched = cbCondition && !recentlyTriggered;
 
@@ -390,6 +411,7 @@ function evaluateCBv5Snapshot({ bot, klines, targetCloseTime, nowMs }) {
     isHighVolume,
     cbCondition,
     fingerprint,
+    bypassedDebounce,
     candlesCount: klines.length,
     pivotCount: pivots.length,
     targetCloseTime: klines[lastIdx] ? klines[lastIdx].closeTime : null,

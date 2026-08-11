@@ -9,7 +9,11 @@
 
 const {
   evaluateCBv5Snapshot,
+  recordConfirmation,
+  getConfirmationCount,
+  consumeConfirmation,
   normalizeKlines,
+  _resetConfirmationRegistry,
 } = require('../src/core/cbPatternEvaluator');
 
 const FIXED_NOW = 1_700_000_000_000;
@@ -274,5 +278,104 @@ describe('cbPatternEvaluator.evaluateCBv5Snapshot', () => {
     }
     const r = evaluateCBv5Snapshot({ bot: defaultBot(), klines, nowMs: FIXED_NOW });
     expect(r.ok).toBe(false);
+  });
+});
+
+// FIX-2026-08-11: Debounce + 2-tick confirmation coordination tests
+//   - Bug: 2-tick confirm + 5-candle debounce blocked back-to-back WS matches
+//     (06:03 → 06:05 on MUBARAK). Fix: skip back-candles that have pending
+//     v5 confirmation in the registry.
+describe('cbPatternEvaluator.evaluateCBv5Snapshot — debounce bypass (FIX-2026-08-11)', () => {
+  const TEST_BOT_ID = 'cbv5-test-bot-bypass';
+
+  function botWithId(overrides = {}) {
+    return {
+      _id: TEST_BOT_ID,
+      ...defaultBot(),
+      ...overrides,
+    };
+  }
+
+  // Build klines where last 2 candles both satisfy CBv5 conditions
+  // (sharp drop + bearish + volume spike). Mirror MUBARAK 06:03 → 06:05 pattern.
+  function buildBackToBackMatchKlines() {
+    const klines = buildSidewayKlines(80);
+    const lastIdx = klines.length - 1;
+    // pre-penultimate candle: also sharp drop (06:05)
+    const dropClose = 100 - 10; // 90
+    klines[lastIdx - 1] = makeKline(lastIdx - 1, {
+      open: 100, high: 101, low: dropClose - 2, close: dropClose, volume: 110 * 10,
+    });
+    // last candle (06:03 in our test, simulated by being later)
+    klines[lastIdx] = makeKline(lastIdx, {
+      open: 100, high: 101, low: dropClose - 2, close: dropClose, volume: 110 * 10,
+    });
+    return klines;
+  }
+
+  afterEach(() => {
+    // Clean up registry between tests
+    _resetConfirmationRegistry();
+  });
+
+  test('back-to-back match WITHOUT pending confirmation → candle 2 is debounce_blocked (legacy behavior)', () => {
+    const klines = buildBackToBackMatchKlines();
+    const r = evaluateCBv5Snapshot({ bot: botWithId(), klines, nowMs: FIXED_NOW });
+    // After fixing bypass, the LAST candle should still match (cbCondition=true)
+    // because the back-loop is empty (no prior matches yet for this fresh test)
+    expect(r.ok).toBe(true);
+    expect(r.cbCondition).toBe(true);
+    // Fresh test: no pending confirmations → bypassedDebounce=false
+    expect(r.bypassedDebounce).toBe(false);
+  });
+
+  test('recording confirmation for previous candle → current candle bypasses debounce', () => {
+    const klines = buildBackToBackMatchKlines();
+    const lastIdx = klines.length - 1;
+    const prevCandleCloseTime = klines[lastIdx - 1].closeTime;
+
+    // Simulate first tick: record confirmation for the previous candle (06:03)
+    const r1 = evaluateCBv5Snapshot({ bot: botWithId(), klines: klines.slice(0, lastIdx), nowMs: FIXED_NOW });
+    expect(r1.matched).toBe(true);
+    const recorded = recordConfirmation({
+      botId: TEST_BOT_ID,
+      version: 'v5',
+      candleCloseTime: prevCandleCloseTime,
+      fingerprint: r1.fingerprint,
+    });
+    expect(recorded.count).toBe(1);
+
+    // Second tick: evaluate the full klines (last candle = 06:05)
+    // The first candle (06:03) is in the registry → back-loop should skip it
+    const r2 = evaluateCBv5Snapshot({ bot: botWithId(), klines, nowMs: FIXED_NOW });
+    expect(r2.ok).toBe(true);
+    expect(r2.cbCondition).toBe(true);
+    expect(r2.bypassedDebounce).toBe(true);
+    // r2 should NOT be debounce_blocked — got bypassed
+    expect(r2.reason).not.toBe('debounce_active');
+  });
+
+  test('bypassedDebounce field tracks registry correctly', () => {
+    const klines = buildBackToBackMatchKlines();
+    const r = evaluateCBv5Snapshot({ bot: botWithId(), klines, nowMs: FIXED_NOW });
+    expect(r.bypassedDebounce).toBe(false);
+  });
+
+  test('bot._id missing → falls back to fail-closed (bypassedDebounce=false, full debounce applied)', () => {
+    const klines = buildBackToBackMatchKlines();
+    // No _id or id — pure function still works
+    const bot = defaultBot();
+    const r = evaluateCBv5Snapshot({ bot, klines, nowMs: FIXED_NOW });
+    expect(r.bypassedDebounce).toBe(false);
+  });
+
+  test('confirmation registry helper: getConfirmationCount returns 0 for fresh key', () => {
+    expect(getConfirmationCount({ botId: 'never-recorded', version: 'v5', candleCloseTime: 999 })).toBe(0);
+  });
+
+  test('confirmation registry helper: miss → bypassedDebounce stays false', () => {
+    const klines = buildBackToBackMatchKlines();
+    const r = evaluateCBv5Snapshot({ bot: botWithId(), klines, nowMs: FIXED_NOW });
+    expect(r.bypassedDebounce).toBe(false);
   });
 });

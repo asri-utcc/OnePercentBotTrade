@@ -1004,6 +1004,19 @@ class Trader {
     return this.bot && this.bot.dcaEnabled === true;
   }
 
+  // FIX-2026-08-11: CBv5 pre-BUY support — check if CBv2 or CBv3 cooldown is active
+  //   - Used by CBv5 pre-BUY block to skip the pre-check when another CB already
+  //     fired (the cooldown gate in placeBuy will block anyway)
+  //   - Returns true if CBv2 or CBv3 lock is in the future
+  _hasActiveCbCooldownExceptV5() {
+    const now = Date.now();
+    const cbv2LockedUntil = this.bot.cbv2LockedUntil ? new Date(this.bot.cbv2LockedUntil).getTime() : 0;
+    const cbv3LockedUntil = this.bot.cbv3LockedUntil ? new Date(this.bot.cbv3LockedUntil).getTime() : 0;
+    if (cbv2LockedUntil > now) return true;
+    if (cbv3LockedUntil > now) return true;
+    return false;
+  }
+
   // FIX-2026-08-03: DCA + Martingale layer sizing
   //   - Returns the per-layer notional (USDT) for the upcoming DCA layer
   //   - When martingaleEnabled=false OR dcaEnabled=false → capitalPerTrade (unchanged, backward compat)
@@ -2132,13 +2145,16 @@ class Trader {
           });
         }
         if (evaluation.reason === 'debounce_active') {
-          logger.debug({
+          logger.warn({
             botId: this.bot._id.toString(),
             symbol: this.bot.symbol,
             timeframe: this.bot.timeframe,
             reason: evaluation.reason,
             candlesCount: evaluation.candlesCount,
-          }, 'trader: cbv5 skip — debounce active (pattern matched recently)');
+            lastLower: evaluation.lastLower ? evaluation.lastLower.toFixed(8) : null,
+            bypassedDebounce: evaluation.bypassedDebounce === true,
+            targetCloseTime: evaluation.targetCloseTime,
+          }, 'trader: cbv5 near-miss — single-tick match but debounce blocked (pattern matched recently)');
         }
         return;
       }
@@ -3447,6 +3463,48 @@ class Trader {
       } catch (err) {
         // fail-open on unexpected exception (defensive)
         logger.warn({ err: err.message, botId: this.bot._id.toString() }, 'trader: safe-trade no-trade check threw — allowing BUY');
+      }
+    }
+
+    // FIX-2026-08-11: CBv5 pre-BUY check (race: S1 + CBv5 on same candle)
+    //   - CBv5 only blocks BUY AFTER it fires (cbv5LockHours cooldown).
+    //   - When S1 fires on the same candle that CBv5 matches, BUY is placed
+    //     before the WS handler persists cbv5LockedUntil.
+    //   - Fix: pre-check the same candle against CBv5 here, alongside ST#3.
+    //   - Per-bot opt-out: bot.cbv5Enabled === false → skip
+    //   - DCA mode: skip (mirror ST#3 behavior)
+    //   - Mutual: if CBv2/CBv3 already locked → skip pre-check (cooldown gate blocks anyway)
+    if (this.bot.cbv5Enabled !== false && !this._isDcaMode() && !this._hasActiveCbCooldownExceptV5()) {
+      try {
+        const evalResult = await cbPatternEvaluator.fetchAndEvaluateCBv5({
+          bot: this.bot,
+          binanceRest,
+          targetCloseTime: candle.closeTime,
+        });
+        if (evalResult.ok && evalResult.matched) {
+          logger.warn({
+            botId: this.bot._id.toString(),
+            signalId: signalDoc._id.toString(),
+            symbol: this.bot.symbol,
+            targetCloseTime: candle.closeTime,
+            lastLower: evalResult.lastLower ? evalResult.lastLower.toFixed(8) : null,
+            deepestLow: evalResult.deepestLow ? evalResult.deepestLow.toFixed(8) : null,
+            fingerprint: evalResult.fingerprint,
+            reason: 'cbv5_pre_buy_block',
+          }, 'trader: CBv5 pre-BUY block — CBv5 matched on S1 candle, defer to WS handler for force-close');
+          await Signal.updateOne({ _id: signalDoc._id }, { outcome: 'skipped', note: 'cbv5_pre_buy_block' });
+          try {
+            eventBus.emit('cbv5:pre_buy_block', {
+              botId: this.bot._id.toString(),
+              signalId: signalDoc._id.toString(),
+              targetCloseTime: candle.closeTime,
+              fingerprint: evalResult.fingerprint,
+            });
+          } catch (_) { /* non-fatal */ }
+          return;
+        }
+      } catch (err) {
+        logger.warn({ err: err.message, botId: this.bot._id.toString() }, 'trader: CBv5 pre-BUY check threw — allowing BUY (fail-OPEN)');
       }
     }
 

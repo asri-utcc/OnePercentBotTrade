@@ -1333,13 +1333,16 @@ class PositionWatchdog {
           candleCloseTime: evaluation.targetCloseTime,
         });
         if (evaluation.reason === 'debounce_active') {
-          logger.debug({
+          logger.warn({
             botId: botIdStr,
             symbol: bot.symbol,
             timeframe: bot.timeframe,
             reason: evaluation.reason,
             candlesCount: evaluation.candlesCount,
-          }, 'positionWatchdog: cbv5 skip — debounce active');
+            lastLower: evaluation.lastLower ? evaluation.lastLower.toFixed(8) : null,
+            bypassedDebounce: evaluation.bypassedDebounce === true,
+            targetCloseTime: evaluation.targetCloseTime,
+          }, 'positionWatchdog: cbv5 near-miss — single-tick match but debounce blocked');
         }
         continue;
       }
@@ -1348,7 +1351,12 @@ class PositionWatchdog {
       const deepestLow = evaluation.deepestLow;
       const fingerprint = evaluation.fingerprint;
 
-      // 6. 2-tick confirmation registry
+      // FIX-2026-08-11: Watchdog Phase 5 (CBv5) uses single-tick confirmation
+      //   - Watchdog ticks at 180s (vs WS 500ms); back-to-back ticks always
+      //     span debounce window, so 2-tick confirmation is incompatible.
+      //   - Trust single-tick match — 4-condition filter (KC + deepestLow +
+      //     bearish + volume) keeps noise rate low.
+      //   - Still record for cross-process visibility (cbAutoUnlock reads).
       const recorded = cbPatternEvaluator.recordConfirmation({
         botId: botIdStr,
         version: 'v5',
@@ -1356,7 +1364,9 @@ class PositionWatchdog {
         fingerprint,
       });
       const confirmationCount = recorded.count;
-      if (confirmationCount < cbPatternEvaluator.REQUIRED_CONFIRMATIONS) {
+      // Watchdog fires on count >= 1 (single-tick trust); trader WS path still uses 2-tick
+      const REQUIRED_CONFIRMATIONS_WATCHDOG = 1;
+      if (confirmationCount < REQUIRED_CONFIRMATIONS_WATCHDOG) {
         logger.warn({
           botId: botIdStr,
           symbol: bot.symbol,
@@ -1368,7 +1378,7 @@ class PositionWatchdog {
           lastLower: lastLower.toFixed(8),
           deepestLow: deepestLow != null ? deepestLow.toFixed(8) : null,
           confirmationCount,
-          required: cbPatternEvaluator.REQUIRED_CONFIRMATIONS,
+          required: REQUIRED_CONFIRMATIONS_WATCHDOG,
           fingerprint,
           reason: 'confirmation_pending',
         }, 'positionWatchdog: cbv5 pattern matched but confirmation pending — skipping force-close');
