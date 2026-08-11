@@ -19,6 +19,8 @@
     cbv2_panic:              { label: 'CBv2',   emoji: '💎', category: 'bear',    tooltip: 'CBv2 sustained panic-sell (4 consecutive red candles below lowerKC) + HYBRID cooldown S1 BUY for cbv2LockHours hours (bot stays enabled)' },
     // FIX-2026-08-09: cbv3_panic — เพิ่มเข้า enum (เดิม Mongoose strict mode drop silently)
     cbv3_panic:              { label: 'CBv3',   emoji: '💎', category: 'bear',    tooltip: 'CBv3 sustained panic-sell (CBv2 base + ST3 upper-TF same-candle) + HYBRID cooldown S1 BUY for cbv3LockHours hours (bot stays enabled)' },
+    // FIX-2026-08-12: cbv5_panic — Support Zone Circuit Breaker (lowerKC + deepest pivot low + bearish + volume spike)
+    cbv5_panic:              { label: 'CBv5',   emoji: '💎', category: 'bear',    tooltip: 'CBv5 Support Zone panic-close (lowerKC break + deepest pivot low + bearish + volume spike) + HYBRID cooldown S1 BUY for cbv5LockHours hours (bot stays enabled)' },
     // FIX-2026-08-09: แยก SL-UKC auto-armed (F1) vs manual — เดิมรวมเป็น stop_loss_upper_kc
     sl_ukc_f1_armed:         { label: 'SL-F1',  emoji: '🛑', category: 'bear',    tooltip: 'SL on upper-KC — auto-armed by F1 (loss>10% + age>4h), then close > upperKC' },
     sl_ukc_manual:           { label: 'SL-M',   emoji: '🛑', category: 'bear',    tooltip: 'SL on upper-KC — manually armed (bot.stopLossOnUpperKC=true), then close > upperKC' },
