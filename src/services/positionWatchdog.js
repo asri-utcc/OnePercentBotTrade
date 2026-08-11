@@ -1598,13 +1598,16 @@ class PositionWatchdog {
       // 15. Telegram alert
       try {
         const botName = bot.name || bot.symbol || botIdStr;
+        // FIX-2026-08-12: pass number, let template format via .toFixed
+        //   (was converting to string here → template's .toFixed call threw
+        //   "p.deepestLow.toFixed is not a function" → telegram never sent)
         await telegramNotifier.sendNow('cbv5PanicClose', {
           botName,
           symbol: bot.symbol,
           timeframe: bot.timeframe,
           closedCount,
           lastLower,
-          deepestLow: deepestLow != null ? deepestLow.toFixed(6) : null,
+          deepestLow,
           isBearish: evaluation.isBearish,
           isHighVolume: evaluation.isHighVolume,
           lockedUntil: lockedUntilIso,
