@@ -64,6 +64,7 @@ const logger = require('../utils/logger');
 const telegramNotifier = require('./telegramNotifier');
 // FIX-2026-08-08: Feature #2 — CBv3 version routing (mutually exclusive with CBv2)
 const cbVersion = require('../core/cbVersion');
+const cbv5MasterToggle = require('../core/cbv5MasterToggle'); // FIX-2026-08-12 (audit Q9): master CBv5 toggle
 const volatilityScanner = require('../core/volatilityScanner'); // FIX-2026-08-08: corrected path (volatilityScanner.js lives in src/core/, not src/services/)
 // FIX-2026-08-09: shared CB pattern evaluator — single source of truth for klines/KC/isCBv2At
 //   - eliminates kline window inconsistency between trader (WS cache 500) and watchdog (REST 30)
@@ -686,16 +687,37 @@ class PositionWatchdog {
       const lockedUntil = new Date(Date.now() + lockHours * 60 * 60 * 1000);
       const lockedUntilIso = lockedUntil.toISOString();
 
+      // FIX-2026-08-12 (audit Q4): use cbCrossCooldown for Direction A symmetry
+      //   - Watchdog's CBv2 path was directly setting cbv2LockedUntil but NOT
+      //     clearing cbv5LockedUntil if CBv5 was active. CBv5 cooldown would block
+      //     BUYs unnecessarily until manual unlock.
+      //   - Mirror trader.js: route through cbCrossCooldown.applyCrossCooldownOnFire
+      //     → Direction A (CBv2 fires while CBv5 active) → cancels CBv5 + applies CBv2
+      const cbCrossCooldown = require('../core/cbCrossCooldown');
+      const crossResult = cbCrossCooldown.applyCrossCooldownOnFire({
+        bot: {
+          cbv2LockedUntil: bot.cbv2LockedUntil,
+          cbv3LockedUntil: bot.cbv3LockedUntil,
+          cbv5LockedUntil: bot.cbv5LockedUntil,
+        },
+        firingVersion: 'v2',
+        lockHours,
+        nowMs: Date.now(),
+      });
       // 8. Persist cooldown DB fields FIRST (idempotency — concurrent watchdog ticks see cooldown)
       //    Note: HYBRID — DO NOT touch bot.enabled / status / autoPauseReason
       //    This lets trader.restoreCbv2FiredAt (trader.js:222) pick up on next spawn
+      // FIX-2026-08-12: write back crossResult.appliedTo + crossResult fields so
+      //   cbv5LockedUntil is cleared on Direction A.
       Bot.updateOne(
         { _id: bot._id },
         {
           $set: {
-            cbv2LockedUntil: lockedUntil,
-            cbv2LockReason: 'cbv2_panic',
-            cbv2LastFiredAt: new Date(),
+            cbv2LockedUntil: crossResult.cbv2LockedUntil,
+            cbv2LockReason: crossResult.cbv2LockedUntil ? 'cbv2_panic' : null,
+            cbv2LastFiredAt: crossResult.cbv2LastFiredAt,
+            cbv3LockedUntil: crossResult.cbv3LockedUntil,
+            cbv5LockedUntil: crossResult.cbv5LockedUntil,
           },
         }
       ).catch((err) =>
@@ -712,9 +734,12 @@ class PositionWatchdog {
         if (trader) {
           trader._cbv2FiredAt = Date.now();
           if (trader.bot) {
-            trader.bot.cbv2LockedUntil = lockedUntil;
-            trader.bot.cbv2LockReason = 'cbv2_panic';
-            trader.bot.cbv2LastFiredAt = new Date();
+            trader.bot.cbv2LockedUntil = crossResult.cbv2LockedUntil;
+            trader.bot.cbv2LockReason = crossResult.cbv2LockedUntil ? 'cbv2_panic' : null;
+            trader.bot.cbv2LastFiredAt = crossResult.cbv2LastFiredAt;
+            // FIX-2026-08-12 (audit Q4): mirror crossResult to clear CBv5 in-memory
+            trader.bot.cbv5LockedUntil = crossResult.cbv5LockedUntil;
+            trader.bot.cbv5LockReason = crossResult.cbv5LockedUntil ? 'cbv5_panic' : null;
           }
         }
       } catch (traderErr) {
@@ -1087,14 +1112,29 @@ class PositionWatchdog {
       const lockedUntil = new Date(Date.now() + lockHours * 60 * 60 * 1000);
       const lockedUntilIso = lockedUntil.toISOString();
 
+      // FIX-2026-08-12 (audit Q4): use cbCrossCooldown for Direction A symmetry
+      //   - same fix as CBv2 path — CBv5 cooldown not cleared on Direction A
+      //   - reuse cbCrossCooldown (already required at top of CBv2 path above)
+      const crossResultV3 = cbCrossCooldown.applyCrossCooldownOnFire({
+        bot: {
+          cbv2LockedUntil: bot.cbv2LockedUntil,
+          cbv3LockedUntil: bot.cbv3LockedUntil,
+          cbv5LockedUntil: bot.cbv5LockedUntil,
+        },
+        firingVersion: 'v3',
+        lockHours,
+        nowMs: Date.now(),
+      });
       // 9. Persist cooldown DB fields FIRST
       Bot.updateOne(
         { _id: bot._id },
         {
           $set: {
-            cbv3LockedUntil: lockedUntil,
-            cbv3LockReason: 'cbv3_panic',
-            cbv3LastFiredAt: new Date(),
+            cbv2LockedUntil: crossResultV3.cbv2LockedUntil,
+            cbv3LockedUntil: crossResultV3.cbv3LockedUntil,
+            cbv3LockReason: crossResultV3.cbv3LockedUntil ? 'cbv3_panic' : null,
+            cbv3LastFiredAt: crossResultV3.cbv3LastFiredAt,
+            cbv5LockedUntil: crossResultV3.cbv5LockedUntil,
           },
         }
       ).catch((err) =>
@@ -1106,15 +1146,19 @@ class PositionWatchdog {
 
       // FIX-2026-08-09: ACEUSDT cooldown-bypass — sync in-memory trader state so placeBuy gate fires
       //   before DB write completes / across restart. Same pattern as unlock-cbv2 endpoint.
+      // FIX-2026-08-12 (audit Q4): mirror crossResult to clear CBv5 in-memory
       try {
         const botManager = require('../core/botManager');
         const trader = botManager.traders && botManager.traders.get(botIdStr);
         if (trader) {
           trader._cbv3FiredAt = Date.now();
           if (trader.bot) {
-            trader.bot.cbv3LockedUntil = lockedUntil;
-            trader.bot.cbv3LockReason = 'cbv3_panic';
-            trader.bot.cbv3LastFiredAt = new Date();
+            trader.bot.cbv2LockedUntil = crossResultV3.cbv2LockedUntil;
+            trader.bot.cbv3LockedUntil = crossResultV3.cbv3LockedUntil;
+            trader.bot.cbv3LockReason = crossResultV3.cbv3LockedUntil ? 'cbv3_panic' : null;
+            trader.bot.cbv3LastFiredAt = crossResultV3.cbv3LastFiredAt;
+            trader.bot.cbv5LockedUntil = crossResultV3.cbv5LockedUntil;
+            trader.bot.cbv5LockReason = crossResultV3.cbv5LockedUntil ? 'cbv5_panic' : null;
           }
         }
       } catch (traderErr) {
@@ -1255,6 +1299,13 @@ class PositionWatchdog {
   //     during same tick — Direction B: absorb CBv5 into existing dominant cooldown)
   //   - persists cbv5* DB fields → trader restores cooldown on resume
   async _checkCBv5PanicCloseForDisabled(stats) {
+    // FIX-2026-08-12 (audit Q9): master gate — AppConfig.cbv5MasterEnabled
+    //   - Audit found: watchdog Phase 5 had no master gate, only per-bot cbv5Enabled
+    //   - User contract: master toggle should let user disable CBv5 globally
+    if (!(await cbv5MasterToggle.isMasterCbv5Enabled())) {
+      stats.cbv5SkippedMaster = (stats.cbv5SkippedMaster || 0) + 1;
+      return;
+    }
     // 1. Get ALL open-state trades — same as Phase 3/4
     const OPEN_STATES = ['partial_wait', 'filled', 'retrying', 'holding', 'selling', 'partial_sell_wait'];
     const candidates = await Trade.find({ state: { $in: OPEN_STATES } }).lean();
@@ -1759,6 +1810,10 @@ class PositionWatchdog {
    */
   static _cbv5SkipReason(bot, tradesLen, klinesLen, nowMs) {
     if (!bot) return 'no_bot';
+    // FIX-2026-08-12 (audit Q9): master gate — synchronous check via cached value
+    //   - _cbv5SkipReason is a pure function (no async) — must consult cache directly
+    //   - Cache is 30s; misses default to true (master ON) so degradation is safe
+    if (!cbv5MasterToggle.isMasterCbv5EnabledCached()) return 'master_disabled';
     if (bot.cbv5Enabled === false) return 'disabled';
     if (bot.cbv5LockedUntil && new Date(bot.cbv5LockedUntil).getTime() > nowMs) {
       return 'cooldown_active';

@@ -12,6 +12,8 @@ const volatilityScanner = require('./volatilityScanner');
 const dps = require('./dynamicPositionSizing'); // FIX-2026-08-08: Feature #1 — Dynamic Position Sizing
 const cbAutoUnlock = require('./cbAutoUnlock'); // FIX-2026-08-08: Feature #3 — Auto Unlock Cooldown
 const cbVersion = require('./cbVersion'); // FIX-2026-08-08: Feature #2 — CB Version routing (v2 vs v3)
+const cbv5MasterToggle = require('./cbv5MasterToggle'); // FIX-2026-08-12 (audit Q9): master CBv5 toggle (AppConfig.cbv5MasterEnabled)
+const cbCooldownGate = require('./cbCooldownGate'); // FIX-2026-08-12 (audit Q11): pre-BUY CBv5 uses evaluateCbCooldown for fresh DB read
 const cbPatternEvaluator = require('./cbPatternEvaluator'); // FIX-2026-08-09: canonical REST window + 2-tick confirmation
 const cbCrossCooldown = require('./cbCrossCooldown'); // FIX-2026-08-10: CBv5 cross-version cooldown interaction (Direction A/B)
 const masterConfig = require('./masterConfig'); // FIX-2026-08-08: master toggles (DPS, CB Auto-Unlock)
@@ -2100,6 +2102,14 @@ class Trader {
       logger.debug({ botId: this.bot._id.toString() }, 'trader: cbv5 skip — not running');
       return;
     }
+    // FIX-2026-08-12 (audit Q9): master gate — AppConfig.cbv5MasterEnabled
+    //   - Audit found: per-bot cbv5Enabled was the only gate, no master switch
+    //   - User contract: master toggle should let user disable CBv5 globally
+    //   - Cheap DB call (30s cache) — falls back to true on error
+    if (!(await cbv5MasterToggle.isMasterCbv5Enabled())) {
+      logger.debug({ botId: this.bot._id.toString() }, 'trader: cbv5 skip — master toggle OFF');
+      return;
+    }
     if (this.bot.cbv5Enabled === false) {
       logger.debug({ botId: this.bot._id.toString() }, 'trader: cbv5 skip — disabled');
       return;
@@ -2545,7 +2555,11 @@ class Trader {
 
     // 1. atomic claim (state selling → stopping, หรือ filled/holding/... → stopping)
     //   - ใช้ allowedFrom set เพื่อกัน race กับ paths อื่น ๆ
-    const ALLOWED_FROM = ['partial_wait', 'filled', 'retrying', 'holding', 'selling', 'partial_sell_wait'];
+    // FIX-2026-08-12 (audit Q14): use shared ATOMIC_FORCE_CLOSE_STATES from tradeStates.js
+    //   - Was hardcoded 6-element list; now uses the canonical set including 'stopping'
+    //   - 'stopping' was added so concurrent force-close paths race correctly (winner = claim first)
+    const { ATOMIC_FORCE_CLOSE_STATES } = require('./tradeStates');
+    const ALLOWED_FROM = ATOMIC_FORCE_CLOSE_STATES;
     let errNote;
     if (isStack) {
       errNote = `dca_stack_force_close triggered (reason=${reason}, stackBep=${parseFloat(trade.stackBep || 0).toFixed(6)})`;
@@ -3474,7 +3488,12 @@ class Trader {
     //   - Per-bot opt-out: bot.cbv5Enabled === false → skip
     //   - DCA mode: skip (mirror ST#3 behavior)
     //   - Mutual: if CBv2/CBv3 already locked → skip pre-check (cooldown gate blocks anyway)
-    if (this.bot.cbv5Enabled !== false && !this._isDcaMode() && !this._hasActiveCbCooldownExceptV5()) {
+    //   - FIX-2026-08-12 (audit Q9): master gate — AppConfig.cbv5MasterEnabled
+    //   - FIX-2026-08-12 (audit Q11): use evaluateCbCooldown (DB + in-mem) to handle
+    //     stale in-memory bot.cbv5LockedUntil if watchdog just wrote it.
+    //     cbCooldownGate reads DB + backfills in-mem — same as placeBuy gate.
+    const cbv5PreGate = await cbCooldownGate.evaluateCbCooldown(this, this.bot, 'v5', Date.now());
+    if (this.bot.cbv5Enabled !== false && !this._isDcaMode() && !cbv5PreGate.active && !this._hasActiveCbCooldownExceptV5() && await cbv5MasterToggle.isMasterCbv5Enabled()) {
       try {
         const evalResult = await cbPatternEvaluator.fetchAndEvaluateCBv5({
           bot: this.bot,
@@ -3540,8 +3559,7 @@ class Trader {
       // FIX-2026-08-08: Feature #2 — CBv3 cooldown gate (mirror CBv2 schema)
       //   - mutually exclusive: cbVersion='v2' → CBv2 gate fires, 'v3' → CBv3 gate fires
       //   - both gates share the same unlock endpoint (POST /api/bots/:id/unlock-cbv2)
-      const { evaluateCbCooldown } = require('./cbCooldownGate');
-      const cbv2Gate = evaluateCbCooldown(this, this.bot, 'v2', Date.now());
+      const cbv2Gate = cbCooldownGate.evaluateCbCooldown(this, this.bot, 'v2', Date.now());
       if (cbv2Gate.active) {
         logger.warn({
           botId: this.bot._id.toString(),
@@ -3560,7 +3578,7 @@ class Trader {
       //   in memory. Pre-fix gate only consulted in-memory flag → trader opened 5 BUYs in 2.5h.
       //   Fix: ALSO consult DB `bot.cbv3LockedUntil` (authoritative across restart + external writers)
       //   via cbCooldownGate.evaluateCbCooldown().
-      const cbv3Gate = evaluateCbCooldown(this, this.bot, 'v3', Date.now());
+      const cbv3Gate = cbCooldownGate.evaluateCbCooldown(this, this.bot, 'v3', Date.now());
       if (cbv3Gate.active) {
         logger.warn({
           botId: this.bot._id.toString(),
@@ -3578,7 +3596,7 @@ class Trader {
       //   - INDEPENDENT of cbVersion — fires in parallel with CBv2 or CBv3 (no mutual exclusion)
       //   - same shape as CBv2/CBv3 gates; cbCooldownGate.evaluateCbCooldown handles v5 via dynamic key
       //   - dynamic duration: cbv5LockHours (per-bot, default 4)
-      const cbv5Gate = evaluateCbCooldown(this, this.bot, 'v5', Date.now());
+      const cbv5Gate = cbCooldownGate.evaluateCbCooldown(this, this.bot, 'v5', Date.now());
       if (cbv5Gate.active) {
         logger.warn({
           botId: this.bot._id.toString(),
@@ -8277,6 +8295,12 @@ class Trader {
           }
           if (this.bot.cbv3Enabled !== false && !this.cbv3CheckInFlight) {
             await this._checkCBv3PanicClose(candleObj);
+          }
+          // FIX-2026-08-12 (audit Q7): replay mode CBv5 missing — CBv5 was never
+          //   called in this reconcile loop → if WS outage spans a Support Zone
+          //   break, bot resumes missing the protection.
+          if (this.bot.cbv5Enabled !== false && !this.cbv5CheckInFlight) {
+            await this._checkCBv5PanicClose(candleObj);
           }
         }
       }

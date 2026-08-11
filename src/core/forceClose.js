@@ -42,11 +42,14 @@ const botManager = require('./botManager');
 //   branch has no real PnL → skip DPS entirely.
 const dpsAfterClose = require('./dpsAfterClose');
 
-// Mirror OPEN_TRADE_STATES from bot-detail.js — duplicated to avoid circular require on trader.js
-// FIX-2026-07-23b: เพิ่ม 'stopping' เพื่อให้ manual force-close ทำงานได้ระหว่าง stop-loss atomic-claim window
-//   - ถ้า user กด force-close ขณะ stop-loss กำลัง force-close อยู่ → ทั้งคู่แข่งกัน, ใคร update 'sold' ก่อนชนะ
-// FIX-2026-08-02: เพิ่ม 'partial_wait', 'partial_sell_wait' เพื่อรองรับ DCA stack partial states
-const FORCE_OPEN_STATES = ['placed', 'partial_wait', 'filled', 'holding', 'selling', 'retrying', 'partial_sell_wait', 'stopping'];
+// FIX-2026-08-12 (audit Q14): Shared atomic force-close state set.
+//   - FORCE_OPEN_STATES (8 states, includes 'placed') — used by manual force-close
+//     which can cancel a pending BUY (no SELL needed).
+//   - ATOMIC_FORCE_CLOSE_STATES (7 states, excludes 'placed') — used by automated
+//     force-close paths (MARKET SELL requires the BUY to have filled first).
+//   - Both sets are extracted to src/core/tradeStates.js to avoid divergence
+//     between markTradeSold (forceClose.js) and _forceCloseTradeNow (trader.js).
+const { FORCE_OPEN_STATES, ATOMIC_FORCE_CLOSE_STATES } = require('./tradeStates');
 
 // FIX-2026-08-02: DCA stack BEP computation (local copy — avoid circular require on trader.js)
 //   - ใช้ใน forceClose เพื่อ derive buyPrice/buyQty จาก stack fields
@@ -146,6 +149,17 @@ async function placeMarketSell(symbol, qty, clientOrderTag) {
  * and we treat it as a no-op success so we don't double-decrement bot totals.
  */
 async function markTradeSold({ trade, sold, errorNote, reason, sellReason, sellReasonDetail, sellReasonSource, isDcaStack }) {
+  // FIX-2026-08-12 (audit Q14): idempotency check — if trade already 'sold', return ok
+  //   - Prevents double-write when watchdog + manual force-close race
+  //   - normalized state comparison (handles 'sold' and 'SOLD' legacy)
+  if (trade && (trade.state === 'sold' || trade.state === 'SOLD' || trade.state === 'partial_sold_done')) {
+    logger.info({
+      tradeId: trade._id && trade._id.toString(),
+      state: trade.state,
+      reason: 'already_sold',
+    }, 'forceClose: markTradeSold called on already-sold trade — no-op');
+    return true;
+  }
   const setFields = {
     state: 'sold',
     sellOrderId: sold.sellOrderId ?? null,

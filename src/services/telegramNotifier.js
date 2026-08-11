@@ -222,10 +222,48 @@ async function reloadConfig() {
 // ─── Public dispatcher ────────────────────────────────
 // eventKey: 'buyFilled' | 'sellFilled' | 'insufficientBalance' | 'botEnabled'
 //          | 'botDisabled' | 'botDeleted' | 'positionLoss' | 'positionProfit' | 'positionStuck'
+//
+// FIX-2026-08-12 (audit Q12): per-bot CB panic-close dedup latch.
+//   - trader + watchdog + manual force-close can fire CB panic-close for same bot
+//     within 60s. Without dedup, user gets 2-3 duplicate alerts.
+//   - Latch: per-bot per-version (v2/v3/v5) last-notified timestamp. Suppress
+//     if < 60s. Reset on bot:unlocked event (user manually clears cooldown).
+const CB_DEDUP_EVENTS = new Set(['cbv2PanicClose', 'cbv3PanicClose', 'cbv5PanicClose']);
+const CB_DEDUP_WINDOW_MS = 60 * 1000; // 60s
+const _cbNotifiedAt = new Map(); // key: `${version}:${botId}` → ms
+
+function _checkCbDedup(eventKey, payload) {
+  if (!CB_DEDUP_EVENTS.has(eventKey)) return true;
+  const botId = payload && payload.botId;
+  if (!botId) return true; // no botId → don't dedup (allow)
+  const version = eventKey.replace('cbv', '').replace('PanicClose', ''); // '2'|'3'|'5'
+  const key = `${version}:${botId}`;
+  const now = Date.now();
+  const last = _cbNotifiedAt.get(key);
+  if (last && (now - last) < CB_DEDUP_WINDOW_MS) {
+    logger.info({
+      eventKey, botId, version,
+      lastNotifiedMs: last,
+      skippedMs: now - last,
+    }, 'telegramNotifier: CB panic-close deduped (recently sent)');
+    return false;
+  }
+  _cbNotifiedAt.set(key, now);
+  return true;
+}
+
+function _resetCbDedup(botId) {
+  if (!botId) return;
+  for (const key of _cbNotifiedAt.keys()) {
+    if (key.endsWith(`:${botId}`)) _cbNotifiedAt.delete(key);
+  }
+}
+
 async function dispatch(eventKey, payload) {
   const cfg = await loadConfig();
   if (!cfg.enabled || !cfg.hasToken || !cfg.chatId) return false;
   if (!cfg.events[eventKey]) return false;
+  if (!_checkCbDedup(eventKey, payload)) return false;
   const result = renderMessage(eventKey, payload, cfg);
   if (!result) return false;
   // 2026-08-09: renderMessage อาจ return { text, parseMode } สำหรับ event ที่ต้องการ HTML
@@ -867,6 +905,14 @@ function bindEventHandlers() {
   //   - payload จาก trader._checkCBv2PanicClose: { botId, lockedUntil, lockHours, reason }
   //   - HYBRID: บอทยัง enable, แค่กั้น BUY — message ใช้ template 'botLocked' (เดิม)
   //   - ส่งครั้งเดียวต่อ cooldown event (no latch needed — trader จะส่งครั้งเดียวต่อ fire)
+  //
+  // FIX-2026-08-12 (audit Q12): bot:unlocked event — reset CB dedup latch
+  //   - When user manually clears cooldown via POST /api/bots/:id/unlock-cbv2,
+  //     the next CB fire should be allowed to send a telegram (no dedup).
+  eventBus.on('bot:unlocked', async (p) => {
+    if (p && p.botId) _resetCbDedup(p.botId);
+  });
+
   eventBus.on('bot:cooldown', async (p) => {
     try {
       if (!p || !p.botId) return;

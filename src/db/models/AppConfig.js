@@ -158,6 +158,14 @@ const appConfigSchema = new mongoose.Schema(
     // ═══════════════════════════════════════════════════════════════════════
     cbVersion: { type: String, enum: ['v2', 'v3'], default: 'v3' },
 
+    // FIX-2026-08-12 (audit Q9): Master CBv5 toggle
+    //   - CBv5 was originally "independent of cbVersion" — but user contract violation
+    //     because no master switch existed (per-bot cbv5Enabled only).
+    //   - cbv5MasterEnabled (default true) — when false, all 4 CBv5 sites skip
+    //   - per-bot cbv5Enabled still respected (user can opt-out individual bots)
+    //   - Gate at: trader._checkCBv5PanicClose, trader pre-BUY, watchdog Phase 5, _cbv5SkipReason
+    cbv5MasterEnabled: { type: Boolean, default: true },
+
     // ═══════════════════════════════════════════════════════════════════════
     // FIX-2026-08-08: Master toggles for DPS / CB Auto-Unlock
     //   - masterDynamicSizeEnabled (default true) — when false, all bots skip DPS evaluation
