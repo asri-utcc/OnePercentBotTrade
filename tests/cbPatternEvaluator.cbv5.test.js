@@ -235,6 +235,34 @@ describe('cbPatternEvaluator.evaluateCBv5Snapshot', () => {
     expect(out[0].closeTime).toBe(FIXED_NOW);
   });
 
+  // FIX-2026-08-11: volume preservation — without volume the CBv5 volume filter
+  //   always returns false. fetchAndEvaluateCBv5 must yield objects with .volume.
+  test('normalizeKlines preserves volume from Binance kline[5]', () => {
+    const k = [FIXED_NOW - TF_MS, '100', '101', '99', '100.5', '1234567.89', FIXED_NOW, '0', '0', '0', '0', '0'];
+    const out = normalizeKlines([k], { nowMs: FIXED_NOW });
+    expect(out).toHaveLength(1);
+    expect(out[0].volume).toBe(1234567.89);
+    expect(out[0].volume).toBeGreaterThan(0);
+  });
+
+  test('normalizeKlines handles missing/invalid volume gracefully', () => {
+    const kMissingVol = [FIXED_NOW - TF_MS, '100', '101', '99', '100.5', 'NaN', FIXED_NOW];
+    const out = normalizeKlines([kMissingVol], { nowMs: FIXED_NOW });
+    // Number.isFinite(NaN)=false → volume=undefined (NOT throw, NOT zero)
+    expect(out).toHaveLength(1);
+    expect(out[0].volume).toBeUndefined();
+  });
+
+  test('CBv5 with proper volume → isHighVolume reflects volMultiplier', () => {
+    const klines = buildBreakoutKlines({ dropPct: 15, volSpike: 10 });
+    const r = evaluateCBv5Snapshot({
+      bot: defaultBot(),
+      klines, // from buildBreakoutKlines which has volume in object form
+      nowMs: FIXED_NOW,
+    });
+    expect(r.isHighVolume).toBe(true);
+  });
+
   test('fingerprint is deterministic for same input', () => {
     const klines = buildBreakoutKlines({ lastIdx: 75, dropPct: 15, volSpike: 10 });
     const r1 = evaluateCBv5Snapshot({ bot: defaultBot(), klines, nowMs: FIXED_NOW });

@@ -45,6 +45,12 @@ const DEFAULT_CONFIRMATION_TTL_MS = 10 * 60 * 1000; // 10 min
 const REQUIRED_CONFIRMATIONS = 2;
 
 // ─── Pure: normalize Binance tuple → object, dedupe, filter closed candles ──
+// FIX-2026-08-11: include `volume` field from Binance kline[5] — without it,
+//   CBv5 evaluateCBv5Snapshot's isHighVolume check sees curVol=undefined →
+//   Number.isFinite(undefined)=false → isHighVolume always false when
+//   cbv5UseVolume=true, silently dead-coding the volume filter (and thus the
+//   whole CBv5 in fetchAndEvaluateCBv5 path) while CBv3 (which uses
+//   klineCache-seeded objects with .volume populated) keeps firing.
 function normalizeKlines(rawKlines, { nowMs = Date.now() } = {}) {
   if (!Array.isArray(rawKlines)) return [];
   const seen = new Set();
@@ -56,6 +62,9 @@ function normalizeKlines(rawKlines, { nowMs = Date.now() } = {}) {
     const high = parseFloat(k[2]);
     const low = parseFloat(k[3]);
     const close = parseFloat(k[4]);
+    // FIX-2026-08-11: parse volume (kline[5]); if non-finite → undefined (fail-OPEN
+    //   at the consumer level via existing NaN guard in evaluateCBv5Snapshot)
+    const volume = (k.length >= 6 && Number.isFinite(parseFloat(k[5]))) ? parseFloat(k[5]) : undefined;
     const closeTime = Number(k[6]);
     if (!Number.isFinite(openTime) || openTime <= 0) continue;
     if (!Number.isFinite(closeTime) || closeTime <= 0) continue;
@@ -64,7 +73,7 @@ function normalizeKlines(rawKlines, { nowMs = Date.now() } = {}) {
     if (closeTime > nowMs) continue;
     if (seen.has(openTime)) continue;
     seen.add(openTime);
-    out.push({ openTime, open, high, low, close, closeTime });
+    out.push({ openTime, open, high, low, close, closeTime, volume });
   }
   out.sort((a, b) => a.openTime - b.openTime);
   return out;
