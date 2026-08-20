@@ -2043,8 +2043,8 @@ async function createBot() {
     autoPauseMinKcPct: parseFloat(document.getElementById('nb-auto-pause-min-kc').value) || 2, // FIX-2026-08-01: auto-pause threshold %
     autoPauseMin24hVolUsdt: parseFloat(document.getElementById('nb-auto-pause-min-24h-vol').value) || 1000000, // FIX-2026-08-10: 24h volume guard (USDT, default 1M)
     autoArmStopLossOnUKC: document.getElementById('nb-auto-arm-stop-loss-ukc').checked, // FIX-2026-07-31 (F1): per-bot auto-arm SL-on-UKC toggle (default true)
-    autoArmLossPct: parseFloat(document.getElementById('nb-auto-arm-loss-pct').value) || 10, // FIX-2026-08-03: F1 loss threshold (1..90, default 10)
-    autoArmAgeHours: parseFloat(document.getElementById('nb-auto-arm-age-hours').value) || 4, // FIX-2026-08-03: F1 age threshold (0.5..168, default 4)
+    autoArmLossPct: parseFloat(document.getElementById('nb-auto-arm-loss-pct').value) || 10, // FIX-2026-08-03 / EXT-2026-08-20: F1 loss threshold (1..99, default 10)
+    autoArmAgeHours: parseFloat(document.getElementById('nb-auto-arm-age-hours').value) || 4, // FIX-2026-08-03 / EXT-2026-08-20: F1 age threshold (0.5..999, default 4)
     slUkcTriggerOnProfit: document.getElementById('nb-sl-ukc-trigger-on-profit').checked, // FIX-2026-08-03: SL-UKC trigger on profit (default false)
     tpTrendEnabled: document.getElementById('nb-tp-trend-enabled').checked, // FIX-2026-08-01: per-bot TP trend ×N master toggle (default true)
     tpTrendMultiplier: parseFloat(document.getElementById('nb-tp-trend-multiplier').value) || 2, // FIX-2026-07-31 (F2): per-bot TP ×N multiplier (1..10, default 2)

@@ -245,11 +245,11 @@ function render() {
                 <div class="bot-settings-dependent bot-settings-grid">
                   <div>
                     <label class="form-label" for="f-auto-arm-loss-pct">ขาดทุนขั้นต่ำ (%)</label>
-                    <input type="number" class="form-control" id="f-auto-arm-loss-pct" value="${bot.autoArmLossPct ?? 10}" step="0.5" min="1" max="90" />
+                    <input type="number" class="form-control" id="f-auto-arm-loss-pct" value="${bot.autoArmLossPct ?? 10}" step="0.5" min="1" max="99" />
                   </div>
                   <div>
                     <label class="form-label" for="f-auto-arm-age-hours">อายุ Position ขั้นต่ำ (ชม.)</label>
-                    <input type="number" class="form-control" id="f-auto-arm-age-hours" value="${bot.autoArmAgeHours ?? 4}" step="0.5" min="0.5" max="168" />
+                    <input type="number" class="form-control" id="f-auto-arm-age-hours" value="${bot.autoArmAgeHours ?? 4}" step="0.5" min="0.5" max="999" />
                   </div>
                 </div>
                 <small class="text-muted d-block mt-2">เมื่อครบทั้ง loss% และอายุ ระบบจะ arm safety flag ให้ position นั้น</small>
@@ -701,6 +701,13 @@ function render() {
           <div class="alert alert-info mb-1" id="f-total"></div>
           <div class="text-danger small" id="f-error"></div>
         </div>
+        <!-- FIX-2026-08-14: Import/Export file-based -->
+        <div class="d-flex gap-2 flex-wrap mb-2 w-100">
+          <button type="button" class="btn btn-sm btn-outline-secondary" id="f-export-config" title="บันทึกค่าตั้งค่าทั้งหมดเป็นไฟล์ JSON">📤 Export</button>
+          <button type="button" class="btn btn-sm btn-outline-info" id="f-import-replace" title="โหลดไฟล์ทับฟอร์มทั้งหมด (symbol ไม่ถูกแก้)">📥 Import (Replace)</button>
+          <button type="button" class="btn btn-sm btn-outline-info" id="f-import-merge" title="โหลดไฟล์แบบ merge · อัพเดทเฉพาะ field ที่อยู่ในไฟล์">📥 Import (Merge)</button>
+        </div>
+        <div id="f-io-status" class="text-muted small mb-2 w-100"></div>
         <button type="submit" class="btn btn-primary">💾 บันทึก</button>
         <a href="/bots.html" class="btn btn-secondary">กลับ</a>
       </div>
@@ -735,6 +742,86 @@ function render() {
     });
   });
   document.getElementById('f-tp-recommend').onclick = recommendTp;
+
+  // FIX-2026-08-14: Import/Export file-based (cross-surface compatible JSON)
+  //   - Export reads CURRENT bot values (from bot object, not stale form) for accuracy
+  //   - Import skips 'symbol' (immutable after create) + auto-refreshes DCA-dependent UI
+  const exportConfigBtn = document.getElementById('f-export-config');
+  if (exportConfigBtn) exportConfigBtn.onclick = exportConfigToFile;
+  const importReplaceBtn = document.getElementById('f-import-replace');
+  if (importReplaceBtn) importReplaceBtn.onclick = () => importConfigFromFile('replace');
+  const importMergeBtn = document.getElementById('f-import-merge');
+  if (importMergeBtn) importMergeBtn.onclick = () => importConfigFromFile('merge');
+
+  function setIoStatus(msg, variant) {
+    const el = document.getElementById('f-io-status');
+    if (!el) return;
+    el.textContent = msg || '';
+    const colors = { danger: '#ff6b6b', success: '#4ade80', warn: '#ffa500' };
+    el.style.color = colors[variant] || 'var(--text-3)';
+  }
+
+  function exportConfigToFile() {
+    if (!window.botConfigIO) { setIoStatus('❌ botConfigIO module ไม่โหลด', 'danger'); return; }
+    if (!bot) { setIoStatus('❌ ยังโหลดบอทไม่เสร็จ', 'danger'); return; }
+    // Pull settings from the loaded bot object (authoritative — not stale form values)
+    const settings = {};
+    const keys = window.botConfigIO.ALLOWED_FIELD_KEYS;
+    for (const k of keys) {
+      if (bot[k] !== undefined && bot[k] !== null) settings[k] = bot[k];
+    }
+    const fieldCount = Object.keys(settings).length;
+    if (fieldCount === 0) { setIoStatus('❌ บอทไม่มี config fields', 'danger'); return; }
+    const payload = window.botConfigIO.buildExportPayload({
+      type: 'bot',
+      name: bot.name || bot.symbol || 'bot',
+      source: 'bot-edit',
+      settings,
+      botSymbol: bot.symbol,
+      botTimeframe: bot.timeframe,
+      cbVersion: bot.cbVersion,
+    });
+    const filename = window.botConfigIO.buildExportFilename('bot', bot.symbol || 'bot');
+    window.botConfigIO.triggerDownload(filename, payload);
+    setIoStatus(`✅ Export ${fieldCount} fields → ${filename}`, 'success');
+  }
+
+  async function importConfigFromFile(mode) {
+    if (!window.botConfigIO) { setIoStatus('❌ botConfigIO module ไม่โหลด', 'danger'); return; }
+    if (!bot) { setIoStatus('❌ ยังโหลดบอทไม่เสร็จ', 'danger'); return; }
+    if (mode === 'replace' && !window.confirm('Import จะทับฟอร์มทั้งหมด (ยกเว้น symbol ที่ล็อกไว้) — แน่ใจมั้ย?')) return;
+    setIoStatus('⏳ กำลังเลือกไฟล์…');
+    const file = await window.botConfigIO.pickJsonFile();
+    if (!file) { setIoStatus('ยกเลิก', 'warn'); return; }
+    setIoStatus(`⏳ กำลังอ่าน ${file.name}…`);
+    const result = await window.botConfigIO.parseImportFile(file);
+    if (!result.ok) { setIoStatus('❌ ' + result.error, 'danger'); return; }
+    const sanitize = result.sanitizeResult;
+    // skipKey='symbol' is defensive — symbol not in whitelist, but explicit is safer
+    const { applied, skipped } = window.botConfigIO.applyToForm(sanitize.settings, 'bot-edit', { mode, skipKey: 'symbol' });
+    // Timeframe mismatch warning (Save will restart trader)
+    const fileTf = sanitize.settings.timeframe;
+    const tfWarning = (fileTf && fileTf !== bot.timeframe)
+      ? `⚠️ Timeframe ${fileTf} ≠ ${bot.timeframe} — Save จะ restart trader`
+      : '';
+    // Run DCA refresh chain (DCA + Martingale + CB visibility depend on applied values)
+    try {
+      updateDcaMaxCap();
+      updateDcaTpMirror();
+      updateDcaExitPolicy();
+      updateDcaMartingaleVisibility();
+      updateDcaMartingalePreview();
+      refreshDcaUi({ autoSwitchTab: false });
+      updateTotal();
+    } catch (_) { /* non-fatal — leave stale UI if any ref missing */ }
+    const parts = [`✅ Import ${applied} fields (${mode})`];
+    if (sanitize.dropped > 0) parts.push(`dropped ${sanitize.dropped} unknown`);
+    if (skipped.length > 0) parts.push(`skipped ${skipped.length}`);
+    const warnings = result.warnings || [];
+    if (warnings.length) parts.push(`⚠️ ${warnings.join('; ')}`);
+    if (tfWarning) parts.push(tfWarning);
+    setIoStatus(parts.join(' · '), (warnings.length || tfWarning) ? 'warn' : 'success');
+  }
 
   // FIX-2026-08-03: live-update DCA max-capital formula + max-capital card
   function updateDcaMaxCap() {
@@ -1076,8 +1163,8 @@ async function save(e) {
     autoPauseMinKcPct: parseFloat(document.getElementById('f-auto-pause-min-kc').value) || 2, // FIX-2026-08-01: auto-pause threshold %
     autoPauseMin24hVolUsdt: parseFloat(document.getElementById('f-auto-pause-min-24h-vol').value) || 1000000, // FIX-2026-08-10: 24h volume guard (USDT, default 1M)
     autoArmStopLossOnUKC: document.getElementById('f-auto-arm-stop-loss-ukc').checked, // FIX-2026-07-31 (F1): per-bot auto-arm SL-on-UKC toggle (default true)
-    autoArmLossPct: parseFloat(document.getElementById('f-auto-arm-loss-pct').value) || 10, // FIX-2026-08-03: per-bot F1 loss threshold (1..90, default 10)
-    autoArmAgeHours: parseFloat(document.getElementById('f-auto-arm-age-hours').value) || 4, // FIX-2026-08-03: per-bot F1 age threshold (0.5..168, default 4)
+    autoArmLossPct: parseFloat(document.getElementById('f-auto-arm-loss-pct').value) || 10, // FIX-2026-08-03 / EXT-2026-08-20: per-bot F1 loss threshold (1..99, default 10)
+    autoArmAgeHours: parseFloat(document.getElementById('f-auto-arm-age-hours').value) || 4, // FIX-2026-08-03 / EXT-2026-08-20: per-bot F1 age threshold (0.5..999, default 4)
     slUkcTriggerOnProfit: document.getElementById('f-sl-ukc-trigger-on-profit').checked, // FIX-2026-08-03: SL-UKC trigger on profit (default false)
     tpTrendEnabled: document.getElementById('f-tp-trend-enabled').checked, // FIX-2026-08-01: per-bot TP trend ×N master toggle (default true)
     tpTrendMultiplier: parseFloat(document.getElementById('f-tp-trend-multiplier').value), // FIX-2026-07-31 (F2): per-bot TP ×N multiplier (1..10, default 2)

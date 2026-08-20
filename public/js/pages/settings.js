@@ -260,6 +260,12 @@ function renderBotDefaultsSection() {
       </div>
       <div class="col-md-4">
         <label class="form-check form-switch">
+          <input type="checkbox" class="form-check-input" id="bd-cbv5-enabled" ${d.cbv5Enabled ? 'checked' : ''} />
+          <span class="form-check-label">💎 CBv5 Support Zone panic-sell</span>
+        </label>
+      </div>
+      <div class="col-md-4">
+        <label class="form-check form-switch">
           <input type="checkbox" class="form-check-input" id="bd-cb-auto-unlock-enabled" ${d.cbAutoUnlockEnabled ? 'checked' : ''} />
           <span class="form-check-label">🔓 CB Auto-Unlock</span>
         </label>
@@ -332,6 +338,26 @@ function renderBotDefaultsSection() {
       </div>
     </div>
 
+    <!-- CBv5 Advanced sub-section -->
+    <div class="alert alert-warning bg-opacity-10 border border-warning border-opacity-25 small mb-3 mt-4">
+      <strong>💎 CBv5 Advanced Setup</strong> — เงื่อนไข 4 ข้อ: <code>lowerKC break</code> + <code>deepest pivot low</code> + <code>bearish candle</code> + <code>volume spike</code> · cooldown S1 BUY <code>cbv5LockHours</code> ชม. (บอทไม่ถูกปิด)
+    </div>
+    <h6 class="text-muted-3 mb-2 mt-2">💎 CBv5 — Toggles ขั้นสูง</h6>
+    <div class="row g-3">
+      <div class="col-md-4">
+        <label class="form-check form-switch">
+          <input type="checkbox" class="form-check-input" id="bd-cbv5-strict-break" ${d.cbv5StrictBreak ? 'checked' : ''} />
+          <span class="form-check-label">🔒 Strict Break (ต้องปิดเหนือ lowerKC เป๊ะ)</span>
+        </label>
+      </div>
+      <div class="col-md-4">
+        <label class="form-check form-switch">
+          <input type="checkbox" class="form-check-input" id="bd-cbv5-use-volume" ${d.cbv5UseVolume ? 'checked' : ''} />
+          <span class="form-check-label">📊 Volume spike filter (vol × multiplier)</span>
+        </label>
+      </div>
+    </div>
+
     <!-- Numeric fields -->
     <h6 class="text-muted-3 mb-2 mt-4">🔢 ค่าตัวเลข</h6>
     <div class="row g-3">
@@ -342,6 +368,42 @@ function renderBotDefaultsSection() {
       <div class="col-md-3">
         <label class="form-label">CBv3 lock (ชม.)</label>
         <input type="number" class="form-control" id="bd-cbv3-lock-hours" value="${d.cbv3LockHours}" step="0.5" min="0.5" max="168" />
+      </div>
+      <div class="col-md-3">
+        <label class="form-label">💎 CBv5 lock (ชม.)</label>
+        <input type="number" class="form-control" id="bd-cbv5-lock-hours" value="${d.cbv5LockHours}" step="0.5" min="0.5" max="168" />
+      </div>
+      <div class="col-md-3">
+        <label class="form-label">💎 CBv5 KC length</label>
+        <input type="number" class="form-control" id="bd-cbv5-kc-len" value="${d.cbv5KcLen}" step="1" min="5" max="100" />
+      </div>
+      <div class="col-md-3">
+        <label class="form-label">💎 CBv5 KC mult</label>
+        <input type="number" class="form-control" id="bd-cbv5-kc-mult" value="${d.cbv5KcMult}" step="0.1" min="0.5" max="5" />
+      </div>
+      <div class="col-md-3">
+        <label class="form-label">💎 CBv5 pivot lookback</label>
+        <input type="number" class="form-control" id="bd-cbv5-pivot-lookback" value="${d.cbv5PivotLookback}" step="1" min="2" max="10" />
+      </div>
+      <div class="col-md-3">
+        <label class="form-label">💎 CBv5 pivot left length</label>
+        <input type="number" class="form-control" id="bd-cbv5-pivot-left-len" value="${d.cbv5PivotLeftLen}" step="1" min="2" max="50" />
+      </div>
+      <div class="col-md-3">
+        <label class="form-label">💎 CBv5 pivot right length</label>
+        <input type="number" class="form-control" id="bd-cbv5-pivot-right-len" value="${d.cbv5PivotRightLen}" step="1" min="2" max="50" />
+      </div>
+      <div class="col-md-3">
+        <label class="form-label">💎 CBv5 volume MA length</label>
+        <input type="number" class="form-control" id="bd-cbv5-vol-ma-len" value="${d.cbv5VolMaLen}" step="1" min="5" max="100" />
+      </div>
+      <div class="col-md-3">
+        <label class="form-label">💎 CBv5 volume multiplier ×N</label>
+        <input type="number" class="form-control" id="bd-cbv5-vol-multiplier" value="${d.cbv5VolMultiplier}" step="0.1" min="1" max="10" />
+      </div>
+      <div class="col-md-3">
+        <label class="form-label">💎 CBv5 debounce candles</label>
+        <input type="number" class="form-control" id="bd-cbv5-debounce-candles" value="${d.cbv5DebounceCandles}" step="1" min="1" max="20" />
       </div>
       <div class="col-md-3">
         <label class="form-label">CB Auto-Unlock threshold (%)</label>
@@ -357,11 +419,11 @@ function renderBotDefaultsSection() {
       </div>
       <div class="col-md-3">
         <label class="form-label">Auto-arm loss (%)</label>
-        <input type="number" class="form-control" id="bd-auto-arm-loss-pct" value="${d.autoArmLossPct}" step="0.5" min="1" max="90" />
+        <input type="number" class="form-control" id="bd-auto-arm-loss-pct" value="${d.autoArmLossPct}" step="0.5" min="1" max="99" />
       </div>
       <div class="col-md-3">
         <label class="form-label">Auto-arm age (ชม.)</label>
-        <input type="number" class="form-control" id="bd-auto-arm-age-hours" value="${d.autoArmAgeHours}" step="0.5" min="0.5" max="168" />
+        <input type="number" class="form-control" id="bd-auto-arm-age-hours" value="${d.autoArmAgeHours}" step="0.5" min="0.5" max="999" />
       </div>
       <div class="col-md-3">
         <label class="form-label">TP trend multiplier ×N</label>
@@ -373,9 +435,13 @@ function renderBotDefaultsSection() {
       </div>
     </div>
 
-    <div class="mt-3 d-flex align-items-center">
+    <div class="mt-3 d-flex align-items-center flex-wrap">
       <button type="button" class="btn btn-primary" id="btn-save-bd">💾 บันทึก Bot Defaults</button>
       <button type="button" class="btn btn-outline-warning ms-2" id="btn-reset-bd">↩️ Reset เป็นค่าแนะนำ</button>
+      <!-- FIX-2026-08-14: Import/Export file-based (cross-surface compatible JSON) -->
+      <button type="button" class="btn btn-outline-secondary ms-2" id="btn-export-bd" title="บันทึกค่า Bot Defaults เป็นไฟล์ JSON">📤 Export</button>
+      <button type="button" class="btn btn-outline-info ms-2" id="btn-import-bd-replace" title="โหลดไฟล์ทับฟอร์มทั้งหมด">📥 Import (Replace)</button>
+      <button type="button" class="btn btn-outline-info ms-2" id="btn-import-bd-merge" title="โหลดไฟล์แบบ merge · อัพเดทเฉพาะ field ที่อยู่ในไฟล์">📥 Import (Merge)</button>
       <span class="ms-3 text-muted small" id="bd-status"></span>
     </div>
 
@@ -1052,6 +1118,13 @@ function bindEvents() {
   if (sbd) sbd.onclick = saveBotDefaults;
   const rbd = document.getElementById('btn-reset-bd');
   if (rbd) rbd.onclick = resetBotDefaults;
+  // FIX-2026-08-14: Import/Export buttons for Bot Defaults
+  const expBd = document.getElementById('btn-export-bd');
+  if (expBd) expBd.onclick = exportBotDefaultsToFile;
+  const impBdR = document.getElementById('btn-import-bd-replace');
+  if (impBdR) impBdR.onclick = () => importBotDefaultsFromFile('replace');
+  const impBdM = document.getElementById('btn-import-bd-merge');
+  if (impBdM) impBdM.onclick = () => importBotDefaultsFromFile('merge');
 }
 
 // ════════ Telegram ════════
@@ -1462,6 +1535,19 @@ const BD_RECOMMENDED = {
   cbv2LockHours: 8,
   cbv3Enabled: true,
   cbv3LockHours: 8,
+  // FIX-2026-08-14: CBv5 Advanced Setup defaults
+  cbv5Enabled: true,
+  cbv5LockHours: 4,
+  cbv5KcLen: 20,
+  cbv5KcMult: 1.2,
+  cbv5PivotLookback: 3,
+  cbv5PivotLeftLen: 5,
+  cbv5PivotRightLen: 5,
+  cbv5StrictBreak: true,
+  cbv5UseVolume: true,
+  cbv5VolMaLen: 20,
+  cbv5VolMultiplier: 1.5,
+  cbv5DebounceCandles: 5,
   cbAutoUnlockEnabled: false,
   cbAutoUnlockThresholdPct: 1.0,
   dynamicSizeEnabled: true,
@@ -1508,6 +1594,19 @@ async function saveBotDefaults() {
     cbv2LockHours: num('bd-cbv2-lock-hours'),
     cbv3Enabled: isChecked('bd-cbv3-enabled'),
     cbv3LockHours: num('bd-cbv3-lock-hours'),
+    // FIX-2026-08-14: CBv5 advanced setup — mirror admin.routes.js whitelist
+    cbv5Enabled: isChecked('bd-cbv5-enabled'),
+    cbv5StrictBreak: isChecked('bd-cbv5-strict-break'),
+    cbv5UseVolume: isChecked('bd-cbv5-use-volume'),
+    cbv5LockHours: num('bd-cbv5-lock-hours'),
+    cbv5KcLen: int('bd-cbv5-kc-len'),
+    cbv5KcMult: num('bd-cbv5-kc-mult'),
+    cbv5PivotLookback: int('bd-cbv5-pivot-lookback'),
+    cbv5PivotLeftLen: int('bd-cbv5-pivot-left-len'),
+    cbv5PivotRightLen: int('bd-cbv5-pivot-right-len'),
+    cbv5VolMaLen: int('bd-cbv5-vol-ma-len'),
+    cbv5VolMultiplier: num('bd-cbv5-vol-multiplier'),
+    cbv5DebounceCandles: int('bd-cbv5-debounce-candles'),
     cbAutoUnlockEnabled: isChecked('bd-cb-auto-unlock-enabled'),
     cbAutoUnlockThresholdPct: num('bd-cb-auto-unlock-threshold'),
     dynamicSizeEnabled: isChecked('bd-dynamic-size-enabled'),
@@ -1535,8 +1634,18 @@ async function saveBotDefaults() {
   if (!Number.isFinite(payload.kcMult) || payload.kcMult < 0.5 || payload.kcMult > 5) errors.push('KC Mult 0.5..5');
   if (!Number.isFinite(payload.cbv2LockHours) || payload.cbv2LockHours < 0.5 || payload.cbv2LockHours > 168) errors.push('CBv2 lock 0.5..168');
   if (!Number.isFinite(payload.cbv3LockHours) || payload.cbv3LockHours < 0.5 || payload.cbv3LockHours > 168) errors.push('CBv3 lock 0.5..168');
-  if (!Number.isFinite(payload.autoArmLossPct) || payload.autoArmLossPct < 1 || payload.autoArmLossPct > 90) errors.push('Auto-arm loss 1..90');
-  if (!Number.isFinite(payload.autoArmAgeHours) || payload.autoArmAgeHours < 0.5 || payload.autoArmAgeHours > 168) errors.push('Auto-arm age 0.5..168');
+  // FIX-2026-08-14: CBv5 validation (mirror admin.routes.js BOT_DEFAULTS_CLAMP)
+  if (!Number.isFinite(payload.cbv5LockHours) || payload.cbv5LockHours < 0.5 || payload.cbv5LockHours > 168) errors.push('CBv5 lock 0.5..168');
+  if (!Number.isFinite(payload.cbv5KcLen) || payload.cbv5KcLen < 5 || payload.cbv5KcLen > 100) errors.push('CBv5 KC len 5..100');
+  if (!Number.isFinite(payload.cbv5KcMult) || payload.cbv5KcMult < 0.5 || payload.cbv5KcMult > 5) errors.push('CBv5 KC mult 0.5..5');
+  if (!Number.isFinite(payload.cbv5PivotLookback) || payload.cbv5PivotLookback < 2 || payload.cbv5PivotLookback > 10) errors.push('CBv5 pivot lookback 2..10');
+  if (!Number.isFinite(payload.cbv5PivotLeftLen) || payload.cbv5PivotLeftLen < 2 || payload.cbv5PivotLeftLen > 50) errors.push('CBv5 pivot left 2..50');
+  if (!Number.isFinite(payload.cbv5PivotRightLen) || payload.cbv5PivotRightLen < 2 || payload.cbv5PivotRightLen > 50) errors.push('CBv5 pivot right 2..50');
+  if (!Number.isFinite(payload.cbv5VolMaLen) || payload.cbv5VolMaLen < 5 || payload.cbv5VolMaLen > 100) errors.push('CBv5 vol MA len 5..100');
+  if (!Number.isFinite(payload.cbv5VolMultiplier) || payload.cbv5VolMultiplier < 1 || payload.cbv5VolMultiplier > 10) errors.push('CBv5 vol mult 1..10');
+  if (!Number.isFinite(payload.cbv5DebounceCandles) || payload.cbv5DebounceCandles < 1 || payload.cbv5DebounceCandles > 20) errors.push('CBv5 debounce 1..20');
+  if (!Number.isFinite(payload.autoArmLossPct) || payload.autoArmLossPct < 1 || payload.autoArmLossPct > 99) errors.push('Auto-arm loss 1..99');
+  if (!Number.isFinite(payload.autoArmAgeHours) || payload.autoArmAgeHours < 0.5 || payload.autoArmAgeHours > 999) errors.push('Auto-arm age 0.5..999');
   if (!Number.isFinite(payload.tpTrendMultiplier) || payload.tpTrendMultiplier < 1 || payload.tpTrendMultiplier > 10) errors.push('TP trend mult 1..10');
   if (errors.length > 0) {
     setStatus('bd-status', '❌ ' + errors.join(' · '), true);
@@ -1563,6 +1672,69 @@ async function resetBotDefaults() {
   } catch (err) {
     setStatus('bd-status', '❌ ' + (err.body && err.body.error ? err.body.error : err.message), true);
   }
+}
+
+// FIX-2026-08-14: Import/Export file-based for Bot Defaults
+//   - includes defaultSymbol + defaultTimeframe (the 2 extra fields)
+//   - cross-surface compatible (same JSON works for Master Config + bot-edit)
+async function exportBotDefaultsToFile() {
+  if (!window.botConfigIO) { setStatus('bd-status', '❌ botConfigIO module ไม่โหลด', true); return; }
+  // Reuse saveBotDefaults() payload shape (but as settings object only)
+  // Simpler: read all bd-* inputs directly into settings object
+  const settings = collectBotDefaultsFromForm();
+  const fieldCount = Object.keys(settings).length;
+  if (fieldCount === 0) { setStatus('bd-status', '❌ ฟอร์มว่าง', true); return; }
+  const payload = window.botConfigIO.buildExportPayload({
+    type: 'bot-defaults',
+    name: 'Bot Defaults',
+    source: 'settings',
+    settings,
+  });
+  const filename = window.botConfigIO.buildExportFilename('bot-defaults', 'defaults');
+  window.botConfigIO.triggerDownload(filename, payload);
+  setStatus('bd-status', `✅ Export ${fieldCount} fields → ${filename}`);
+}
+
+async function importBotDefaultsFromFile(mode) {
+  if (!window.botConfigIO) { setStatus('bd-status', '❌ botConfigIO module ไม่โหลด', true); return; }
+  if (mode === 'replace' && !window.confirm('Import จะทับค่า Bot Defaults ทั้งหมด — แน่ใจมั้ย?')) return;
+  setStatus('bd-status', '⏳ กำลังเลือกไฟล์…');
+  const file = await window.botConfigIO.pickJsonFile();
+  if (!file) { setStatus('bd-status', 'ยกเลิก'); return; }
+  setStatus('bd-status', `⏳ กำลังอ่าน ${file.name}…`);
+  const result = await window.botConfigIO.parseImportFile(file);
+  if (!result.ok) { setStatus('bd-status', '❌ ' + result.error, true); return; }
+  const sanitize = result.sanitizeResult;
+  const { applied, skipped } = window.botConfigIO.applyToForm(sanitize.settings, 'bot-defaults', { mode });
+  const parts = [`✅ Import ${applied} fields (${mode})`];
+  if (sanitize.dropped > 0) parts.push(`dropped ${sanitize.dropped} unknown`);
+  if (skipped.length > 0) parts.push(`skipped ${skipped.length}`);
+  const warnings = result.warnings || [];
+  if (warnings.length) parts.push(`⚠️ ${warnings.join('; ')}`);
+  setStatus('bd-status', parts.join(' · '), warnings.length > 0);
+}
+
+function collectBotDefaultsFromForm() {
+  if (!window.botConfigIO) return {};
+  const keys = window.botConfigIO.ALLOWED_FIELD_KEYS;
+  const NUM = window.botConfigIO.NUMBER_FIELDS;
+  const BOOL = window.botConfigIO.BOOLEAN_FIELDS;
+  const STR = window.botConfigIO.STRING_FIELDS;
+  const settings = {};
+  const el = (id) => document.getElementById(id);
+  for (const k of keys) {
+    const e = el('bd-' + window.botConfigIO.kebab(k));
+    if (!e) continue;
+    if (NUM.has(k)) {
+      const n = parseFloat(e.value);
+      if (Number.isFinite(n)) settings[k] = n;
+    } else if (BOOL.has(k)) {
+      settings[k] = !!e.checked;
+    } else if (STR.has(k)) {
+      settings[k] = (e.value || '').trim() || null;
+    }
+  }
+  return settings;
 }
 
 // ════════ utils ════════

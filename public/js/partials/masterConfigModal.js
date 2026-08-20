@@ -11,6 +11,9 @@
 (function () {
   let overlay = null;
   let cachedBots = [];
+  // FIX-2026-08-13: cached templates metadata (id, name, fieldCount, timestamps) — full settings
+  //   are fetched on-demand via GET /api/admin/master-config-templates/:id when user clicks Load.
+  let cachedTemplates = [];
 
   // FIX-2026-08-02: เพิ่ม timeframe (select) — valid Binance intervals (mirror config.binanceIntervals)
   //   - เลือก "—" (empty value) = ไม่เปลี่ยน TF
@@ -38,8 +41,8 @@
     { id: 'mc-tpTrendMultiplier', key: 'tpTrendMultiplier', section: 'tp', order: 50, type: 'number', step: '1', min: '1', max: '10', label: '✖️ ตัวคูณ TP ตามแนวโน้ม' },
     { id: 'mc-autoPauseMinKcPct', key: 'autoPauseMinKcPct', section: 'automation', order: 30, type: 'number', step: '0.1', min: '0.1', max: '50', label: '⏸️ Min-%KC threshold (%)' },
     { id: 'mc-autoPauseMin24hVolUsdt', key: 'autoPauseMin24hVolUsdt', section: 'automation', order: 31, type: 'number', step: '1000', min: '0', label: '💵 Auto-pause Min 24h Vol (USDT)' },
-    { id: 'mc-autoArmLossPct', key: 'autoArmLossPct', section: 'risk', order: 30, type: 'number', step: '0.5', min: '1', max: '90', label: '🛡️ ขาดทุนขั้นต่ำสำหรับ Auto-arm (%)' },
-    { id: 'mc-autoArmAgeHours', key: 'autoArmAgeHours', section: 'risk', order: 40, type: 'number', step: '0.5', min: '0.5', max: '168', label: '⏰ อายุ Position ขั้นต่ำสำหรับ Auto-arm (ชม.)' },
+    { id: 'mc-autoArmLossPct', key: 'autoArmLossPct', section: 'risk', order: 30, type: 'number', step: '0.5', min: '1', max: '99', label: '🛡️ ขาดทุนขั้นต่ำสำหรับ Auto-arm (%)' },
+    { id: 'mc-autoArmAgeHours', key: 'autoArmAgeHours', section: 'risk', order: 40, type: 'number', step: '0.5', min: '0.5', max: '999', label: '⏰ อายุ Position ขั้นต่ำสำหรับ Auto-arm (ชม.)' },
     { id: 'mc-cbv2LockHours', key: 'cbv2LockHours', section: 'risk', order: 80, type: 'number', step: '0.5', min: '0.5', max: '168', label: '⏱ ระยะเวลา CBv2 Cooldown (ชม.)' },
     { id: 'mc-cbv3LockHours', key: 'cbv3LockHours', section: 'risk', order: 80, type: 'number', step: '0.5', min: '0.5', max: '168', label: '⏱ ระยะเวลา CBv3 Cooldown (ชม.)' },
     { id: 'mc-cbv5LockHours', key: 'cbv5LockHours', section: 'risk', order: 81, type: 'number', step: '0.5', min: '0.5', max: '168', label: '⏱ ระยะเวลา CBv5 Cooldown (ชม.) · default 4' },
@@ -254,6 +257,36 @@
           <br />ช่องว่างหรือ <strong>— ไม่เปลี่ยน</strong> จะคงค่าเดิม · การเปลี่ยน Timeframe จะ restart trader ของบอทที่เปิดอยู่ชั่วครู่
         </div>
 
+        <details class="lux-details" id="mc-group-templates" data-settings-group="templates">
+          <summary class="lux-details-summary">
+            <span class="bot-settings-group-icon">📋</span>
+            <span class="bot-settings-group-title">Templates (ตั้งค่าสำเร็จรูป)</span>
+            <span class="bot-settings-group-hint">Save · Load · Rename · Duplicate · Delete</span>
+          </summary>
+          <div class="lux-details-body">
+            <div class="bot-settings-note mb-2">
+              Template เก็บเฉพาะ <strong>ค่า setting</strong> — ไม่รวมบอทที่เลือก และไม่ apply ทันที ต้องกด “ใช้ค่ากับบอทที่เลือก” อีกครั้ง
+            </div>
+            <div class="d-flex gap-2 flex-wrap align-items-center mb-2">
+              <select class="form-select form-select-sm" id="mc-tpl-select" style="max-width:320px;">
+                <option value="">— เลือก template —</option>
+              </select>
+              <button type="button" class="btn btn-sm btn-outline-info" id="mc-tpl-load">📥 Load</button>
+              <button type="button" class="btn btn-sm btn-outline-success" id="mc-tpl-save">💾 Save</button>
+              <button type="button" class="btn btn-sm btn-outline-warning" id="mc-tpl-rename">✏️ Rename</button>
+              <button type="button" class="btn btn-sm btn-outline-secondary" id="mc-tpl-duplicate">📋 Duplicate</button>
+              <button type="button" class="btn btn-sm btn-outline-danger" id="mc-tpl-delete">🗑️ Delete</button>
+            </div>
+            <!-- FIX-2026-08-14: Import/Export file-based (works across 4 surfaces) -->
+            <div class="d-flex gap-2 flex-wrap align-items-center mb-2">
+              <button type="button" class="btn btn-sm btn-outline-secondary" id="mc-tpl-export" title="บันทึกฟอร์มเป็นไฟล์ JSON">📤 Export ไฟล์</button>
+              <button type="button" class="btn btn-sm btn-outline-info" id="mc-tpl-import-replace" title="โหลดไฟล์ทับฟอร์มทั้งหมด">📥 Import (Replace)</button>
+              <button type="button" class="btn btn-sm btn-outline-info" id="mc-tpl-import-merge" title="โหลดไฟล์แบบ merge · อัพเดทเฉพาะ field ที่อยู่ในไฟล์">📥 Import (Merge)</button>
+            </div>
+            <div id="mc-tpl-status" class="bot-settings-status text-muted small"></div>
+          </div>
+        </details>
+
         <details class="lux-details" id="mc-group-system" data-settings-group="system" open>
           <summary class="lux-details-summary">
             <span class="bot-settings-group-icon">🛠️</span>
@@ -348,6 +381,7 @@
 
         <div class="bot-settings-actions">
           <button type="button" class="btn btn-primary" id="mc-submit">💾 ใช้ค่ากับบอทที่เลือก</button>
+          <button type="button" class="btn btn-outline-info" id="mc-set-to-new-bot" title="เอาค่าที่กรอกไว้ไปตั้งเป็นค่าเริ่มต้นของบอทใหม่">📋 Set to new bot</button>
           <button type="button" class="btn btn-secondary" id="mc-cancel">ยกเลิก</button>
           <span class="bot-settings-status text-muted small" id="mc-status"></span>
         </div>
@@ -368,10 +402,32 @@
     document.getElementById('mc-cancel').onclick = close;
     document.getElementById('mc-toggle-start').onclick = () => bulkToggle('enable', '▶️ Start');
     document.getElementById('mc-toggle-stop').onclick = () => bulkToggle('disable', '⏸ Stop');
+    // FIX-2026-08-14: Set to new bot — collect form values, stash in sessionStorage, open New Bot modal
+    const setNewBotBtn = document.getElementById('mc-set-to-new-bot');
+    if (setNewBotBtn) setNewBotBtn.onclick = onSetToNewBot;
     const saveMaster = document.getElementById('mc-save-master');
     if (saveMaster) saveMaster.onclick = saveMasterToggles;
     const runAutoDelete = document.getElementById('mc-run-auto-delete');
     if (runAutoDelete) runAutoDelete.onclick = forceRunAutoDelete;
+    // FIX-2026-08-13: wire template panel buttons
+    refreshTemplateDropdown();
+    const tplLoad = document.getElementById('mc-tpl-load');
+    if (tplLoad) tplLoad.onclick = onTemplateLoad;
+    const tplSave = document.getElementById('mc-tpl-save');
+    if (tplSave) tplSave.onclick = onTemplateSave;
+    const tplRename = document.getElementById('mc-tpl-rename');
+    if (tplRename) tplRename.onclick = onTemplateRename;
+    const tplDup = document.getElementById('mc-tpl-duplicate');
+    if (tplDup) tplDup.onclick = onTemplateDuplicate;
+    const tplDel = document.getElementById('mc-tpl-delete');
+    if (tplDel) tplDel.onclick = onTemplateDelete;
+    // FIX-2026-08-14: Import/Export buttons
+    const tplExport = document.getElementById('mc-tpl-export');
+    if (tplExport) tplExport.onclick = onTemplateExport;
+    const tplImpReplace = document.getElementById('mc-tpl-import-replace');
+    if (tplImpReplace) tplImpReplace.onclick = () => onTemplateImport('replace');
+    const tplImpMerge = document.getElementById('mc-tpl-import-merge');
+    if (tplImpMerge) tplImpMerge.onclick = () => onTemplateImport('merge');
   }
 
   // FIX-2026-08-08: save master toggles (DPS / CB Auto-Unlock / Auto Delete Bot / CB Version)
@@ -555,5 +611,338 @@
       status.textContent = '❌ ' + (err.message || err);
       status.style.color = '#ff6b6b';
     }
+  }
+
+  // ════════════════════════════════════════════════════════════════════════════════════════════
+  // FIX-2026-08-13: Templates panel — Save / Load / Rename / Duplicate / Delete
+  //   - All handlers call /api/admin/master-config-templates (CRUD on AppConfig.masterConfigTemplates)
+  //   - Load populates the form (preview-then-apply) — user still clicks "ใช้ค่ากับบอทที่เลือก"
+  //   - Save collects form via the same logic as submit()'s collection block
+  // ════════════════════════════════════════════════════════════════════════════════════════════
+
+  async function refreshTemplateDropdown() {
+    try {
+      const resp = await API.get('/api/admin/master-config-templates');
+      cachedTemplates = (resp && resp.templates) || [];
+      const sel = document.getElementById('mc-tpl-select');
+      if (!sel) return;
+      const previousValue = sel.value;
+      const optsHtml = cachedTemplates.map((t) => {
+        const updatedDate = t.updatedAt ? new Date(t.updatedAt).toLocaleDateString('th-TH') : '';
+        const label = `${escapeHtml(t.name)} · ${t.fieldCount} fields${updatedDate ? ' · ' + updatedDate : ''}`;
+        return `<option value="${escapeHtml(t.id)}">${label}</option>`;
+      }).join('');
+      sel.innerHTML = '<option value="">— เลือก template —</option>' + optsHtml;
+      // preserve previous selection if still present
+      if (previousValue && cachedTemplates.some((t) => t.id === previousValue)) sel.value = previousValue;
+      setTemplateStatus(`${cachedTemplates.length} templates`);
+    } catch (err) {
+      setTemplateStatus('️ โหลด templates ล้มเหลว: ' + err.message, 'danger');
+    }
+  }
+
+  function setTemplateStatus(msg, variant) {
+    const el = document.getElementById('mc-tpl-status');
+    if (!el) return;
+    el.textContent = msg;
+    const colors = { danger: '#ff6b6b', success: '#4ade80', warn: '#ffa500' };
+    el.style.color = colors[variant] || 'var(--text-3)';
+  }
+
+  // Collect current form settings (mirror of submit()'s collection logic — extracted helper)
+  function collectCurrentFormSettings() {
+    const settings = {};
+    document.querySelectorAll('.mc-field').forEach((el) => {
+      const v = el.value;
+      if (v === '' || v == null) return;
+      if (el.classList.contains('mc-field-select')) {
+        // Select (timeframe) — ส่ง string ตรง ๆ
+        settings[el.getAttribute('data-key')] = v;
+      } else {
+        const num = parseFloat(v);
+        if (Number.isFinite(num)) {
+          settings[el.getAttribute('data-key')] = num;
+        }
+      }
+    });
+    document.querySelectorAll('.mc-toggle-mode').forEach((el) => {
+      if (el.checked && el.value !== '') {
+        settings[el.getAttribute('data-key')] = (el.value === 'true');
+      }
+    });
+    return settings;
+  }
+
+  // FIX-2026-08-14: "Set to new bot" — persist current Master Config values to AppConfig.botDefaults
+  //   via PUT /api/admin/bot-defaults. After save, both the manual "+ New Bot" modal and the Auto
+  //   Add Bot path will use these values as defaults (next time they read /api/admin/bot-defaults).
+  //   - maps Master Config key 'timeframe' → 'defaultTimeframe' (single TF slot in botDefaults)
+  //   - uses callBotWithPassword which prompts via themed modal on 403/503 (matches existing UI)
+  //   - does NOT open New Bot modal automatically — user clicks "+ New Bot" or runs Auto Add normally
+  async function onSetToNewBot() {
+    const settings = collectCurrentFormSettings();
+    if (Object.keys(settings).length === 0) {
+      const status = document.getElementById('mc-status');
+      if (status) {
+        status.textContent = '❌ กรอก field หรือติ๊ก toggle อย่างน้อย 1 อย่างก่อน';
+        status.style.color = '#ff6b6b';
+      }
+      return;
+    }
+    // Map Master Config keys → botDefaults keys (only timeframe differs)
+    const payload = {};
+    for (const [k, v] of Object.entries(settings)) {
+      if (k === 'timeframe') payload.defaultTimeframe = v;
+      else payload[k] = v;
+    }
+    const fieldCount = Object.keys(payload).length;
+    if (!window.confirm(`📋 จะตั้งค่า ${fieldCount} fields เป็นค่าเริ่มต้นของบอทใหม่ (Bot Defaults)?\n\nใช้กับ "+ New Bot" และ "Auto Add Bot" ในครั้งถัดไป`)) return;
+
+    const status = document.getElementById('mc-status');
+    if (status) {
+      status.textContent = '⏳ กำลังบันทึก…';
+      status.style.color = 'var(--text-3)';
+    }
+    try {
+      // callBotWithPassword handles 403/503 by prompting themed modal automatically
+      const callFn = (window.LUX_CONFIRM && window.LUX_CONFIRM.callBotWithPassword)
+        || window.callBotWithPassword
+        || (async (m, u, d) => API.put(u, d));
+      await callFn('PUT', '/api/admin/bot-defaults', payload, 'ตั้งเป็น Bot Defaults');
+      if (status) {
+        status.textContent = `✅ บันทึก ${fieldCount} fields เป็นค่าเริ่มต้นแล้ว · ใช้กับบอทใหม่ครั้งถัดไป`;
+        status.style.color = '#4ade80';
+      }
+    } catch (err) {
+      if (status) {
+        status.textContent = '❌ ' + (err.message || err);
+        status.style.color = '#ff6b6b';
+      }
+    }
+  }
+
+  // True if user has touched any field or toggle (used to warn before Load overwrite)
+  function isFormDirty() {
+    for (const el of document.querySelectorAll('.mc-field')) {
+      if (el.value !== '' && el.value != null) return true;
+    }
+    for (const el of document.querySelectorAll('.mc-toggle-mode')) {
+      if (el.checked && el.value !== '') return true;
+    }
+    return false;
+  }
+
+  function promptForName(title, defaultValue) {
+    const v = window.prompt(title, defaultValue || '');
+    if (v == null) return null;
+    return v;
+  }
+
+  function getSelectedTemplateId() {
+    const sel = document.getElementById('mc-tpl-select');
+    return sel ? sel.value : '';
+  }
+
+  function setSelectedTemplateId(id) {
+    const sel = document.getElementById('mc-tpl-select');
+    if (sel) sel.value = id || '';
+  }
+
+  async function onTemplateSave() {
+    const settings = collectCurrentFormSettings();
+    if (Object.keys(settings).length === 0) {
+      setTemplateStatus('❌ ต้องกรอก field หรือติ๊ก toggle อย่างน้อย 1 อย่างก่อน Save', 'danger');
+      return;
+    }
+    const selectedId = getSelectedTemplateId();
+    if (selectedId) {
+      const existing = cachedTemplates.find((t) => t.id === selectedId);
+      if (!existing) {
+        setTemplateStatus('⚠️ template ที่เลือกไม่อยู่ในรายการ — กด refresh', 'warn');
+        return;
+      }
+      if (!window.confirm(`⚠️ จะ overwrite settings ของ template "${existing.name}" ใ่มั้ย? (ชื่อเดิม)`)) return;
+      setTemplateStatus('⏳ กำลัง save…');
+      try {
+        const resp = await API.put(`/api/admin/master-config-templates/${encodeURIComponent(selectedId)}`, { settings });
+        setTemplateStatus(`✅ บันทึกทับ "${resp.template.name}" (${Object.keys(resp.template.settings).length} fields)`, 'success');
+        await refreshTemplateDropdown();
+      } catch (err) {
+        setTemplateStatus('❌ ' + err.message, 'danger');
+      }
+      return;
+    }
+    const name = promptForName('ตั้งชื่อ Template ใหม่ (max 50 chars):');
+    if (name == null) return;
+    setTemplateStatus('⏳ กำลัง save…');
+    try {
+      const resp = await API.post('/api/admin/master-config-templates', { name, settings });
+      setTemplateStatus(`✅ สร้าง "${resp.template.name}" (${Object.keys(resp.template.settings).length} fields, dropped=${resp.droppedFields || 0})`, 'success');
+      await refreshTemplateDropdown();
+      setSelectedTemplateId(resp.template.id);
+    } catch (err) {
+      setTemplateStatus('❌ ' + err.message, 'danger');
+    }
+  }
+
+  async function onTemplateLoad() {
+    const id = getSelectedTemplateId();
+    if (!id) { setTemplateStatus('⚠️ เลือก template ก่อน', 'warn'); return; }
+    if (isFormDirty() && !window.confirm('ท่านมีการเปลี่ยนแปลงที่ยังไม่ได้บันทึก — แน่ใจมั้ยที่จะ Load (จะทับฟอร์ม)?')) return;
+    setTemplateStatus('⏳ กำลัง load…');
+    try {
+      const resp = await API.get(`/api/admin/master-config-templates/${encodeURIComponent(id)}`);
+      applyTemplateToForm(resp.template.settings);
+      const n = Object.keys(resp.template.settings).length;
+      setTemplateStatus(`✅ โหลด "${resp.template.name}" (${n} fields) — กด “ใช้ค่ากับบอทที่เลือก” เพื่อ apply`, 'success');
+    } catch (err) {
+      setTemplateStatus('❌ ' + err.message, 'danger');
+    }
+  }
+
+  function applyTemplateToForm(settings) {
+    settings = settings || {};
+    // 1) Clear all fields first — start from clean state
+    document.querySelectorAll('.mc-field').forEach((el) => { el.value = ''; });
+    document.querySelectorAll('.mc-toggle-mode').forEach((el) => { el.checked = (el.value === ''); });
+    // 2) Apply values
+    let applied = 0;
+    let skipped = 0;
+    for (const [key, value] of Object.entries(settings)) {
+      const fieldEl = document.querySelector(`.mc-field[data-key="${CSS.escape(key)}"]`);
+      if (fieldEl) {
+        fieldEl.value = String(value);
+        applied += 1;
+        continue;
+      }
+      // Toggles: find radio matching key + value (true/false). value="" not in settings.
+      const radios = document.querySelectorAll(`.mc-toggle-mode[data-key="${CSS.escape(key)}"]`);
+      let matched = false;
+      for (const r of radios) {
+        if (r.value === String(value)) { r.checked = true; matched = true; break; }
+      }
+      if (matched) applied += 1; else skipped += 1;
+    }
+    if (skipped > 0) {
+      console.warn(`[masterConfigModal] applyTemplateToForm: ${skipped} fields skipped (likely hidden by cbVersion)`);
+    }
+    return applied;
+  }
+
+  async function onTemplateRename() {
+    const id = getSelectedTemplateId();
+    if (!id) { setTemplateStatus('⚠️ เลือก template ก่อน', 'warn'); return; }
+    const existing = cachedTemplates.find((t) => t.id === id);
+    if (!existing) { setTemplateStatus('⚠️ template หายไปจากรายการ', 'warn'); return; }
+    const name = promptForName('เปลี่ยนชื่อ Template:', existing.name);
+    if (name == null || name === existing.name) return;
+    setTemplateStatus('⏳ กำลัง rename…');
+    try {
+      const resp = await API.put(`/api/admin/master-config-templates/${encodeURIComponent(id)}`, { name });
+      setTemplateStatus(`✅ เปลี่ยนชื่อเปน "${resp.template.name}"`, 'success');
+      await refreshTemplateDropdown();
+      setSelectedTemplateId(resp.template.id);
+    } catch (err) {
+      setTemplateStatus('❌ ' + err.message, 'danger');
+    }
+  }
+
+  async function onTemplateDuplicate() {
+    const id = getSelectedTemplateId();
+    if (!id) { setTemplateStatus('️ เลือก template ก่อน', 'warn'); return; }
+    const existing = cachedTemplates.find((t) => t.id === id);
+    if (!existing) { setTemplateStatus('⚠️ template หายไปจากรายการ', 'warn'); return; }
+    const name = promptForName(`Duplicate "${existing.name}" — ตั้งชื่อใหม่:`, existing.name + ' (copy)');
+    if (name == null) return;
+    setTemplateStatus('⏳ กำลัง duplicate…');
+    try {
+      const full = await API.get(`/api/admin/master-config-templates/${encodeURIComponent(id)}`);
+      const resp = await API.post('/api/admin/master-config-templates', { name, settings: full.template.settings });
+      setTemplateStatus(`✅ Duplicate → "${resp.template.name}"`, 'success');
+      await refreshTemplateDropdown();
+      setSelectedTemplateId(resp.template.id);
+    } catch (err) {
+      setTemplateStatus('❌ ' + err.message, 'danger');
+    }
+  }
+
+  async function onTemplateDelete() {
+    const id = getSelectedTemplateId();
+    if (!id) { setTemplateStatus('⚠️ เลือก template ก่อน', 'warn'); return; }
+    const existing = cachedTemplates.find((t) => t.id === id);
+    if (!existing) { setTemplateStatus('⚠️ template หายไปจากรายการ', 'warn'); return; }
+    if (!window.confirm(`🗑️ ลบ template "${existing.name}" ใช่มั้ย? การกระทำนี้ไม่สามาร undo ได้`)) return;
+    setTemplateStatus('⏳ กำลังลบ…');
+    try {
+      await API.delete(`/api/admin/master-config-templates/${encodeURIComponent(id)}`);
+      setTemplateStatus(`✅ ลบ "${existing.name}" แล้ว`, 'success');
+      await refreshTemplateDropdown();
+      setSelectedTemplateId('');
+    } catch (err) {
+      setTemplateStatus('❌ ' + err.message, 'danger');
+    }
+  }
+
+  // ════════════════════════════════════════════════════════════════════════════════════════════
+  // FIX-2026-08-14: Import/Export ไฟล์ (cross-surface compatible JSON)
+  //   - Export: serialize ฟอร์มปัจจุบัน → download .json
+  //   - Import: เลือกไฟล์ → parse → apply ลงฟอร์ม (Replace หรือ Merge)
+  //   - shared กับ bot-edit / New Bot / Bot Defaults — type field เป็น origin hint เท่านั้น
+  // ════════════════════════════════════════════════════════════════════════════════════════════
+
+  function onTemplateExport() {
+    if (!window.botConfigIO) {
+      setTemplateStatus('❌ botConfigIO module ไม่ได้โหลด', 'danger');
+      return;
+    }
+    const settings = collectCurrentFormSettings();
+    const fieldCount = Object.keys(settings).length;
+    if (fieldCount === 0) {
+      setTemplateStatus('❌ ฟอร์มว่าง — กรอกค่าก่อน export', 'danger');
+      return;
+    }
+    // Use selected template name (if any) as filename hint
+    const selectedId = getSelectedTemplateId();
+    const selectedTpl = cachedTemplates.find((t) => t.id === selectedId);
+    const name = selectedTpl ? selectedTpl.name : 'form';
+    const cbVersionEl = document.getElementById('mc-cb-version');
+    const cbVersion = cbVersionEl ? cbVersionEl.value : null;
+    const payload = window.botConfigIO.buildExportPayload({
+      type: 'master-template',
+      name,
+      source: 'master-config',
+      settings,
+      cbVersion,
+    });
+    const filename = window.botConfigIO.buildExportFilename('master-template', name);
+    window.botConfigIO.triggerDownload(filename, payload);
+    setTemplateStatus(`✅ Export ${fieldCount} fields → ${filename}`, 'success');
+  }
+
+  async function onTemplateImport(mode) {
+    if (!window.botConfigIO) {
+      setTemplateStatus('❌ botConfigIO module ไม่โหลด', 'danger');
+      return;
+    }
+    if (mode === 'replace' && isFormDirty() && !window.confirm('ท่านมีการเปลี่ยนแปลงที่ยังไม่ได้บันทึก — แน่ใจมั้ยที่จะ Import (จะทับฟอร์ม)?')) return;
+    setTemplateStatus('⏳ กำลังเลือกไฟล์…');
+    const file = await window.botConfigIO.pickJsonFile();
+    if (!file) { setTemplateStatus('ยกเลิก', 'warn'); return; }
+    setTemplateStatus(`⏳ กำลังอ่าน ${file.name}…`);
+    const result = await window.botConfigIO.parseImportFile(file);
+    if (!result.ok) {
+      setTemplateStatus('❌ ' + result.error, 'danger');
+      return;
+    }
+    const warnings = result.warnings || [];
+    const sanitize = result.sanitizeResult;
+    const { applied, skipped } = window.botConfigIO.applyToForm(sanitize.settings, 'master-config', { mode });
+    // Summary
+    const parts = [];
+    parts.push(`✅ Import ${applied} fields (${mode})`);
+    if (sanitize.dropped > 0) parts.push(`dropped ${sanitize.dropped} unknown`);
+    if (skipped.length > 0) parts.push(`skipped ${skipped.length}`);
+    if (warnings.length > 0) parts.push(`⚠️ ${warnings.join('; ')}`);
+    setTemplateStatus(parts.join(' · '), warnings.length ? 'warn' : 'success');
   }
 })();

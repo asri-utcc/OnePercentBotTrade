@@ -131,7 +131,7 @@ const botSchema = new mongoose.Schema(
     cbv2LastFiredAt: { type: Date, default: null }, // FIX-2026-08-06: cross-restart restore (informational + audit)
     // FIX-2026-08-01: per-bot safe-trade filter (default ON)
     //   - On S1 buy signal: check super-upper TF (3m/5m→4h, 15m→1d, 1h→1w) — SAFE_TRADE_SUPER_TF_MAP
-    //   - PASS = lastClose > open (green) OR lastClose > ema20 (uptrend) → ผ่านเข้า BUY
+    //   - PASS = lastClose > open (green ONLY) — strict; แดง → block ทันทีไม่สน EMA20 (FIX-2026-08-19)
     //   - FAIL-OPEN on Binance error (API outage ไม่บล็อกการเทรด)
     safeTradeEnabled: { type: Boolean, default: true },
     // FIX-2026-08-03: per-bot safe-trade filter #2 — LuxAlgo red pivot-low trendline (opt-in, default OFF)
@@ -170,13 +170,13 @@ const botSchema = new mongoose.Schema(
     //   - เมื่อ position ขาดทุน > autoArmLossPct + เปิดมา > autoArmAgeHours → trader set trade.useStopLossOnUKC=true
     //   - _checkStopLossOnUpperKC จะยอม trigger เฉพาะ trade ที่มี flag นี้
     autoArmStopLossOnUKC: { type: Boolean, default: true },
-    // FIX-2026-08-03: per-bot auto-arm loss threshold (%)
+    // FIX-2026-08-03 / EXT-2026-08-20: per-bot auto-arm loss threshold (%)
     //   - paired with autoArmStopLossOnUKC — set trade.useStopLossOnUKC=true when position loss > X%
-    //   - default 10% (matches original hard-coded threshold); range 1..90
-    autoArmLossPct: { type: Number, default: 10, min: 1, max: 90 },
-    // FIX-2026-08-03: per-bot auto-arm age threshold (hours)
-    //   - default 4h (matches original hard-coded threshold); range 0.5..168 (1 week)
-    autoArmAgeHours: { type: Number, default: 4, min: 0.5, max: 168 },
+    //   - default 10% (matches original hard-coded threshold); range 1..99
+    autoArmLossPct: { type: Number, default: 10, min: 1, max: 99 },
+    // FIX-2026-08-03 / EXT-2026-08-20: per-bot auto-arm age threshold (hours)
+    //   - default 4h (matches original hard-coded threshold); range 0.5..999
+    autoArmAgeHours: { type: Number, default: 4, min: 0.5, max: 999 },
     // FIX-2026-08-03: SL-UKC trigger on profitable positions (default false — backward compat)
     //   - false (default): SL-UKC only fires when buyPrice > close (loss only) — original behavior
     //   - true: SL-UKC fires whenever candle.close > upperKC (profit OR loss) — strict upper-band exit

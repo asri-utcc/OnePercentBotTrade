@@ -211,8 +211,8 @@ function buildBotCreatePayload({ overrides = {}, botDefaults = {}, fallbacks = {
 
     // ── Auto-arm SL-UKC (F1) ──
     autoArmStopLossOnUKC: pickBool(o, b, 'autoArmStopLossOnUKC', true),
-    autoArmLossPct: pickScalar(o, b, 'autoArmLossPct', 10, { clamp: [1, 90] }),
-    autoArmAgeHours: pickScalar(o, b, 'autoArmAgeHours', 4, { clamp: [0.5, 168] }),
+    autoArmLossPct: pickScalar(o, b, 'autoArmLossPct', 10, { clamp: [1, 99] }),
+    autoArmAgeHours: pickScalar(o, b, 'autoArmAgeHours', 4, { clamp: [0.5, 999] }),
     slUkcTriggerOnProfit: pickBool(o, b, 'slUkcTriggerOnProfit', false, { strict: true }),
 
     // ── TP trend ×N (F2) ──

@@ -21,6 +21,7 @@ const masterConfig = require('../../core/masterConfig');
 const cbVersion = require('../../core/cbVersion');
 const autoDeleteBot = require('../../services/autoDeleteBot');
 const eventBus = require('../../services/eventBus');
+const masterConfigTemplates = require('../../services/masterConfigTemplates');
 const logger = require('../../utils/logger');
 const { requireAuth } = require('../middleware/auth');
 
@@ -205,11 +206,20 @@ const BOT_DEFAULTS_CLAMP = {
   martingaleMaxLayerNotional:{ min: 1,     max: 10000 },
   cbv2LockHours:             { min: 0.5,   max: 168 },
   cbv3LockHours:             { min: 0.5,   max: 168 },
+  cbv5LockHours:             { min: 0.5,   max: 168 },
+  cbv5KcLen:                 { min: 5,     max: 100,    int: true },
+  cbv5KcMult:                { min: 0.5,   max: 5 },
+  cbv5PivotLookback:         { min: 2,     max: 10,     int: true },
+  cbv5PivotLeftLen:          { min: 2,     max: 50,     int: true },
+  cbv5PivotRightLen:         { min: 2,     max: 50,     int: true },
+  cbv5VolMaLen:              { min: 5,     max: 100,    int: true },
+  cbv5VolMultiplier:         { min: 1.0,   max: 10 },
+  cbv5DebounceCandles:      { min: 1,     max: 20,     int: true },
   cbAutoUnlockThresholdPct:  { min: 0.5,   max: 5.0 },
   autoPauseMinKcPct:         { min: 0.1,   max: 50 },
   autoPauseMin24hVolUsdt:    { min: 0,     max: 1_000_000_000, int: true },
-  autoArmLossPct:            { min: 1,     max: 90 },
-  autoArmAgeHours:           { min: 0.5,   max: 168 },
+  autoArmLossPct:            { min: 1,     max: 99 },
+  autoArmAgeHours:           { min: 0.5,   max: 999 },
   tpTrendMultiplier:         { min: 1,     max: 10 },
 };
 
@@ -235,6 +245,18 @@ const BOT_DEFAULTS_SCHEMA = {
   cbv2LockHours: 8,
   cbv3Enabled: true,
   cbv3LockHours: 8,
+  cbv5Enabled: true,
+  cbv5LockHours: 4,
+  cbv5KcLen: 20,
+  cbv5KcMult: 1.2,
+  cbv5PivotLookback: 3,
+  cbv5PivotLeftLen: 5,
+  cbv5PivotRightLen: 5,
+  cbv5StrictBreak: true,
+  cbv5UseVolume: true,
+  cbv5VolMaLen: 20,
+  cbv5VolMultiplier: 1.5,
+  cbv5DebounceCandles: 5,
   cbAutoUnlockEnabled: false,
   cbAutoUnlockThresholdPct: 1.0,
   dynamicSizeEnabled: true,
@@ -287,6 +309,7 @@ router.put('/bot-defaults', requireAuth, requireSettingsPassword, async (req, re
     const BOOLEAN_FIELDS = [
       'dcaEnabled', 'martingaleEnabled',
       's1OnlyDown', 'xs1Enabled', 'cbEnabled', 'cbv2Enabled', 'cbv3Enabled',
+      'cbv5Enabled', 'cbv5StrictBreak', 'cbv5UseVolume',
       'cbAutoUnlockEnabled', 'dynamicSizeEnabled',
       'safeTradeEnabled', 'safeTradeTrendlineEnabled', 'safeTradeNoTradeEnabled',
       'autoPauseEnabled', 'autoArmStopLossOnUKC',
@@ -296,7 +319,10 @@ router.put('/bot-defaults', requireAuth, requireSettingsPassword, async (req, re
       'capitalPerTrade', 'maxTrades', 'tpPercent', 'retryTimeMin', 'retryMax',
       'kcMult', 'minSpreadTicks', 'suggestTpWindow',
       'dcaMaxLayers', 'martingaleMultiplier', 'martingaleMaxLayerNotional',
-      'cbv2LockHours', 'cbv3LockHours', 'cbAutoUnlockThresholdPct',
+      'cbv2LockHours', 'cbv3LockHours', 'cbv5LockHours',
+      'cbv5KcLen', 'cbv5KcMult', 'cbv5PivotLookback', 'cbv5PivotLeftLen', 'cbv5PivotRightLen',
+      'cbv5VolMaLen', 'cbv5VolMultiplier', 'cbv5DebounceCandles',
+      'cbAutoUnlockThresholdPct',
       'autoPauseMinKcPct', 'autoPauseMin24hVolUsdt', 'autoArmLossPct', 'autoArmAgeHours', 'tpTrendMultiplier',
     ];
     const STRING_FIELDS = ['defaultSymbol', 'defaultTimeframe'];
@@ -386,6 +412,174 @@ router.post('/dps-reset-all', requireAuth, requireBotActionPassword, async (req,
     res.json({ ok: true, matched, modified, syncedInMem });
   } catch (err) {
     logger.warn({ err: err.message }, 'admin: dps-reset-all failed');
+    res.status(500).json({ error: err.message });
+  }
+});
+
+module.exports = router;
+
+// ════════════════════════════════════════════════════════════════════════════════════════════
+// FIX-2026-08-13: Master Config Templates — CRUD on AppConfig.masterConfigTemplates
+//   - GET    /api/admin/master-config-templates              list (metadata only)
+//   - GET    /api/admin/master-config-templates/:id          full entry (with settings)
+//   - POST   /api/admin/master-config-templates              create
+//   - PUT    /api/admin/master-config-templates/:id          rename and/or replace settings
+//   - DELETE /api/admin/master-config-templates/:id          delete
+//
+// Auth: requireSettingsPassword (mutates persistent AppConfig — same pattern as
+//   PUT /api/admin/app-config). Falls back to requireAuth if middleware missing.
+// ════════════════════════════════════════════════════════════════════════════════════════════
+
+// Lightweight metadata list (id + name + fieldCount + timestamps).
+// Modal dropdown only needs these — full settings fetched on demand.
+router.get('/master-config-templates', requireAuth, requireSettingsPassword, async (req, res) => {
+  try {
+    const cfg = await AppConfig.findOne({ key: 'singleton' }).lean();
+    const templates = (cfg && cfg.masterConfigTemplates) || [];
+    res.json({ templates: masterConfigTemplates.toMetadataList(templates) });
+  } catch (err) {
+    logger.warn({ err: err.message }, 'admin: GET master-config-templates failed');
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Full entry (with settings) — frontend calls this on Load click.
+router.get('/master-config-templates/:id', requireAuth, requireSettingsPassword, async (req, res) => {
+  try {
+    const cfg = await AppConfig.findOne({ key: 'singleton' }).lean();
+    const templates = (cfg && cfg.masterConfigTemplates) || [];
+    const entry = masterConfigTemplates.findById(templates, req.params.id);
+    if (!entry) return res.status(404).json({ error: 'template not found' });
+    res.json({ template: entry });
+  } catch (err) {
+    logger.warn({ err: err.message }, 'admin: GET master-config-templates/:id failed');
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Create new template — body: { name, settings, overwrite?: boolean }
+// sanitizeSettings() drops unknown keys; per-field clamping is deferred to
+// /api/bots/bulk-update (so user sees validation errors at the apply step).
+router.post('/master-config-templates', requireAuth, requireSettingsPassword, async (req, res) => {
+  try {
+    const cfg = await AppConfig.findOne({ key: 'singleton' }).lean();
+    const templates = (cfg && cfg.masterConfigTemplates) || [];
+
+    // overwrite:true + same name → reuse existing entry (preserves id + createdAt)
+    const v = masterConfigTemplates.validateName(req.body && req.body.name);
+    if (!v.ok) return res.status(400).json({ error: v.error });
+
+    // Find existing entry with same name (case-insensitive). excludeId=null because POST never edits an existing id.
+    const existingByName = templates.find((t) => t && masterConfigTemplates.isNameTaken([t], v.name, null));
+
+    if (existingByName) {
+      if (req.body && req.body.overwrite === true) {
+        // Update existing entry's settings (preserve id + createdAt)
+        const idx = templates.indexOf(existingByName);
+        const { settings, dropped } = masterConfigTemplates.sanitizeSettings(req.body && req.body.settings);
+        if (Object.keys(settings).length === 0) {
+          return res.status(400).json({ error: 'ต้องมีอย่างน้อย 1 field ใน settings' });
+        }
+        const updated = await AppConfig.findOneAndUpdate(
+          { key: 'singleton' },
+          { $set: {
+            [`masterConfigTemplates.${idx}.settings`]: settings,
+            [`masterConfigTemplates.${idx}.updatedAt`]: new Date(),
+          } },
+          { new: true, upsert: true }
+        ).lean();
+        const entry = (updated.masterConfigTemplates || [])[idx];
+        logger.info({ botId: null, id: existingByName.id, name: v.name, dropped }, 'admin: master-config-template overwritten');
+        return res.json({ ok: true, template: entry, droppedFields: dropped, total: (updated.masterConfigTemplates || []).length });
+      }
+      return res.status(409).json({ error: `ชื่อ "${v.name}" มีอยู่แล้ว`, existingId: existingByName.id });
+    }
+
+    // New entry path
+    if (templates.length >= masterConfigTemplates.MAX_TEMPLATES) {
+      return res.status(400).json({ error: `ถึงขีดจำกัด ${masterConfigTemplates.MAX_TEMPLATES} templates แล้ว — กรุณาลบของเก่าก่อน` });
+    }
+    const { settings, dropped } = masterConfigTemplates.sanitizeSettings(req.body && req.body.settings);
+    if (Object.keys(settings).length === 0) {
+      return res.status(400).json({ error: 'ต้องมีอย่างน้อย 1 field ใน settings' });
+    }
+    const entry = masterConfigTemplates.buildEntry({ name: v.name, settings });
+    const updated = await AppConfig.findOneAndUpdate(
+      { key: 'singleton' },
+      { $push: { masterConfigTemplates: entry } },
+      { new: true, upsert: true }
+    ).lean();
+    logger.info({ botId: null, id: entry.id, name: entry.name, dropped }, 'admin: master-config-template created');
+    res.json({ ok: true, template: entry, droppedFields: dropped, total: (updated.masterConfigTemplates || []).length });
+  } catch (err) {
+    logger.warn({ err: err.message }, 'admin: POST master-config-templates failed');
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Update — body: { name?, settings? } (at least one required).
+router.put('/master-config-templates/:id', requireAuth, requireSettingsPassword, async (req, res) => {
+  try {
+    const cfg = await AppConfig.findOne({ key: 'singleton' }).lean();
+    const templates = (cfg && cfg.masterConfigTemplates) || [];
+    const idx = masterConfigTemplates.findIndexById(templates, req.params.id);
+    if (idx === -1) return res.status(404).json({ error: 'template not found' });
+
+    const update = { updatedAt: new Date() };
+    if (req.body && req.body.name !== undefined) {
+      const v = masterConfigTemplates.validateName(req.body.name);
+      if (!v.ok) return res.status(400).json({ error: v.error });
+      if (masterConfigTemplates.isNameTaken(templates, v.name, req.params.id)) {
+        return res.status(409).json({ error: `ชื่อ "${v.name}" มีอยู่แล้ว` });
+      }
+      update.name = v.name;
+    }
+    if (req.body && req.body.settings !== undefined) {
+      const { settings, dropped } = masterConfigTemplates.sanitizeSettings(req.body.settings);
+      if (Object.keys(settings).length === 0) {
+        return res.status(400).json({ error: 'ต้องมีอย่างน้อย 1 field ใน settings' });
+      }
+      update.settings = settings;
+      logger.info({ id: req.params.id, dropped }, 'admin: master-config-template settings updated');
+    }
+    if (!update.name && !update.settings) {
+      return res.status(400).json({ error: 'ต้องส่ง name หรือ settings อย่างน้อย 1 อย่าง' });
+    }
+
+    // Build positional $set
+    const setOps = {
+      [`masterConfigTemplates.${idx}.updatedAt`]: update.updatedAt,
+    };
+    if (update.name) setOps[`masterConfigTemplates.${idx}.name`] = update.name;
+    if (update.settings) setOps[`masterConfigTemplates.${idx}.settings`] = update.settings;
+
+    const updated = await AppConfig.findOneAndUpdate(
+      { key: 'singleton' },
+      { $set: setOps },
+      { new: true, upsert: true }
+    ).lean();
+    const newEntry = (updated.masterConfigTemplates || [])[idx];
+    logger.info({ id: req.params.id }, 'admin: master-config-template updated');
+    res.json({ ok: true, template: newEntry });
+  } catch (err) {
+    logger.warn({ err: err.message }, 'admin: PUT master-config-templates/:id failed');
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Delete
+router.delete('/master-config-templates/:id', requireAuth, requireSettingsPassword, async (req, res) => {
+  try {
+    const updated = await AppConfig.findOneAndUpdate(
+      { key: 'singleton' },
+      { $pull: { masterConfigTemplates: { id: req.params.id } } },
+      { new: true, upsert: true }
+    ).lean();
+    const remaining = (updated.masterConfigTemplates || []).length;
+    logger.info({ id: req.params.id, remaining }, 'admin: master-config-template deleted');
+    res.json({ ok: true, remaining });
+  } catch (err) {
+    logger.warn({ err: err.message }, 'admin: DELETE master-config-templates/:id failed');
     res.status(500).json({ error: err.message });
   }
 });

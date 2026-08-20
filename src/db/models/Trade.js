@@ -115,8 +115,8 @@ const tradeSchema = new mongoose.Schema(
     // FIX-2026-08-03: snapshot ของ bot thresholds ตอนที่ arm (per-trade)
     //   - positionCard.js ใช้ค่านี้แสดง "stuck-like" highlight ที่ตรงกับ threshold ตอน arm (ไม่ใช่ค่าปัจจุบันของบอทที่อาจเปลี่ยนทีหลัง)
     //   - reset เป็น null ตอน state ออกจาก selling (เหมือน useStopLossOnUKC)
-    autoArmLossPct: { type: Number, default: null },             // snapshot of bot.autoArmLossPct ตอน arm (1..90)
-    autoArmAgeHours: { type: Number, default: null },            // snapshot of bot.autoArmAgeHours ตอน arm (0.5..168)
+    autoArmLossPct: { type: Number, default: null },             // snapshot of bot.autoArmLossPct ตอน arm (1..99)
+    autoArmAgeHours: { type: Number, default: null },            // snapshot of bot.autoArmAgeHours ตอน arm (0.5..999)
 
     // FIX-2026-08-01: SELL partial-fill latching alert (1h after detection still partial)
     //   - sellPartialDetectedAt = timestamp แรกที่ตรวจเจอ SELL partial-fill (ไม่ reset ทุกครั้งที่ poll)

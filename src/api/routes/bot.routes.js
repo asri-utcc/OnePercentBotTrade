@@ -1167,11 +1167,11 @@ router.put('/:id', requireAuth, async (req, res) => {
           // FIX-2026-07-31 (F2): TP ×N multiplier clamp 1..10
           bot[k] = Math.min(10, Math.max(1, parseFloat(data[k])));
         } else if (k === 'autoArmLossPct') {
-          // FIX-2026-08-03: per-bot auto-arm loss threshold % (1..90, default 10)
-          bot[k] = Math.min(90, Math.max(1, parseFloat(data[k])));
+          // FIX-2026-08-03 / EXT-2026-08-20: per-bot auto-arm loss threshold % (1..99, default 10)
+          bot[k] = Math.min(99, Math.max(1, parseFloat(data[k])));
         } else if (k === 'autoArmAgeHours') {
-          // FIX-2026-08-03: per-bot auto-arm age threshold hours (0.5..168, default 4)
-          bot[k] = Math.min(168, Math.max(0.5, parseFloat(data[k])));
+          // FIX-2026-08-03 / EXT-2026-08-20: per-bot auto-arm age threshold hours (0.5..999, default 4)
+          bot[k] = Math.min(999, Math.max(0.5, parseFloat(data[k])));
         } else if (k === 'slUkcTriggerOnProfit') {
           // FIX-2026-08-03: SL-UKC trigger on profitable positions (default false)
           bot[k] = data[k] === true || data[k] === 'true';
@@ -2147,9 +2147,9 @@ router.post('/bulk-update', requireAuth, async (req, res) => {
     if (Number.isFinite(update.autoPauseMinKcPct)) update.autoPauseMinKcPct = Math.max(0.1, Math.min(50, update.autoPauseMinKcPct));
     // FIX-2026-08-10: 24h vol guard clamp (0..1B USDT, integer)
     if (Number.isFinite(update.autoPauseMin24hVolUsdt)) update.autoPauseMin24hVolUsdt = Math.max(0, Math.min(1_000_000_000, Math.round(update.autoPauseMin24hVolUsdt)));
-    // FIX-2026-08-03: F1 auto-arm thresholds + profit trigger (bulk-update support)
-    if (Number.isFinite(update.autoArmLossPct)) update.autoArmLossPct = Math.max(1, Math.min(90, update.autoArmLossPct));
-    if (Number.isFinite(update.autoArmAgeHours)) update.autoArmAgeHours = Math.max(0.5, Math.min(168, update.autoArmAgeHours));
+    // FIX-2026-08-03 / EXT-2026-08-20: F1 auto-arm thresholds + profit trigger (bulk-update support)
+    if (Number.isFinite(update.autoArmLossPct)) update.autoArmLossPct = Math.max(1, Math.min(99, update.autoArmLossPct));
+    if (Number.isFinite(update.autoArmAgeHours)) update.autoArmAgeHours = Math.max(0.5, Math.min(999, update.autoArmAgeHours));
     if ('slUkcTriggerOnProfit' in update) update.slUkcTriggerOnProfit = update.slUkcTriggerOnProfit === true || update.slUkcTriggerOnProfit === 'true';
     if (Number.isFinite(update.tpPercent)) update.tpPercent = Math.max(0.1, Math.min(100, update.tpPercent));
     if (Number.isFinite(update.kcMult)) update.kcMult = Math.max(0.5, Math.min(5, update.kcMult));
