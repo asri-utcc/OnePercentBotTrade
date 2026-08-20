@@ -374,6 +374,8 @@
     /* detected / pending → violet (no decision yet) */
     .cm-ls-action.is-detected,
     .cm-ls-action.is-pending        { background: rgba(167,139,250,0.16); color: #c4b5fd; border: 1px solid rgba(167,139,250,0.40); }
+    /* no_audit (2026-08-20 rev2) — scan เจอ แต่ trader ไม่เคย process → muted question mark */
+    .cm-ls-action.is-no-audit       { background: rgba(148,163,184,0.10); color: #cbd5e1; border: 1px dashed rgba(148,163,184,0.40); font-style: italic; }
     /* trade link on filled rows */
     .cm-ls-trade-link { font-size: 0.65rem; color: var(--text-muted, #94a3b8); text-decoration: none; padding: 0.05rem 0.3rem; border-radius: 4px; border: 1px dashed rgba(255,255,255,0.18); }
     .cm-ls-trade-link:hover { color: var(--gold-1, #f5b800); border-color: rgba(245,184,0,0.45); }

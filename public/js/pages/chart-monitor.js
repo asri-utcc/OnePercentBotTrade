@@ -1596,12 +1596,37 @@ function renderLatestSignalsPanel() {
  *   - `label` = short pill text ("filled", "safe-trade #1", "retry max", "เงินไม่พอ", ...)
  *   - `title` = tooltip with the full `note` text (good for debugging)
  *   - `tradeLink` = optional "→ trade" anchor if a tradeId is present (filled/order_placed rows)
+ *
+ * 2026-08-20 rev2: when no DB row exists for a non-blocked signal, distinguish:
+ *   - FRESH candle (closeTime + 90s > now) → "⏳ pending" (trader เขียน DB อยู่)
+ *   - PAST candle (เกิน timeframe + grace)  → "❓ ไม่มีบันทึก" (historical scan, trader ไม่ process)
+ *   - เดิมแสดง "⏳ pending" ทั้งคู่ ทำให้สับสน
  */
 function formatSignalAction(s) {
   if (!s) return null;
-  const outcome = s.outcome || (s.status === 'blocked' ? 'skipped_predicted' : 'pending');
-  const note = (s.outcomeNote || '').toString().trim();
   const tradeId = s.tradeId || null;
+  const note = (s.outcomeNote || '').toString().trim();
+
+  // ─── Derive outcome (with smarter non-DB fallback) ───
+  let outcome = s.outcome || null;
+  if (!outcome) {
+    // No DB row → classify by in-memory status + candle age
+    if (s.status === 'blocked') {
+      outcome = 'skipped_predicted';
+    } else {
+      // Compute candleCloseTime = openTime + timeframeMs
+      const openTime = Number(s.openTime) || 0;
+      const tfMs = timeframeToMs(s.timeframe);
+      const closeTime = openTime + tfMs;
+      const now = Date.now();
+      const FRESH_GRACE_MS = 90_000; // 90s after candle close
+      if (closeTime + FRESH_GRACE_MS > now) {
+        outcome = 'pending'; // trader ยังไม่ทันเขียน DB
+      } else {
+        outcome = 'no_audit'; // trader ไม่เคย process (historical)
+      }
+    }
+  }
 
   // Build the trade link if applicable
   let tradeLink = '';
@@ -1610,20 +1635,20 @@ function formatSignalAction(s) {
     tradeLink = ` <a class="cm-ls-trade-link" href="/history.html?trade=${encodeURIComponent(tradeId)}" target="_blank" rel="noopener" title="เปิดไม้ในหน้า History">${last8} →</a>`;
   }
 
-  // 1) outcome takes precedence → map a base outcome to (cls, label)
+  // 1) outcome → base (cls, label)
   const OUTCOME_BASE = {
-    filled:         { cls: 'is-filled',       label: '✅ filled' },
-    order_placed:   { cls: 'is-order_placed', label: '📤 order_placed' },
-    skipped:        { cls: 'is-skipped',      label: '⏭ skipped' },
+    filled:            { cls: 'is-filled',            label: '✅ filled' },
+    order_placed:      { cls: 'is-order_placed',      label: '📤 order_placed' },
+    skipped:           { cls: 'is-skipped',           label: '⏭ skipped' },
     skipped_predicted: { cls: 'is-skipped_predicted', label: '⏭ predicted skip' },
-    expired:        { cls: 'is-expired',      label: '⌛ expired' },
-    failed:         { cls: 'is-failed',       label: '❌ failed' },
-    detected:       { cls: 'is-detected',     label: '🎯 detected' },
-    pending:        { cls: 'is-pending',      label: '⏳ pending' },
+    expired:           { cls: 'is-expired',           label: '⌛ expired' },
+    failed:            { cls: 'is-failed',            label: '❌ failed' },
+    detected:          { cls: 'is-detected',          label: '🎯 detected' },
+    pending:           { cls: 'is-pending',           label: '⏳ pending' },
+    no_audit:          { cls: 'is-no-audit',          label: '❓ ไม่มีบันทึก' },
   };
 
   // 2) note→label overrides (carry the friendly reason)
-  //    Keys are ordered from most specific → least specific.
   const NOTE_TO_LABEL = [
     { match: /^retryMax.*reached/i,           label: '🔁 retry max' },
     { match: /^spread too tight/i,             label: '↔️ spread tight' },
@@ -1647,7 +1672,7 @@ function formatSignalAction(s) {
     { match: /^insufficient USDT balance/i,    label: '💸 เงินไม่พอ' },
   ];
 
-  const base = OUTCOME_BASE[outcome] || { cls: 'is-pending', label: outcome };
+  const base = OUTCOME_BASE[outcome] || { cls: 'is-no-audit', label: outcome };
   let finalLabel = base.label;
   if (note) {
     for (const rule of NOTE_TO_LABEL) {
@@ -1655,13 +1680,32 @@ function formatSignalAction(s) {
     }
   }
 
-  // Compose title — show note verbatim for debugging
+  // Compose title — show note + raw outcome + (when no_audit) explanation
   const titleParts = [`outcome: ${outcome}`];
   if (note) titleParts.push(note);
   if (tradeId) titleParts.push(`trade: ${tradeId}`);
+  if (outcome === 'no_audit') {
+    titleParts.push('— scan เจอ S1 แต่ trader ไม่เคย process แท่งนี้ (historical scanner)');
+  } else if (outcome === 'pending') {
+    titleParts.push('— trader กำลัง process อยู่ รอสักครู่');
+  } else if (outcome === 'skipped_predicted') {
+    titleParts.push('— in-memory block (DB row pending / ไม่เคยเขียน)');
+  }
   const title = titleParts.join('\n');
 
   return { cls: base.cls, label: finalLabel, title, tradeLink };
+}
+
+// Helper: timeframe string → milliseconds (used to classify fresh vs past signals)
+function timeframeToMs(tf) {
+  if (!tf) return 60_000;
+  const m = String(tf).match(/^(\d+)([mhd])$/);
+  if (!m) return 60_000;
+  const n = parseInt(m[1], 10);
+  if (m[2] === 'm') return n * 60_000;
+  if (m[2] === 'h') return n * 60 * 60_000;
+  if (m[2] === 'd') return n * 24 * 60 * 60_000;
+  return 60_000;
 }
 
 function formatAgeSafe(ms) {
