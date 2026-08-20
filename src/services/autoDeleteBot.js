@@ -30,6 +30,10 @@ const logger = require('../utils/logger');
 
 const INTERVAL_MS = 60 * 60 * 1000; // 1 hour
 const OPEN_STATES = ['placed', 'partial_wait', 'filled', 'retrying', 'holding', 'selling', 'stopping', 'partial_sell_wait'];
+// FIX-2026-08-20: safety caps — prevent mass deletion in a single tick (e.g. after bug fix backlog)
+//   - ไม่กระทบ enabled bots / open positions (filter ก่อนหน้าแล้ว) — แค่จำกัด batch size
+const MAX_DELETES_PER_TICK = 50;   // up to 50 soft-deletes per tick (clears backlog ภายใน 1-2 รอบ)
+const MAX_WARNS_PER_TICK = 20;     // up to 20 warnings per tick (กัน telegram spam)
 
 let _intervalHandle = null;
 let _running = false;
@@ -80,6 +84,7 @@ async function tick() {
     skipped_open_positions: 0,
     skipped_enabled: 0,
     skipped_already_deleted: 0,
+    skipped_cap: 0, // FIX-2026-08-20: track safety cap hits
     errors: 0,
   };
   try {
@@ -133,7 +138,17 @@ async function tick() {
           continue;
         }
 
-        if (elapsedMs >= cutoffMs) {
+        // FIX-2026-08-20: BUG FIX — เดิมใช้ `elapsedMs >= cutoffMs` (เปรียบเทียบ duration �ับ absolute timestamp = false เสมอ)
+        //   - elapsedMs = duration in ms (e.g. 22 วัน ≈ 1.9B ms)
+        //   - cutoffMs = absolute timestamp (e.g. 2026-08-13 ≈ 1.78T ms)
+        //   - ทำให้ soft-delete ไม่เ�ยทำงานเลย (74+ บอท backlog)
+        //   - fix: เปรียบเทียบ timestamp กับ timestamp — ถ้า lastActiveMs <= cutoffMs แปลว่า disabled นานเกิน threshold
+        if (lastActiveMs <= cutoffMs) {
+          // FIX-2026-08-20: safety cap — skip if already hit MAX_DELETES_PER_TICK this round
+          if (stats.scheduled >= MAX_DELETES_PER_TICK) {
+            stats.skipped_cap += 1;
+            continue;
+          }
           // FIX-2026-08-08: schedule soft-delete
           await Bot.updateOne(
             { _id: b._id },
@@ -162,7 +177,12 @@ async function tick() {
           } catch (tgErr) {
             logger.warn({ err: tgErr.message }, 'autoDeleteBot: telegram sendNow failed (non-fatal)');
           }
-        } else if (elapsedMs >= warningCutoffMs && (!b.deleteNotificationSentAt || new Date(b.deleteNotificationSentAt).getTime() < lastActiveMs)) {
+        } else if (lastActiveMs <= warningCutoffMs && (!b.deleteNotificationSentAt || new Date(b.deleteNotificationSentAt).getTime() < lastActiveMs)) {
+          // FIX-2026-08-20: safety cap — skip if already hit MAX_WARNS_PER_TICK this round
+          if (stats.warned >= MAX_WARNS_PER_TICK) {
+            stats.skipped_cap += 1;
+            continue;
+          }
           // FIX-2026-08-08: warning window — 1-time telegram alert
           await Bot.updateOne(
             { _id: b._id },
