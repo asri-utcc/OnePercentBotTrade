@@ -61,6 +61,10 @@ let openPositionsAsOf = null;       // last fetch timestamp
 let tradeIdToBotId = new Map();     // tradeId -> botId (used by WS trade:update handler)
 let modalPriceOverrides = new Map();// tradeId -> live close price (UNUSED 2026-08-03 — WS price auto-update ถูกปิดแล้ว)
 let currentModalOp = null;          // bootstrap.Modal instance for #openPositionsModal
+// FIX-2026-08-20: global all-time stats from Trade collection (source of truth)
+//   - ใช้กับ summary tiles: Total Trades / Win Rate / Total PnL
+//   - รวม trades จาก soft-deleted bots (ต่างจาก sum(b.totalTrades) ที่ filter ออก)
+let globalStats = { allTimeTrades: 0, allTimeWins: 0, allTimePnl: 0 };
 
 // ── FIX-2026-08-05: Bot search & filter (client-side) ────────
 //   - text search: match name / symbol / timeframe / status (case-insensitive)
@@ -711,6 +715,56 @@ function setupEventHandlers() {
       console.warn('applyBotDefaultsToNewBot failed:', e.message);
     }
   }
+
+  // FIX-2026-08-14: Import/Export file-based for New Bot modal
+  //   - skips symbol (user picks manually) + auto-fills name only if blank
+  const nbImportReplaceBtn = document.getElementById('nb-import-replace');
+  if (nbImportReplaceBtn) nbImportReplaceBtn.onclick = () => importConfigToNewBot('replace');
+  const nbImportMergeBtn = document.getElementById('nb-import-merge');
+  if (nbImportMergeBtn) nbImportMergeBtn.onclick = () => importConfigToNewBot('merge');
+
+  function setNbIoStatus(msg, variant) {
+    const el = document.getElementById('nb-io-status');
+    if (!el) return;
+    el.textContent = msg || '';
+    const colors = { danger: '#ff6b6b', success: '#4ade80', warn: '#ffa500' };
+    el.style.color = colors[variant] || 'var(--text-3)';
+  }
+
+  async function importConfigToNewBot(mode) {
+    if (!window.botConfigIO) { setNbIoStatus('❌ botConfigIO module ไม่โหลด', 'danger'); return; }
+    if (mode === 'replace' && !window.confirm('Import จะทับฟอร์ม (ยกเว้น symbol · เลือก symbol เอง) — แน่ใจมั้ย?')) return;
+    setNbIoStatus('⏳ กำลังเลือกไฟล์…');
+    const file = await window.botConfigIO.pickJsonFile();
+    if (!file) { setNbIoStatus('ยกเลิก', 'warn'); return; }
+    setNbIoStatus(`⏳ กำลังอ่าน ${file.name}…`);
+    const result = await window.botConfigIO.parseImportFile(file);
+    if (!result.ok) { setNbIoStatus('❌ ' + result.error, 'danger'); return; }
+    const sanitize = result.sanitizeResult;
+    const { applied, skipped } = window.botConfigIO.applyToForm(sanitize.settings, 'new-bot', { mode, skipKey: 'symbol' });
+    // Refresh CBv2/CBv3 visibility based on cbVersion + total preview
+    try { applyCbVersionToNewBot(); } catch (_) { /* non-fatal */ }
+    try { if (typeof updateNewBotTotal === 'function') updateNewBotTotal(); } catch (_) { /* non-fatal */ }
+    // Auto-fill name only if blank (don't overwrite user-typed name)
+    const nameEl = document.getElementById('nb-name');
+    if (nameEl && !nameEl.value.trim() && typeof autoFillNewBotName === 'function') {
+      try { autoFillNewBotName(); } catch (_) { /* non-fatal */ }
+    }
+    const parts = [`✅ Import ${applied} fields (${mode})`];
+    if (sanitize.dropped > 0) parts.push(`dropped ${sanitize.dropped} unknown`);
+    if (skipped.length > 0) parts.push(`skipped ${skipped.length}`);
+    const warnings = result.warnings || [];
+    if (warnings.length) parts.push(`⚠️ ${warnings.join('; ')}`);
+    setNbIoStatus(parts.join(' · '), warnings.length ? 'warn' : 'success');
+  }
+
+  // FIX-2026-08-14: reset _botDefaultsApplied on modal hide so re-opens re-apply Bot Defaults
+  if (newBotModalEl) {
+    newBotModalEl.addEventListener('hidden.bs.modal', () => {
+      window._botDefaultsApplied = false;
+    });
+  }
+
   // ถ้า user เปลี่ยน symbol — re-derive name ถ้ายังเป็น auto-fill pattern
   const symbolEl = document.getElementById('nb-symbol');
   if (symbolEl) symbolEl.addEventListener('change', autoFillNewBotName);
@@ -885,6 +939,10 @@ async function loadBots(opts = {}) {
     const url = expand ? '/api/bots?expand=1' : '/api/bots';
     const resp = await API.get(url);
     bots = resp.bots;
+    // FIX-2026-08-20: global all-time stats from Trade collection (source of truth)
+    //   - รวม trades จาก soft-deleted bots ด้วย (ไม่ใช่ sum(b.totalTrades) ที่ filter ออก)
+    //   - ใช้กับ summary tiles: Total Trades / Win Rate / Total PnL
+    globalStats = resp.globalStats || { allTimeTrades: 0, allTimeWins: 0, allTimePnl: 0 };
     seedBotsEmaCache(bots); // FIX-2026-07-23: seed EMA cache for realtime updates
     // FIX-2026-08-01: prefetch coin info for all unique symbols (cache 5min server-side)
     prefetchCoinInfos(bots).catch((e) => console.warn('coinInfo prefetch', e));
@@ -1869,9 +1927,12 @@ function renderStats() {
     }
   }
 
-  const totalTrades = bots.reduce((s, b) => s + (b.totalTrades || 0), 0);
-  const totalWins = bots.reduce((s, b) => s + (b.winTrades || 0), 0);
-  const totalPnl = bots.reduce((s, b) => s + (b.totalPnl || 0), 0);
+  // FIX-2026-08-20: summary tiles use globalStats (aggregate from Trade collection)
+  //   - รวม trades จาก soft-deleted bots (ไม่ถูก filter ออกเหมือน sum(b.totalTrades))
+  //   - per-bot card ยังใช้ b.totalTrades/winTrades/totalPnl ของบอทนั้น (ถูกต้อง)
+  const totalTrades = globalStats.allTimeTrades || 0;
+  const totalWins = globalStats.allTimeWins || 0;
+  const totalPnl = globalStats.allTimePnl || 0;
   const todayTrades = bots.reduce((s, b) => s + (b.todayTrades || 0), 0);
   const todayPnl = bots.reduce((s, b) => s + (b.todayPnl || 0), 0);
   const monthTrades = bots.reduce((s, b) => s + (b.monthTrades || 0), 0);

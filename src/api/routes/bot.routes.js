@@ -21,6 +21,7 @@ const trendlineForBot = require('../../core/trendlineForBot'); // FIX-2026-08-03
 const qualityIndicator = require('../../core/qualityIndicator'); // FIX-2026-08-01: Bot Quality Indicator (0-4 score)
 const prediction = require('../../core/prediction'); // FIX-2026-08-05: upper-KC + predicted loss for AU prediction panel
 const dps = require('../../core/dynamicPositionSizing'); // FIX-2026-08-08 (rev2): DPS state reset helper
+const tradeStats = require('../../core/tradeStats'); // FIX-2026-08-20: aggregate today/month/all-time per bot (extracted for testability)
 const logger = require('../../utils/logger');
 const eventBus = require('../../services/eventBus');
 
@@ -87,42 +88,6 @@ function startOfMonthLocal() {
 }
 
 /**
- * Aggregate todayTrades + todayPnl grouped by botId.
- * Returns Map<botIdString, { todayTrades, todayPnl }>.
- */
-async function aggregateTodayPerBot() {
-  const since = startOfTodayLocal();
-  const rows = await Trade.aggregate([
-    { $match: { sellFilledAt: { $gte: since }, realizedPnl: { $ne: null } } },
-    { $group: {
-      _id: '$botId',
-      todayTrades: { $sum: 1 },
-      todayPnl: { $sum: '$realizedPnl' },
-    } },
-  ]);
-  const map = new Map();
-  for (const r of rows) map.set(String(r._id), { todayTrades: r.todayTrades, todayPnl: r.todayPnl });
-  return map;
-}
-
-/**
- * FIX-2026-07-23: Active position count per bot — trades ที่ยังเปิดอยู่ (BUY/SELL รอ fill หรือถือ position)
- *   ใช้ใน dashboard card เพื่อ highlight บอทที่กำลังมี position ค้าง
- *   Returns Map<botIdString, count>
- */
-async function aggregateActivePositionsPerBot() {
-  const rows = await Trade.aggregate([
-    { $match: {
-      state: { $in: ['placed', 'partial_wait', 'filled', 'retrying', 'holding', 'selling', 'stopping'] },
-    } },
-    { $group: { _id: '$botId', count: { $sum: 1 } } },
-  ]);
-  const map = new Map();
-  for (const r of rows) map.set(String(r._id), r.count);
-  return map;
-}
-
-/**
  * FIX-2026-07-23: คำนวณ price indicator สำหรับ bot card
  *   - lastClose = ราคาปิดแท่งล่าสุด (หรือราคา real-time ของแท่งที่กำลังสร้าง)
  *   - ema20 = EMA(closes, 20) ของ timeframe ของบอท
@@ -183,25 +148,6 @@ function computeActiveDurationMs(bot) {
   return base;
 }
 
-/**
- * Aggregate monthTrades + monthPnl grouped by botId (since day 1 of current month).
- * Returns Map<botIdString, { monthTrades, monthPnl }>.
- */
-async function aggregateMonthPerBot() {
-  const since = startOfMonthLocal();
-  const rows = await Trade.aggregate([
-    { $match: { sellFilledAt: { $gte: since }, realizedPnl: { $ne: null } } },
-    { $group: {
-      _id: '$botId',
-      monthTrades: { $sum: 1 },
-      monthPnl: { $sum: '$realizedPnl' },
-    } },
-  ]);
-  const map = new Map();
-  for (const r of rows) map.set(String(r._id), { monthTrades: r.monthTrades, monthPnl: r.monthPnl });
-  return map;
-}
-
 // ดึง list symbols ที่ valid (สำหรับ dropdown)
 router.get('/symbols', requireAuth, async (req, res) => {
   try {
@@ -229,10 +175,12 @@ router.get('/', requireAuth, async (req, res) => {
     const filter = includeDeleted ? {} : { deletedAt: null };
     const bots = await Bot.find(filter).sort({ enabled: -1, createdAt: -1 }).lean();
     // FIX-2026-08-02: run aggregations in parallel (independent)
-    const [todayMap, monthMap, activePosMap] = await Promise.all([
-      aggregateTodayPerBot(),
-      aggregateMonthPerBot(),
-      aggregateActivePositionsPerBot(),
+    // FIX-2026-08-20: extract to tradeStats module for testability
+    const [todayMap, monthMap, activePosMap, allTimeGlobal] = await Promise.all([
+      tradeStats.aggregateTodayPerBot(),
+      tradeStats.aggregateMonthPerBot(),
+      tradeStats.aggregateActivePositionsPerBot(),
+      tradeStats.aggregateAllTimeGlobal(), // ใช้แทน sum(b.totalTrades) เพราะรวม trades จาก soft-deleted bots ด้วย
     ]);
     // 2026-07-31: per-bot volatility snapshot (KC min + TP suggestion + 24h volume)
     //   - reuse tpUpdater.computeSuggestedTpForBot + get24hrTickers ผ่าน volatilityForBot helper
@@ -373,7 +321,17 @@ router.get('/', requireAuth, async (req, res) => {
         deleteDaysSince: b.deletedAt ? Math.floor((Date.now() - new Date(b.deletedAt).getTime()) / (1000 * 60 * 60 * 24)) : null,
       };
     });
-    res.json({ bots: enriched });
+    res.json({
+      bots: enriched,
+      // FIX-2026-08-20: global all-time stats — aggregate จาก Trade collection (source of truth)
+      //   - รวม trades จาก soft-deleted bots ด้วย (ต่างจาก sum(b.totalTrades) ที่ filter ออก)
+      //   - ใช้กับ summary tiles: Total Trades / Win Rate / Total PnL
+      globalStats: {
+        allTimeTrades: allTimeGlobal.totalTrades,
+        allTimeWins: allTimeGlobal.totalWins,
+        allTimePnl: allTimeGlobal.totalPnl,
+      },
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
