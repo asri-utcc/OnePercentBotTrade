@@ -1528,7 +1528,15 @@ function teardownCmCharts() {
 }
 
 /* ════════════════════════════════════════════════════════════════════
- * 20 latest signals panel — top 20 most recent S1 signals across all running bots
+ * 50 latest signals panel — top 50 most recent S1 signals across all running bots
+ * 2026-08-20: each row now shows the SIGNAL ACTION (DB outcome + note):
+ *   - filled / order_placed (trade opened)
+ *   - skipped: maxTrades, safe_trade_block, safetrade (ST#1/ST#2/ST#3),
+ *              cbv5_pre_buy_block / cb_suppress / cbv2/v3/v5_cooldown,
+ *              buy_in_flight, cooldown_*, symbol_delisted, dca_*
+ *   - expired: retry max / spread tight / rePlace rejected
+ *   - failed: validation error / hard failures
+ *   - pending: detected but not yet decided (warm-up, cache-cold)
  * ════════════════════════════════════════════════════════════════════ */
 
 function renderLatestSignalsPanel() {
@@ -1558,6 +1566,11 @@ function renderLatestSignalsPanel() {
     const statusIcon = s.status === 'blocked' ? '⛔' : '✅';
     // 2026-08-06: add absolute date+time sub-line under the relative age
     const dtTxt = s.openTime ? formatCmSignalDateTime(s.openTime) : '';
+    // 2026-08-20: action badge (filled / safetrade / retry max / เงินไม่พอ / ...)
+    const action = formatSignalAction(s);
+    const actionHtml = action
+      ? `<div class="cm-ls-action-row"><span class="cm-ls-action ${action.cls}" title="${escapeHtml(action.title)}">${escapeHtml(action.label)}</span>${action.tradeLink}</div>`
+      : '';
     return `
       <div class="cm-ls-row ${statusCls}">
         <div class="cm-ls-left">
@@ -1566,6 +1579,7 @@ function renderLatestSignalsPanel() {
             <div class="cm-ls-bot">${escapeHtml(s.name)} <span class="cm-ls-meta">${escapeHtml(s.symbol)} · ${escapeHtml(s.timeframe)}</span></div>
             <div class="cm-ls-time">${ageTxt} · bg ${s.bgPrev}→${s.bgState}</div>
             ${dtTxt ? `<div class="cm-ls-datetime">📅 ${dtTxt}</div>` : ''}
+            ${actionHtml}
           </div>
         </div>
         <div class="cm-ls-right">
@@ -1575,6 +1589,79 @@ function renderLatestSignalsPanel() {
       </div>`;
   }).join('');
   panel.innerHTML = rows;
+}
+
+/* 2026-08-20: map (outcome + note) → {cls, label, title, tradeLink}
+ *   - `cls`  = "is-filled" / "is-skipped" / "is-expired" / "is-failed" / "is-pending" / ...
+ *   - `label` = short pill text ("filled", "safe-trade #1", "retry max", "เงินไม่พอ", ...)
+ *   - `title` = tooltip with the full `note` text (good for debugging)
+ *   - `tradeLink` = optional "→ trade" anchor if a tradeId is present (filled/order_placed rows)
+ */
+function formatSignalAction(s) {
+  if (!s) return null;
+  const outcome = s.outcome || (s.status === 'blocked' ? 'skipped_predicted' : 'pending');
+  const note = (s.outcomeNote || '').toString().trim();
+  const tradeId = s.tradeId || null;
+
+  // Build the trade link if applicable
+  let tradeLink = '';
+  if (tradeId && (outcome === 'filled' || outcome === 'order_placed')) {
+    const last8 = tradeId.slice(-8);
+    tradeLink = ` <a class="cm-ls-trade-link" href="/history.html?trade=${encodeURIComponent(tradeId)}" target="_blank" rel="noopener" title="เปิดไม้ในหน้า History">${last8} →</a>`;
+  }
+
+  // 1) outcome takes precedence → map a base outcome to (cls, label)
+  const OUTCOME_BASE = {
+    filled:         { cls: 'is-filled',       label: '✅ filled' },
+    order_placed:   { cls: 'is-order_placed', label: '📤 order_placed' },
+    skipped:        { cls: 'is-skipped',      label: '⏭ skipped' },
+    skipped_predicted: { cls: 'is-skipped_predicted', label: '⏭ predicted skip' },
+    expired:        { cls: 'is-expired',      label: '⌛ expired' },
+    failed:         { cls: 'is-failed',       label: '❌ failed' },
+    detected:       { cls: 'is-detected',     label: '🎯 detected' },
+    pending:        { cls: 'is-pending',      label: '⏳ pending' },
+  };
+
+  // 2) note→label overrides (carry the friendly reason)
+  //    Keys are ordered from most specific → least specific.
+  const NOTE_TO_LABEL = [
+    { match: /^retryMax.*reached/i,           label: '🔁 retry max' },
+    { match: /^spread too tight/i,             label: '↔️ spread tight' },
+    { match: /^rePlace rejected/i,             label: '🚫 rePlace reject' },
+    { match: /^maxTrades reached/i,            label: '🚦 maxTrades' },
+    { match: /^safe_trade_block/i,             label: '🛡 safe-trade #1' },
+    { match: /^safe_trade_trendline_block/i,   label: '📈 trendline (ST#2)' },
+    { match: /^safe_trade_no_trade_block/i,    label: '🚫 no-trade (ST#3)' },
+    { match: /^cbv5_pre_buy_block/i,           label: '🔐 CBv5 pre-buy' },
+    { match: /^cb_suppress/i,                  label: '🔐 CB suppress' },
+    { match: /^cbv2_cooldown/i,                label: '🔐 CBv2 cooldown' },
+    { match: /^cbv3_cooldown/i,                label: '🔐 CBv3 cooldown' },
+    { match: /^cbv5_cooldown/i,                label: '🔐 CBv5 cooldown' },
+    { match: /^buy_in_flight/i,                label: '🔄 BUY in flight' },
+    { match: /^cooldown_/i,                    label: '⏳ cooldown' },
+    { match: /^symbol_delisted/i,              label: '🚫 delisted' },
+    { match: /^delist_in_\d+d/i,               label: '⚠️ delist soon' },
+    { match: /^dca_max_layers/i,               label: '🧱 DCA max layer' },
+    { match: /^dca_buy_in_flight/i,            label: '🧱 DCA in flight' },
+    { match: /^dca_claim_lost/i,               label: '🧱 DCA claim lost' },
+    { match: /^insufficient USDT balance/i,    label: '💸 เงินไม่พอ' },
+  ];
+
+  const base = OUTCOME_BASE[outcome] || { cls: 'is-pending', label: outcome };
+  let finalLabel = base.label;
+  if (note) {
+    for (const rule of NOTE_TO_LABEL) {
+      if (rule.match.test(note)) { finalLabel = rule.label; break; }
+    }
+  }
+
+  // Compose title — show note verbatim for debugging
+  const titleParts = [`outcome: ${outcome}`];
+  if (note) titleParts.push(note);
+  if (tradeId) titleParts.push(`trade: ${tradeId}`);
+  const title = titleParts.join('\n');
+
+  return { cls: base.cls, label: finalLabel, title, tradeLink };
 }
 
 function formatAgeSafe(ms) {

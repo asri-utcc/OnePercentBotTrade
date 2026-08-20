@@ -293,7 +293,7 @@
       margin-left: auto;
     }
     .cm-latest-scroll {
-      max-height: 320px;
+      max-height: 560px;
       overflow-y: auto;
       display: flex;
       flex-direction: column;
@@ -336,6 +336,49 @@
     }
     .cm-ls-reasons { display: flex; gap: 0.25rem; flex-wrap: wrap; justify-content: flex-end; }
     .cm-latest-empty { padding: 1.5rem 0.5rem; text-align: center; color: var(--text-muted, #94a3b8); font-size: 0.85rem; }
+
+    /* ─── 2026-08-20: Action / outcome badge (per signal row) ───
+       Shows the DB outcome + reason note of each signal (filled, safetrade1,
+       retry max, เงินไม่พอ, etc.). Color-coded by class. */
+    .cm-ls-action {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.25rem;
+      font-size: 0.65rem;
+      padding: 0.12rem 0.4rem;
+      border-radius: 4px;
+      font-weight: 700;
+      letter-spacing: 0.02em;
+      max-width: 100%;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      line-height: 1.2;
+    }
+    .cm-ls-action .cm-ls-action-label {
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      font-size: 0.6rem;
+      opacity: 0.85;
+    }
+    /* filled / order_placed → bull (green) */
+    .cm-ls-action.is-filled         { background: rgba(0,229,184,0.20); color: #5eead4; border: 1px solid rgba(0,229,184,0.55); }
+    .cm-ls-action.is-order_placed   { background: rgba(0,229,184,0.16); color: #6ee7d2; border: 1px solid rgba(0,229,184,0.45); }
+    /* skipped (graceful) → grey */
+    .cm-ls-action.is-skipped        { background: rgba(148,163,184,0.16); color: #cbd5e1; border: 1px solid rgba(148,163,184,0.40); }
+    .cm-ls-action.is-skipped_predicted { background: rgba(148,163,184,0.12); color: #94a3b8; border: 1px dashed rgba(148,163,184,0.40); }
+    /* expired (timed-out, e.g. retry max / spread) → gold */
+    .cm-ls-action.is-expired        { background: rgba(245,184,0,0.18); color: #fcd34d; border: 1px solid rgba(245,184,0,0.45); }
+    /* failed (hard error) → bear */
+    .cm-ls-action.is-failed         { background: rgba(255,77,109,0.20); color: #ff8aa3; border: 1px solid rgba(255,77,109,0.55); }
+    /* detected / pending → violet (no decision yet) */
+    .cm-ls-action.is-detected,
+    .cm-ls-action.is-pending        { background: rgba(167,139,250,0.16); color: #c4b5fd; border: 1px solid rgba(167,139,250,0.40); }
+    /* trade link on filled rows */
+    .cm-ls-trade-link { font-size: 0.65rem; color: var(--text-muted, #94a3b8); text-decoration: none; padding: 0.05rem 0.3rem; border-radius: 4px; border: 1px dashed rgba(255,255,255,0.18); }
+    .cm-ls-trade-link:hover { color: var(--gold-1, #f5b800); border-color: rgba(245,184,0,0.45); }
+    /* 2026-08-20: row that holds (action badge + trade link) under the bot meta line */
+    .cm-ls-action-row { display: flex; gap: 0.35rem; align-items: center; flex-wrap: wrap; margin-top: 0.18rem; }
 
     /* ─── Open Positions panel (above chart grid) ───────── */
     .cm-positions-card {
@@ -744,7 +787,7 @@
     <!-- Latest Signals panel (top 20 across all running bots) — moved to bottom per request -->
     <div class="cm-latest-signals-card" id="cm-latest-signals-card">
       <div class="cm-latest-header">
-        <span class="cm-latest-title">📡 S1 Signals ล่าสุด (20 รายการ)</span>
+        <span class="cm-latest-title">📡 S1 Signals ล่าสุด (50 รายการ)</span>
         <span class="cm-latest-meta">
           <span id="cm-latest-signals-count">กำลังโหลด…</span>
           · <span id="cm-latest-signals-ts">—</span>

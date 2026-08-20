@@ -693,7 +693,9 @@ router.get('/positions', requireAuth, async (req, res) => {
 // ─── GET /api/bots/chart-monitor/signals ─────────────────────────
 // 2026-08-06: Chart Monitor page aggregation
 //   - Per-bot: current zone + prediction label + last 2 signals (with blocked reasons)
-//   - Cross-bot: top 20 latest signals across all running bots
+//   - Cross-bot: top 50 latest signals across all running bots
+//   - 2026-08-20: enrich with Signal DB outcome (filled / skipped / expired / etc.) + note
+//     so the page shows WHY each signal got that result (retry max, เงินไม่พอ, safetrade, ...)
 //   - "blockedReasons" mirrors the runtime gates:
 //       * xs1 (XS1 candle-wide dump filter, when xs1Enabled=true)
 //       * s1OnlyDown (when s1OnlyDown=true and signal is Strong Up)
@@ -704,6 +706,7 @@ router.get('/positions', requireAuth, async (req, res) => {
 //   - significant Binance weight only when a bot has safeTradeNoTradeEnabled=true (then 1 REST per such bot for upper TF)
 let _cmSignalsCache = null;
 const CM_SIGNALS_CACHE_MS = 30_000;
+const CM_SIGNALS_TOP_LIMIT = 50;
 router.get('/chart-monitor/signals', requireAuth, async (req, res) => {
   try {
     const forceRefresh = req.query.fresh === '1';
@@ -896,7 +899,7 @@ router.get('/chart-monitor/signals', requireAuth, async (req, res) => {
           lastSignal: hasLiveSignal ? lastSignal : null,
           prevSignal: prevSignal,
           hasLiveSignal,
-          // All enriched signals (for top-20 aggregation)
+          // All enriched signals (for top-50 aggregation)
           _signals: enrichedSignals,
           // Snapshot of configs that affect the highlight color
           s1OnlyDown: s1Opts.onlyDown,
@@ -914,16 +917,58 @@ router.get('/chart-monitor/signals', requireAuth, async (req, res) => {
 
     const validBots = perBot.filter(Boolean);
 
-    // Top 20 latest signals across all running bots
+    // Aggregate + sort all signals across all running bots ONCE
     const allSignals = validBots.flatMap((b) => b._signals || []);
     allSignals.sort((a, b) => b.openTime - a.openTime);
-    const top20 = allSignals.slice(0, 20);
+    // 2026-08-20: top 50 (was 20) — show full action detail of every recent signal
+    const top50 = allSignals.slice(0, CM_SIGNALS_TOP_LIMIT);
+
+    // 2026-08-20: merge Signal DB outcome + note into each enriched signal so the
+    //   📡 S1 Signals ล่าสุด panel can show the reason (filled / safetrade1 /
+    //   retry max / เงินไม่พอ / dca_max_layers / ...). Match by (botId, candleOpenTime).
+    //   - in-memory `s.openTime` is the candle open ms; DB stores it as Date.
+    //   - safeTrade blockedReasons are still kept alongside DB outcome for the existing pill UX.
+    try {
+      const SignalModel = require('../../db/models/Signal');
+      if (top50.length > 0) {
+        const botIds = [...new Set(top50.map((s) => s.botId))];
+        const sinceMs = top50[top50.length - 1].openTime - 1; // inclusive lower bound
+        const dbRows = await SignalModel.find({
+          botId: { $in: botIds },
+          candleOpenTime: { $gte: new Date(sinceMs) },
+        })
+          .select({ botId: 1, candleOpenTime: 1, outcome: 1, note: 1, tradeId: 1, _id: 0 })
+          .lean();
+        // Build index: key = `${botId}::${candleOpenTimeMs}` → row
+        const dbIdx = new Map();
+        for (const row of dbRows) {
+          const key = `${String(row.botId)}::${new Date(row.candleOpenTime).getTime()}`;
+          dbIdx.set(key, row);
+        }
+        for (const s of top50) {
+          const row = dbIdx.get(`${s.botId}::${s.openTime}`);
+          if (row) {
+            s.outcome = row.outcome || null;
+            s.outcomeNote = row.note || '';
+            s.tradeId = row.tradeId ? String(row.tradeId) : null;
+          } else {
+            // No DB record yet (signal just detected this second, not yet persisted,
+            // OR detected long ago + trader restarted without DB backfill)
+            s.outcome = s.status === 'blocked' ? 'skipped_predicted' : 'pending';
+            s.outcomeNote = s.status === 'blocked' ? 'in-memory block' : '';
+            s.tradeId = null;
+          }
+        }
+      }
+    } catch (sigDbErr) {
+      logger.warn({ err: sigDbErr.message }, 'chart-monitor signals: outcome enrichment failed (non-fatal)');
+    }
 
     const data = {
       asOf: Date.now(),
       cachedForMs: CM_SIGNALS_CACHE_MS,
-      count: { running: bots.length, computed: validBots.length, signals: allSignals.length, top: top20.length },
-      signals: top20,
+      count: { running: bots.length, computed: validBots.length, signals: allSignals.length, top: top50.length },
+      signals: top50,
       bots: validBots.map((b) => ({
         botId: b.botId,
         name: b.name,
@@ -1147,7 +1192,14 @@ router.put('/:id', requireAuth, async (req, res) => {
     // FIX-2026-08-08 (rev2): จำค่าเดิมไว้ตรวจว่า user แก้ capital/maxTrades เองหรือไม่ (แก้บั๊ก A4)
     const _prevCapital = bot.capitalPerTrade;
     const _prevMaxTrades = bot.maxTrades;
-    const allowed = ['name', 'capitalPerTrade', 'maxTrades', 'tpPercent', 'retryTimeMin', 'retryMax', 'timeframe', 'stopLossOnUpperKC', 'autoUpdateTp', 'kcMult', 'minSpreadTicks', 's1OnlyDown', 'xs1Enabled', 'cbEnabled', 'cbv2Enabled', 'cbv2LockHours', 'cbv3Enabled', 'cbv3LockHours', 'safeTradeEnabled', 'safeTradeTrendlineEnabled', 'autoPauseEnabled', 'autoPauseMinKcPct', 'autoPauseMin24hVolUsdt', 'suggestTpWindow', 'autoArmStopLossOnUKC', 'autoArmLossPct', 'autoArmAgeHours', 'slUkcTriggerOnProfit', 'tpTrendMultiplier', 'tpTrendEnabled', 'dcaEnabled', 'dcaMaxLayers', 'martingaleEnabled', 'martingaleMultiplier', 'martingaleMaxLayerNotional', 'safeTradeNoTradeEnabled', 'dynamicSizeEnabled', 'cbAutoUnlockEnabled', 'cbAutoUnlockThresholdPct']; // FIX-2026-08-05: audit fix — missing from allowed list caused bot-edit save to silently drop the field  // FIX-2026-08-06: CBv2 fields (cbv2Enabled, cbv2LockHours)  // FIX-2026-08-08: Feature #1+3 (dynamicSizeEnabled, cbAutoUnlockEnabled, cbAutoUnlockThresholdPct)  // FIX-2026-08-08: CBv3 fields (cbv3Enabled, cbv3LockHours) — added to whitelist for bulk update + bot-edit save  // FIX-2026-08-10: 24h vol guard field for Auto Pause-Resume
+    const allowed = ['name', 'capitalPerTrade', 'maxTrades', 'tpPercent', 'retryTimeMin', 'retryMax', 'timeframe', 'stopLossOnUpperKC', 'autoUpdateTp', 'kcMult', 'minSpreadTicks', 's1OnlyDown', 'xs1Enabled', 'cbEnabled', 'cbv2Enabled', 'cbv2LockHours', 'cbv3Enabled', 'cbv3LockHours', 'safeTradeEnabled', 'safeTradeTrendlineEnabled', 'autoPauseEnabled', 'autoPauseMinKcPct', 'autoPauseMin24hVolUsdt', 'suggestTpWindow', 'autoArmStopLossOnUKC', 'autoArmLossPct', 'autoArmAgeHours', 'slUkcTriggerOnProfit', 'tpTrendMultiplier', 'tpTrendEnabled', 'dcaEnabled', 'dcaMaxLayers', 'martingaleEnabled', 'martingaleMultiplier', 'martingaleMaxLayerNotional', 'safeTradeNoTradeEnabled', 'dynamicSizeEnabled', 'cbAutoUnlockEnabled', 'cbAutoUnlockThresholdPct', // FIX-2026-08-05: audit fix — missing from allowed list caused bot-edit save to silently drop the field  // FIX-2026-08-06: CBv2 fields (cbv2Enabled, cbv2LockHours)  // FIX-2026-08-08: Feature #1+3 (dynamicSizeEnabled, cbAutoUnlockEnabled, cbAutoUnlockThresholdPct)  // FIX-2026-08-08: CBv3 fields (cbv3Enabled, cbv3LockHours) — added to whitelist for bulk update + bot-edit save  // FIX-2026-08-10: 24h vol guard field for Auto Pause-Resume  // FIX-2026-08-14: CBv5 fields (12 advanced params) — silent-drop bug exposed by botConfigIO import feature
+      'cbv5Enabled', 'cbv5LockHours',
+      'cbv5KcLen', 'cbv5KcMult',
+      'cbv5PivotLookback', 'cbv5PivotLeftLen', 'cbv5PivotRightLen',
+      'cbv5StrictBreak', 'cbv5UseVolume',
+      'cbv5VolMaLen', 'cbv5VolMultiplier',
+      'cbv5DebounceCandles',
+    ];
 
     for (const k of allowed) {
       if (data[k] !== undefined) {
@@ -1205,6 +1257,33 @@ router.put('/:id', requireAuth, async (req, res) => {
         } else if (k === 'autoPauseMin24hVolUsdt') {
           // FIX-2026-08-10: 24h volume guard for Auto Pause-Resume (0..1B USDT, default 1M, integer)
           bot[k] = Math.min(1_000_000_000, Math.max(0, Math.round(parseFloat(data[k]))));
+        } else if (k === 'cbv5Enabled' || k === 'cbv5StrictBreak' || k === 'cbv5UseVolume') {
+          // FIX-2026-08-14: CBv5 boolean toggles — default true (cbv5Enabled) / true (strictBreak, useVolume)
+          bot[k] = data[k] === true || data[k] === 'true';
+        } else if (k === 'cbv5LockHours') {
+          // FIX-2026-08-14: CBv5 lock duration (0.5..168, default 4)
+          bot[k] = Math.min(168, Math.max(0.5, parseFloat(data[k])));
+        } else if (k === 'cbv5KcLen') {
+          // FIX-2026-08-14: KC length (5..100, integer, default 20)
+          bot[k] = Math.min(100, Math.max(5, Math.floor(parseFloat(data[k]))));
+        } else if (k === 'cbv5KcMult') {
+          // FIX-2026-08-14: KC multiplier (0.5..5.0, default 1.2)
+          bot[k] = Math.min(5, Math.max(0.5, parseFloat(data[k])));
+        } else if (k === 'cbv5PivotLookback') {
+          // FIX-2026-08-14: pivot lookback (2..10, integer, default 3)
+          bot[k] = Math.min(10, Math.max(2, Math.floor(parseFloat(data[k]))));
+        } else if (k === 'cbv5PivotLeftLen' || k === 'cbv5PivotRightLen') {
+          // FIX-2026-08-14: pivot left/right lengths (2..50, integer, default 5)
+          bot[k] = Math.min(50, Math.max(2, Math.floor(parseFloat(data[k]))));
+        } else if (k === 'cbv5VolMaLen') {
+          // FIX-2026-08-14: Volume MA length (5..100, integer, default 20)
+          bot[k] = Math.min(100, Math.max(5, Math.floor(parseFloat(data[k]))));
+        } else if (k === 'cbv5VolMultiplier') {
+          // FIX-2026-08-14: volume spike multiplier (1.0..10.0, default 1.5)
+          bot[k] = Math.min(10, Math.max(1.0, parseFloat(data[k])));
+        } else if (k === 'cbv5DebounceCandles') {
+          // FIX-2026-08-14: debounce candles (1..20, integer, default 5)
+          bot[k] = Math.min(20, Math.max(1, Math.floor(parseFloat(data[k]))));
         } else if (k === 'maxTrades' || k === 'retryTimeMin' || k === 'retryMax' || k === 'minSpreadTicks' || k === 'suggestTpWindow') {
           // FIX-2026-07-24: minSpreadTicks clamp 0..10
           // FIX-2026-07-25: retryTimeMin ต้อง parseFloat (รองรับ 0.1..60) ไม่ใช่ parseInt — เดิมใช้ parseInt ตัดทศนิยมทิ้ง → "0.1" กลายเป็น 0 → validation fail
