@@ -17,6 +17,7 @@ const cbCooldownGate = require('./cbCooldownGate'); // FIX-2026-08-12 (audit Q11
 const cbPatternEvaluator = require('./cbPatternEvaluator'); // FIX-2026-08-09: canonical REST window + 2-tick confirmation
 const cbCrossCooldown = require('./cbCrossCooldown'); // FIX-2026-08-10: CBv5 cross-version cooldown interaction (Direction A/B)
 const masterConfig = require('./masterConfig'); // FIX-2026-08-08: master toggles (DPS, CB Auto-Unlock)
+const walletReserve = require('../services/walletReserve'); // FIX-2026-08-19: USDT reserve (กั๊กเงิน) — ลด availableUsdt ก่อนตรวจ BUY
 const telegramNotifier = require('../services/telegramNotifier');
 const logger = require('../utils/logger');
 const Bot = require('../db/models/Bot');
@@ -3325,7 +3326,7 @@ class Trader {
 
     // FIX-2026-08-01: Safe-trade filter (default ON)
     //   - ก่อนวาง BUY ให้เช็ค super-upper TF (3m/5m→4h, 15m→1d, 1h→1w)
-    //   - PASS = lastClose > open (green) OR lastClose > ema20 (uptrend)
+    //   - PASS = lastClose > open (green ONLY — strict, FIX-2026-08-19) — แดง block ทันทีไม่สน EMA
     //   - FAIL-OPEN on Binance error (API outage ไม่ block การเทรด)
     //   - skip BUY ทันทีถ้า fail (don't waste signal slot)
     if (this.bot.safeTradeEnabled !== false) {
@@ -3987,15 +3988,26 @@ class Trader {
         const freeUsdt = usdtBal ? parseFloat(usdtBal.free) : 0;
         const lockedUsdt = usdtBal ? parseFloat(usdtBal.locked) : 0;
         const availableUsdt = freeUsdt + lockedUsdt; // FIX-2026-07-21
-        if (availableUsdt < requiredWithBuffer) {
-          const reason = `insufficient USDT balance: have ${availableUsdt.toFixed(4)} (free ${freeUsdt.toFixed(4)} + locked ${lockedUsdt.toFixed(4)}), need ${requiredWithBuffer.toFixed(4)} (notional ${requiredNotional.toFixed(4)} + fee buffer)`;
-          logger.warn({ botId: this.bot._id.toString(), freeUsdt, lockedUsdt, requiredWithBuffer }, 'trader: balance check failed');
+        // FIX-2026-08-19: Wallet Reserve — กั๊ก USDT ที่ user ตั้งไว้ใน /wallet.html
+        //   - reserveUsdt cached 10s ใน src/services/walletReserve.js
+        //   - ถ้า fail read (DB hiccup) → fallback = 0 (safe default — ไม่ block BUY)
+        //   - usableUsdt ต้องไม่ติดลบ (clamp ≥ 0)
+        let reserveUsdt = 0;
+        try {
+          reserveUsdt = await walletReserve.getReserveUsdt();
+        } catch (_) {
+          reserveUsdt = 0;
+        }
+        const usableUsdt = Math.max(0, availableUsdt - reserveUsdt);
+        if (usableUsdt < requiredWithBuffer) {
+          const reason = `insufficient USDT balance: have ${availableUsdt.toFixed(4)} (free ${freeUsdt.toFixed(4)} + locked ${lockedUsdt.toFixed(4)}), reserve ${reserveUsdt.toFixed(4)} → usable ${usableUsdt.toFixed(4)}, need ${requiredWithBuffer.toFixed(4)} (notional ${requiredNotional.toFixed(4)} + fee buffer)`;
+          logger.warn({ botId: this.bot._id.toString(), freeUsdt, lockedUsdt, reserveUsdt, requiredWithBuffer }, 'trader: balance check failed');
           await Signal.updateOne({ _id: signalDoc._id }, { outcome: 'skipped', note: reason });
           this.buyInFlight = false; // FIX-2026-07-21: release on early-return
           await this.failSignal(signalDoc, reason);
           return;
         }
-        logger.debug({ botId: this.bot._id.toString(), freeUsdt, lockedUsdt, requiredWithBuffer }, 'trader: balance check ok');
+        logger.debug({ botId: this.bot._id.toString(), freeUsdt, lockedUsdt, reserveUsdt, requiredWithBuffer }, 'trader: balance check ok');
       } catch (balErr) {
         // ถ้า fetch balance fail (เช่น API key ไม่มี permission) — log warning แต่ไม่ block
         logger.warn({ err: balErr.message }, 'trader: balance pre-check failed (continuing)');

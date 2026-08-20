@@ -288,6 +288,34 @@ const appConfigSchema = new mongoose.Schema(
         defaultTimeframe: '3m',
       }),
     },
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // FIX-2026-08-13: Master Config Templates — user-saved setting presets
+    //   - Mixed array on AppConfig singleton (cap = 50 entries)
+    //   - Each entry: { id (uuid), name, settings (raw k→v, validated by bulk-update),
+    //                    createdAt, updatedAt }
+    //   - Name uniqueness: case-insensitive UPPER comparison on trimmed value (route-handler)
+    //   - Backward compat: legacy docs without this field → route uses `|| []`
+    //   - Per-entry shape validation lives in routes/admin.routes.js (helpful 400 errors)
+    // ═══════════════════════════════════════════════════════════════════════
+    masterConfigTemplates: {
+      type: [Object],
+      default: [],
+      validate: {
+        validator: (arr) => Array.isArray(arr) && arr.length <= 50,
+        message: 'masterConfigTemplates: cap = 50 entries',
+      },
+    },
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // 2026-08-19: Wallet Reserve — USDT amount locked away from bot spending
+    //   - Persisted on AppConfig singleton (survives restart)
+    //   - Read by trader.js balance pre-check (subtracts from availableUsdt)
+    //   - UI: /wallet.html slider + quick-set chips (requireBotActionPassword to save)
+    //   - In-process cache: src/services/walletReserve.js (10s TTL)
+    //   - Clamp 0..1,000,000 USDT (sanity ceiling — typical user reserve is 0..1k)
+    // ═══════════════════════════════════════════════════════════════════════
+    walletReserveUsdt: { type: Number, default: 0, min: 0, max: 1_000_000 },
   },
   { timestamps: true }
 );

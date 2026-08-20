@@ -27,6 +27,8 @@ const scanRoutes = require('./api/routes/scan.routes');
 const bnbAutoBuyRoutes = require('./api/routes/bnbAutoBuy.routes'); // FIX-2026-08-05: auto-buy BNB
 const autoAddBotRoutes = require('./api/routes/autoAddBot.routes'); // FIX-2026-08-07: auto add new bot
 const adminRoutes = require('./api/routes/admin.routes'); // FIX-2026-08-08: master config + admin endpoints
+// 2026-08-19: Wallet — holdings + USDT reserve
+const walletRoutes = require('./api/routes/wallet.routes');
 // FIX-2026-07-24: Telegram + History (ใหม่)
 const telegramRoutes = require('./api/routes/telegram.routes');
 const historyRoutes = require('./api/routes/history.routes');
@@ -132,6 +134,7 @@ function createApp() {
   app.use('/api/bnb-auto-buy', bnbAutoBuyRoutes); // FIX-2026-08-05
   app.use('/api/auto-add-bot', autoAddBotRoutes); // FIX-2026-08-07
   app.use('/api/admin', adminRoutes); // FIX-2026-08-08: master config + force-run autoDeleteBot
+  app.use('/api/wallet', walletRoutes); // 2026-08-19: wallet holdings + USDT reserve
   // FIX-2026-07-24: register telegram + history
   app.use('/api/telegram', telegramRoutes);
   // FIX-2026-07-29: register pnl (calendar + series)
@@ -150,10 +153,10 @@ function createApp() {
   //   - ป้องกัน AI/AI-coding-tool scrape HTML/JS labels + feature names + modal flow
   //   - session lookup จาก MongoDB เกิดขึ้นอยู่แล้ว (express-session global) → overhead ≈ 0
   //   - ไฟล์ HTML ที่ต้อง auth → Cache-Control: no-store (กัน back-button cache leak หลัง logout)
-  //   - Public (whitelist): /login.html, /favicon.svg, /css/*, /js/api.js
+  //   - Public (whitelist): /login.html, /favicon.svg, /css/*, /js/api.js, /js/botConfigIO.js
   //   - ทุก path อื่น → ต้อง session.authenticated === true ถึงจะเห็นเนื้อหา
   const PUBLIC_EXACT = new Set(['/login.html', '/favicon.svg']);
-  const PUBLIC_PREFIXES = ['/css/', '/js/api.js'];
+  const PUBLIC_PREFIXES = ['/css/', '/js/api.js', '/js/botConfigIO.js'];
 
   function isPublicStaticPath(p) {
     if (PUBLIC_EXACT.has(p)) return true;

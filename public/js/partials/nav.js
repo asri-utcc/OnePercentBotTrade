@@ -30,6 +30,7 @@
     { key: 'scan',          href: '/scan-volatility.html', label: '🎰 Scan' },
     { key: 'pnl',           href: '/pnl.html',      label: '📅 PnL' },               // FIX-2026-07-29
     { key: 'history',       href: '/history.html',  label: '📜 History' },           // FIX-2026-07-24
+    { key: 'wallet',        href: '/wallet.html',   label: '💼 Wallet' },            // 2026-08-19: holdings + USDT reserve
     { key: 'security',      href: '/password-sessions.html', label: '🔑 Security' }, // 2026-08-09: Password & Sessions Manager
     { key: 'settings',      href: '/settings.html', label: '⚙️ Settings' },          // FIX-2026-07-24
   ].filter((l) => l.key !== 'detail' || botId); // hide detail if no botId
