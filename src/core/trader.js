@@ -18,6 +18,7 @@ const cbPatternEvaluator = require('./cbPatternEvaluator'); // FIX-2026-08-09: c
 const cbCrossCooldown = require('./cbCrossCooldown'); // FIX-2026-08-10: CBv5 cross-version cooldown interaction (Direction A/B)
 const masterConfig = require('./masterConfig'); // FIX-2026-08-08: master toggles (DPS, CB Auto-Unlock)
 const walletReserve = require('../services/walletReserve'); // FIX-2026-08-19: USDT reserve (กั๊กเงิน) — ลด availableUsdt ก่อนตรวจ BUY
+const buyCommitment = require('../services/buyCommitment'); // FIX-2026-08-21: atomic in-process claim กัน race ระหว่างบอท (แก้ "กั๊กเงินหลุด")
 const telegramNotifier = require('../services/telegramNotifier');
 const logger = require('../utils/logger');
 const Bot = require('../db/models/Bot');
@@ -3973,44 +3974,55 @@ class Trader {
         return;
       }
 
-      // 6. ── Pre-flight USDT balance check (FIX-2026-07-21: ใช้ free + locked) ──
-      // ตรวจว่ามี USDT พอจ่าย notional + fee buffer
-      //   - ก่อนหน้านี้ใช้แค่ free — ทำให้ locked USDT (BUY order ที่ match แล้วแต่ยังไม่ settled)
-      //     ถูกนับซ้ำ → บอทคิดว่ามีเงินพอ แต่จริงๆ committed ไปแล้วใน BUY ก่อนหน้า
-      //   - fix: ใช้ (free + locked) — accurate committed balance
+      // 6. ── Pre-flight USDT balance check (FIX-2026-08-21: race-safe reserve) ──
+      //   - ก่อนหน้านี้ใช้ (free + locked) - reserve → "total USDT I have" - reserve
+      //     ปัญหา: locked = USDT ที่ commit ไปแล้วใน LIMIT_MAKER BUY ของบอทอื่น
+      //     เมื่อ 2 �อท check พร้อมกัน → ทั้งคู่เห็น USDT เต็ม → ทั้งคู่ผ่าน
+      //     → over-spend เกิน reserve (อาการ "กั๊กเงินหลุด" ที่ user รายงาน)
+      //   - fix: ใช้ free - reserve - committed (USDT ที่ยังไม่ถูก commit) + atomic claim
+      //     - buyCommitment.claimBuy(notional) → synchronous atomic increment
+      //     - ถ้า over-commit → fail signal, return (no order placed)
+      //     - on order fail/cancel → releaseBuy(notional) ใน finally-style cleanup
       const requiredNotional = parseFloat(buyPrice) * parseFloat(qty);
       const feeBufferRate = fees.getMakerRate();
       const requiredWithBuffer = requiredNotional * (1 + feeBufferRate);
+      let claimedBuy = false; // FIX-2026-08-21: track for release on early-return
 
       try {
         const account = await binanceRest.getAccount();
         const usdtBal = (account.balances || []).find((b) => b.asset === 'USDT');
         const freeUsdt = usdtBal ? parseFloat(usdtBal.free) : 0;
-        const lockedUsdt = usdtBal ? parseFloat(usdtBal.locked) : 0;
-        const availableUsdt = freeUsdt + lockedUsdt; // FIX-2026-07-21
-        // FIX-2026-08-19: Wallet Reserve — กั๊ก USDT ที่ user ตั้งไว้ใน /wallet.html
-        //   - reserveUsdt cached 10s ใน src/services/walletReserve.js
-        //   - ถ้า fail read (DB hiccup) → fallback = 0 (safe default — ไม่ block BUY)
-        //   - usableUsdt ต้องไม่ติดลบ (clamp ≥ 0)
+        // FIX-2026-08-21: ไม่นับ locked เ�็น available (locked = USDT ที่ commit ไปแล้ว)
         let reserveUsdt = 0;
         try {
           reserveUsdt = await walletReserve.getReserveUsdt();
         } catch (_) {
           reserveUsdt = 0;
         }
-        const usableUsdt = Math.max(0, availableUsdt - reserveUsdt);
-        if (usableUsdt < requiredWithBuffer) {
-          const reason = `insufficient USDT balance: have ${availableUsdt.toFixed(4)} (free ${freeUsdt.toFixed(4)} + locked ${lockedUsdt.toFixed(4)}), reserve ${reserveUsdt.toFixed(4)} → usable ${usableUsdt.toFixed(4)}, need ${requiredWithBuffer.toFixed(4)} (notional ${requiredNotional.toFixed(4)} + fee buffer)`;
-          logger.warn({ botId: this.bot._id.toString(), freeUsdt, lockedUsdt, reserveUsdt, requiredWithBuffer }, 'trader: balance check failed');
+        const committed = buyCommitment.getCommitted();
+        const availableForNewBuy = Math.max(0, freeUsdt - reserveUsdt - committed);
+        if (availableForNewBuy < requiredWithBuffer) {
+          const reason = `insufficient USDT balance: free ${freeUsdt.toFixed(4)}, reserve ${reserveUsdt.toFixed(4)}, in-flight committed ${committed.toFixed(4)} → available ${availableForNewBuy.toFixed(4)}, need ${requiredWithBuffer.toFixed(4)} (notional ${requiredNotional.toFixed(4)} + fee buffer)`;
+          logger.warn({ botId: this.bot._id.toString(), freeUsdt, reserveUsdt, committed, requiredWithBuffer }, 'trader: balance check failed');
           await Signal.updateOne({ _id: signalDoc._id }, { outcome: 'skipped', note: reason });
           this.buyInFlight = false; // FIX-2026-07-21: release on early-return
           await this.failSignal(signalDoc, reason);
           return;
         }
-        logger.debug({ botId: this.bot._id.toString(), freeUsdt, lockedUsdt, reserveUsdt, requiredWithBuffer }, 'trader: balance check ok');
+        // Atomic claim — sync increment prevents concurrent bot from over-spending
+        buyCommitment.claimBuy(requiredWithBuffer);
+        claimedBuy = true;
+        logger.debug({ botId: this.bot._id.toString(), freeUsdt, reserveUsdt, committed, requiredWithBuffer }, 'trader: balance check ok (claim acquired)');
       } catch (balErr) {
-        // ถ้า fetch balance fail (เช่น API key ไม่มี permission) — log warning แต่ไม่ block
-        logger.warn({ err: balErr.message }, 'trader: balance pre-check failed (continuing)');
+        // FIX-2026-08-21: เปลี่ยนจาก fail-open → fail-closed ตอน check fail
+        //   - เดิม log warning แล้ว proceed (ไม่ claim → เสี่ยง race ระหว่างบอท)
+        //   - ใหม่ fail signal เพื่อกัน race (Binance API hiccup ไม่ควรทำให้ reserve �ลุด)
+        const reason = `balance pre-check failed (fail-closed): ${balErr.message}`;
+        logger.warn({ err: balErr.message, botId: this.bot._id.toString() }, 'trader: balance pre-check failed — aborting BUY to protect reserve');
+        await Signal.updateOne({ _id: signalDoc._id }, { outcome: 'skipped', note: reason });
+        this.buyInFlight = false;
+        await this.failSignal(signalDoc, reason);
+        return;
       }
 
       // 7. สร้าง Trade document (หรือ update stack ถ้า DCA mode)
@@ -4189,6 +4201,14 @@ class Trader {
         const detail = isPostOnly
           ? `BUY -2010 post-only rejected (snapshot bid=${bid} ask=${ask}, placed=${buyPrice}) — Binance: ${binanceMsg}. bookTicker อาจ stale ตอน place order; ลอง retry ด้วย price ที่ต่ำกว่า ask มากขึ้น`
           : `BUY ${orderResp.error.code}: ${binanceMsg}`;
+        // FIX-2026-08-21: release buy commitment on order failure (กัน counter ไม่ inflate)
+        //   - claimedBuy = true หลังจาก balance check → ถ้า order fail ต้อง release
+        //   - ถ้าไม่ release → committed ค้าง → บอทอื่นโดน block ผิดพลาด
+        if (claimedBuy) {
+          buyCommitment.releaseBuy(requiredWithBuffer);
+          claimedBuy = false;
+          logger.info({ botId: this.bot._id.toString(), releasedUsdt: requiredWithBuffer.toFixed(4) }, 'trader: BUY rejected — buy commitment released');
+        }
         logger.warn({
           botId: this.bot._id.toString(),
           err: orderResp.error,
@@ -6596,6 +6616,39 @@ class Trader {
       }, 'trader: top_up — cancel LIMIT_MAKER BUY failed (continuing)');
     }
 
+    // FIX-2026-08-21: Pre-flight reserve check + atomic claim (กัน race + กันกิน reserve)
+    //   - _topUpAndSell ใช้ MARKET BUY ตรง ๆ (ไม่ผ่าน balance check ปกติของ placeBuy)
+    //   - ต้องเช็ค free - reserve - committed >= topUpNotional ก่อนเสมอ
+    //   - claim ผ่าน buyCommitment เพื่อกันบอทอื่น over-spend พร้อมกัน
+    let topUpClaimed = false;
+    const topUpNotional = topUpQty * currentAsk;
+    try {
+      const topUpAccount = await binanceRest.getAccount();
+      const topUpUsdt = (topUpAccount.balances || []).find((b) => b.asset === 'USDT');
+      const topUpFree = topUpUsdt ? parseFloat(topUpUsdt.free) : 0;
+      const topUpReserve = await walletReserve.getReserveUsdt().catch(() => 0);
+      const topUpCommitted = buyCommitment.getCommitted();
+      const topUpAvailable = Math.max(0, topUpFree - topUpReserve - topUpCommitted);
+      if (topUpAvailable < topUpNotional) {
+        logger.warn({
+          botId: this.bot._id.toString(),
+          tradeId: trade._id.toString(),
+          topUpFree, topUpReserve, topUpCommitted, topUpAvailable: topUpAvailable.toFixed(4),
+          topUpNotional: topUpNotional.toFixed(4),
+        }, 'trader: top_up — insufficient USDT (would eat into reserve) — falling back to accept_partial');
+        return this._placeSellForPartialFill(trade, fresh);
+      }
+      buyCommitment.claimBuy(topUpNotional);
+      topUpClaimed = true;
+    } catch (topUpBalErr) {
+      logger.warn({
+        err: topUpBalErr.message,
+        botId: this.bot._id.toString(),
+        tradeId: trade._id.toString(),
+      }, 'trader: top_up — balance check failed (fail-closed) — falling back to accept_partial');
+      return this._placeSellForPartialFill(trade, fresh);
+    }
+
     // FIX V4: place MARKET BUY top-up
     let topUpResp;
     try {
@@ -6610,6 +6663,10 @@ class Trader {
       });
     } catch (err) {
       const fe = binanceRest.formatBinanceError(err);
+      if (topUpClaimed) {
+        buyCommitment.releaseBuy(topUpNotional);
+        topUpClaimed = false;
+      }
       logger.warn({
         err: fe, tradeId: trade._id.toString(),
       }, 'trader: top_up — MARKET BUY failed, falling back to accept_partial');
@@ -6617,6 +6674,10 @@ class Trader {
       return this._placeSellForPartialFill(trade, fresh);
     }
     if (topUpResp.error) {
+      if (topUpClaimed) {
+        buyCommitment.releaseBuy(topUpNotional);
+        topUpClaimed = false;
+      }
       logger.warn({
         err: topUpResp.error, tradeId: trade._id.toString(),
       }, 'trader: top_up — MARKET BUY rejected, falling back to accept_partial');
