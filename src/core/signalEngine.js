@@ -282,11 +282,11 @@ const SAFE_TRADE_SUPER_TF_MAP = {
   '1h': '1w',
 };
 
-// FIX-2026-08-01: Safe-trade filter — ก่อนวาง BUY ให้เช็ค super-upper TF ว่า "อยู่ในขาขึ้น"
-//   - PASS condition (either or both):
-//     a) lastClose > lastOpen (แท่งเขียว)
-//     b) lastClose > ema20 (uptrend)
-//   - FAIL-OPEN on Binance error (API outage ไม่ block การเทรด)
+// FIX-2026-08-19: Safe-trade filter (STRICT green-only) — ก่อนวาง BUY ให้เช็ค super-upper TF
+//   - PASS condition: lastClose > lastOpen (แท่งเขียวเท่านั้น) — strict
+//   - แท่งแดง → block ทันที แม้ราคาจะอยู่เหนือ EMA20 (เดิม OR กับ aboveEma แต่ปรับให้เข้มงวดขึ้น 2026-08-19)
+//   - aboveEma ยังคง compute + return เพื่อ log/debug telemetry (ไม่กระทบ pass decision)
+//   - FAIL-OPEN on Binance error / insufficient data (mirror previous behavior)
 //   - return { skip, pass, greenCandle, aboveEma, superTF, lastClose, lastOpen, lastEma, reason }
 //     skip=true means trader should NOT place BUY on this S1 signal
 async function checkSafeTrade(bot, binanceRest, indicators) {
@@ -311,7 +311,8 @@ async function checkSafeTrade(bot, binanceRest, indicators) {
     const lastEma = emaArr[emaArr.length - 1];
     const greenCandle = lastClose > lastOpen;
     const aboveEma = lastEma != null && Number.isFinite(lastEma) && lastClose > lastEma;
-    const pass = greenCandle || aboveEma;
+    // FIX-2026-08-19: strict — greenCandle ONLY; แดง → block ไม่สน EMA
+    const pass = greenCandle;
     return {
       skip: !pass,
       pass,

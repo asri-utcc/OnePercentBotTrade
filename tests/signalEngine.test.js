@@ -276,3 +276,130 @@ describe('computeTrendlinePivotLows', () => {
     }
   });
 });
+
+// FIX-2026-08-19: Safe-trade #1 (strict green-only) — checkSafeTrade tests
+//   Pattern: inject fake binanceRest.getKlines() returning Binance raw tuple arrays
+//   Tuple format: [openTime, open, high, low, close, volume, closeTime, ...]
+describe('checkSafeTrade (ST#1 strict green-only)', () => {
+  // Build 25-bar history where bars 1-21 are flat at basePrice, bars 22-25 follow lastBars spec.
+  // lastBars: array of {open, close} for the trailing 4 bars.
+  function makeKlines(basePrice, lastBars) {
+    const klines = [];
+    // bars 0-20 (21 bars): flat
+    for (let i = 0; i < 21; i += 1) {
+      klines.push([i * 1000, basePrice, basePrice + 1, basePrice - 1, basePrice, 100]);
+    }
+    // bars 21-24 (4 bars): per lastBars spec
+    lastBars.forEach((bar, idx) => {
+      klines.push([(21 + idx) * 1000, bar.open, Math.max(bar.open, bar.close) + 1, Math.min(bar.open, bar.close) - 1, bar.close, 100]);
+    });
+    return klines;
+  }
+
+  test('green candle → PASS', async () => {
+    // rising history ending with green bar
+    const klines = makeKlines(100, [
+      { open: 100, close: 104 },
+      { open: 104, close: 108 },
+      { open: 108, close: 112 },
+      { open: 110, close: 115 }, // green: close > open
+    ]);
+    const fakeBinance = { getKlines: async () => klines };
+    const bot = { symbol: 'BTCUSDT', timeframe: '3m', safeTradeEnabled: true };
+    const st = await signalEngine.checkSafeTrade(bot, fakeBinance, indicators);
+    expect(st.skip).toBe(false);
+    expect(st.pass).toBe(true);
+    expect(st.greenCandle).toBe(true);
+    expect(st.superTF).toBe('4h');
+    expect(st.reason).toBe('pass');
+  });
+
+  test('red candle above EMA20 → BLOCK (strict green-only — FIX-2026-08-19)', async () => {
+    // rising history but last bar is red (pullback) — old OR-logic would PASS via aboveEma,
+    // strict green-only rule MUST block.
+    const klines = makeKlines(100, [
+      { open: 100, close: 104 },
+      { open: 104, close: 108 },
+      { open: 108, close: 112 },
+      { open: 115, close: 110 }, // RED but close=110 is well above EMA20 (~104)
+    ]);
+    const fakeBinance = { getKlines: async () => klines };
+    const bot = { symbol: 'BTCUSDT', timeframe: '3m', safeTradeEnabled: true };
+    const st = await signalEngine.checkSafeTrade(bot, fakeBinance, indicators);
+    expect(st.greenCandle).toBe(false);
+    expect(st.aboveEma).toBe(true);  // confirms EMA telemetry still computed
+    expect(st.pass).toBe(false);
+    expect(st.skip).toBe(true);
+    expect(st.reason).toBe('blocked');
+  });
+
+  test('red candle below EMA20 → BLOCK', async () => {
+    // downtrend: flat history, last bar red and below EMA
+    const klines = makeKlines(100, [
+      { open: 100, close: 99 },
+      { open: 99, close: 98 },
+      { open: 98, close: 97 },
+      { open: 97, close: 95 }, // RED + close below EMA
+    ]);
+    const fakeBinance = { getKlines: async () => klines };
+    const bot = { symbol: 'BTCUSDT', timeframe: '3m', safeTradeEnabled: true };
+    const st = await signalEngine.checkSafeTrade(bot, fakeBinance, indicators);
+    expect(st.greenCandle).toBe(false);
+    expect(st.aboveEma).toBe(false);
+    expect(st.pass).toBe(false);
+    expect(st.skip).toBe(true);
+  });
+
+  test('doji (open === close) → BLOCK (strict > comparison)', async () => {
+    // last bar: open=close — strict > means greenCandle=false
+    const klines = makeKlines(100, [
+      { open: 100, close: 104 },
+      { open: 104, close: 108 },
+      { open: 108, close: 112 },
+      { open: 112, close: 112 }, // doji
+    ]);
+    const fakeBinance = { getKlines: async () => klines };
+    const bot = { symbol: 'BTCUSDT', timeframe: '3m', safeTradeEnabled: true };
+    const st = await signalEngine.checkSafeTrade(bot, fakeBinance, indicators);
+    expect(st.greenCandle).toBe(false);
+    expect(st.pass).toBe(false);
+    expect(st.skip).toBe(true);
+  });
+
+  test('insufficient data (<21 bars) → FAIL-OPEN', async () => {
+    const fakeBinance = { getKlines: async () => makeKlines(100, []).slice(0, 10) };
+    const bot = { symbol: 'BTCUSDT', timeframe: '3m', safeTradeEnabled: true };
+    const st = await signalEngine.checkSafeTrade(bot, fakeBinance, indicators);
+    expect(st.skip).toBe(false);
+    expect(st.reason).toBe('insufficient_data_open');
+    expect(st.superTF).toBe('4h');
+  });
+
+  test('API error → FAIL-OPEN', async () => {
+    const fakeBinance = { getKlines: async () => { throw new Error('binance 503'); } };
+    const bot = { symbol: 'BTCUSDT', timeframe: '3m', safeTradeEnabled: true };
+    const st = await signalEngine.checkSafeTrade(bot, fakeBinance, indicators);
+    expect(st.skip).toBe(false);
+    expect(st.reason).toBe('api_error_open');
+    expect(st.superTF).toBe('4h');
+  });
+
+  test('safeTradeEnabled=false → disabled (no filter call)', async () => {
+    // getKlines should NOT be called
+    const fakeBinance = { getKlines: jest.fn ? jest.fn() : async () => { throw new Error('should not call'); } };
+    const bot = { symbol: 'BTCUSDT', timeframe: '3m', safeTradeEnabled: false };
+    const st = await signalEngine.checkSafeTrade(bot, fakeBinance, indicators);
+    expect(st.skip).toBe(false);
+    expect(st.reason).toBe('disabled');
+  });
+
+  test('TF not in SAFE_TRADE_SUPER_TF_MAP → no-filter', async () => {
+    // TF=30m is not in map → no_super_tf, no Binance call
+    const fakeBinance = { getKlines: async () => { throw new Error('should not call'); } };
+    const bot = { symbol: 'BTCUSDT', timeframe: '30m', safeTradeEnabled: true };
+    const st = await signalEngine.checkSafeTrade(bot, fakeBinance, indicators);
+    expect(st.skip).toBe(false);
+    expect(st.reason).toBe('no_super_tf');
+    expect(st.superTF).toBe(null);
+  });
+});
