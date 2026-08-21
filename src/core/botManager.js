@@ -339,6 +339,47 @@ class BotManager {
                       buyQuoteQty: parseFloat(order.cummulativeQuoteQty),
                     }
                   );
+                  // FIX-2026-08-14: ส่ง Telegram alert เพื่อให้ user รู้ทันที — ก่อนหน้านี้ silent
+                  //   log เฉยๆ ทำให้ orphan ค้างเป็นเดือน (เช่น EPIC 2026-08-14 ค้าง 4 ชม.)
+                  //   - latch: ส่ง telegram เฉพาะเมื่อ `trade.updatedAt` เก่ากว่า 1 ชั่วโมง
+                  //     (คือ "ยังไม่ได้ alert ใน reconcile cycle นี้") — กัน spam ทุก 5 นาที
+                  //   - reconcile cycle ถัดไปจะ re-update trade.updatedAt → latch ใหม่อีก 1 ชม.
+                  const updatedAtMs = trade.updatedAt ? new Date(trade.updatedAt).getTime() : 0;
+                  const staleMs = Date.now() - updatedAtMs;
+                  const shouldAlert = staleMs > 60 * 60 * 1000; // > 1 hour since last update
+                  if (shouldAlert) {
+                    try {
+                      const telegramNotifier = require('../services/telegramNotifier');
+                      telegramNotifier.sendNow && telegramNotifier.sendNow('orphanBuyFilled', {
+                        botName: bot.name || bot.symbol,
+                        symbol: trade.symbol,
+                        tradeId: trade._id.toString(),
+                        buyOrderId: trade.buyOrderId,
+                        buyPrice: parseFloat(order.price) || parseFloat(order.cummulativeQuoteQty) / parseFloat(order.executedQty),
+                        buyQty: parseFloat(order.executedQty),
+                        buyFilledAt: new Date(order.updateTime || Date.now()).toISOString(),
+                        botEnabled: bot.enabled,
+                        botStatus: bot.status,
+                        autoPauseReason: bot.autoPauseReason || '',
+                        ts: Date.now(),
+                      });
+                    } catch (tgErr) {
+                      logger.warn({ err: tgErr.message }, 'reconcile: telegram alert (orphanBuyFilled) failed (non-fatal)');
+                    }
+                  }
+                  logger.error({
+                    tradeId: trade._id.toString(),
+                    botId: trade.botId.toString(),
+                    botName: bot.name,
+                    symbol: trade.symbol,
+                    buyOrderId: trade.buyOrderId,
+                    buyQty: parseFloat(order.executedQty),
+                    buyFilledAt: new Date(order.updateTime || Date.now()).toISOString(),
+                    botEnabled: bot.enabled,
+                    autoPauseReason: bot.autoPauseReason || '',
+                    telegramAlerted: shouldAlert,
+                    staleMsSinceLastUpdate: staleMs,
+                  }, 'reconcile: 🚨 ORPHAN BUY filled on DISABLED bot — user must re-enable bot OR run force-close manually');
                 }
               }
             } else if (order.status === 'PARTIALLY_FILLED') {
@@ -793,6 +834,22 @@ class BotManager {
       scanSingleBot(bot).catch((err) => {
         logger.warn({ botId: String(bot._id), symbol: bot.symbol, err: err.message }, 'botManager: enableBot → scanSingleBot failed');
       });
+    }
+    // FIX-2026-08-14: trigger reconcilePendingTrades() right after spawn so a
+    //   re-enabled bot picks up any orphan BUY-filled-without-SELL trades that
+    //   accumulated while it was disabled (e.g. EPIC 2026-08-14 incident where
+    //   bot was auto-paused 4 hours after BUY fill → DB stuck in 'filled' with
+    //   no sellOrderId, creating "10 positions vs 9 open orders" mismatch).
+    //   - previous behavior: enableBot spawned trader but waited up to
+    //     RECONCILE_INTERVAL_MS (5 min) for the periodic sweep to catch orphan.
+    //   - new: fire-and-forget reconcile immediately → trader.handleBuyFilled
+    //     places LIMIT_MAKER SELL @ TP for the orphan trade.
+    //   - reconcileInFlight guard: periodic sweep will skip this cycle.
+    if (!this.reconcileInFlight) {
+      this.reconcileInFlight = true;
+      this.reconcilePendingTrades()
+        .catch((err) => logger.warn({ botId: String(bot._id), err: err.message }, 'botManager: enableBot → reconcilePendingTrades failed'))
+        .finally(() => { this.reconcileInFlight = false; });
     }
     return bot;
   }

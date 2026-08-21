@@ -74,6 +74,11 @@ const DEFAULT_EVENTS = {
   //   - ใช้แทน password เมื่อลืม — ไม่ใช่ 2FA
   //   - default ON (user ปิดเองได้ใน Settings > Telegram Events)
   telegramLogin: true,
+  // FIX-2026-08-14: Orphan BUY filled on disabled bot — BUY filled แต่บอทปิดอยู่
+  //   (trader ถูก stop ไปแล้ว) → ไม่มีใคร place SELL → ค้างใน DB state='filled' + balance ค้างบน Binance
+  //   ก่อนหน้านี้ silent log → user ไม่รู้จนกว่าจะสังเกตเห็น "10 positions vs 9 open orders" ใน UI
+  //   ตอนนี้ส่ง telegram alert ทันที + latch ใน DB (orphanLatchedAt) กัน spam ทุก 5 นาที
+  orphanBuyFilled: true,
 };
 const DEFAULT_THRESHOLDS = {
   positionLossPct: 2, positionProfitPct: 1, positionStuckMin: 30,
@@ -341,6 +346,18 @@ function renderMessage(eventKey, p, cfg) {
             ? `\nUSDT remain: ${p.usdtTotal.toFixed(2)}  (≈ ${thbEq.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} THB)`
             : `\nUSDT remain: ${p.usdtTotal.toFixed(2)}`;
         }
+        // FIX-2026-08-13: Today P&L (running sum across all bots from start of local day)
+        //   - ใช้ aggregateTrades range ที่คำนวณใน handler (รวม trade ปัจจุบันแล้ว)
+        //   - แสดง USDT + THB บรรทัดเดียวกัน เพื่อให้ user เห็นภาพรวมวันนี้ทันทีหลัง fill
+        let todayPnlLine = '';
+        if (p.todayPnlUsdt != null && Number.isFinite(Number(p.todayPnlUsdt))) {
+          const tpnl = Number(p.todayPnlUsdt);
+          const tsign = tpnl >= 0 ? '+' : '';
+          const tthb = p.todayPnlThb != null && Number.isFinite(Number(p.todayPnlThb))
+            ? Number(p.todayPnlThb).toFixed(2)
+            : '?';
+          todayPnlLine = `\nToday P&L: ${tsign}${tpnl.toFixed(2)} USDT ~ ${tthb} THB`;
+        }
         // FIX-2026-08-01: structured sellReason — บอกว่า SELL trigger มาจากอะไร
         //   - ไม่แสดงถ้า p.reason ว่าง (backwards compat — trade เก่าไม่มี field)
         let reasonLine = '';
@@ -390,7 +407,7 @@ function renderMessage(eventKey, p, cfg) {
             reasonLine += `\nContext: ${contextLine}`;
           }
         }
-        return `${emoji} SELL filled\nBot: ${p.botName}\nSymbol: ${p.symbol}\nQty: ${formatQty(p.qty)} @${formatPrice(p.price, p.symbol)}\nP&L: ${sign}${pnl.toFixed(4)} USDT${pctInline}${reasonLine}${thbLine}${balLine}`;
+        return `${emoji} SELL filled\nBot: ${p.botName}\nSymbol: ${p.symbol}\nQty: ${formatQty(p.qty)} @${formatPrice(p.price, p.symbol)}\nP&L: ${sign}${pnl.toFixed(4)} USDT${pctInline}${reasonLine}${thbLine}${todayPnlLine}${balLine}`;
       }
       case 'insufficientBalance':
         return `💸 Insufficient USDT\nBot: ${p.botName}\nSymbol: ${p.symbol}\n${p.note || ''}`.trim();
@@ -398,6 +415,15 @@ function renderMessage(eventKey, p, cfg) {
         return `▶️ Bot enabled\nBot: ${p.botName}`;
       case 'botDisabled':
         return `⏸ Bot disabled\nBot: ${p.botName}`;
+      // FIX-2026-08-14: Orphan BUY filled on disabled bot — DB state='filled' แต่ Binance ไม่มี SELL
+      //   - บอทถูก disable ไปแล้ว (manual/auto-pause) แต่ BUY เพิ่ง fill → trader ถูก stop ไปแล้ว
+      //   - reconcile จะ alert ซ้ำทุก 5 นาที → กัน spam ด้วย orphanLatchedAt ใน DB (caller latch)
+      case 'orphanBuyFilled': {
+        const filledAgo = p.buyFilledAt ? Math.round((Date.now() - new Date(p.buyFilledAt).getTime()) / 60000) : null;
+        const agoTxt = filledAgo != null ? ` (เมื่อ ${filledAgo} นาทีที่แล้ว)` : '';
+        const reasonLine = p.autoPauseReason ? `\nAuto-pause reason: ${p.autoPauseReason}` : '';
+        return `🚨 ORPHAN BUY filled on DISABLED bot${agoTxt}\nBot: ${p.botName} (enabled=${p.botEnabled}, status=${p.botStatus})\nSymbol: ${p.symbol}\nBuy order: ${p.buyOrderId}\nQty: ${p.buyQty != null ? p.buyQty : '?'} @ ${p.buyPrice != null ? p.buyPrice : '?'} USDT${reasonLine}\n\n⚠️ ไม่มี SELL order บน Binance — ต้อง re-enable bot หรือ force-close ด้วยตัวเอง`;
+      }
       case 'botDeleted':
         return `🗑 Bot deleted\nBot: ${p.name || p.botId || '(unknown)'}`;
       case 'positionLoss':
@@ -829,6 +855,26 @@ function bindEventHandlers() {
         }
         // FIX-2026-07-27: USDT balance remain หลัง SELL fill (fail-safe)
         const bal = await fetchUsdtBalance();
+        // FIX-2026-08-13: Today P&L (running sum) — sum-only $group ของ realizedPnl across all bots
+        //   - ใช้ Trade.aggregate ตรงๆ (ไม่ Bot.find / ไม่ perBot map) เพราะที่นี่ต้องการแค่ pnlUsdt
+        //   - include trade ปัจจุบันในช่วง [startOfLocalDay(now), now+60s] (this trade already has sellFilledAt)
+        //   - ถ้า aggregate ล้ม → ไม่แสดง line นี้ (template guard ด้วย Number.isFinite)
+        let todayPnlUsdt = null;
+        let todayPnlThb = null;
+        try {
+          const tStart = startOfLocalDay(new Date());
+          const tEnd = new Date(Date.now() + 60_000); // include trade นี้ (saved ~now)
+          const rows = await Trade.aggregate([
+            { $match: { sellFilledAt: { $gte: tStart, $lt: tEnd }, realizedPnl: { $ne: null } } },
+            { $group: { _id: null, pnlUsdt: { $sum: '$realizedPnl' } } },
+          ]);
+          todayPnlUsdt = rows && rows[0] ? Number(rows[0].pnlUsdt) || 0 : 0;
+          if (fxRate != null && Number.isFinite(fxRate)) {
+            todayPnlThb = Number((todayPnlUsdt * fxRate).toFixed(2));
+          }
+        } catch (err) {
+          logger.warn({ err: err.message }, 'telegramNotifier: todayPnl aggregate failed — omit Today P&L line');
+        }
         // FIX-2026-08-09: compute position Context (held duration, F1-armed signal, partial-fill flag)
         //   - ใช้บอกผู้ใช้ว่า trade นี้อยู่ในสถานะอะไรก่อน close (ทำไมถึง trigger)
         //   - cap at 100 chars ใน template (truncate helper)
@@ -872,6 +918,9 @@ function bindEventHandlers() {
           reasonDetail: trade.sellReasonDetail || null,
           // FIX-2026-08-09: position context line (held duration + F1-armed flag + partial-fill)
           context: context || null,
+          // FIX-2026-08-13: Today P&L running sum across all bots (USDT + THB equivalent)
+          todayPnlUsdt, // null ถ้า aggregate ล้ม — template จะ skip line
+          todayPnlThb,  // null ถ้า fxRate unavailable — template จะแสดง '?'
         });
         // Reset anti-spam state เมื่อ trade จบ
         tradeNotifyState.delete(String(trade._id));
