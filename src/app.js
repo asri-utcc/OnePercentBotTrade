@@ -142,6 +142,8 @@ function createApp() {
   app.use('/api/history', historyRoutes);
   app.use('/api/daily-target', dailyTargetRoutes); // 2026-08-06: Daily Profit Target gauge
   app.use('/api/coins', require('./api/routes/coin.routes')); // FIX-2026-08-01: coin info aggregator
+// FIX-2026-08-21: Trade Analysis aggregator (includes soft-deleted bots)
+app.use('/api/analysis', require('./api/routes/analysis.routes'));
 
   // Health
   app.get('/health', (req, res) => {

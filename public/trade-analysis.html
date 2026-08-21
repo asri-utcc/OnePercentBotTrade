@@ -1,0 +1,683 @@
+<!doctype html>
+<html lang="th">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Trade Analysis - OnePercentBotTrade</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet" />
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+  <link href="/css/app.css" rel="stylesheet" />
+  <style>
+    /* ───── Trade Analysis page-specific styles ───── */
+    .ta-hero {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 0.75rem;
+      margin-bottom: 1rem;
+    }
+    .ta-hero .stat-tile .value { font-size: 1.45rem; }
+
+    .ta-section {
+      margin-bottom: 1.25rem;
+    }
+    .ta-section .lux-header h5 { margin: 0; font-size: 0.92rem; }
+
+    .ta-grid-2 {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(380px, 1fr));
+      gap: 1rem;
+    }
+
+    /* Bar charts (CSS-driven) */
+    .ta-bar-row {
+      display: grid;
+      grid-template-columns: 110px 1fr 80px 60px;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 0.25rem 0;
+      font-family: var(--font-mono, monospace);
+      font-size: 0.78rem;
+    }
+    .ta-bar-row .ta-bar-label {
+      color: var(--text-1);
+      font-weight: 600;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .ta-bar-row .ta-bar-track {
+      height: 10px;
+      background: rgba(255,255,255,0.04);
+      border-radius: 999px;
+      overflow: hidden;
+      position: relative;
+    }
+    .ta-bar-row .ta-bar-fill {
+      height: 100%;
+      border-radius: 999px;
+      transition: width 240ms ease;
+    }
+    .ta-bar-row .ta-bar-fill.is-bull  { background: linear-gradient(90deg, var(--bull-2), var(--bull-1)); }
+    .ta-bar-row .ta-bar-fill.is-bear  { background: linear-gradient(90deg, var(--bear-2), var(--bear-1)); }
+    .ta-bar-row .ta-bar-fill.is-gold  { background: linear-gradient(90deg, #c79100, var(--gold-1)); }
+    .ta-bar-row .ta-bar-fill.is-muted { background: linear-gradient(90deg, #4b5b76, #6e7e98); }
+    .ta-bar-row .ta-bar-num {
+      text-align: right;
+      color: var(--text-2);
+      font-variant-numeric: tabular-nums;
+    }
+    .ta-bar-row .ta-bar-wr {
+      text-align: right;
+      color: var(--text-3);
+      font-variant-numeric: tabular-nums;
+    }
+    .ta-bar-row .ta-bar-num.is-bull  { color: var(--bull-1); }
+    .ta-bar-row .ta-bar-num.is-bear  { color: var(--bear-1); }
+
+    .ta-empty {
+      padding: 1.5rem 1rem; text-align: center;
+      color: var(--text-3); font-size: 0.85rem;
+    }
+
+    /* Sparkline for daily PnL — 14px tall bars in a row */
+    .ta-spark {
+      display: flex;
+      align-items: flex-end;
+      gap: 1px;
+      height: 64px;
+      padding: 4px 0;
+      overflow-x: auto;
+      scrollbar-width: thin;
+    }
+    .ta-spark .ta-spark-bar {
+      min-width: 3px;
+      flex: 1 0 3px;
+      border-radius: 2px 2px 0 0;
+      transition: opacity 120ms ease;
+    }
+    .ta-spark .ta-spark-bar:hover { opacity: 0.7; }
+    .ta-spark .ta-spark-bar.is-bull { background: var(--bull-1); }
+    .ta-spark .ta-spark-bar.is-bear { background: var(--bear-1); }
+    .ta-spark .ta-spark-bar.is-flat { background: var(--text-4); }
+
+    .ta-heatmap {
+      display: grid;
+      grid-template-columns: 32px repeat(24, 1fr);
+      gap: 2px;
+      align-items: center;
+      font-family: var(--font-mono, monospace);
+      font-size: 0.65rem;
+    }
+    .ta-heatmap .ta-heat-label {
+      color: var(--text-3);
+      text-align: right;
+      padding-right: 4px;
+    }
+    .ta-heatmap .ta-heat-cell {
+      aspect-ratio: 1 / 1;
+      min-height: 14px;
+      border-radius: 3px;
+      background: rgba(255,255,255,0.04);
+      position: relative;
+    }
+    .ta-heatmap .ta-heat-cell:hover::after {
+      content: attr(data-tip);
+      position: absolute;
+      bottom: 110%; left: 50%;
+      transform: translateX(-50%);
+      background: var(--bg-0);
+      color: var(--text-1);
+      padding: 0.3rem 0.45rem;
+      border-radius: 6px;
+      white-space: pre;
+      font-family: var(--font-mono);
+      font-size: 0.7rem;
+      pointer-events: none;
+      box-shadow: var(--shadow-2);
+      z-index: 10;
+      border: 1px solid var(--border-mid);
+    }
+
+    .ta-meta-row {
+      display: flex; flex-wrap: wrap; gap: 0.75rem;
+      color: var(--text-3); font-size: 0.75rem;
+      font-family: var(--font-mono, monospace);
+    }
+    .ta-meta-row .pill {
+      padding: 0.2rem 0.55rem;
+      border-radius: 999px;
+      background: rgba(255,255,255,0.04);
+      border: 1px solid var(--border-soft);
+    }
+
+    .ta-conclusion {
+      display: flex;
+      flex-direction: column;
+      gap: 0.45rem;
+      padding: 0.5rem 0;
+    }
+    .ta-conclusion .ta-line {
+      padding: 0.45rem 0.7rem;
+      border-radius: 8px;
+      background: rgba(255,255,255,0.02);
+      border: 1px solid var(--border-soft);
+      font-size: 0.85rem;
+      color: var(--text-1);
+      line-height: 1.5;
+    }
+    .ta-conclusion .ta-line.is-warn {
+      background: rgba(255,181,71,0.10);
+      border-color: rgba(255,181,71,0.45);
+      color: var(--warn-1);
+    }
+    .ta-conclusion .ta-line.is-warn::before {
+      content: '⚠️ ';
+    }
+
+    .ta-stat-mini {
+      display: inline-flex; align-items: baseline; gap: 0.3rem;
+      color: var(--text-3); font-size: 0.7rem;
+      font-family: var(--font-mono);
+      margin-right: 0.5rem;
+    }
+    .ta-stat-mini b { color: var(--text-1); font-weight: 700; font-size: 0.82rem; }
+
+    .ta-trend {
+      display: inline-block; margin-left: 0.4rem;
+      padding: 0.1rem 0.45rem;
+      border-radius: 999px;
+      font-size: 0.65rem; font-weight: 700;
+      font-family: var(--font-mono);
+    }
+    .ta-trend.is-bull { background: rgba(0,229,184,0.18); color: var(--bull-1); }
+    .ta-trend.is-bear { background: rgba(255,77,109,0.18); color: var(--bear-1); }
+    .ta-trend.is-flat { background: rgba(148,163,184,0.18); color: var(--text-3); }
+
+    /* TP/SL Deep Dive cards */
+    .ta-reason-card {
+      background: rgba(255,255,255,0.02);
+      border: 1px solid var(--border-soft);
+      border-radius: 10px;
+      padding: 0.75rem 0.85rem;
+    }
+    .ta-reason-card-bull { border-color: rgba(0,229,184,0.35); background: rgba(0,229,184,0.05); }
+    .ta-reason-card-bear { border-color: rgba(255,77,109,0.35); background: rgba(255,77,109,0.05); }
+    .ta-reason-card-warn { border-color: rgba(255,181,71,0.45); background: rgba(255,181,71,0.06); }
+    .ta-reason-card .ta-reason-title {
+      font-weight: 700;
+      font-size: 0.9rem;
+      color: var(--text-1);
+      margin-bottom: 0.55rem;
+      letter-spacing: 0.02em;
+    }
+    .ta-reason-stats {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 0.3rem 0.85rem;
+    }
+    .ta-reason-stats > div {
+      display: flex; justify-content: space-between; align-items: baseline;
+      font-size: 0.78rem; font-family: var(--font-mono, monospace);
+      border-bottom: 1px dashed rgba(255,255,255,0.06);
+      padding-bottom: 2px;
+    }
+    .ta-reason-stats .lbl { color: var(--text-3); }
+    .ta-reason-stats .val { color: var(--text-1); font-weight: 600; }
+    .ta-reason-stats .val.is-bull { color: var(--bull-1); }
+    .ta-reason-stats .val.is-bear { color: var(--bear-1); }
+
+    /* Optimal config table tweaks */
+    .ta-grid-2 h6 { margin: 0 0 0.4rem; }
+  </style>
+</head>
+<body>
+  <nav class="app-nav" id="app-nav"></nav>
+
+  <div class="container-fluid px-3 px-md-4 py-3 py-md-4" style="max-width: 1400px;">
+    <div class="page-title">
+      <h3>📊 Trade Analysis</h3>
+      <div class="d-flex gap-2 align-items-center">
+        <span class="text-muted-3" id="ta-meta" style="font-size: 0.78rem;">—</span>
+        <button id="ta-refresh-btn" type="button" class="btn-lux btn-sm">🔄 รีเฟรซ</button>
+      </div>
+    </div>
+
+    <!-- ─── HERO: all-time totals ─────────────────────────── -->
+    <div class="ta-hero">
+      <div class="stat-tile" id="ta-tile-trades">
+        <div class="label">Total Trades</div>
+        <div class="value" id="ta-trades">—</div>
+        <div class="sub" id="ta-trades-meta">—</div>
+      </div>
+      <div class="stat-tile" id="ta-tile-pnl">
+        <div class="label">Total PnL (USDT)</div>
+        <div class="value" id="ta-pnl">—</div>
+        <div class="sub" id="ta-pnl-thb">—</div>
+      </div>
+      <div class="stat-tile" id="ta-tile-winrate">
+        <div class="label">Win Rate</div>
+        <div class="value" id="ta-winrate">—</div>
+        <div class="sub" id="ta-winrate-meta">—</div>
+      </div>
+      <div class="stat-tile" id="ta-tile-avg">
+        <div class="label">Avg PnL / Trade</div>
+        <div class="value" id="ta-avg-pnl">—</div>
+        <div class="sub" id="ta-avg-meta">—</div>
+      </div>
+      <div class="stat-tile" id="ta-tile-pf">
+        <div class="label">Profit Factor</div>
+        <div class="value" id="ta-pf">—</div>
+        <div class="sub" id="ta-pf-meta">—</div>
+      </div>
+      <div class="stat-tile" id="ta-tile-expectancy">
+        <div class="label">Expectancy / Trade</div>
+        <div class="value" id="ta-expectancy">—</div>
+        <div class="sub" id="ta-expectancy-meta">—</div>
+      </div>
+    </div>
+
+    <!-- ─── CONCLUSION (text insights) ─────────────────────── -->
+    <div class="lux-card ta-section">
+      <div class="lux-header">
+        <h5>💡 สรุปผลการวิเคราะห์ (Conclusion)</h5>
+        <span class="text-muted-3" id="ta-conclusion-meta" style="font-size: 0.72rem;">—</span>
+      </div>
+      <div class="lux-body">
+        <div class="ta-conclusion" id="ta-conclusion">
+          <div class="ta-empty">กำลังโหลด…</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ─── Row 1: TIME SERIES + EXTREMES ─────────────────── -->
+    <div class="ta-grid-2">
+      <div class="lux-card ta-section">
+        <div class="lux-header">
+          <h5>📈 Daily PnL Sparkline</h5>
+          <span class="text-muted-3" id="ta-daily-meta" style="font-size: 0.72rem;">—</span>
+        </div>
+        <div class="lux-body">
+          <div class="ta-spark" id="ta-daily-spark"></div>
+          <div class="ta-meta-row mt-2">
+            <span class="pill" id="ta-daily-best">Best: —</span>
+            <span class="pill" id="ta-daily-worst">Worst: —</span>
+            <span class="pill" id="ta-daily-trade-days">Trade days: —</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="lux-card ta-section">
+        <div class="lux-header">
+          <h5>🏆 Extremes (ไม้ที่ดี/แย่ที่สุด + วันที่ดี/แย่ที่สุด)</h5>
+        </div>
+        <div class="lux-body">
+          <div class="ta-bar-row">
+            <div class="ta-bar-label">🚀 Biggest Win</div>
+            <div class="ta-bar-track"><div class="ta-bar-fill is-bull" style="width:100%"></div></div>
+            <div class="ta-bar-num is-bull" id="ta-ext-win">—</div>
+            <div class="ta-bar-wr" id="ta-ext-win-meta">—</div>
+          </div>
+          <div class="ta-bar-row">
+            <div class="ta-bar-label">💀 Biggest Loss</div>
+            <div class="ta-bar-track"><div class="ta-bar-fill is-bear" style="width:100%"></div></div>
+            <div class="ta-bar-num is-bear" id="ta-ext-loss">—</div>
+            <div class="ta-bar-wr" id="ta-ext-loss-meta">—</div>
+          </div>
+          <div class="ta-bar-row">
+            <div class="ta-bar-label">🌟 Best Day</div>
+            <div class="ta-bar-track"><div class="ta-bar-fill is-bull" style="width:100%"></div></div>
+            <div class="ta-bar-num is-bull" id="ta-ext-bday">—</div>
+            <div class="ta-bar-wr" id="ta-ext-bday-meta">—</div>
+          </div>
+          <div class="ta-bar-row">
+            <div class="ta-bar-label">⛈️ Worst Day</div>
+            <div class="ta-bar-track"><div class="ta-bar-fill is-bear" style="width:100%"></div></div>
+            <div class="ta-bar-num is-bear" id="ta-ext-wday">—</div>
+            <div class="ta-bar-wr" id="ta-ext-wday-meta">—</div>
+          </div>
+          <div class="ta-meta-row mt-2">
+            <span class="pill" id="ta-ext-dd">Max DD ≈ —</span>
+            <span class="pill" id="ta-ext-sharpe">Sharpe-lite ≈ —</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ─── Row 2: MONTHLY + STREAKS ─────────────────────── -->
+    <div class="ta-grid-2">
+      <div class="lux-card ta-section">
+        <div class="lux-header">
+          <h5>📅 Monthly Performance</h5>
+          <span class="text-muted-3" id="ta-month-meta" style="font-size: 0.72rem;">—</span>
+        </div>
+        <div class="lux-body">
+          <div id="ta-month-body">
+            <div class="ta-empty">กำลังโหลด…</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="lux-card ta-section">
+        <div class="lux-header">
+          <h5>🔥 Streaks (Win/Loss Streak)</h5>
+        </div>
+        <div class="lux-body">
+          <div class="ta-bar-row">
+            <div class="ta-bar-label">Best Win Streak</div>
+            <div class="ta-bar-track"><div class="ta-bar-fill is-bull" id="ta-streak-win-fill" style="width:0%"></div></div>
+            <div class="ta-bar-num is-bull" id="ta-streak-win">—</div>
+            <div class="ta-bar-wr">—</div>
+          </div>
+          <div class="ta-bar-row">
+            <div class="ta-bar-label">Best Loss Streak</div>
+            <div class="ta-bar-track"><div class="ta-bar-fill is-bear" id="ta-streak-loss-fill" style="width:0%"></div></div>
+            <div class="ta-bar-num is-bear" id="ta-streak-loss">—</div>
+            <div class="ta-bar-wr">—</div>
+          </div>
+          <div class="ta-bar-row">
+            <div class="ta-bar-label">Current Streak</div>
+            <div class="ta-bar-track"><div class="ta-bar-fill is-muted" style="width:100%"></div></div>
+            <div class="ta-bar-num" id="ta-streak-current">—</div>
+            <div class="ta-bar-wr">—</div>
+          </div>
+          <div class="ta-meta-row mt-2">
+            <span class="pill">Win Trades: <b id="ta-streak-wins">—</b></span>
+            <span class="pill">Loss Trades: <b id="ta-streak-losses">—</b></span>
+            <span class="pill">Avg Win / Avg Loss = <b id="ta-streak-ratio">—</b></span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ─── Row 3: BY SYMBOL + BY TIMEFRAME ───────────────── -->
+    <div class="ta-grid-2">
+      <div class="lux-card ta-section">
+        <div class="lux-header">
+          <h5>💱 By Symbol (PnL & Win Rate ต่อเหรียญ)</h5>
+          <span class="text-muted-3" id="ta-sym-meta" style="font-size: 0.72rem;">—</span>
+        </div>
+        <div class="lux-body">
+          <div id="ta-sym-body">
+            <div class="ta-empty">กำลังโหลด…</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="lux-card ta-section">
+        <div class="lux-header">
+          <h5>⏱️ By Timeframe</h5>
+        </div>
+        <div class="lux-body">
+          <div id="ta-tf-body">
+            <div class="ta-empty">กำลังโหลด…</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ─── Row 4: SELL REASON ───────────────────────────── -->
+    <div class="lux-card ta-section">
+      <div class="lux-header">
+        <h5>🎯 By Sell Reason (เหตุผลที่ปิดไม้)</h5>
+        <span class="text-muted-3" id="ta-sr-meta" style="font-size: 0.72rem;">—</span>
+      </div>
+      <div class="lux-body">
+        <div class="ta-grid-2">
+          <div>
+            <h6 style="font-size: 0.78rem; color: var(--text-3); text-transform: uppercase; letter-spacing: 0.06em;">📦 Categories</h6>
+            <div id="ta-sr-cat-body">
+              <div class="ta-empty">กำลังโหลด…</div>
+            </div>
+          </div>
+          <div>
+            <h6 style="font-size: 0.78rem; color: var(--text-3); text-transform: uppercase; letter-spacing: 0.06em;">📋 Full Breakdown</h6>
+            <div id="ta-sr-full-body">
+              <div class="ta-empty">กำลังโหลด…</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ─── Row 5: HEATMAP (hour x day-of-week) ─────────── -->
+    <div class="lux-card ta-section">
+      <div class="lux-header">
+        <h5>🕐 PnL Heatmap (Day-of-week × Hour-of-day)</h5>
+        <span class="text-muted-3" id="ta-heat-meta" style="font-size: 0.72rem;">—</span>
+      </div>
+      <div class="lux-body">
+        <div class="ta-heatmap" id="ta-heatmap">
+          <div></div>
+        </div>
+        <div class="ta-meta-row mt-2">
+          <span class="pill">🟢 = PnL บวก</span>
+          <span class="pill">🔴 = PnL ลบ</span>
+          <span class="pill">ความเข้ม = ขนาดของ PnL (cap ที่ ±10 USDT)</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- ─── Row 6: HOLD DURATION + POSITION SIZING ───────── -->
+    <div class="ta-grid-2">
+      <div class="lux-card ta-section">
+        <div class="lux-header">
+          <h5>⏳ Hold Duration (เวลาถือครอง)</h5>
+          <span class="text-muted-3" id="ta-hold-meta" style="font-size: 0.72rem;">—</span>
+        </div>
+        <div class="lux-body">
+          <div id="ta-hold-body">
+            <div class="ta-empty">กำลังโหลด…</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="lux-card ta-section">
+        <div class="lux-header">
+          <h5>💰 Position Sizing (ไม้ละกี่ USDT)</h5>
+          <span class="text-muted-3" id="ta-size-meta" style="font-size: 0.72rem;">—</span>
+        </div>
+        <div class="lux-body">
+          <div id="ta-size-body">
+            <div class="ta-empty">กำลังโหลด…</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ─── Row 7: BOTS + DCA ───────────────────────────── -->
+    <div class="ta-grid-2">
+      <div class="lux-card ta-section">
+        <div class="lux-header">
+          <h5>🤖 Bot Leaderboard (Top 10 บอททำกำไร & แพ้)</h5>
+          <span class="text-muted-3" id="ta-bot-meta" style="font-size: 0.72rem;">—</span>
+        </div>
+        <div class="lux-body">
+          <div class="ta-grid-2">
+            <div>
+              <h6 style="font-size: 0.78rem; color: var(--bull-1); text-transform: uppercase; letter-spacing: 0.06em;">🏆 Best</h6>
+              <div id="ta-bot-best-body">
+                <div class="ta-empty">—</div>
+              </div>
+            </div>
+            <div>
+              <h6 style="font-size: 0.78rem; color: var(--bear-1); text-transform: uppercase; letter-spacing: 0.06em;">📉 Worst</h6>
+              <div id="ta-bot-worst-body">
+                <div class="ta-empty">—</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="lux-card ta-section">
+        <div class="lux-header">
+          <h5>📚 DCA vs Single-Trade</h5>
+        </div>
+        <div class="lux-body">
+          <div id="ta-dca-body">
+            <div class="ta-empty">กำลังโหลด…</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ─── Row 8: HOLD TIME vs PROFIT (deeper) ────────────── -->
+    <div class="lux-card ta-section">
+      <div class="lux-header">
+        <h5>⏳ Hold Time vs Profit — ถือนาน vs กำไร/ขาดทุน</h5>
+        <span class="text-muted-3" id="ta-hvp-meta" style="font-size: 0.72rem;">—</span>
+      </div>
+      <div class="lux-body">
+        <div class="ta-grid-2">
+          <div>
+            <h6 style="font-size: 0.78rem; color: var(--text-3); text-transform: uppercase; letter-spacing: 0.06em;">📊 สรุปเวลาถือ</h6>
+            <div class="ta-meta-row mb-2">
+              <span class="pill">⏱️ เฉลี่ยรวม: <b id="ta-hvp-avg-all">—</b></span>
+              <span class="pill">ชนะ: <b id="ta-hvp-avg-win">—</b></span>
+              <span class="pill">แพ้: <b id="ta-hvp-avg-loss">—</b></span>
+            </div>
+            <div id="ta-hvp-buckets">
+              <div class="ta-empty">กำลังโหลด…</div>
+            </div>
+          </div>
+          <div>
+            <h6 style="font-size: 0.78rem; color: var(--text-3); text-transform: uppercase; letter-spacing: 0.06em;">🚀 Extremes (เร็วสุด/นานสุด × กำไร/ขาดทุน)</h6>
+            <div class="ta-bar-row">
+              <div class="ta-bar-label">⚡ Scalp เร็วสุด (กำไร)</div>
+              <div class="ta-bar-track"><div class="ta-bar-fill is-bull" style="width:100%"></div></div>
+              <div class="ta-bar-num is-bull" id="ta-hvp-fast-profit">—</div>
+              <div class="ta-bar-wr" id="ta-hvp-fast-profit-meta">—</div>
+            </div>
+            <div class="ta-bar-row">
+              <div class="ta-bar-label">🐢 ถือนานสุด (กำไร)</div>
+              <div class="ta-bar-track"><div class="ta-bar-fill is-bull" style="width:100%"></div></div>
+              <div class="ta-bar-num is-bull" id="ta-hvp-long-profit">—</div>
+              <div class="ta-bar-wr" id="ta-hvp-long-profit-meta">—</div>
+            </div>
+            <div class="ta-bar-row">
+              <div class="ta-bar-label">⛈️ แพ้เร็วสุด</div>
+              <div class="ta-bar-track"><div class="ta-bar-fill is-bear" style="width:100%"></div></div>
+              <div class="ta-bar-num is-bear" id="ta-hvp-fast-loss">—</div>
+              <div class="ta-bar-wr" id="ta-hvp-fast-loss-meta">—</div>
+            </div>
+            <div class="ta-bar-row">
+              <div class="ta-bar-label">💀 ถือนานสุด (รวม)</div>
+              <div class="ta-bar-track"><div class="ta-bar-fill is-muted" style="width:100%"></div></div>
+              <div class="ta-bar-num" id="ta-hvp-long-all">—</div>
+              <div class="ta-bar-wr" id="ta-hvp-long-all-meta">—</div>
+            </div>
+            <div class="ta-bar-row">
+              <div class="ta-bar-label">💎 กำไรใหญ่สุด (ถือนาน?)</div>
+              <div class="ta-bar-track"><div class="ta-bar-fill is-bull" style="width:100%"></div></div>
+              <div class="ta-bar-num is-bull" id="ta-hvp-big-profit">—</div>
+              <div class="ta-bar-wr" id="ta-hvp-big-profit-meta">—</div>
+            </div>
+            <div class="ta-bar-row">
+              <div class="ta-bar-label">☠️ ขาดทุนหนักสุด (ถือนาน?)</div>
+              <div class="ta-bar-track"><div class="ta-bar-fill is-bear" style="width:100%"></div></div>
+              <div class="ta-bar-num is-bear" id="ta-hvp-big-loss">—</div>
+              <div class="ta-bar-wr" id="ta-hvp-big-loss-meta">—</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ─── Row 9: TP / SL Deep Dive ──────────────────────── -->
+    <div class="lux-card ta-section">
+      <div class="lux-header">
+        <h5>🎯 TP / SL Deep Dive — กำไร/ขาดทุนเชิงลึก</h5>
+        <span class="text-muted-3" id="ta-tpsl-meta" style="font-size: 0.72rem;">—</span>
+      </div>
+      <div class="lux-body">
+        <div class="ta-grid-2">
+          <div class="ta-reason-card ta-reason-card-bull">
+            <div class="ta-reason-title">🎯 TP (จบปกติ + DCA TP)</div>
+            <div class="ta-reason-stats">
+              <div><span class="lbl">ไม้</span><span class="val" id="ta-tp-count">—</span></div>
+              <div><span class="lbl">รวม</span><span class="val is-bull" id="ta-tp-pnl">—</span></div>
+              <div><span class="lbl">เฉลี่ย/ไม้</span><span class="val is-bull" id="ta-tp-avg">—</span></div>
+              <div><span class="lbl">น้อยสุด</span><span class="val" id="ta-tp-min">—</span></div>
+              <div><span class="lbl">มากสุด</span><span class="val is-bull" id="ta-tp-max">—</span></div>
+              <div><span class="lbl">ถือเฉลี่ย</span><span class="val" id="ta-tp-hold">—</span></div>
+              <div><span class="lbl">ไม้กำไรสุดถือ</span><span class="val" id="ta-tp-max-hold">—</span></div>
+              <div><span class="lbl">Win Rate</span><span class="val is-bull" id="ta-tp-wr">—</span></div>
+            </div>
+          </div>
+          <div class="ta-reason-card ta-reason-card-bear">
+            <div class="ta-reason-title">🛑 SL-UKC (ตัดขาดทุน)</div>
+            <div class="ta-reason-stats">
+              <div><span class="lbl">ไม้</span><span class="val" id="ta-sl-count">—</span></div>
+              <div><span class="lbl">รวม</span><span class="val is-bear" id="ta-sl-pnl">—</span></div>
+              <div><span class="lbl">เฉลี่ย/ไม้</span><span class="val is-bear" id="ta-sl-avg">—</span></div>
+              <div><span class="lbl">น้อยสุด</span><span class="val" id="ta-sl-min">—</span></div>
+              <div><span class="lbl">มากสุด</span><span class="val is-bear" id="ta-sl-max">—</span></div>
+              <div><span class="lbl">ถือเฉลี่ย</span><span class="val" id="ta-sl-hold">—</span></div>
+              <div><span class="lbl">ไม้แพ้หนักสุดถือ</span><span class="val" id="ta-sl-max-hold">—</span></div>
+              <div><span class="lbl">SL rate</span><span class="val is-bear" id="ta-sl-rate">—</span></div>
+            </div>
+          </div>
+          <div class="ta-reason-card ta-reason-card-warn">
+            <div class="ta-reason-title">🚨 CB Panic-sell (ตลาดไหล)</div>
+            <div class="ta-reason-stats">
+              <div><span class="lbl">ไม้</span><span class="val" id="ta-cb-count">—</span></div>
+              <div><span class="lbl">รวม</span><span class="val is-bear" id="ta-cb-pnl">—</span></div>
+              <div><span class="lbl">เฉลี่ย/ไม้</span><span class="val is-bear" id="ta-cb-avg">—</span></div>
+              <div><span class="lbl">ถือเฉลี่ย</span><span class="val" id="ta-cb-hold">—</span></div>
+              <div><span class="lbl">ไม้ที่ถือนานสุด</span><span class="val" id="ta-cb-max-hold">—</span></div>
+              <div><span class="lbl">อัตราการขาดทุน</span><span class="val is-bear" id="ta-cb-rate">—</span></div>
+            </div>
+          </div>
+          <div class="ta-reason-card">
+            <div class="ta-reason-title">🖐️ Manual Close (กดเอง)</div>
+            <div class="ta-reason-stats">
+              <div><span class="lbl">ไม้</span><span class="val" id="ta-mc-count">—</span></div>
+              <div><span class="lbl">รวม</span><span class="val" id="ta-mc-pnl">—</span></div>
+              <div><span class="lbl">เฉลี่ย/ไม้</span><span class="val" id="ta-mc-avg">—</span></div>
+              <div><span class="lbl">ถือเฉลี่ย</span><span class="val" id="ta-mc-hold">—</span></div>
+              <div><span class="lbl">ไม้ที่ถือนานสุด</span><span class="val" id="ta-mc-max-hold">—</span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ─── Row 10: OPTIMAL CONFIG FINDER ──────────────────── -->
+    <div class="lux-card ta-section">
+      <div class="lux-header">
+        <h5>🔬 Optimal Config Finder — หา config กำไรสูง + ถือสั้น + แพ้น้อย</h5>
+        <span class="text-muted-3" id="ta-opt-meta" style="font-size: 0.72rem;">—</span>
+      </div>
+      <div class="lux-body">
+        <p style="color: var(--text-3); font-size: 0.78rem; margin: 0 0 0.5rem;">
+          จัดกลุ่มเทรดตาม <b>timeframe × TP% bucket × KC× bucket × Safe-trade combo × CB combo</b>
+          แล้วให้คะแนน: <code>score = avgPnl × (WR/100) × √count / log(1 + holdMin)</code> — คะแนนสูง = กำไรดี × WR สูง × ถือสั้น × sample เยอะพอ
+        </p>
+        <div class="ta-grid-2">
+          <div>
+            <h6 style="font-size: 0.78rem; color: var(--bull-1); text-transform: uppercase; letter-spacing: 0.06em;">🏆 Top Configs (ควรใช้)</h6>
+            <div id="ta-opt-best-body">
+              <div class="ta-empty">กำลังโหลด…</div>
+            </div>
+          </div>
+          <div>
+            <h6 style="font-size: 0.78rem; color: var(--bear-1); text-transform: uppercase; letter-spacing: 0.06em;">⛔ Avoid Configs (ควรหลีกเลี่ยง)</h6>
+            <div id="ta-opt-worst-body">
+              <div class="ta-empty">กำลังโหลด…</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="text-muted-3 text-center mt-4" id="ta-footer-ts" style="font-size: 0.72rem;">
+      —
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+  <script src="/js/api.js"></script>
+  <script src="/js/ws-client.js"></script>
+  <script>window.NAV_ACTIVE = 'analysis';</script>
+  <script src="/js/partials/nav.js"></script>
+  <script src="/js/pages/trade-analysis.js"></script>
+</body>
+</html>
