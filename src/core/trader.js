@@ -4238,6 +4238,24 @@ class Trader {
         return;
       }
 
+      // FIX-2026-08-21 (rev2): release buy commitment on order acceptance
+      //   - เดิม release เฉพาะตอน reject (line 4208) → committed สะสมทุก BUY ที่สำเร็จ
+      //     → counter โตเรื่อยจน block บอทอื่น (อาการ "in-flight committed 54.5057"
+      //     ทั้งที่ free 59.7 USDT และ reserve=0)
+      //   - fix: release ทันทีหลัง Binance accept order
+      //     - LIMIT_MAKER pending → USDT ถูก Binance lock (freeUsdt จาก next getAccount
+      //       จะ exclude ส่วนนี้เอง) → counter ไม่ต้อง track ซ้ำ
+      //     - ถ้า fill ทันที → USDT ถูกใช้ไปแล้ว → counter ไม่ต้อง track
+      //   - defense-in-depth: handleBuyFilled ก็ release อีกครั้ง (no-op ถ้า release แล้ว)
+      if (claimedBuy) {
+        buyCommitment.releaseBuy(requiredWithBuffer);
+        claimedBuy = false;
+        logger.debug({
+          botId: this.bot._id.toString(),
+          releasedUsdt: requiredWithBuffer.toFixed(4),
+        }, 'trader: BUY order accepted — buy commitment released');
+      }
+
       await Trade.updateOne(
         { _id: trade._id },
         {
@@ -6683,6 +6701,20 @@ class Trader {
       }, 'trader: top_up — MARKET BUY rejected, falling back to accept_partial');
       // FIX-2026-07-31 (BUG-8): keep state as 'partial_wait' — see L2946 comment
       return this._placeSellForPartialFill(trade, fresh);
+    }
+
+    // FIX-2026-08-21 (rev2): release buy commitment on MARKET BUY success
+    //   - MARKET BUY fills immediately → USDT spent → ไม่ in-flight อีกต่อไป
+    //   - เดิม: release เฉพาะตอน reject (line 6667, 6678) → counter สะสมทุก top-up
+    //     → บอทอื่นโดนบล็อก
+    if (topUpClaimed) {
+      buyCommitment.releaseBuy(topUpNotional);
+      topUpClaimed = false;
+      logger.debug({
+        botId: this.bot._id.toString(),
+        tradeId: trade._id.toString(),
+        releasedUsdt: topUpNotional.toFixed(4),
+      }, 'trader: top_up — MARKET BUY executed, buy commitment released');
     }
 
     const topUpExecuted = parseFloat(topUpResp.executedQty);

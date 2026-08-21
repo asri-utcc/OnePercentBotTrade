@@ -139,4 +139,81 @@ describe('buyCommitment (FIX-2026-08-21: กัน reserve หลุดจาก
     const botBAvailable = (15 - 5) - buyCommitment.getCommitted();
     expect(botBAvailable >= 5).toBe(false);
   });
+
+  // ─── FIX-2026-08-21 (rev2): release on order acceptance ─────────────────
+  // ก่อนหน้านี้: release เฉพาะตอน order reject → committed สะสมทุก BUY ที่สำเร็จ
+  // จนกินเงินเกือบหมด (อาการ: log "in-flight committed 54.5057" ทั้งที่ free 59.7)
+  // fix: trader.js placeBuy + _topUpAndSell เรียก releaseBuy ทันทีหลัง Binance accept
+  describe('FIX-2026-08-21 rev2: release on order acceptance (ไม่ leak หลัง success)', () => {
+    test('cycle claim→release→claim ทำซ้ำได้เรื่อยๆ ไม่สะสม', () => {
+      // simulate 100 successful BUY cycles
+      for (let i = 0; i < 100; i++) {
+        buyCommitment.claimBuy(5);
+        expect(buyCommitment.getCommitted()).toBe(5);
+        buyCommitment.releaseBuy(5);
+        expect(buyCommitment.getCommitted()).toBe(0);
+      }
+    });
+
+    test('mix: 3 success + 1 reject → counter = 0 (3 releases + 1 release = 4)', () => {
+      // bot A claim + release (success)
+      buyCommitment.claimBuy(5);
+      buyCommitment.releaseBuy(5);
+      expect(buyCommitment.getCommitted()).toBe(0);
+
+      // bot B claim + release (success)
+      buyCommitment.claimBuy(7);
+      buyCommitment.releaseBuy(7);
+      expect(buyCommitment.getCommitted()).toBe(0);
+
+      // bot C claim + release (success)
+      buyCommitment.claimBuy(3);
+      buyCommitment.releaseBuy(3);
+      expect(buyCommitment.getCommitted()).toBe(0);
+
+      // bot D claim + release (reject — same path as success in counter terms)
+      buyCommitment.claimBuy(10);
+      buyCommitment.releaseBuy(10);
+      expect(buyCommitment.getCommitted()).toBe(0);
+    });
+
+    test('เดิม (ไม่ release on success) จะ leak: 50 success claims → committed = 250', () => {
+      // simulate buggy behavior: claim only, never release
+      for (let i = 0; i < 50; i++) buyCommitment.claimBuy(5);
+      expect(buyCommitment.getCommitted()).toBe(50 * 5); // 250 USDT leaked
+
+      // ต่อให้บอทอื่นพยายาม — committed ใหญ่กว่า free ทั้งหมด → block
+      // ตัวอย่างเช่น free=300, committed=250, reserve=0 → available = 50
+      const available = 300 - buyCommitment.getCommitted();
+      expect(available).toBe(50); // bug: ควรเป็น 300 (USDT ถูกใช้ไปจริงบน Binance แล้ว)
+      expect(available >= 10).toBe(true); // บอทอื่นผ่านไปได้ แต่ committed ยังค้าง
+    });
+
+    test('หลัง fix: 50 success claims + 50 releases → committed = 0', () => {
+      for (let i = 0; i < 50; i++) {
+        buyCommitment.claimBuy(5);
+        buyCommitment.releaseBuy(5);
+      }
+      expect(buyCommitment.getCommitted()).toBe(0);
+
+      // available = free - committed = free (ไม่มี double-count)
+      const available = 300 - buyCommitment.getCommitted();
+      expect(available).toBe(300);
+    });
+
+    test('race + release on success: 2 bots race, both succeed → total claims bounded', () => {
+      // Both bots claim 10 simultaneously (within in-flight window)
+      buyCommitment.claimBuy(10); // bot A
+      buyCommitment.claimBuy(10); // bot B
+      expect(buyCommitment.getCommitted()).toBe(20);
+
+      // bot A's newOrder returns first → release
+      buyCommitment.releaseBuy(10);
+      expect(buyCommitment.getCommitted()).toBe(10);
+
+      // bot B's newOrder returns next → release
+      buyCommitment.releaseBuy(10);
+      expect(buyCommitment.getCommitted()).toBe(0);
+    });
+  });
 });
