@@ -571,6 +571,12 @@
           </div>
         </div>
         <div class="modal-footer lux-modal-footer">
+          <!-- FIX-2026-08-14: Import file-based (export only on bot-edit) -->
+          <div class="d-flex gap-2 flex-wrap align-items-center w-100 mb-2">
+            <button type="button" class="btn btn-sm btn-outline-info" id="nb-import-replace" title="โหลดไฟล์ทับฟอร์ม (symbol ไม่ถูกแก้)">📥 Import (Replace)</button>
+            <button type="button" class="btn btn-sm btn-outline-info" id="nb-import-merge" title="โหลดไฟล์แบบ merge · อัพเดทเฉพาะ field ที่อยู่ในไฟล์">📥 Import (Merge)</button>
+          </div>
+          <div id="nb-io-status" class="text-muted small w-100 mb-2"></div>
           <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">ยกเลิก</button>
           <button type="button" class="btn btn-primary" id="nb-create">
             <span class="btn-glyph">✨</span>
@@ -743,6 +749,8 @@
   <script src="/js/luxConfirm.js"></script>
   <script src="/js/partials/positionCard.js"></script>
   <script src="/js/partials/qualityModal.js"></script>
+  <!-- FIX-2026-08-14: Import/Export bot settings (shared across 4 surfaces) -->
+  <script src="/js/botConfigIO.js"></script>
   <!-- FIX-2026-08-01: Master Config modal — bulk-edit หลายบอท -->
   <script src="/js/partials/masterConfigModal.js"></script>
   <script src="/js/pages/bots.js"></script>

@@ -2117,7 +2117,7 @@ router.post('/bulk-update', requireAuth, async (req, res) => {
     const allowed = [
       'capitalPerTrade', 'maxTrades', 'tpPercent', 'retryTimeMin', 'retryMax',
       'timeframe', 'stopLossOnUpperKC', 'autoUpdateTp', 'kcMult', 'minSpreadTicks',
-      's1OnlyDown', 'xs1Enabled', 'cbEnabled', 'cbv2Enabled', 'cbv2LockHours', 'safeTradeEnabled',
+      's1OnlyDown', 'xs1Enabled', 'cbEnabled', 'cbv2Enabled', 'cbv2LockHours', 'cbv3Enabled', 'cbv3LockHours', 'safeTradeEnabled',
       // FIX-2026-08-03: Safe-trade filter #2 (trendline) — bulk-update support
       'safeTradeTrendlineEnabled',
       // FIX-2026-08-05: Safe-trade filter #3 (no-trade engulfing/SS) — bulk-update support
