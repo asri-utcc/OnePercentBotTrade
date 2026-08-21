@@ -316,6 +316,19 @@ const appConfigSchema = new mongoose.Schema(
     //   - Clamp 0..1,000,000 USDT (sanity ceiling — typical user reserve is 0..1k)
     // ═══════════════════════════════════════════════════════════════════════
     walletReserveUsdt: { type: Number, default: 0, min: 0, max: 1_000_000 },
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // FIX-2026-08-21: Binance API rate-limit capacity (token-bucket)
+    //   - capacity (REQUEST_WEIGHT per minute) for the IP-bucket in binanceRest.js
+    //   - default 6000 (= Binance standard IP-based limit)
+    //   - user can lower it via Settings → 🛒 การซื้อขาย → 🌐 Binance API — Rate Limit
+    //     เช่น 1 server รันหลาย instance / หลายระบบ → หาร capacity กัน
+    //     clamp 500..120000 (Binance Bot Account allows up to 120,000/min)
+    //   - engine: binanceRest.RateLimiter.setCapacity() (in-place, no restart)
+    //   - cache: src/services/binanceRateLimitConfig.js (30s TTL, mirror cbVersion.js)
+    //   - validation/clamp: PUT /api/admin/rate-limit (admin.routes.js)
+    // ═══════════════════════════════════════════════════════════════════════
+    binanceRateLimitPerMin: { type: Number, default: 6000, min: 500, max: 120000 },
   },
   { timestamps: true }
 );

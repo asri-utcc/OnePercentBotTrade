@@ -7,12 +7,35 @@ const logger = require('../utils/logger');
 
 // ─── Rate limiter แบบ token bucket ตาม X-MBX-USED-WEIGHT-1M ────
 // IP-based REQUEST_WEIGHT limit = 6000/min (verified via GET /api/v3/exchangeInfo.rateLimits)
+// FIX-2026-08-21: capacity ปรับได้ runtime ผ่าน setCapacity() + src/services/binanceRateLimitConfig
+//   กรณี server เดียวรันหลาย instance (หรือหลายระบบ) ให้หาร capacity กัน
+//   ตัวอย่าง: 2 ระบบแบ่ง 6000/min → ตั้ง 3000/min ต่อ instance
 class RateLimiter {
   constructor({ capacity = 6000, refillPerMs = 6000 / 60000 } = {}) {
     this.capacity = capacity;
-    this.tokens = capacity;
     this.refillRate = refillPerMs;
+    this.tokens = capacity;
     this.lastRefill = Date.now();
+  }
+
+  /**
+   * Update capacity (e.g. user changed via Settings → /api/admin/rate-limit).
+   * - Recompute refillRate = capacity / 60000 (tokens/ms)
+   * - ไม่ reset tokens (preserves in-flight budget) — clamp ให้ไม่เกิน capacity ใหม่
+   */
+  setCapacity(newCapacity) {
+    if (!Number.isFinite(newCapacity) || newCapacity <= 0) return;
+    if (newCapacity === this.capacity) return;
+    const oldCapacity = this.capacity;
+    this.capacity = newCapacity;
+    this.refillRate = newCapacity / 60000;
+    if (this.tokens > this.capacity) {
+      this.tokens = this.capacity;
+    }
+    logger.info(
+      { oldCapacity, newCapacity, refillRate: this.refillRate, tokens: this.tokens },
+      'binance: rate limit capacity updated'
+    );
   }
 
   async take(weight = 1) {
@@ -29,22 +52,63 @@ class RateLimiter {
 
       const needed = weight - this.tokens;
       const waitMs = Math.ceil(needed / this.refillRate);
-      logger.debug({ waitMs, weight }, 'rate limit wait');
+      logger.debug({ waitMs, weight, capacity: this.capacity }, 'rate limit wait');
       await new Promise((r) => setTimeout(r, waitMs));
     }
   }
 
   updateFromHeaders(headers) {
     const used = parseInt(headers['x-mbx-used-weight-1m'] || '0', 10);
-    // แจ้งเตือนเมื่อใช้เกิน 90% (5400/min) — เลิกรบกวนตอนโหลดปกติ
-    if (used > this.capacity * 0.9) {
+    // แจ้งเตือนเมื่อใช้เกิน 90% ของ capacity — เลิกรบกวนตอนโหลดปกติ
+    const warnAt = this.capacity * 0.9;
+    if (used > warnAt) {
       logger.warn({ used, capacity: this.capacity }, 'binance weight approaching limit');
     }
-    this.tokens = Math.max(0, this.capacity - used);
+    // clamp กับ capacity ปัจจุบัน (กรณี capacity ถูกปรับลดแต่ server ยังรายงาน used สูง)
+    const cap = Math.max(1, this.capacity);
+    this.tokens = Math.max(0, cap - used);
+  }
+
+  /**
+   * Snapshot สำหรับ status endpoint / telemetry
+   * - capacity: ค่าที่ตั้งไว้ (จาก AppConfig.binanceRateLimitPerMin)
+   * - used (estimate): capacity - tokens
+   */
+  status() {
+    return {
+      capacity: this.capacity,
+      refillRate: this.refillRate,
+      tokens: this.tokens,
+      usedEstimated: Math.max(0, this.capacity - this.tokens),
+      lastRefill: this.lastRefill,
+    };
   }
 }
 
 const limiter = new RateLimiter();
+
+// FIX-2026-08-21: helper สำหรับเรียก setCapacity จากภายนอก (route handler + startup boot)
+//   ใช้ mutex เพื่อกัน race ตอน 2 process ยิงพร้อมกัน
+let _capacityUpdateInflight = null;
+function setRateLimitCapacity(newCapacity) {
+  if (typeof newCapacity !== 'number' || !Number.isFinite(newCapacity) || newCapacity <= 0) {
+    return { ok: false, error: `Invalid capacity: ${newCapacity}` };
+  }
+  if (_capacityUpdateInflight) return _capacityUpdateInflight;
+  _capacityUpdateInflight = (async () => {
+    try {
+      limiter.setCapacity(newCapacity);
+      return { ok: true, capacity: newCapacity };
+    } finally {
+      _capacityUpdateInflight = null;
+    }
+  })();
+  return _capacityUpdateInflight;
+}
+
+function getRateLimitStatus() {
+  return limiter.status();
+}
 
 // ─── HTTP client ────────────────────────────────────────
 const http = axios.create({
@@ -439,4 +503,8 @@ module.exports = {
   nowMsBinance,           // FIX-2026-07-14: export �ำหรับ signed timestamps
   refreshServerTimeOffset,// FIX-2026-07-14: export สำหรับ one-shot sync (เช่นตอน botManager.start)
   ensureTimeOffset,
+  // FIX-2026-08-21: dynamic rate-limit capacity (Settings → /api/admin/rate-limit)
+  setRateLimitCapacity,
+  getRateLimitStatus,
+  _RateLimiterClass: RateLimiter, // exported for unit tests
 };

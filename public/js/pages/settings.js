@@ -13,6 +13,7 @@ let dailyTarget = null; // 2026-08-06: daily target gauge config
 let autoAddBotCfg = null; // FIX-2026-08-07: auto add new bot config
 let adminCfg = null;   // FIX-2026-08-08 (rev2): DPS tunables
 let botDefaults = null; // FIX-2026-08-08 (rev3): Bot Defaults
+let rateLimit = null;  // FIX-2026-08-21: Binance API rate-limit capacity
 
 async function init() {
   const me = await API.get('/api/auth/me').catch(() => null);
@@ -65,6 +66,13 @@ async function loadConfig() {
     } catch (err) {
       console.warn('bot-defaults load failed:', err.message);
       botDefaults = {};
+    }
+    // FIX-2026-08-21: Binance API rate-limit
+    try {
+      rateLimit = await API.get('/api/admin/rate-limit');
+    } catch (err) {
+      console.warn('rate-limit load failed:', err.message);
+      rateLimit = { capacity: 6000, min: 500, max: 120000, default: 6000, limiter: { tokens: 0 } };
     }
     render();
   } catch (err) {
@@ -133,6 +141,7 @@ function render() {
         <h5 id="group-trading" class="settings-group-title">🛒 การซื้อขาย</h5>
         <p class="text-muted-3 small mb-3">ค่าเกี่ยวกับการเทรด (DPS + CB Version + Daily Target)</p>
 
+        ${renderRateLimitSection()}
         ${renderCbVersionSection()}
         ${renderDpsSection()}
         ${renderDailyTargetSection()}
@@ -801,6 +810,66 @@ function renderTelegramThresholdsSection(th) {
   `);
 }
 
+// ─── 🛒 Section: Binance API Rate Limit (FIX-2026-08-21) ──────────
+function renderRateLimitSection() {
+  const rl = rateLimit || { capacity: 6000, min: 500, max: 120000, default: 6000, limiter: { tokens: 0 } };
+  const cap = Number.isFinite(rl.capacity) ? rl.capacity : 6000;
+  const min = rl.min || 500;
+  const max = rl.max || 120000;
+  const def = rl.default || 6000;
+  const usedEstimated = Math.max(0, cap - (rl.limiter && Number.isFinite(rl.limiter.tokens) ? rl.limiter.tokens : 0));
+  const usedPct = cap > 0 ? Math.min(100, Math.round((usedEstimated / cap) * 100)) : 0;
+  const presetHalf = Math.max(min, Math.round(def / 2));
+  const presetThird = Math.max(min, Math.round(def / 3));
+  const presetQuarter = Math.max(min, Math.round(def / 4));
+  return section('sec-rate-limit', '🌐', 'Binance API — Rate Limit (token-bucket capacity)', false, `
+    <div class="alert alert-info small mb-3">
+      <strong>📌 ใช้เมื่อไหร่:</strong> ถ้า server เครื่องนี้รันหลาย instance / หลายระบบ ที่ share public IP เดียวกัน
+      Binance จะนับ REQUEST_WEIGHT รวมกัน → ควรหาร capacity กัน (เช่น 2 ระบบ → ตั้ง 3000/min ต่อ instance)
+      <br/><strong>ค่าเริ่มต้น:</strong> ${def} (Binance IP-based limit) · <strong>ช่วง:</strong> ${min}..${max}
+      <br/><strong>Bot Account:</strong> ถ้าใช้ Binance Bot Account จะได้สูงสุด 120,000/min
+    </div>
+
+    <div class="row g-3">
+      <div class="col-md-4">
+        <label class="form-label">🎚 Capacity (REQUEST_WEIGHT / นาที)</label>
+        <input type="number" class="form-control" id="rl-capacity" value="${cap}" step="100" min="${min}" max="${max}" />
+        <small class="text-muted">ช่วง ${min}..${max} · มีผลทันที (no restart)</small>
+      </div>
+      <div class="col-md-8">
+        <label class="form-label">⚡ Presets (จาก default ${def})</label>
+        <div class="d-flex gap-2 flex-wrap">
+          <button type="button" class="btn btn-outline-secondary btn-sm rl-preset" data-cap="${def}">🎯 ${def} (1 instance)</button>
+          <button type="button" class="btn btn-outline-secondary btn-sm rl-preset" data-cap="${presetHalf}">½ × ${def} = ${presetHalf} (2 instances)</button>
+          <button type="button" class="btn btn-outline-secondary btn-sm rl-preset" data-cap="${presetThird}">⅓ × ${def} = ${presetThird} (3 instances)</button>
+          <button type="button" class="btn btn-outline-secondary btn-sm rl-preset" data-cap="${presetQuarter}">¼ × ${def} = ${presetQuarter} (4 instances)</button>
+          <button type="button" class="btn btn-outline-warning btn-sm" id="rl-reset-default">↩️ Reset → ${def}</button>
+        </div>
+        <small class="text-muted d-block mt-1">คลิก preset เพื่อกรอกอัตโนมัติ แล้วกด 💾 บันทึก</small>
+      </div>
+    </div>
+
+    <div class="mt-3">
+      <button type="button" class="btn btn-primary" id="btn-save-rl">💾 บันทึก Rate Limit</button>
+      <button type="button" class="btn btn-outline-info ms-2" id="btn-reload-rl">🔄 Refresh สถานะ</button>
+      <span class="ms-2 text-muted small" id="rl-status"></span>
+    </div>
+
+    <div class="mt-3">
+      <strong>📊 Live limiter (in-process):</strong>
+      <div>capacity = <code>${cap}</code> · used ≈ <code>${usedEstimated}</code> (${usedPct}%) · tokens คงเหลือ ≈ <code>${Math.max(0, cap - usedEstimated)}</code></div>
+      <div class="progress mt-2" style="height: 8px;">
+        <div class="progress-bar ${usedPct > 90 ? 'bg-danger' : usedPct > 70 ? 'bg-warning' : 'bg-success'}" role="progressbar" style="width: ${usedPct}%" aria-valuenow="${usedPct}" aria-valuemin="0" aria-valuemax="100"></div>
+      </div>
+      <small class="text-muted mt-2 d-block">
+        <strong>หมายเหตุ:</strong> ใช้ได้กับทุก Binance calls (signed + public) — binanceRest.RateLimiter token-bucket
+        <br/>refill rate = <code>${(cap / 60000).toFixed(4)}</code> token/ms ≈ <code>${(cap / 60).toFixed(2)}</code> token/sec
+        <br/>ถ้าเห็น <code class="text-danger">weight approaching limit</code> ใน log → ลดค่า หรือรอ spread ให้กระจายดีขึ้น
+      </small>
+    </div>
+  `);
+}
+
 // ─── 🛒 Section: CB Version ──────────────────────────────────────
 function renderCbVersionSection() {
   return section('sec-cb-ver', '⚡', 'CB Version (v2 vs v3)', false, `
@@ -1112,6 +1181,25 @@ function bindEvents() {
   if (sdps) sdps.onclick = saveDpsConfig;
   const rdps = document.getElementById('btn-dps-reset-all');
   if (rdps) rdps.onclick = resetDpsStateAll;
+
+  // FIX-2026-08-21: Rate Limit
+  const srl = document.getElementById('btn-save-rl');
+  if (srl) srl.onclick = saveRateLimit;
+  const rrl = document.getElementById('btn-reload-rl');
+  if (rrl) rrl.onclick = () => loadConfig();
+  const rlReset = document.getElementById('rl-reset-default');
+  if (rlReset) rlReset.onclick = () => {
+    const input = document.getElementById('rl-capacity');
+    if (input) input.value = defCapacity();
+  };
+  // preset buttons — fill input + save in one click
+  document.querySelectorAll('.rl-preset').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const input = document.getElementById('rl-capacity');
+      if (input) input.value = btn.getAttribute('data-cap');
+      saveRateLimit();
+    });
+  });
 
   // Bot Defaults (FIX-2026-08-08 rev3)
   const sbd = document.getElementById('btn-save-bd');
@@ -1443,6 +1531,40 @@ async function saveAutoDeleteBot() {
     setStatus('adb-status', `✅ บันทึกแล้ว · Auto Delete ${enabled ? '🟢 ON' : '⚪ OFF'} · ${days} วัน / warning ${warningDays} วัน`);
     await loadConfig();
   } catch (err) { setStatus('adb-status', '❌ ' + (err.body && err.body.error ? err.body.error : err.message), true); }
+}
+
+// ════════ Rate Limit (FIX-2026-08-21) ════════
+function defCapacity() {
+  return (rateLimit && Number.isFinite(rateLimit.default)) ? rateLimit.default : 6000;
+}
+function rlMin() { return (rateLimit && Number.isFinite(rateLimit.min)) ? rateLimit.min : 500; }
+function rlMax() { return (rateLimit && Number.isFinite(rateLimit.max)) ? rateLimit.max : 120000; }
+
+async function saveRateLimit() {
+  const raw = document.getElementById('rl-capacity').value;
+  const n = parseInt(raw, 10);
+  if (!Number.isFinite(n) || n <= 0) {
+    setStatus('rl-status', '❌ ค่าต้องเป็นจำนวนเต็มบวก', true);
+    return;
+  }
+  if (n < rlMin()) {
+    setStatus('rl-status', `❌ ขั้นต่ำ ${rlMin()}`, true);
+    return;
+  }
+  if (n > rlMax()) {
+    setStatus('rl-status', `❌ ขั้นสูง ${rlMax()}`, true);
+    return;
+  }
+  try {
+    setStatus('rl-status', '⏳ กำลังอัปเดต…');
+    const resp = await API.put('/api/admin/rate-limit', { capacity: n, password: window._settingsPassword });
+    rateLimit = resp;
+    setStatus('rl-status', `✅ บันทึกแล้ว · capacity = ${resp.capacity} · tokens = ${Math.round((resp.limiter && resp.limiter.tokens) || 0)}`);
+    // re-render เพื่อ update progress bar
+    setTimeout(() => loadConfig(), 600);
+  } catch (err) {
+    setStatus('rl-status', '❌ ' + (err.body && err.body.error ? err.body.error : err.message), true);
+  }
 }
 
 // ════════ DPS ════════

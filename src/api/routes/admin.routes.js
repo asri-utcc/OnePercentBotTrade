@@ -171,6 +171,86 @@ router.put('/app-config', requireAuth, requireSettingsPassword, async (req, res)
   }
 });
 
+// ═══════════════════════════════════════════════════════════════════════
+// FIX-2026-08-21: Binance API rate-limit capacity (token-bucket)
+//   - GET /api/admin/rate-limit
+//       → return current capacity + live limiter status (tokens/used estimate)
+//   - PUT /api/admin/rate-limit
+//       → user updates capacity (clamp 500..120000) — applies to live limiter
+//       → when 1 server รันหลาย instance / หลายระบบ ให้หาร capacity กัน
+//         เช่น 2 ระบบ → capacity = 6000 / 2 = 3000 ต่อ instance
+//   - requireSettingsPassword (admin-level — same as PUT /app-config)
+//
+// Response shape:
+//   {
+//     capacity: 6000,
+//     min: 500,
+//     max: 120000,
+//     default: 6000,
+//     limiter: { tokens, usedEstimated, refillRate, lastRefill }
+//   }
+// ═══════════════════════════════════════════════════════════════════════
+const rateLimitConfig = require('../../services/binanceRateLimitConfig');
+const binanceRest = require('../../binance/binanceRest');
+
+router.get('/rate-limit', requireAuth, async (req, res) => {
+  try {
+    const capacity = await rateLimitConfig.getBinanceRateLimit();
+    res.json({
+      capacity,
+      min: rateLimitConfig.MIN_VALUE,
+      max: rateLimitConfig.MAX_VALUE,
+      default: rateLimitConfig.DEFAULT_VALUE,
+      limiter: binanceRest.getRateLimitStatus(),
+    });
+  } catch (err) {
+    logger.warn({ err: err.message }, 'admin: GET rate-limit failed');
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.put('/rate-limit', requireAuth, requireSettingsPassword, async (req, res) => {
+  try {
+    const raw = req.body && req.body.capacity;
+    const n = parseInt(raw, 10);
+    if (!Number.isFinite(n) || n <= 0) {
+      return res.status(400).json({ error: `capacity ต้องเป็นจำนวนเต็มบวก (ได้รับ: ${raw})` });
+    }
+    if (n < rateLimitConfig.MIN_VALUE) {
+      return res.status(400).json({
+        error: `capacity ขั้นต่ำ ${rateLimitConfig.MIN_VALUE} (ได้รับ: ${n}) — Binance แจ้งเตือนถ้าใช้ต่ำกว่านี้`,
+      });
+    }
+    if (n > rateLimitConfig.MAX_VALUE) {
+      return res.status(400).json({
+        error: `capacity ขั้นสูง ${rateLimitConfig.MAX_VALUE} (ได้รับ: ${n}) — ต้องใช้ Binance Bot Account ถึงจะได้มากกว่า 6000`,
+      });
+    }
+    // persist to DB
+    const updated = await AppConfig.findOneAndUpdate(
+      { key: 'singleton' },
+      { $set: { binanceRateLimitPerMin: n } },
+      { new: true, upsert: true }
+    ).lean();
+    // drop cache + apply to live limiter (in-place, no restart needed)
+    rateLimitConfig.invalidateCache(n);
+    const applyResult = await binanceRest.setRateLimitCapacity(n);
+    logger.info(
+      { previous: applyResult && applyResult.ok ? null : applyResult, newCapacity: n, dbCapacity: updated.binanceRateLimitPerMin },
+      'admin: binance rate-limit updated'
+    );
+    res.json({
+      ok: true,
+      capacity: n,
+      dbCapacity: updated.binanceRateLimitPerMin,
+      limiter: binanceRest.getRateLimitStatus(),
+    });
+  } catch (err) {
+    logger.warn({ err: err.message, body: req.body }, 'admin: PUT rate-limit failed');
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ─── POST /api/admin/auto-delete-run ───────────────────────────
 // FIX-2026-08-08: force-tick autoDeleteBot — useful for testing + manual scheduling
 //   - returns stats object from tick()
