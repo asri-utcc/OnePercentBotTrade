@@ -156,6 +156,52 @@ a:hover { color: var(--gold-2); text-decoration: none; }
 .app-nav .balance-pill.is-error .balance-usdt {
   color: var(--bear-1);
 }
+/* FIX-2026-08-20: "reserved" state — gold border slightly brighter to hint
+   that part of the balance is locked away from the bots. */
+.app-nav .balance-pill.is-reserved {
+  background: linear-gradient(135deg, rgba(245,184,0,0.18), rgba(245,184,0,0.08));
+  border-color: rgba(245,184,0,0.55);
+}
+.app-nav .balance-pill.is-reserved .balance-usdt {
+  color: var(--gold-1);
+}
+/* FIX-2026-08-20: "over-reserved" state — reserve exceeds total balance so
+   bots cannot spend any USDT. Red border + red text to call attention. */
+.app-nav .balance-pill.is-over-reserved {
+  background: linear-gradient(135deg, rgba(255,77,109,0.18), rgba(255,77,109,0.06));
+  border-color: rgba(255,77,109,0.55);
+}
+.app-nav .balance-pill.is-over-reserved .balance-usdt {
+  color: var(--bear-1);
+}
+
+/* FIX-2026-08-20: secondary "🛡 N USDT" pill — sits next to the main balance
+   pill only when reserve > 0. Hidden otherwise. */
+.app-nav .balance-reserve-pill {
+  display: inline-flex; align-items: center; gap: 0.35rem;
+  padding: 0.3rem 0.75rem;
+  background: rgba(245,184,0,0.08);
+  border: 1px solid rgba(245,184,0,0.35);
+  border-radius: 999px;
+  font-family: var(--font-mono);
+  color: var(--gold-1);
+  font-size: 0.78rem; font-weight: 600;
+  cursor: default;
+  user-select: none;
+}
+.app-nav .balance-reserve-pill:hover {
+  background: rgba(245,184,0,0.14);
+  border-color: rgba(245,184,0,0.50);
+}
+.app-nav .balance-reserve-pill .reserve-glyph { font-size: 0.9rem; }
+.app-nav .balance-reserve-pill.is-over {
+  background: rgba(255,77,109,0.10);
+  border-color: rgba(255,77,109,0.45);
+  color: var(--bear-1);
+}
+@media (max-width: 575.98px) {
+  .app-nav .balance-reserve-pill { display: none !important; }
+}
 .app-nav .balance-pill .balance-icon { font-size: 0.95rem; }
 .app-nav .balance-pill .balance-text {
   display: inline-flex; flex-direction: column; align-items: flex-start;

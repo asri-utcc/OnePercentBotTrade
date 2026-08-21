@@ -30,6 +30,7 @@
     { key: 'scan',          href: '/scan-volatility.html', label: '🎰 Scan' },
     { key: 'pnl',           href: '/pnl.html',      label: '📅 PnL' },               // FIX-2026-07-29
     { key: 'history',       href: '/history.html',  label: '📜 History' },           // FIX-2026-07-24
+    { key: 'analysis',      href: '/trade-analysis.html', label: '📊 Trade Analysis' }, // FIX-2026-08-21: comprehensive analysis page
     { key: 'wallet',        href: '/wallet.html',   label: '💼 Wallet' },            // 2026-08-19: holdings + USDT reserve
     { key: 'security',      href: '/password-sessions.html', label: '🔑 Security' }, // 2026-08-09: Password & Sessions Manager
     { key: 'settings',      href: '/settings.html', label: '⚙️ Settings' },          // FIX-2026-07-24
@@ -45,12 +46,16 @@
         ${links.map((l) => `<a class="nav-pill ${active === l.key ? 'active' : ''}" href="${l.href}">${l.label}</a>`).join('')}
       </nav>
       <div class="ms-auto d-flex align-items-center gap-2">
-        <span class="balance-pill" id="nav-balance" title="ยอด USDT จาก Binance + ค่าเงิน THB">
+        <span class="balance-pill" id="nav-balance" title="ยอด USDT จาก Binance + �่าเงิน THB">
           <span class="balance-icon">💰</span>
           <span class="balance-text" id="nav-balance-text">
             <span class="balance-usdt" id="nav-balance-usdt">…</span>
             <span class="balance-thb" id="nav-balance-thb" style="display:none;"></span>
           </span>
+        </span>
+        <span class="balance-reserve-pill" id="nav-reserve-pill" title="USDT ที่กั๊กไว้ — บอทใช้ไม่ได้" style="display:none;">
+          <span class="reserve-glyph">🛡</span>
+          <span class="reserve-text" id="nav-reserve-text">0</span>
         </span>
         <span class="ws-status" id="ws-status"><span class="ws-dot"></span><span id="ws-status-label">offline</span></span>
         ${active !== 'login' ? `<button class="btn-lux btn-sm" id="logout-btn" type="button">Logout</button>` : ''}
@@ -107,6 +112,9 @@
 
   const usdtEl = document.getElementById('nav-balance-usdt');
   const thbEl = document.getElementById('nav-balance-thb');
+  const pillEl = document.getElementById('nav-balance');
+  const reservePillEl = document.getElementById('nav-reserve-pill');
+  const reserveTextEl = document.getElementById('nav-reserve-text');
   if (!usdtEl) return;
 
   // Client-side FX cache (5 min) — also exposed globally so page scripts
@@ -130,19 +138,88 @@
 
   function setUsdtText(text) { if (usdtEl) usdtEl.textContent = text; }
   function setThbText(text)   { if (thbEl) { thbEl.textContent = text; thbEl.style.display = text ? '' : 'none'; } }
+  function setReserveText(text) { if (reserveTextEl) reserveTextEl.textContent = text; }
 
-  function applyUsdtToBalance(usdtFree, usdtLocked) {
-    const total = (Number(usdtFree) || 0) + (Number(usdtLocked) || 0);
-    if (!isFinite(total) || total <= 0) {
-      setUsdtText('— USDT');
+  // Shared state for combined balance + reserve render (FIX-2026-08-20)
+  let _totalUsdt = null;
+  let _reserveUsdt = 0;
+  let _isOverReserved = false;
+  let _balanceErrorMsg = null;
+
+  function renderPill() {
+    if (_balanceErrorMsg) {
+      setUsdtText('⚠ Binance');
       setThbText('');
+      if (reservePillEl) reservePillEl.style.display = 'none';
+      if (pillEl) {
+        pillEl.classList.add('is-error');
+        pillEl.classList.remove('is-reserved', 'is-over-reserved');
+        pillEl.title = `Binance API error: ${_balanceErrorMsg}\n(refresh อีกครั้งใน 30s)`;
+      }
       return;
     }
-    setUsdtText(formatUsdt(total));
+    if (_totalUsdt == null || !isFinite(_totalUsdt) || _totalUsdt <= 0) {
+      setUsdtText('— USDT');
+      setThbText('');
+      if (reservePillEl) reservePillEl.style.display = 'none';
+      if (pillEl) pillEl.classList.remove('is-error', 'is-reserved', 'is-over-reserved');
+      return;
+    }
+    if (pillEl) pillEl.classList.remove('is-error');
+
+    const total = _totalUsdt;
+    const reserve = _reserveUsdt || 0;
+    const usable = Math.max(0, total - reserve);
+    const hasReserve = reserve > 0;
+
+    // Main USDT text — "usable / total" when reserved, otherwise just total
+    if (hasReserve) {
+      setUsdtText(`${formatUsdt(usable)} / ${formatUsdt(total)}`);
+    } else {
+      setUsdtText(formatUsdt(total));
+    }
+
+    // THB line — based on usable when reserved, otherwise total
+    const thbBase = hasReserve ? usable : total;
     if (fxRate && fxRate > 0) {
-      setThbText(`≈ ฿${formatThb(total * fxRate)}`);
+      setThbText(`≈ ฿${formatThb(thbBase * fxRate)}`);
     } else {
       setThbText('');
+    }
+
+    // Pill state classes + tooltip
+    if (pillEl) {
+      if (_isOverReserved || (hasReserve && reserve > total)) {
+        pillEl.classList.add('is-over-reserved');
+        pillEl.classList.remove('is-reserved');
+        const reserveThb = fxRate ? ` (≈ ฿${formatThb(reserve * fxRate)})` : '';
+        pillEl.title =
+          `� กั๊กเงิน (${formatUsdt(reserve)}${reserveThb}) เกินยอด USDT ที่มี (${formatUsdt(total)})\n` +
+          `บอทจะใช้เงินไม่ได้จนกว่าจะลด reserve — ไปตั้งที่ /wallet.html`;
+      } else if (hasReserve) {
+        pillEl.classList.add('is-reserved');
+        pillEl.classList.remove('is-over-reserved');
+        const reserveThb = fxRate ? ` (≈ ฿${formatThb(reserve * fxRate)})` : '';
+        pillEl.title =
+          `USDT ที่บอทใช้ได้: ${formatUsdt(usable)} / �ั้งหมด: ${formatUsdt(total)}\n` +
+          `🛡 Reserved: ${formatUsdt(reserve)}${reserveThb}`;
+      } else {
+        pillEl.classList.remove('is-reserved', 'is-over-reserved');
+        pillEl.title = 'ยอด USDT จาก Binance (ยังไม่ได้ตั้งการกั๊กเงิน — ไปตั้งได้ที่ /wallet.html)';
+      }
+    }
+
+    // Secondary 🛡 pill — visible only when reserve > 0
+    if (reservePillEl && reserveTextEl) {
+      if (hasReserve) {
+        reservePillEl.style.display = '';
+        setReserveText(formatUsdt(reserve));
+        reservePillEl.classList.toggle('is-over', _isOverReserved || reserve > total);
+        const reserveThb2 = fxRate ? ` (≈ ฿${formatThb(reserve * fxRate)})` : '';
+        reservePillEl.title = `🛡 กั๊กเงิน ${formatUsdt(reserve)} USDT${reserveThb2} — บอทใช้ไม่ได้\nไปแก้ที่ /wallet.html`;
+      } else {
+        reservePillEl.style.display = 'none';
+      }
     }
   }
 
@@ -155,6 +232,8 @@
       publishFx();
       // notify page scripts that may be waiting on FX to render THB
       document.dispatchEvent(new CustomEvent('fx:updated', { detail: window.__fx }));
+      // FX affects THB text — re-render pill (FIX-2026-08-20)
+      renderPill();
       return true;
     } catch (_) {
       return false;
@@ -163,27 +242,27 @@
 
   // FIX-2026-07-14: balance refresh ที่ rate-limit + graceful failure
   //   - ปัญหาเดิม: WS disconnect/reconnect storm → onAccountUpdate ยิง refreshBalance() ทุกครั้ง
-  //     → /api/account/balance ยิง Binance ถี่เกินไป → Binance -1021 timestamp drift → 400
+  //     → /api/account/balance �ิง Binance ถี่เกินไป → Binance -1021 timestamp drift → 400
   //     → UI ขึ้น "Balance 400 ไม่สามารถโหลด"
   //   - fix: minInterval 30s ระหว่าง refresh (lastFetchAt); failure แสดง "⚠ Binance" + tooltip
   let _lastBalanceFetchAt = 0;
   const BALANCE_MIN_INTERVAL_MS = 30 * 1000;
-  let _lastBalanceErrorMsg = '';
 
   async function refreshBalance(force = false) {
     const now = Date.now();
-    // Rate-limit: ถ้า fetch สำเร็จเมื่อกี้ this minute, skip (ยกเว้น force)
+    // Rate-limit: ถ้า fetch สำเร็จเมื่อกี้ this minute, skip (ยกเ�้น force)
     if (!force && (now - _lastBalanceFetchAt) < BALANCE_MIN_INTERVAL_MS) return false;
     _lastBalanceFetchAt = now;
     try {
       const r = await API.get('/api/account/balance');
       const usdt = (r.balances || []).find((b) => b.asset === 'USDT');
-      if (!usdt) { setUsdtText('— USDT'); setThbText(''); return true; }
-      applyUsdtToBalance(usdt.free, usdt.locked);
-      _lastBalanceErrorMsg = '';
-      // FIX-2026-07-14: ลบ error class ออกเมื่อสำเร็จ
-      const pill = document.getElementById('nav-balance');
-      if (pill) pill.classList.remove('is-error');
+      if (!usdt) {
+        _totalUsdt = null;
+      } else {
+        _totalUsdt = (Number(usdt.free) || 0) + (Number(usdt.locked) || 0);
+      }
+      _balanceErrorMsg = null;
+      renderPill();
       return true;
     } catch (err) {
       const status = err.status || null;
@@ -191,14 +270,30 @@
       const detail = body.binanceCode
         ? `${body.binanceCode} · ${body.error || ''}`.trim()
         : (body.error || err.message || 'unknown');
-      _lastBalanceErrorMsg = `${status || 'err'} · ${detail}`;
-      setUsdtText('⚠ Binance');
-      setThbText('');
-      const pill = document.getElementById('nav-balance');
-      if (pill) {
-        pill.title = `Binance API error: ${_lastBalanceErrorMsg}\n(ระบบซ่อมอัตโนมัติด้วย server-time sync; refresh อีกครั้งใน 30s)`;
-        pill.classList.add('is-error');
-      }
+      _balanceErrorMsg = `${status || 'err'} · ${detail}`;
+      renderPill();
+      return false;
+    }
+  }
+
+  // Reserve refresh — reads /api/wallet/reserve. 10s client cache to match
+  // the 10s server-side cache in src/services/walletReserve.js.
+  // FIX-2026-08-20: combined with balance to render "usable / total" pill.
+  let _lastReserveFetchAt = 0;
+  const RESERVE_MIN_INTERVAL_MS = 10 * 1000;
+
+  async function refreshReserve(force = false) {
+    const now = Date.now();
+    if (!force && (now - _lastReserveFetchAt) < RESERVE_MIN_INTERVAL_MS) return false;
+    _lastReserveFetchAt = now;
+    try {
+      const r = await API.get('/api/wallet/reserve');
+      _reserveUsdt = Number(r.reserveUsdt) || 0;
+      _isOverReserved = !!r.isOverReserved;
+      renderPill();
+      return true;
+    } catch (_) {
+      // Non-fatal — keep stale reserve value, do not break pill
       return false;
     }
   }
@@ -206,7 +301,7 @@
   async function refreshAll() {
     // FX first (lightweight, cached) so we can convert immediately
     const ok = await refreshFx();
-    await refreshBalance();
+    await Promise.all([refreshBalance(true), refreshReserve(true)]);
     return ok;
   }
 
@@ -228,10 +323,18 @@
   if (typeof WSClient !== 'undefined') {
     const onAccountUpdate = () => {
       refreshBalance();
+      refreshReserve(true); // reserve ผูกกับ USDT balance → refresh ด้วย (FIX-2026-08-20)
     };
     WSClient.on('account:update', onAccountUpdate);
     WSClient.on('balance:update', onAccountUpdate);
   }
+
+  // FIX-2026-08-20: expose refresh hooks so wallet.js (and others) can
+  // re-fetch balance/reserve after a mutation without waiting for the 60s
+  // poll or the next WS event.
+  window.__navRefreshReserve = () => refreshReserve(true);
+  window.__navRefreshBalance = () => refreshBalance(true);
+  window.__navRefreshAll = () => { refreshBalance(true); refreshReserve(true); };
 })();
 
 // ─── Formatters (exported for use by page renderers) ──

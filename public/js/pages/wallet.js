@@ -409,7 +409,12 @@
       syncReserveDisplay();
       syncChipsActive();
       syncDirtyFlag();
-      els.help.textContent = `✅ บันทึกแล้ว · บอทจะใช้ USDT ได้สูงสุด ${fmtUsdt(Math.max(0, _totalUsdt - _savedReserve))} USDT`;
+      els.help.textContent = `✅ บันท�กแล้ว · บอทจะใช้ USDT ได้สูงสุด ${fmtUsdt(Math.max(0, _totalUsdt - _savedReserve))} USDT`;
+      // FIX-2026-08-20: refresh nav pill so "usable / total" updates without
+      // waiting for the next 60s poll or WS event.
+      if (typeof window.__navRefreshReserve === 'function') {
+        window.__navRefreshReserve();
+      }
     } catch (err) {
       const msg = (err && err.body && err.body.error) || err.message || 'unknown';
       els.help.textContent = `❌ บันทึกไม่สำเร็จ: ${msg}`;
