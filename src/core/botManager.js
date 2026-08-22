@@ -29,6 +29,23 @@ const RECONCILE_INTERVAL_MS = 5 * 60 * 1000;
 // FIX-2026-08-04: 5min → 10min (auto-pause check เป็น read-only volatility scan — ไม่กระทบ bot operations)
 const AUTO_PAUSE_INTERVAL_MS = 10 * 60 * 1000;
 let autoPauseTimer = null;
+// FIX-2026-08-22: BUY-in-flight states — if a bot has any trade in these states,
+//   auto-pause must NOT fire (pausing would orphan the BUY position because
+//   trader.stop() removes the in-memory handler that places the SELL).
+//   See [[onepercentbot-rvn-orphan-2026-08-22]] incident:
+//     - 01:27:16 BUY 1344279972 placed (state='placed')
+//     - 01:27:37 autoPauseLastActionAt → trader.stop() killed in-memory handler
+//     - 01:30:46 BUY filled → state='filled' but no SELL placed → orphan 2108.4 RVN
+//   `selling` is intentionally excluded (SELL is on the order book, pause is safe).
+const AUTO_PAUSE_BUY_IN_FLIGHT_STATES = [
+  'placed',
+  'partial_wait',
+  'filled',
+  'retrying',
+  'holding',
+  'partial_sell_wait',
+  'stopping',
+];
 // FIX-2026-08-06: delist scheduler — interval + forceCloseDays/blockBuyDays
 const DELIST_SCHEDULE_INTERVAL_MS = 5 * 60 * 1000; // ทุก 5 นา�ี ตรวจ delist schedule
 let delistSchedulerTimer = null;
@@ -192,6 +209,19 @@ class BotManager {
   }
 
   async spawnTrader(bot) {
+    // FIX-2026-08-22 (zombie): refuse to spawn a trader for a soft-deleted bot
+    //   - ป้องกัน checkAutoPauseBots RESUME branch (หรือ caller อื่น) จากการเปิด trader
+    //     บนบอทที่ user ลบไปแล้ว → trader จะ place BUY ต่อจนกว่า process จะถูก kill
+    //   - kaito/gps incident: RESUME branch เคยเรียก spawnTrader บน soft-deleted bot
+    //     (เพราะ loader ไม่กรอง deletedAt + RESUME ไม่เช็ค) — fix ทั้ง 3 จุด
+    if (bot && bot.deletedAt) {
+      logger.warn({
+        botId: bot._id && bot._id.toString(),
+        symbol: bot.symbol,
+        deletedAt: bot.deletedAt,
+      }, 'botManager: spawnTrader refused — bot is soft-deleted');
+      return;
+    }
     if (this.traders.has(bot._id.toString())) {
       logger.warn({ botId: bot._id.toString() }, 'trader already running');
       return;
@@ -815,6 +845,12 @@ class BotManager {
   async enableBot(botId) {
     const bot = await Bot.findById(botId);
     if (!bot) throw new Error('Bot not found');
+    // FIX-2026-08-22 (zombie): refuse to enable a soft-deleted bot via direct API call
+    //   - ป้องกัน user-initiated path (POST /api/bots/:id/enable, bulk-toggle) จากการเปิดบอทที่ลบไปแล้ว
+    //   - ถ้าต้องการ re-enable จริงๆ ต้องเรียก restore endpoint ก่อน (POST /api/bots/:id/restore)
+    if (bot.deletedAt) {
+      throw new Error('Bot is soft-deleted — call POST /api/bots/:id/restore first to re-enable');
+    }
     // FIX 2026-08-05: reset stale cursor ก่อน spawnTrader (กัน ghost BUY จาก reconcileKlines replay)
     await this._resetStaleReplayCursorOnEnable(bot);
     bot.enabled = true;
@@ -900,14 +936,38 @@ class BotManager {
   }
 }
 
+// FIX-2026-08-22: Return Set of botId strings that currently have a BUY in flight.
+//   Used by checkAutoPauseBots() to skip pausing bots that have an open position
+//   needing the trader to complete the BUY → SELL placement cycle. On error returns
+//   empty Set (fail-OPEN: still allow pauses — better than orphaning the BUY).
+//   Exported for testability (see tests/autoPauseBuyInFlight.test.js).
+async function findBotIdsWithBuyInFlight() {
+  const out = new Set();
+  try {
+    const cursor = Trade.find(
+      { state: { $in: AUTO_PAUSE_BUY_IN_FLIGHT_STATES } },
+      { projection: { botId: 1 } }
+    ).lean().cursor();
+    for await (const t of cursor) {
+      if (t && t.botId) out.add(String(t.botId));
+    }
+  } catch (err) {
+    logger.warn({ err: err.message }, 'botManager: findBotIdsWithBuyInFlight failed');
+  }
+  return out;
+}
+
 // FIX-2026-08-01: Auto-pause scanner — ทุก 5 นาที ตรวจ Min-%KC(30 bars) ของทุกบอทที่ autoPauseEnabled !== false
 //   - ถ้า minKcPct < threshold และบอท enabled → PAUSE (set enabled=false + telegram + stop trader)
 //   - ถ้า minKcPct >= threshold และบอท auto-paused ก่อนหน้า (autoPauseReason === 'low_vol') → RESUME
 //   - auto-resume เฉพาะบอทที่ถูก auto-pause (ไม่ resume บอทที่ user ปิดเอง)
+//   - FIX-2026-08-22: ถ้ามี BUY in flight → SKIP pause (กัน orphan) — see findBotIdsWithBuyInFlight()
+//   - FIX-2026-08-22 (zombie): exclude soft-deleted bots (deletedAt: null) — กัน RESUME บอทที่ user ลบไปแล้ว
+//     (kaito/gps incident: บอทถูก auto-pause → user soft-delete → vol ฟื้น → auto-RESUME กลับมาเปิด BUY ใหม่)
 async function checkAutoPauseBots() {
   let bots;
   try {
-    bots = await Bot.find({ autoPauseEnabled: { $ne: false } }).lean();
+    bots = await Bot.find({ autoPauseEnabled: { $ne: false }, deletedAt: null }).lean();
   } catch (err) {
     logger.warn({ err: err.message }, 'botManager: checkAutoPauseBots — Bot.find failed');
     return;
@@ -941,6 +1001,12 @@ async function checkAutoPauseBots() {
     if (n >= 1e3) return `$${(n / 1e3).toFixed(1)}K`;
     return `$${Math.round(n)}`;
   };
+
+  // FIX-2026-08-22: pre-fetch botIds with BUY in flight (single query, streamed)
+  //   - on error returns empty Set (fail-OPEN — pause still allowed if Trade.query fails)
+  //   - skip-then-pause pattern: ถ้า pauseReason trigger แต่มี BUY in flight → skip
+  //     (จะถูก evaluate อีกครั้งใน tick ถัดไป เมื่อ BUY progress ไปถึง 'selling')
+  const buyInFlightBots = await findBotIdsWithBuyInFlight();
 
   for (const b of bots) {
     try {
@@ -986,12 +1052,30 @@ async function checkAutoPauseBots() {
 
       if (pauseReason && b.enabled !== false) {
         // ─── PAUSE ────────────────────────────────────────────────────
+        // FIX-2026-08-22: skip pause if bot has a BUY in flight — pausing here would
+        //   orphan the position (trader.stop() removes the in-memory SELL-placement
+        //   handler).  Next tick (10min) will re-evaluate when BUY has progressed
+        //   to 'selling' (safe to pause) or the BUY has fully closed.
+        if (buyInFlightBots.has(String(b._id))) {
+          update.autoPauseLastCheckedAt = now;
+          update.autoPauseSkipReason = 'buy_in_flight';
+          await Bot.updateOne({ _id: b._id }, { $set: update });
+          logger.info({
+            botId: String(b._id),
+            pauseReason,
+            minKcPct,
+            quoteVolume24h,
+          }, 'botManager: auto-pause skipped — BUY in flight');
+          continue;
+        }
         Object.assign(update, {
           enabled: false,
           enabledAt: null,
           status: 'idle',
           autoPauseLastActionAt: now,
           autoPauseReason: pauseReason,
+          // FIX-2026-08-22: clear skip flag on successful pause (it was bypassed)
+          autoPauseSkipReason: null,
         });
         await Bot.updateOne({ _id: b._id }, { $set: update });
         const stopReason = pauseReason === 'low_vol' ? 'auto_pause_low_kc' : 'auto_pause_low_24h_vol';
@@ -1032,6 +1116,7 @@ async function checkAutoPauseBots() {
       } else if (
         !kcLow && !volLow
         && b.enabled === false
+        && !b.deletedAt // FIX-2026-08-22 (zombie): guard against respawning soft-deleted bots
         && (b.autoPauseReason === 'low_vol' || b.autoPauseReason === 'low_24h_vol')
       ) {
         // ─── RESUME (เฉพาะบอทที่เคยถูก auto-pause) ──────────────────
@@ -1040,11 +1125,15 @@ async function checkAutoPauseBots() {
         //   - ลบ CBv2 lock override blocks เดิม (FIX-2026-08-06) — ไม่จำเป็นใน HYBRID mode
         // FIX-2026-08-10: resume gate ต้องการทั้ง 2 เงื่อนไข healthy + reason ∈ {low_vol, low_24h_vol}
         //   - บอทที่ user ปิดเอง (reason=null) หรือ delist (reason='binance_delist') → ไม่ auto-resume
+        // FIX-2026-08-22 (zombie): defense-in-depth — ถึงแม้ loader filter จะตัด deletedAt แล้ว
+        //   ก็เช็คซ้ำใน condition (กัน regression ถ้า loader filter หลุด)
         Object.assign(update, {
           enabled: true,
           enabledAt: now,
           autoPauseLastActionAt: now,
           autoPauseReason: 'vol_recovered',
+          // FIX-2026-08-22: clear skip flag on successful resume
+          autoPauseSkipReason: null,
         });
         await Bot.updateOne({ _id: b._id }, { $set: update });
         // FIX 2026-08-05 (GIGGLE): reset stale cursor ก่อน spawnTrader (กัน ghost BUY จาก reconcileKlines replay)
@@ -1243,6 +1332,11 @@ module.exports = new BotManager();
 // FIX-2026-08-03: Export helpers for routes (pattern mirrors module.exports = new BotManager() above)
 module.exports.getTrendlineStatusForBots = getTrendlineStatusForBots;
 module.exports.invalidateTrendlineCache = invalidateTrendlineCache;
+// FIX-2026-08-22: Export for testability (see tests/autoPauseBuyInFlight.test.js)
+module.exports.findBotIdsWithBuyInFlight = findBotIdsWithBuyInFlight;
+module.exports.AUTO_PAUSE_BUY_IN_FLIGHT_STATES = AUTO_PAUSE_BUY_IN_FLIGHT_STATES;
+// FIX-2026-08-22 (zombie): Export for testability (see tests/autoPauseDeletedAtGuard.test.js)
+module.exports.checkAutoPauseBots = checkAutoPauseBots;
 
 // FIX-2026-08-03: Trendline status scanner — refresh _trendlineStatusCache ทุก 60s
 //   - ตรวจเฉพาะบอทที่ safeTradeTrendlineEnabled === true (ลด Binance calls)

@@ -3039,6 +3039,19 @@ class Trader {
   async onCandleClosed(candle, opts = {}) {
     if (!this.running) return;
     if (!this.bot.enabled) return;
+    // FIX-2026-08-22 (zombie): guard against in-memory stale state where a trader is
+    //   still running but the Bot doc has been soft-deleted (deletedAt set).
+    //   - scenario: kaito/gps — auto-RESUME spawned trader for soft-deleted bot → BUY ต่อ
+    //   - bot.deletedAt captured at construction; refresh on the rare path where _botUpdatedHandler
+    //     reloads from DB. Cheap defense-in-depth — if trader is somehow alive on a deleted bot, no BUY.
+    if (this.bot.deletedAt) {
+      logger.warn({
+        botId: this.bot._id.toString(),
+        symbol: this.bot.symbol,
+        deletedAt: this.bot.deletedAt,
+      }, 'trader: onCandleClosed refused — bot is soft-deleted');
+      return;
+    }
 
     // ต้อง warm-up ก่อน
     if (!signalEngine.isWarmedUp(klineCache.size(this.bot.symbol, this.bot.timeframe))) {
