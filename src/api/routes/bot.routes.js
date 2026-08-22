@@ -186,18 +186,37 @@ router.get('/', requireAuth, async (req, res) => {
     //   - reuse tpUpdater.computeSuggestedTpForBot + get24hrTickers ผ่าน volatilityForBot helper
     //   - concurrency-6 กัน burst (Binance public weight limit)
     //   - FIX-2026-08-02: only when ?expand=1 (default = skip for fast first paint)
+    //   - FIX-2026-08-22 (perf): skip Binance-heavy enrichment for soft-deleted bots
+    //     - deleted bots ไม่มี trader → klineCache ว่าง → ทุก call = cache miss → fetch Binance ใหม่
+    //     - bots[] ยังคงรวม deleted (เพื่อ UI แสดง 🗑 badge) แต่ vol fields = sentinel (UI fallback "—")
+    //     - ประหยัด ~3 Binance calls per deleted bot (get24hrTickers + tpUpdater klines × N)
+    const EMPTY_VOL = {
+      ok: false, error: 'bot_deleted', cached: true,
+      kcMinPct: null, kcMinPctDisplay: null, suggestedTpPct: null,
+      trendState: null, trendTF: null, tpOverridden: false,
+      rawSuggestedTpPct: null, feeBufferPct: null,
+      quoteVolume24h: null, quoteVolume24hDisplay: null,
+    };
+    const EMPTY_QUALITY = { enabled: true, score: null, color: 'gray', updatedAt: null, cached: true };
+    const deletedCount = bots.filter((b) => b.deletedAt).length;
+    if (deletedCount > 0) {
+      logger.info({ deletedCount, totalBots: bots.length }, 'bots: skipped vol/quality enrichment for soft-deleted bots');
+    }
     const volSnapshots = includeVolatility
-      ? await volatilityForBot.mapWithConcurrency(
-          bots, 6, (b) => volatilityForBot.computeBotVolatilitySnapshot(b)
+      ? await volatilityForBot.mapWithConcurrency(bots, 6, (b) =>
+          b.deletedAt ? Promise.resolve(EMPTY_VOL) : volatilityForBot.computeBotVolatilitySnapshot(b)
         )
-      : bots.map(() => ({}));
+      : bots.map(() => EMPTY_VOL);
     // FIX-2026-08-01: Bot Quality Indicator — 0-4 score per bot (shared top-N + per-bot cache)
     // FIX-2026-08-02: skip on cold default load (5s) — cache warm = 0ms anyway
     //   - cached values still returned (server reads perBotCache before returning)
     //   - explicit ?quality=1 forces full compute
+    //   - FIX-2026-08-22 (perf): same soft-deleted skip as volSnapshots — saves 2 × getKlines per deleted bot
     const qualitySnaps = includeQuality
-      ? await qualityIndicator.computeBotsQuality(bots)
-      : bots.map((b) => qualityIndicator.getCachedOnly(b) || {});
+      ? await volatilityForBot.mapWithConcurrency(bots, 6, (b) =>
+          b.deletedAt ? Promise.resolve(EMPTY_QUALITY) : qualityIndicator.computeBotQuality(b)
+        )
+      : bots.map((b) => (b.deletedAt ? EMPTY_QUALITY : (qualityIndicator.getCachedOnly(b) || {})));
     // FIX-2026-08-03: Safe-trade #2 (trendline) — read in-memory status cache populated by botManager
     //   - ไม่เรียก Binance ที่นี่ (พึ่ง botManager's 60s scan) — เพื่อ /api/bots response time คงที่
     //   - ถ้าบอทปิด filter → status=null (UI แสดง "off")
