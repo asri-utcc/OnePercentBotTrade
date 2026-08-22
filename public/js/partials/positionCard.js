@@ -254,6 +254,8 @@ window.PositionCard = {
    *     - botLink: bool — ทำให้ sym-tag เป็น link ไป /bot-detail.html?id=<botId>
    *     - showRetry: bool (default false) — แสดง retry pill "🔄 N/M"
    *     - forceCloseBtnClass: string (default 'btn-force-close') — class ของปุ่ม Force Close (ใช้แยก event listener ระหว่าง modal)
+   *     - chartBtnClass: string (default 'btn-chart-link') — class ของปุ่ม Chart link (target=_blank → /chart.html)
+   *     - expandBtnClass: string|null — ถ้าใส่ จะ render ปุ่ม 🔍 Expand (trigger modal-level handler ด้วย data-action="expand-chart")
    *     - retryMax: number — ถ้าไม่ใส่ t.botRetryMax
    */
   renderCard(t, currentPrice, opts = {}) {
@@ -333,6 +335,7 @@ window.PositionCard = {
       : `<span class="sym-tag">${this.escapeHtml(t.symbol || '-')}</span>`;
     const stateColor = this.STATE_COLORS[t.state] || '';
     const fcCls = opts.forceCloseBtnClass || 'btn-force-close';
+    const expandCls = opts.expandBtnClass || '';
     const retryMax = (t.botRetryMax != null ? t.botRetryMax : (opts.retryMax != null ? opts.retryMax : 1));
 
     // FIX-2026-08-03: Chart button — deep-link ไป /chart.html?symbol=XXX&tf=YYY
@@ -342,6 +345,15 @@ window.PositionCard = {
     const chartHref = (t.symbol && t.timeframe)
       ? `/chart.html?symbol=${encodeURIComponent(t.symbol)}&tf=${encodeURIComponent(t.timeframe)}`
       : '#';
+
+    // FIX-2026-08-22: Expand chart button (🔍) — opens the same expand modal
+    //   used by mini-chart cards on chart-monitor (data-action="expand-chart").
+    //   - Rendered only if opts.expandBtnClass is provided (per-consumer opt-in).
+    //   - Same data-bot-id contract as the mini-chart card so the modal-level
+    //     handler can find the bot via _cmBots.find().
+    const expandBtn = expandCls
+      ? `<button type="button" class="btn-lux btn-gold btn-sm ${expandCls}" data-action="expand-chart" data-bot-id="${this.escapeHtml(botId)}" title="เปิดกราฟขยาย (500 แท่ง, โหลดเพิ่มได้, candle + KC + S1 markers + TP lines)">🔍 Expand</button>`
+      : '';
 
     // FIX-2026-08-01: SL-armed pill — tooltip บอก armed-at + reason
     const slArmedPill = isArmed
@@ -414,6 +426,7 @@ window.PositionCard = {
           <span class="pair"><span>Order:</span><strong class="code">${this.escapeHtml(t.buyOrderId || '—')}</strong></span>
           ${t.sellOrderId ? `<span class="pair"><span>SELL:</span><strong class="code">${this.escapeHtml(t.sellOrderId)}</strong></span>` : ''}
           ${t.error ? `<span class="last-err">⚠️ ${this.escapeHtml(t.error)}</span>` : ''}
+          ${expandBtn}
           <a class="btn-lux btn-info btn-sm ${chartCls}" href="${this.escapeHtml(chartHref)}" target="_blank" rel="noopener" data-trade-id="${this.escapeHtml(tradeId)}" title="เปิดกราฟ ${this.escapeHtml(t.symbol || '')} ${this.escapeHtml(t.timeframe || '')} ในแท็บใหม่">📈 Chart</a>
           <button type="button" class="btn-lux btn-bear btn-sm ${fcCls}" data-trade-id="${this.escapeHtml(tradeId)}" data-bot-id="${this.escapeHtml(botId)}" title="บังคับปิดไม้นี้ (ยกเลิก SELL + MARKET SELL หรือ synthetic close)">🛑 Force Close</button>
         </div>

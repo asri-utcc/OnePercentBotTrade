@@ -437,11 +437,24 @@ async function onCmPositionCardClick(ev) {
  *   - ปิด modal หลัง force-close สำเร็จ เพื่อให้เห็น grid ที่อัปเดตแล้ว
  */
 async function onCmPositionModalBodyClick(ev) {
+  // Force Close button (modal variant)
   const fcBtn = ev.target.closest('.btn-force-close-cm-modal');
   if (fcBtn) {
     ev.preventDefault();
     ev.stopPropagation();
     await _doCmForceClose(fcBtn, { closeModal: true });
+    return;
+  }
+
+  // Expand chart button (FIX-2026-08-22) — mirror 🔍 บน mini-chart cards
+  //   - ใช้ expand modal เดียวกับ grid (500 bars + KC + S1 markers + TP lines)
+  //   - ปิด position modal ก่อน → เปิด expand modal ทับ (back จาก expand กลับมาที่ grid)
+  const expBtn = ev.target.closest('[data-action="expand-chart"]');
+  if (expBtn) {
+    ev.preventDefault();
+    ev.stopPropagation();
+    if (_cmPositionModal) _cmPositionModal.hide();
+    _doCmExpandChart(expBtn);
     return;
   }
 
@@ -498,12 +511,24 @@ async function _doCmForceClose(btn, opts = {}) {
   }
 }
 
-/* 2026-08-06: Card action click delegation (currently: expand chart button) */
+/* 2026-08-06: Card action click delegation (currently: expand chart button)
+ * FIX-2026-08-22: refactored → shared with modal handler via _doCmExpandChart()
+ */
 function onCmCardActionClick(ev) {
   const btn = ev.target.closest('[data-action="expand-chart"]');
   if (!btn) return;
   ev.preventDefault();
   ev.stopPropagation();
+  _doCmExpandChart(btn);
+}
+
+/**
+ * FIX-2026-08-22: Shared expand-chart flow (used by both grid + modal handlers)
+ *   - btn: any element with data-action="expand-chart" + data-bot-id
+ *   - Looks up the bot via _cmBots, inits _cmExpandChart state, opens #cmExpandModal
+ *   - No-op if bot not found (caller should already have gated)
+ */
+function _doCmExpandChart(btn) {
   const botId = btn.dataset.botId;
   if (!botId) return;
   const bot = _cmBots.find((b) => String(b._id) === String(botId));
@@ -536,6 +561,7 @@ function openCmPositionModal(pos) {
       showRetry: true,
       forceCloseBtnClass: 'btn-force-close-cm-modal',
       chartBtnClass: 'btn-chart-link-cm-modal',
+      expandBtnClass: 'btn-expand-chart-cm-modal',
     },
   );
   if (_cmPositionModal) _cmPositionModal.show();
