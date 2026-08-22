@@ -122,7 +122,11 @@
     const body = document.getElementById('mc-body');
     body.innerHTML = '<div class="text-muted-3 text-center py-3">กำลังโหลดบอท…</div>';
     try {
-      const resp = await API.get('/api/bots');
+      // FIX-2026-08-22: include soft-deleted bots — Master Config ต้องเห็นบอททุกตัว
+      //   - bots.html ตอนนี้แสดงบอท soft-deleted แล้ว (chip "🗑 Deleted")
+      //   - เดิม filter { deletedAt: null } → user เห็นบอทไม่ครบ (Master Config กับ bots.html ไม่ตรงกัน)
+      //   - ตอนนี้ส่ง ?includeDeleted=1 — ผู้ใช้สามารถ apply settings / Restore บอทที่ลบได้จากที่เดียว
+      const resp = await API.get('/api/bots?includeDeleted=1');
       cachedBots = resp.bots || [];
       if (cachedBots.length === 0) {
         body.innerHTML = '<div class="alert alert-warning">ไม่มีบอทในระบบ</div>';
@@ -149,13 +153,32 @@
       return true;
     };
 
+    // FIX-2026-08-22: แสดงบอท soft-deleted ด้วย chip "🗑 DELETED" + รายชื่อสีจางลง
+    //   - ตรงกับ visual language ของ bots.html (.deleted-pill + .bot-card-v2.is-deleted)
+    //   - is-deleted class ใช้ text-decoration line-through เพื่อสื่อสาร "บอทนี้ถูกพักการใช้งาน"
+    //   - daysSinceDelete + withinRestoreWindow เพื่อบอก user ว่า restore ได้อีกกี่วัน
+    const deletedCount = cachedBots.filter((b) => !!b.deletedAt).length;
+    const activeCount = cachedBots.length - deletedCount;
     const botListHtml = cachedBots.map((b) => {
-      const checked = b.enabled !== false ? 'checked' : '';
-      const status = b.enabled !== false ? '🟢' : '⏸';
+      const isDeleted = !!b.deletedAt;
+      // deleted → unchecked by default (ปลอดภัย: ไม่ apply settings บนบอทที่ลบ จนกว่า user �ะเลือกเอง)
+      const checked = (!isDeleted && b.enabled !== false) ? 'checked' : '';
+      let status;
+      if (isDeleted) status = '🗑';
+      else if (b.enabled !== false) status = '🟢';
+      else status = '⏸';
+      const deletedBadge = isDeleted
+        ? (() => {
+          const d = b.deletedAt ? new Date(b.deletedAt) : null;
+          const daysSince = d ? Math.floor((Date.now() - d.getTime()) / 86400000) : 0;
+          const withinWindow = daysSince <= 30;
+          return `<span class="deleted-pill" title="ถูก soft-delete เมื่อ ${escapeHtml(d ? d.toLocaleString('th-TH') : '—')}${withinWindow ? ' — ยัง restore ได้ (ภายใน 30 วัน)' : ' — หมดเวลา restore แล้ว (เกิน 30 วัน)'}">🗑 DELETED · ${daysSince}d${withinWindow ? '' : ' ⚠️'}</span>`;
+        })()
+        : '';
       return `
-        <label class="form-check d-flex align-items-center gap-2 mb-1" style="cursor:pointer;">
+        <label class="form-check d-flex align-items-center gap-2 mb-1 mc-bot-row ${isDeleted ? 'is-deleted' : ''}" style="cursor:pointer; ${isDeleted ? 'opacity:0.78;' : ''}">
           <input type="checkbox" class="form-check-input mc-bot-check" data-bot-id="${escapeHtml(b._id)}" ${checked} />
-          <span>${status} <code>${escapeHtml(b.symbol)}</code> · ${escapeHtml(b.timeframe)} · ${escapeHtml(b.name || '(no name)')}</span>
+          <span>${status} <code>${escapeHtml(b.symbol)}</code> · ${escapeHtml(b.timeframe)} · ${escapeHtml(b.name || '(no name)')} ${deletedBadge}</span>
         </label>`;
     }).join('');
 
@@ -358,13 +381,14 @@
           <summary class="lux-details-summary">
             <span class="bot-settings-group-icon">📋</span>
             <span class="bot-settings-group-title">เลือกบอทและควบคุม Start/Stop</span>
-            <span class="bot-settings-group-hint">${cachedBots.length} บอท · เลือก enabled เป็นค่าเริ่มต้น</span>
+            <span class="bot-settings-group-hint">${cachedBots.length} บอท · <span style="color:#4ade80;">🟢 ${activeCount} active</span>${deletedCount > 0 ? ` · <span style="color:#ff6b6b;">� ${deletedCount} deleted</span>` : ''} · เลือก enabled เป็นค่าเริ่มต้น</span>
           </summary>
           <div class="lux-details-body">
             <div class="d-flex gap-2 flex-wrap mb-2">
               <button type="button" class="btn btn-sm btn-outline-gold" id="mc-select-all">เลือกทั้งหมด</button>
               <button type="button" class="btn btn-sm btn-outline-gold" id="mc-select-none">ไม่เลือกเลย</button>
               <button type="button" class="btn btn-sm btn-outline-gold" id="mc-select-enabled">เฉพาะที่ Enabled</button>
+              ${deletedCount > 0 ? '<button type="button" class="btn btn-sm btn-outline-info" id="mc-select-deleted" title="เลือกเฉพาะบอทที่ถูก soft-delete เพื่อ Restore">🗑 เลือกบอทที่ลบ</button>' : ''}
             </div>
             <div class="mb-3 p-2" style="background:rgba(255,255,255,0.03); border:1px solid rgba(255,255,255,0.06); border-radius:8px; max-height:190px; overflow-y:auto;">
               ${botListHtml}
@@ -372,12 +396,14 @@
             <div class="bot-settings-actions">
               <button type="button" class="btn btn-sm btn-outline-success" id="mc-toggle-start" title="เริ่ม scan ตลาดและเปิด order ตาม signal">▶️ Start ที่เลือก</button>
               <button type="button" class="btn btn-sm btn-outline-warning" id="mc-toggle-stop" title="หยุดเปิดไม้ใหม่; position ที่ถืออยู่ยังทำงานต่อ">⏸ Stop ที่เลือก</button>
+              ${deletedCount > 0 ? '<button type="button" class="btn btn-sm btn-outline-info" id="mc-toggle-restore" title="Restore บอทที่ถูก soft-delete (เฉพาะบอทที่ลบเลือกอยู่)">↩️ Restore ที่เลือก</button>' : ''}
               <span class="bot-settings-status text-muted small" id="mc-toggle-status"></span>
             </div>
           </div>
         </details>
 
         ${sectionsHtml}
+
 
         <div class="bot-settings-actions">
           <button type="button" class="btn btn-primary" id="mc-submit">💾 ใช้ค่ากับบอทที่เลือก</button>
@@ -401,6 +427,14 @@
     };
     document.getElementById('mc-cancel').onclick = close;
     document.getElementById('mc-toggle-start').onclick = () => bulkToggle('enable', '▶️ Start');
+    document.getElementById('mc-select-deleted').onclick = () => {
+      container.querySelectorAll('.mc-bot-check').forEach((checkbox, index) => {
+        checkbox.checked = cachedBots[index] && !!cachedBots[index].deletedAt;
+      });
+    };
+    const restoreBtn = document.getElementById('mc-toggle-restore');
+    if (restoreBtn) restoreBtn.onclick = bulkRestore;
+
     document.getElementById('mc-toggle-stop').onclick = () => bulkToggle('disable', '⏸ Stop');
     // FIX-2026-08-14: Set to new bot — collect form values, stash in sessionStorage, open New Bot modal
     const setNewBotBtn = document.getElementById('mc-set-to-new-bot');
@@ -573,8 +607,22 @@
       status.style.color = '#ff6b6b';
       return;
     }
+    // FIX-2026-08-22: filter out soft-deleted bots — enableBot throws error for them
+    //   - deleted bots ต้อง Restore ก่อน (ปุ่ม ↩️ Restore) — Start/Stop ห้ามใช้บนบอทที่ลบ
+    //   - รายงาน skipped count ใน confirm + status เพื่อให้ user เห็นว่ามีบอทที่ข้ามไป
+    const deletedSkipped = selectedBotIds.filter((id) => {
+      const b = cachedBots.find((x) => String(x._id) === String(id));
+      return b && b.deletedAt;
+    });
+    const toggleableBotIds = selectedBotIds.filter((id) => !deletedSkipped.includes(id));
+    if (toggleableBotIds.length === 0) {
+      status.textContent = '❌ บอทที่เลือกทั้งหมดถูก soft-delete — ใช้ปุ่ม "↩️ Restore" แทน';
+      status.style.color = '#ff6b6b';
+      return;
+    }
+    const skipNote = deletedSkipped.length > 0 ? '\n\n(ข้าม ' + deletedSkipped.length + ' บอทที่ถูก soft-delete)' : '';
     const verb = action === 'enable' ? 'เปิด' : 'หยุด';
-    const ok = window.confirm(`⚠️ ยืนยัน${verb} ${selectedBotIds.length} บอท?`);
+    const ok = window.confirm(`�️ ยืนยัน${verb} ${toggleableBotIds.length} บอท?${skipNote}`);
     if (!ok) return;
 
     status.textContent = `⏳ กำลัง${verb}…`;
@@ -584,8 +632,8 @@
       const resp = await window.LUX_CONFIRM.callBotWithPassword(
         'POST',
         '/api/bots/bulk-toggle',
-        { botIds: selectedBotIds, action },
-        `${verb} ${selectedBotIds.length} บอท`,
+        { botIds: toggleableBotIds, action },
+        `${verb} ${toggleableBotIds.length} บอท`,
       );
       const results = resp.results || [];
       const failed = results.filter((r) => !r.ok);
@@ -614,6 +662,70 @@
   }
 
   // ════════════════════════════════════════════════════════════════════════════════════════════
+  // ════════════════════════════════════════════════════════════════════════════════════════════
+  // FIX-2026-08-22: bulkRestore — Restore บอทที่ถูก soft-delete หลายตัวพร้อมกัน
+  //   - POST /api/bots/bulk-restore (password-protected เหมือน bulk-toggle)
+  //   - filter เฉพาะบอทที่ถูก soft-delete จริง� (selected deleted bots only)
+  //   - แสดง per-bot result + error ของบอทที่ล้มเหลว (เช่น เกิน 30 วัน)
+  // ════════════════════════════════════════════════════════════════════════════════════════════
+  async function bulkRestore() {
+    const status = document.getElementById('mc-toggle-status');
+    const selectedBotIds = Array.from(document.querySelectorAll('.mc-bot-check:checked')).map((c) => c.getAttribute('data-bot-id'));
+    if (selectedBotIds.length === 0) {
+      status.textContent = '� เลือกบอทอย่างน้อย 1 ตัว';
+      status.style.color = '#ff6b6b';
+      return;
+    }
+    // filter เฉพาะบอทที่ deleted จริง (ไม่งั้น backend จะ return 400 "Bot is not soft-deleted")
+    const restoreIds = selectedBotIds.filter((id) => {
+      const b = cachedBots.find((x) => String(x._id) === String(id));
+      return b && b.deletedAt;
+    });
+    const skipped = selectedBotIds.length - restoreIds.length;
+    if (restoreIds.length === 0) {
+      status.textContent = '❌ บอทที่เลือกไม่มีตัวที่ถูก soft-delete — เ�ือกเฉพาะบอทที่มี chip 🗑 DELETED';
+      status.style.color = '#ff6b6b';
+      return;
+    }
+    const skipNote = skipped > 0 ? '\n\n(ข้าม ' + skipped + ' บอทที่ยังไม่ได้ลบ)' : '';
+    const ok = window.confirm(`↩️ ยืนยัน Restore ${restoreIds.length} บอท?${skipNote}\n\nบอทที่ restore แล้วจะกลับมา�ำงานตามปกติ (แต่จะยังไม่ถูก Start อัตโนมัติ — ใ�้ปุ่ม "▶️ Start" แยกต่างหา�)`);
+    if (!ok) return;
+
+    status.textContent = '⏳ กำลัง Restore…';
+    status.style.color = 'var(--text-3)';
+    try {
+      const resp = await window.LUX_CONFIRM.callBotWithPassword(
+        'POST',
+        '/api/bots/bulk-restore',
+        { botIds: restoreIds },
+        `Restore ${restoreIds.length} บอท`,
+      );
+      const results = resp.results || [];
+      const failed = results.filter((r) => !r.ok);
+      const succeeded = results.filter((r) => r.ok);
+      if (failed.length === 0) {
+        status.textContent = `✅ สำเร็จ — Restore ${succeeded.length} บอท`;
+        status.style.color = '#4ade80';
+      } else {
+        const failedNames = failed.map((r) => {
+          const bot = cachedBots.find((b) => String(b._id) === String(r.botId));
+          return `${bot ? (bot.name || bot.symbol) : r.botId}: ${r.error}`;
+        }).join('; ');
+        status.textContent = `⚠️ สำเร็จ ${succeeded.length}/${results.length}, �้มเหลว ${failed.length} — ${failedNames}`;
+        status.style.color = '#ffa500';
+      }
+      // Refresh bots list (อัพเดท deleted status) หลังผ่านไป 1.5s
+      setTimeout(() => {
+        close();
+        if (typeof window.loadBots === 'function') window.loadBots();
+        try { window.dispatchEvent(new CustomEvent('bots:bulk-updated')); } catch (_) {}
+      }, 1500);
+    } catch (err) {
+      status.textContent = '❌ ' + (err.message || err);
+      status.style.color = '#ff6b6b';
+    }
+  }
+
   // FIX-2026-08-13: Templates panel — Save / Load / Rename / Duplicate / Delete
   //   - All handlers call /api/admin/master-config-templates (CRUD on AppConfig.masterConfigTemplates)
   //   - Load populates the form (preview-then-apply) — user still clicks "ใช้ค่ากับบอทที่เลือก"

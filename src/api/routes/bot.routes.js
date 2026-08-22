@@ -2367,6 +2367,69 @@ router.post('/bulk-toggle', requireAuth, requireBotActionPassword, async (req, r
   }
 });
 
+// FIX-2026-08-22: Master Config — bulk-restore บอทที่ถูก soft-delete หลายตัวพร้อมกัน
+//   - ใช้ requireBotActionPassword เพราะ restore = lifecycle action (เ�มือน bulk-toggle)
+//   - body: { botIds: [string], password?: string }
+//   - ทำทีละตัว sequentially — ป้องกัน race + emit bot:updated ต่อบอท
+//   - แต่ละบอท restore ผ่าน logic เดียวกับ POST /:id/restore (clear deletedAt, scheduledDeleteAt, deleteNotificationSentAt)
+//   - ไม่ spawn trader ใหม่ — user ต้องกด "▶️ Start" แยกต่างหาก (เพื่อให้ตัดสินใจเอง)
+//   - response: { ok: true, results: [{ botId, ok, error?, daysSinceDelete? }], succeeded, failed }
+router.post('/bulk-restore', requireAuth, requireBotActionPassword, async (req, res) => {
+  try {
+    const { botIds } = req.body || {};
+    if (!Array.isArray(botIds) || botIds.length === 0) {
+      return res.status(400).json({ error: 'botIds must be a non-empty array' });
+    }
+    // cap เพื่อกัน DoS (เหมือน bulk-toggle)
+    if (botIds.length > 100) {
+      return res.status(400).json({ error: 'botIds must be <= 100 per request' });
+    }
+
+    const results = [];
+    let succeeded = 0;
+    let failed = 0;
+    // รัน sequentially — restore = simple DB write + emit event (no Binance call → safe to sequential)
+    for (const id of botIds) {
+      try {
+        const bot = await Bot.findById(id);
+        if (!bot) {
+          throw new Error('Bot not found');
+        }
+        if (!bot.deletedAt) {
+          // skip silently — frontend filter ควรป้องกันไม่ให้ส่งบอทที่ยังไม่ลบ
+          //   แต่ถ้าส่งมาจริง ๆ → �ายงาน ok=false เพื่อให้ UI แสดง feedback
+          throw new Error('Bot is not soft-deleted');
+        }
+        const daysSinceDelete = (Date.now() - new Date(bot.deletedAt).getTime()) / (1000 * 60 * 60 * 24);
+        if (daysSinceDelete > 30) {
+          throw new Error('Bot is beyond the 30-day restore window. Contact admin for backup restore.');
+        }
+        bot.deletedAt = null;
+        bot.scheduledDeleteAt = null;
+        bot.deleteNotificationSentAt = null;
+        bot.status = 'idle';
+        await bot.save();
+        eventBus.emit('bot:updated', { botId: String(bot._id) });
+        results.push({ botId: String(id), ok: true, name: bot.name || bot.symbol, daysSinceDelete: Math.floor(daysSinceDelete) });
+        succeeded += 1;
+      } catch (err) {
+        results.push({ botId: String(id), ok: false, error: err.message });
+        failed += 1;
+      }
+    }
+
+    logger.info({
+      requested: botIds.length,
+      succeeded,
+      failed,
+    }, 'bots: bulk-restore applied');
+    res.json({ ok: true, succeeded, failed, results });
+  } catch (err) {
+    logger.error({ err: err.message }, 'bot bulk-restore failed');
+    res.status(500).json({ error: err.message });
+  }
+});
+
 module.exports = router;
 
 // FIX-2026-08-01: start Bot Quality Indicator refresh loop at module load
