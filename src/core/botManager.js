@@ -208,7 +208,7 @@ class BotManager {
     logger.info('botManager stopped');
   }
 
-  async spawnTrader(bot) {
+  async spawnTrader(bot, opts = {}) {
     // FIX-2026-08-22 (zombie): refuse to spawn a trader for a soft-deleted bot
     //   - ป้องกัน checkAutoPauseBots RESUME branch (หรือ caller อื่น) จากการเปิด trader
     //     บนบอทที่ user ลบไปแล้ว → trader จะ place BUY ต่อจนกว่า process จะถูก kill
@@ -246,6 +246,32 @@ class BotManager {
     this.traders.set(bot._id.toString(), trader);
 
     logger.info({ botId: bot._id.toString(), symbol: bot.symbol, tf: bot.timeframe }, 'trader spawned');
+
+    // FIX-2026-08-22 (auto-resume replay-1): replay the last closed candle to catch missed S1 signals
+    //   - caller (auto-resume only) passes opts.pendingReplayCandle from _resetStaleReplayCursorOnEnable
+    //   - schedule via setImmediate so it runs AFTER start() event handler registration
+    //   - skip on soft-deleted bot (defense-in-depth; gate above already filters)
+    //   - ถ้า candle มี S1 → placeBuy fires (intended); ถ้าไม่ใช่ → cursor advances, no harm
+    if (opts.pendingReplayCandle && !bot.deletedAt) {
+      const candleForReplay = opts.pendingReplayCandle;
+      setImmediate(async () => {
+        try {
+          await trader.onCandleClosed(candleForReplay, { replay: true, trigger: 'resume-replay-1' });
+          logger.info({
+            botId: bot._id.toString(),
+            symbol: bot.symbol,
+            candleCloseTime: candleForReplay.closeTime,
+            close: candleForReplay.close,
+          }, 'botManager: replayed last closed candle on resume');
+        } catch (err) {
+          logger.warn({
+            botId: bot._id.toString(),
+            err: err.message,
+            stack: err.stack,
+          }, 'botManager: resume-replay-1 candle failed');
+        }
+      });
+    }
   }
 
   async stopTrader(botId) {
@@ -798,21 +824,30 @@ class BotManager {
   // ─── Lifecycle handlers (called from API) ──────────
 
   // FIX (GIGGLE incident 2026-08-05): stale-cursor reset on re-enable
-  //   - on manual enable OR auto-resume, if lastSignalCloseTime is older than STALE_CURSOR_THRESHOLD_MS
+  //   - on manual enable OR auto-resume, if lastSignalCloseTime is older than REPLAY_MIN_AGE_MS
   //     → re-seed to latestClosed BEFORE spawnTrader()
   //   - ป้องกัน reconcileKlines('startup') ดึง historical candles 200 แท่ง (ช่วง pause/disable)
   //     แล้ว S1 detector ยิง BUY บนแท่งเก่าหลายชั่วโมงก่อน (ghost BUY bug)
   //   - safe: cursor advances monotonically ($max guard ใน trader reconcileKlines กันย้อนหลังอยู่แล้ว)
   //   - mutate `bot.lastSignalCloseTime` ใน place + persist DB เพื่อให้ spawnTrader() ส่งค่าใหม่ให้ Trader ctor
+  // FIX-2026-08-22 (auto-resume replay-1): return pendingReplayCandle when cursor age is in safe replay window
+  //   - REPLAY_MIN_AGE_MS = 30s : cursor ใหม่มาก ไม่ต้อง replay (WS path / reconcile จัดการเอง)
+  //   - REPLAY_MAX_AGE_MS = 5min : pause ยาวเกินไป ไม่ replay (เสี่ยง entry ที่ price เก่า)
+  //   - ใน window (30s < age ≤ 5min) : replay last closed candle เพื่อ catch S1 ที่อาจเกิดระหว่าง pause
   async _resetStaleReplayCursorOnEnable(bot) {
-    const STALE_CURSOR_THRESHOLD_MS = 30 * 60 * 1000; // 30 นาที
+    const REPLAY_MIN_AGE_MS = 30 * 1000;            // 30 วินาที
+    const REPLAY_MAX_AGE_MS = 5 * 60 * 1000;        // 5 นาที
     const lastSignalCloseMs = bot.lastSignalCloseTime || 0;
     const nowMs = Date.now();
     const cursorAgeMs = nowMs - lastSignalCloseMs;
-    // fresh cursor (≤ 30 min) → ไม่ต้อง reset (reconcileKlines จะดึงแค่ 1-2 แท่งที่หายไป)
-    if (lastSignalCloseMs > 0 && cursorAgeMs <= STALE_CURSOR_THRESHOLD_MS) return;
+    // fresh cursor (≤ 30s) → ไม่ต้อง reset (WS / reconcileKlines จะดึงแค่ 1-2 แท่งที่หายไป)
+    // FIX-2026-08-22: return shape changed to { newCursorMs, pendingReplayCandle }
+    if (lastSignalCloseMs > 0 && cursorAgeMs <= REPLAY_MIN_AGE_MS) {
+      return { newCursorMs: lastSignalCloseMs, pendingReplayCandle: null };
+    }
 
     let latestClosedMs = 0;
+    let pendingReplayCandle = null;
     try {
       const raw = await binanceRest.getKlines({
         symbol: bot.symbol,
@@ -821,17 +856,42 @@ class BotManager {
       });
       for (const k of (raw || [])) {
         const ct = k[6];
-        if (ct <= nowMs && ct > latestClosedMs) latestClosedMs = ct;
+        // FIX-2026-08-22: also capture OHLCV of the latest closed candle for resume-replay-1
+        if (ct <= nowMs && ct > latestClosedMs) {
+          latestClosedMs = ct;
+          pendingReplayCandle = {
+            openTime: k[0],
+            open: parseFloat(k[1]),
+            high: parseFloat(k[2]),
+            low: parseFloat(k[3]),
+            close: parseFloat(k[4]),
+            volume: parseFloat(k[5]),
+            closeTime: ct,
+          };
+        }
       }
     } catch (err) {
       logger.warn({ botId: String(bot._id), symbol: bot.symbol, err: err.message },
         'botManager: _resetStaleReplayCursorOnEnable — getKlines failed, skipping reset');
-      return;
+      return { newCursorMs: lastSignalCloseMs, pendingReplayCandle: null };
     }
-    if (latestClosedMs === 0) return; // ยังไม่มี closed candle (เดือนใหม่, exchange ปิด ฯลฯ)
+    if (latestClosedMs === 0) {
+      return { newCursorMs: lastSignalCloseMs, pendingReplayCandle: null };
+    } // ยังไม่มี closed candle (เดือนใหม่, exchange ปิด ฯลฯ)
 
     await Bot.updateOne({ _id: bot._id }, { $set: { lastSignalCloseTime: latestClosedMs } });
     bot.lastSignalCloseTime = latestClosedMs;
+
+    // FIX-2026-08-22: only return pendingReplayCandle when cursor age is in the safe replay window
+    //   - cursorAgeMs > REPLAY_MIN_AGE_MS (30s) → fresh enough that WS may have legitimately missed it
+    //   - cursorAgeMs ≤ REPLAY_MAX_AGE_MS (5min) → not so stale that entry price is risky
+    const inReplayWindow = cursorAgeMs > REPLAY_MIN_AGE_MS && cursorAgeMs <= REPLAY_MAX_AGE_MS;
+    const replayCandle = inReplayWindow ? pendingReplayCandle : null;
+    let replayReason;
+    if (cursorAgeMs <= REPLAY_MIN_AGE_MS) replayReason = 'too_fresh';
+    else if (cursorAgeMs > REPLAY_MAX_AGE_MS) replayReason = 'too_stale';
+    else replayReason = 'in_window';
+
     logger.info({
       botId: String(bot._id),
       symbol: bot.symbol,
@@ -839,7 +899,11 @@ class BotManager {
       prevCursorMs: lastSignalCloseMs,
       cursorAgeMs,
       newCursorMs: latestClosedMs,
-    }, 'botManager: stale replay cursor reset on re-enable (skip historical replay)');
+      willReplayCandle: !!replayCandle,
+      replayReason,
+    }, 'botManager: stale replay cursor reset on re-enable');
+
+    return { newCursorMs: latestClosedMs, pendingReplayCandle: replayCandle };
   }
 
   async enableBot(botId) {
@@ -1138,7 +1202,10 @@ async function checkAutoPauseBots() {
         await Bot.updateOne({ _id: b._id }, { $set: update });
         // FIX 2026-08-05 (GIGGLE): reset stale cursor ก่อน spawnTrader (กัน ghost BUY จาก reconcileKlines replay)
         //   - b เป็น plain object จาก .find() → mutate directly แล้ว persist ผ่าน helper
-        await this._resetStaleReplayCursorOnEnable(b);
+        // FIX-2026-08-22: capture pendingReplayCandle เพื่อ replay last closed candle (auto-resume เท่านั้น)
+        //   - manual enable / PM2 boot ไม่ trigger replay (user อาจตั้งใจปิด)
+        //   - safe window (30s, 5min] enforced ใน helper แล้ว
+        const { pendingReplayCandle } = await this._resetStaleReplayCursorOnEnable(b);
         eventBus.emit('bot:enabled', {
           botId: String(b._id),
           reason: 'auto_resume_vol_recovered',
@@ -1155,7 +1222,8 @@ async function checkAutoPauseBots() {
           });
         } catch (_) { /* non-fatal */ }
         // re-spawn trader (mirror enableBot behavior — without totalActiveMs accrual since autoPause is short)
-        await this.spawnTrader({ _id: b._id, ...b }).catch((err) => logger.warn({ botId: String(b._id), err: err.message }, 'botManager: auto-resume spawn failed'));
+        // FIX-2026-08-22: pass pendingReplayCandle → spawnTrader จะ schedule onCandleClosed replay หลัง start
+        await this.spawnTrader({ _id: b._id, ...b }, { pendingReplayCandle }).catch((err) => logger.warn({ botId: String(b._id), err: err.message }, 'botManager: auto-resume spawn failed'));
         logger.info({
           botId: String(b._id),
           minKcPct,
