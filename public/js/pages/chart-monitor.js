@@ -128,6 +128,11 @@ async function init() {
     _cmPositionModal = window.bootstrap.Modal.getOrCreateInstance(modalEl);
   }
 
+  // FIX-2026-08-22: delegated click handler on modal body for Force Close button
+  //   - เดิม modal ไม่มี handler → กด Force Close ใน modal ไม่ทำงาน
+  const modalBodyEl = document.getElementById('cmPositionModalBody');
+  if (modalBodyEl) modalBodyEl.addEventListener('click', onCmPositionModalBodyClick);
+
   // Bootstrap modal instance for expand chart (2026-08-06) + Load more/Reset buttons
   initCmExpandModal();
 
@@ -402,43 +407,12 @@ function updateCmPositionsTotals(count, totalCost, totalPnl) {
  * ════════════════════════════════════════════════════════════════════ */
 
 async function onCmPositionCardClick(ev) {
-  // Force Close button
+  // Force Close button (grid variant)
   const fcBtn = ev.target.closest('.btn-force-close-cm');
   if (fcBtn) {
     ev.preventDefault();
     ev.stopPropagation();
-    const tradeId = fcBtn.dataset.tradeId;
-    const botId = fcBtn.dataset.botId;
-    if (!tradeId || !botId) return;
-    const pos = _cmPositions && _cmPositions.positions.find((p) => p.tradeId === tradeId);
-    if (!pos) return;
-    try {
-      const pw = await window.LUX_CONFIRM.luxConfirm({
-        variant: 'danger',
-        icon: '🛑',
-        title: 'ยืนยันบังคับปิด position',
-        sub: 'จะยกเลิก SELL (ถ้ามี) แล้ว MARKET SELL freeQty (หรือ synthetic close ถ้า asset หายไปแล้ว)',
-        message: `ไม้ ${tradeId.slice(-8)} (${pos.symbol}, ${pos.timeframe}, state=${pos.state}) — ปิดเลยหรือไม่?`,
-        target: { name: pos.botName || pos.symbol, symbol: pos.symbol, timeframe: pos.timeframe },
-        requirePassword: true,
-        dangerNote: 'บอทยังคงทำงานต่อ — เฉพาะไม้นี้ที่ถูกปิด',
-        confirmLabel: 'บังคับปิดไม้นี้',
-        confirmGlyph: '🛑',
-      });
-      if (pw === null) return;
-      await window.LUX_CONFIRM.callBotWithPassword(
-        'POST',
-        `/api/bots/${botId}/trades/${tradeId}/force-close`,
-        { password: pw || undefined },
-        `force-close ${pos.symbol}`,
-      );
-      await loadCmPositions();
-    } catch (err) {
-      await window.LUX_CONFIRM.luxAlert({
-        variant: 'danger', icon: '⚠️', title: 'บังคับปิดไม่สำเร็จ',
-        message: err.message || String(err),
-      });
-    }
+    await _doCmForceClose(fcBtn, { closeModal: false });
     return;
   }
 
@@ -453,6 +427,75 @@ async function onCmPositionCardClick(ev) {
   const pos = _cmPositions && _cmPositions.positions.find((p) => p.tradeId === tradeId);
   if (!pos) return;
   openCmPositionModal(pos);
+}
+
+/**
+ * FIX-2026-08-22: Click handler for position detail modal body
+ *   - Force Close button (.btn-force-close-cm-modal) → same flow as grid (confirm + API + refetch)
+ *     - เดิม modal ไม่มี delegated handler → กด Force Close ใน modal ไม่ทำงาน
+ *   - Chart button (.btn-chart-link-cm-modal) → ปล่อยให้ <a target=_blank> ทำงานเอง
+ *   - ปิด modal หลัง force-close สำเร็จ เพื่อให้เห็น grid ที่อัปเดตแล้ว
+ */
+async function onCmPositionModalBodyClick(ev) {
+  const fcBtn = ev.target.closest('.btn-force-close-cm-modal');
+  if (fcBtn) {
+    ev.preventDefault();
+    ev.stopPropagation();
+    await _doCmForceClose(fcBtn, { closeModal: true });
+    return;
+  }
+
+  // Chart button (don't interfere — let <a target=_blank> open in new tab)
+  if (ev.target.closest('.btn-chart-link-cm-modal')) return;
+}
+
+/**
+ * FIX-2026-08-22: Shared force-close flow (used by both grid + modal handlers)
+ *   - btn: the .btn-force-close-cm[/-modal] element (must have data-trade-id + data-bot-id)
+ *   - opts.closeModal: true → hide _cmPositionModal after success (modal context)
+ *   - Finds the live position from _cmPositions.positions; if missing, warns + returns
+ *   - Mirrors bots.html onOpenPositionsClick (LUX_CONFIRM.luxConfirm + callBotWithPassword)
+ */
+async function _doCmForceClose(btn, opts = {}) {
+  const tradeId = btn.dataset.tradeId;
+  const botId = btn.dataset.botId;
+  if (!tradeId || !botId) return;
+  const pos = _cmPositions && _cmPositions.positions.find((p) => p.tradeId === tradeId);
+  if (!pos) {
+    await window.LUX_CONFIRM.luxAlert({
+      variant: 'warning', icon: '⚠️', title: 'ไม้นี้ปิดไปแล้ว',
+      message: 'Position นี้ไม่อยู่ในรายการ open แล้ว — กรุณาปิด modal แล้วรีเฟรช',
+    });
+    return;
+  }
+  try {
+    const pw = await window.LUX_CONFIRM.luxConfirm({
+      variant: 'danger',
+      icon: '🛑',
+      title: 'ยืนยันบังคับปิด position',
+      sub: 'จะยกเลิก SELL (ถ้ามี) แล้ว MARKET SELL freeQty (หรือ synthetic close ถ้า asset หายไปแล้ว)',
+      message: `ไม้ ${tradeId.slice(-8)} (${pos.symbol}, ${pos.timeframe}, state=${pos.state}) — ปิดเลยหรือไม่?`,
+      target: { name: pos.botName || pos.symbol, symbol: pos.symbol, timeframe: pos.timeframe },
+      requirePassword: true,
+      dangerNote: 'บอทยังคงทำงานต่อ — เฉพาะไม้นี้ที่ถูกปิด',
+      confirmLabel: 'บังคับปิดไม้นี้',
+      confirmGlyph: '🛑',
+    });
+    if (pw === null) return;
+    await window.LUX_CONFIRM.callBotWithPassword(
+      'POST',
+      `/api/bots/${botId}/trades/${tradeId}/force-close`,
+      { password: pw || undefined },
+      `force-close ${pos.symbol}`,
+    );
+    if (opts.closeModal && _cmPositionModal) _cmPositionModal.hide();
+    await loadCmPositions();
+  } catch (err) {
+    await window.LUX_CONFIRM.luxAlert({
+      variant: 'danger', icon: '⚠️', title: 'บังคับปิดไม่สำเร็จ',
+      message: err.message || String(err),
+    });
+  }
 }
 
 /* 2026-08-06: Card action click delegation (currently: expand chart button) */
