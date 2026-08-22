@@ -525,6 +525,29 @@ class Trader {
       }
     };
     eventBus.on('bot:updated', this._botUpdatedHandler);
+
+    // FIX-2026-08-22: process exit safety net for eventBus listeners
+    //   - ปัญหา: PM2 SIGKILL (OOM/crash/restart) ฆ่าก่อน stop() รันครบ → orphan listeners ค้างบน EventBus
+    //     ของ process ใหม่ → 'kline:closed' listeners �ะสมข้าม restart cycle → 100+ fanout
+    //     → candle close ทุกครั้ง triggers ทุก bot → CB handlers fire พร้อมกัน → Binance weight spike → IP ban
+    //   - fix: process.on('exit') ลบ listeners แบบ sync (eventBus.off() เป็น sync อยู่แล้ว)
+    //   - node spec: process.exit callback ไม่รองรับ async — sync-only path ใช้ได้
+    //   - guard: register ครั้งเ�ียวต่อ instance, ลบใน stop() เพื่อกัน leak ในระหว่าง soft stop
+    if (!this._processExitCleanup) {
+      this._processExitCleanup = () => {
+        if (this._bookTickerHandler) eventBus.off('bookTicker', this._bookTickerHandler);
+        if (this._klineHandler) eventBus.off('kline:closed', this._klineHandler);
+        if (this._cbKlineHandler) eventBus.off('kline:closed', this._cbKlineHandler);
+        if (this._cbv2KlineHandler) eventBus.off('kline:closed', this._cbv2KlineHandler);
+        if (this._cbv3KlineHandler) eventBus.off('kline:closed', this._cbv3KlineHandler);
+        if (this._cbv5KlineHandler) eventBus.off('kline:closed', this._cbv5KlineHandler);
+        if (this._cbAutoUnlockKlineHandler) eventBus.off('kline:closed', this._cbAutoUnlockKlineHandler);
+        if (this._orderHandler) eventBus.off('order:update', this._orderHandler);
+        if (this._marketReconnectHandler) eventBus.off('market:reconnected', this._marketReconnectHandler);
+        if (this._botUpdatedHandler) eventBus.off('bot:updated', this._botUpdatedHandler);
+      };
+      process.on('exit', this._processExitCleanup);
+    }
   }
 
   async stop() {
@@ -587,6 +610,11 @@ class Trader {
     if (this._orderHandler) eventBus.off('order:update', this._orderHandler);
     if (this._marketReconnectHandler) eventBus.off('market:reconnected', this._marketReconnectHandler);
     if (this._botUpdatedHandler) eventBus.off('bot:updated', this._botUpdatedHandler);
+    // FIX-2026-08-22: remove process exit handler (normal stop path ลบ listeners เองแล้ว)
+    if (this._processExitCleanup) {
+      process.removeListener('exit', this._processExitCleanup);
+      this._processExitCleanup = null;
+    }
     this._cbKlineHandler = null;
     this._cbv2KlineHandler = null; // FIX-2026-08-06
     this._cbv3KlineHandler = null; // FIX-2026-08-08: CBv3 handler
