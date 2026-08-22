@@ -197,8 +197,97 @@ describe('binanceRest.RateLimiter (via _RateLimiterClass)', () => {
       tokens: expect.any(Number),
       usedEstimated: expect.any(Number),
       lastRefill: expect.any(Number),
+      banUntilMs: expect.any(Number),
+      banRemainingSec: expect.any(Number),
     }));
     expect(s.usedEstimated).toBeGreaterThanOrEqual(0);
+    expect(s.banUntilMs).toBe(0);
+    expect(s.banRemainingSec).toBe(0);
+  });
+
+  // ─── FIX-2026-08-22: 418 IP-ban gate ────────────────────────
+  describe('FIX-2026-08-22: 418 IP-ban gate (setBanUntil / take / status)', () => {
+    test('default banUntilMs = 0 (no ban)', () => {
+      const R = new binanceRest._RateLimiterClass();
+      expect(R.banUntilMs).toBe(0);
+      const s = R.status();
+      expect(s.banUntilMs).toBe(0);
+      expect(s.banRemainingSec).toBe(0);
+    });
+
+    test('setBanUntil() accepts future epoch ms and updates banUntilMs', () => {
+      const R = new binanceRest._RateLimiterClass();
+      const futureMs = Date.now() + 60_000;
+      const ok = R.setBanUntil(futureMs);
+      expect(ok).toBe(true);
+      expect(R.banUntilMs).toBe(futureMs);
+    });
+
+    test('setBanUntil() rejects invalid (NaN, Infinity, past timestamp)', () => {
+      const R = new binanceRest._RateLimiterClass();
+      expect(R.setBanUntil(NaN)).toBe(false);
+      expect(R.setBanUntil(Infinity)).toBe(false);
+      expect(R.setBanUntil(Date.now() - 1000)).toBe(false);
+      expect(R.banUntilMs).toBe(0);
+    });
+
+    test('setBanUntil() max wins (later expiry overrides earlier)', () => {
+      const R = new binanceRest._RateLimiterClass();
+      const t1 = Date.now() + 10_000;
+      const t2 = Date.now() + 30_000;
+      R.setBanUntil(t1);
+      R.setBanUntil(t2);
+      expect(R.banUntilMs).toBe(t2);
+    });
+
+    test('setBanUntil() shorter expiry does NOT override longer one', () => {
+      const R = new binanceRest._RateLimiterClass();
+      const t1 = Date.now() + 60_000;
+      const t2 = Date.now() + 10_000;
+      R.setBanUntil(t1);
+      const ok = R.setBanUntil(t2);
+      expect(ok).toBe(false);
+      expect(R.banUntilMs).toBe(t1); // unchanged
+    });
+
+    test('clearBan() resets banUntilMs to 0', () => {
+      const R = new binanceRest._RateLimiterClass();
+      R.setBanUntil(Date.now() + 60_000);
+      R.clearBan();
+      expect(R.banUntilMs).toBe(0);
+    });
+
+    test('take() waits when ban is active, then resumes', async () => {
+      const R = new binanceRest._RateLimiterClass({ capacity: 6000 });
+      // ban for 200ms
+      const banMs = Date.now() + 200;
+      R.setBanUntil(banMs);
+      const t0 = Date.now();
+      await R.take(1);
+      const elapsed = Date.now() - t0;
+      // Should have waited at least ~150ms (allow some slack)
+      expect(elapsed).toBeGreaterThanOrEqual(150);
+      // Ban should now be cleared (auto-expire)
+      expect(R.banUntilMs).toBe(0);
+    });
+
+    test('take() returns immediately when no ban is active', async () => {
+      const R = new binanceRest._RateLimiterClass({ capacity: 6000 });
+      const t0 = Date.now();
+      await R.take(1);
+      const elapsed = Date.now() - t0;
+      expect(elapsed).toBeLessThan(50);
+    });
+
+    test('status() reports remaining seconds correctly during ban', () => {
+      const R = new binanceRest._RateLimiterClass();
+      const futureMs = Date.now() + 45_000;
+      R.setBanUntil(futureMs);
+      const s = R.status();
+      expect(s.banUntilMs).toBe(futureMs);
+      expect(s.banRemainingSec).toBeGreaterThanOrEqual(44);
+      expect(s.banRemainingSec).toBeLessThanOrEqual(45);
+    });
   });
 });
 

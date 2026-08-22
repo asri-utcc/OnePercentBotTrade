@@ -16,6 +16,10 @@ class RateLimiter {
     this.refillRate = refillPerMs;
     this.tokens = capacity;
     this.lastRefill = Date.now();
+    // FIX-2026-08-22: 418 IP-ban gate — Binance ตอบ 418 พร้อม "IP banned until <ms>"
+    //   เดิม rate limiter ไม่รู้จัก → ยิงต่อระหว่างถูกแบน → ได้ 418 ทุก call + WS ตาย
+    //   fix: setBanUntil() จาก response interceptor → take() รอจนกว่า banUntilMs จะ expire
+    this.banUntilMs = 0;
   }
 
   /**
@@ -39,6 +43,20 @@ class RateLimiter {
   }
 
   async take(weight = 1) {
+    // FIX-2026-08-22: respect 418 IP ban — wait until banUntilMs expires before queuing
+    //   - Binance bans 5min-2hr หลัง weight > capacity
+    //   - ยิงต่อระหว่างแบน → 418 ทุก call + log spam + WS disconnect
+    //   - cap wait �ี่ 5s ต่อรอบเพื่อให้ ban expiry ตรวจใหม่ได้บ่อยๆ
+    while (this.banUntilMs && Date.now() < this.banUntilMs) {
+      const waitMs = Math.min(5000, this.banUntilMs - Date.now());
+      logger.debug({ banUntilMs: this.banUntilMs, waitMs }, 'binance: rate limiter waiting for 418 ban expiry');
+      await new Promise((r) => setTimeout(r, waitMs));
+    }
+    if (this.banUntilMs && Date.now() >= this.banUntilMs) {
+      logger.info({ previousBanMs: this.banUntilMs }, 'binance: 418 IP ban expired — resuming requests');
+      this.banUntilMs = 0;
+    }
+
     while (true) {
       const now = Date.now();
       const elapsed = now - this.lastRefill;
@@ -57,6 +75,28 @@ class RateLimiter {
     }
   }
 
+  // FIX-2026-08-22: setBanUntil() — set IP-ban expiry from response interceptor
+  //   - Binance 418 body: { code: -1003, msg: "Way too much request weight used;
+  //     IP banned until <epochMs>. Please use WebSocket Streams..." }
+  //   - parse epochMs from msg → set banUntilMs (max wins)
+  //   - defensive: reject invalid (NaN, in-past)
+  setBanUntil(banMs) {
+    if (!Number.isFinite(banMs) || banMs <= Date.now()) return false;
+    if (banMs > this.banUntilMs) {
+      const prev = this.banUntilMs;
+      this.banUntilMs = banMs;
+      const waitSec = Math.round((banMs - Date.now()) / 1000);
+      logger.warn({ previousBanMs: prev, newBanMs: banMs, waitSec }, 'binance: rate limiter set 418 IP ban until');
+      return true;
+    }
+    return false;
+  }
+
+  // FIX-2026-08-22: clearBan() — manually reset (e.g., for tests)
+  clearBan() {
+    this.banUntilMs = 0;
+  }
+
   updateFromHeaders(headers) {
     const used = parseInt(headers['x-mbx-used-weight-1m'] || '0', 10);
     // แจ้งเตือนเมื่อใช้เกิน 90% ของ capacity — เลิกรบกวนตอนโหลดปกติ
@@ -73,6 +113,7 @@ class RateLimiter {
    * Snapshot สำหรับ status endpoint / telemetry
    * - capacity: ค่าที่ตั้งไว้ (จาก AppConfig.binanceRateLimitPerMin)
    * - used (estimate): capacity - tokens
+   * - banUntilMs: 0 = no ban, else epoch ms when 418 IP-ban expires
    */
   status() {
     return {
@@ -81,6 +122,10 @@ class RateLimiter {
       tokens: this.tokens,
       usedEstimated: Math.max(0, this.capacity - this.tokens),
       lastRefill: this.lastRefill,
+      banUntilMs: this.banUntilMs,
+      banRemainingSec: this.banUntilMs > Date.now()
+        ? Math.round((this.banUntilMs - Date.now()) / 1000)
+        : 0,
     };
   }
 }
@@ -125,6 +170,21 @@ http.interceptors.response.use(
   async (err) => {
     if (err.response && err.response.headers) {
       limiter.updateFromHeaders(err.response.headers);
+
+      // FIX-2026-08-22: detect Binance 418 IP ban + extract expiry from msg
+      //   Binance body: { code: -1003, msg: "Way too much request weight used;
+      //     IP banned until <epochMs>. Please use WebSocket Streams..." }
+      //   - parse epochMs via regex → setBanUntil() blocks take() until expiry
+      //   - ป้องกัน log spam + WS disconnect cascade ที่เคยเห็น 13:06:56 incident
+      if (err.response.status === 418) {
+        const data = err.response.data;
+        if (data && typeof data.msg === 'string') {
+          const m = data.msg.match(/IP banned until (\d+)/);
+          if (m) {
+            limiter.setBanUntil(parseInt(m[1], 10));
+          }
+        }
+      }
     }
     return Promise.reject(err);
   }

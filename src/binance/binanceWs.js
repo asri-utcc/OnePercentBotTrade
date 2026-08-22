@@ -190,7 +190,22 @@ class MarketWsManager {
     if (!this.shouldRun) return;
     if (this.reconnectTimer) return;
     this.reconnectAttempts += 1;
-    const wait = Math.min(1000 * 2 ** (this.reconnectAttempts - 1), 30000);
+    let wait = Math.min(1000 * 2 ** (this.reconnectAttempts - 1), 30000);
+    // FIX-2026-08-22: respect HTTP 418 IP ban (shared with REST) — wait for banUntilMs expiry
+    //   เดิม reconnect ทุก attempt โดยไม่เช็ค HTTP ban state → WS handshake 418 → fail loop
+    //   fix: extend wait �้า binanceRest rate limiter บอกว่า IP ยังถูกแบน
+    const status = binanceRest.getRateLimitStatus();
+    if (status && status.banUntilMs && status.banUntilMs > Date.now()) {
+      const banWaitMs = Math.max(wait, status.banUntilMs - Date.now() + 1000); // +1s buffer
+      logger.warn({
+        attempt: this.reconnectAttempts,
+        originalWaitMs: wait,
+        extendedWaitMs: banWaitMs,
+        banUntilMs: status.banUntilMs,
+        banRemainingSec: status.banRemainingSec,
+      }, 'market WS reconnect extended — HTTP 418 IP ban still active');
+      wait = banWaitMs;
+    }
     logger.info({ attempt: this.reconnectAttempts, waitMs: wait }, 'market WS reconnecting');
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
@@ -434,7 +449,21 @@ class UserDataStreamManager {
     if (!this.shouldRun) return;
     if (this.reconnectTimer) return;
     this.reconnectAttempts += 1;
-    const wait = Math.min(1000 * 2 ** (this.reconnectAttempts - 1), 30000);
+    let wait = Math.min(1000 * 2 ** (this.reconnectAttempts - 1), 30000);
+    // FIX-2026-08-22: respect HTTP 418 IP ban — extend wait ถ้า REST rate limiter บอกว่า IP ยังถูกแบน
+    //   Binance ใช้ IP-level ban ทั้ง HTTP และ WS — ถ้า HTTP โดนแบน WS ก็โดนด้วย
+    const status = binanceRest.getRateLimitStatus();
+    if (status && status.banUntilMs && status.banUntilMs > Date.now()) {
+      const banWaitMs = Math.max(wait, status.banUntilMs - Date.now() + 1000);
+      logger.warn({
+        attempt: this.reconnectAttempts,
+        originalWaitMs: wait,
+        extendedWaitMs: banWaitMs,
+        banUntilMs: status.banUntilMs,
+        banRemainingSec: status.banRemainingSec,
+      }, 'user data stream reconnect extended — HTTP 418 IP ban still active');
+      wait = banWaitMs;
+    }
     logger.info({ attempt: this.reconnectAttempts, waitMs: wait }, 'user data stream reconnecting');
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;

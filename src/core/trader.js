@@ -194,15 +194,28 @@ class Trader {
     }, RECONCILE_BALANCE_MS);
 
     // FIX-2026-07-15: also reconcile on WS reconnect (immediate catch-up vs 90s sweep wait)
+    // FIX-2026-08-22: per-symbol debounce + jitter — �ัน burst ตอน WS reconnect
+    //   - ปัญหาเดิม: ทุก trader debounce 500ms เท่า�ัน → 100+ reconcileKlines() พร้อมกัน
+    //     → CB evaluators ยิง getKlines({limit:500}) burst → Binance weight 5990/6000 → IP ban 41s
+    //   - fix 1: per-symbol debounce Map — coalesce multi-bot same-symbol
+    //   - fix 2: jitter 200-1500ms — กระจาย reconcileKlines ในหน้าต่าง ~1.3s แทนพร้อมกัน
+    //   - เมื่อ rate limiter refill 100/s, jitter 1.3s ลด peak load ลง ~10×
+    this._marketReconnectDebounceMap = null; // init ใน handler เพื่อ lazy alloc
     this._marketReconnectHandler = () => {
-      // เล็กน้อย debounce กัน reconnect storm (Binance อาจ reconnect หลายรอบ)
-      if (this._marketReconnectDebounce) clearTimeout(this._marketReconnectDebounce);
-      this._marketReconnectDebounce = setTimeout(() => {
+      if (!this.running) return;
+      if (!this._marketReconnectDebounceMap) this._marketReconnectDebounceMap = new Map();
+      const sym = this.bot.symbol;
+      const prev = this._marketReconnectDebounceMap.get(sym);
+      if (prev) clearTimeout(prev);
+      const jitterMs = 200 + Math.floor(Math.random() * 1300); // 200-1500ms
+      const handle = setTimeout(() => {
+        if (this._marketReconnectDebounceMap) this._marketReconnectDebounceMap.delete(sym);
         if (!this.running) return;
         this.reconcileKlines('ws-reconnect').catch((err) =>
           logger.warn({ err: err.message }, 'trader: ws-reconnect sweep failed')
         );
-      }, 500);
+      }, jitterMs);
+      this._marketReconnectDebounceMap.set(sym, handle);
     };
     eventBus.on('market:reconnected', this._marketReconnectHandler);
 
@@ -565,9 +578,11 @@ class Trader {
       clearInterval(this.sweepTimer);
       this.sweepTimer = null;
     }
-    if (this._marketReconnectDebounce) {
-      clearTimeout(this._marketReconnectDebounce);
-      this._marketReconnectDebounce = null;
+    // FIX-2026-08-22: clear per-symbol debounce Map (replace legacy single _marketReconnectDebounce)
+    if (this._marketReconnectDebounceMap) {
+      for (const t of this._marketReconnectDebounceMap.values()) clearTimeout(t);
+      this._marketReconnectDebounceMap.clear();
+      this._marketReconnectDebounceMap = null;
     }
     // FIX-2026-07-30: clear SELL partial-fill watcher timer
     if (this.sellPartialFillTimer) {
