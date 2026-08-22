@@ -82,7 +82,12 @@ const botFilter = {
 function loadBotFilter() {
   try {
     const raw = localStorage.getItem(BOT_FILTER_KEY);
-    if (!raw) return;
+    if (!raw) {
+      // FIX-2026-08-22: default chip = "not-deleted" เพื่อซ่อน soft-deleted bots อัตโนมัติ
+      //   - user ต้องกด "🗑 Deleted" เพื่อเปิด (ในตัวอย่างเดิม chip ไม่ active → เห็นบอทที่ถูกลบค้าง)
+      botFilter.chips = new Set(['not-deleted']);
+      return;
+    }
     const parsed = JSON.parse(raw);
     if (parsed && Array.isArray(parsed.chips)) {
       botFilter.chips = new Set(parsed.chips.filter((c) => typeof c === 'string'));
@@ -118,6 +123,8 @@ function botMatchesFilters(b) {
     const dcaFrozen = b.dcaFrozen === true || b.dcaCooldownUntil && new Date(b.dcaCooldownUntil).getTime() > now;
     const sellPartialFrozen = b.sellPartialFrozen === true;
     const anyCooldown = cbv2Active || cbv3Active || dcaFrozen || sellPartialFrozen;
+    // FIX-2026-08-22: soft-delete lifecycle
+    const isDeleted = !!b.deletedAt;
     for (const chip of botFilter.chips) {
       switch (chip) {
         case 'running':      if (!b.enabled) return false; break;
@@ -130,6 +137,11 @@ function botMatchesFilters(b) {
         case 'cooldown':       if (!anyCooldown) return false; break;
         case 'cbv2-cooldown':  if (!cbv2Active)  return false; break;
         case 'cbv3-cooldown':  if (!cbv3Active)  return false; break;
+        // FIX-2026-08-22: deleted / not-deleted — บอทที่ถูก soft-delete (autoDeleteBot, user delete)
+        //   - "not-deleted" = default chip ที่ active ตอนเปิดหน้า (ซ่อน deleted อัตโนมัติ)
+        //   - user กด "🗑 Deleted" → ยกเลิก "not-deleted" + เปิด "deleted" (เห็นเฉพาะบอทที่ถูกลบ)
+        case 'deleted':        if (!isDeleted) return false; break;
+        case 'not-deleted':    if (isDeleted)  return false; break;
         default: break; // unknown chip → ignore
       }
     }
@@ -145,6 +157,72 @@ function getFilteredBots() {
 
 function isFilterActive() {
   return botFilter.query.length > 0 || botFilter.chips.size > 0;
+}
+
+// FIX-2026-08-22: แจ้งเตือนเมื่อมีบอทที่ถูก soft-delete แต่ยังมี position เปิดอยู่
+//   - เหตุผล: bot doc ยังอยู่ใน DB (deletedAt != null) แต่ bot ไม่ทำงานแล้ว (enabled=false)
+//     → positions ยังปรากฏใน /api/bots/positions แต่จะไม่ถูกจัดการต่อ → user งง "ทำไม trade ค้าง"
+//   - banner นี้ช่วยให้ user รู้และ Restore ได้ทันที (มีปุ่ม Restore All)
+//   - ปุ่ม dismiss ซ่อนชั่วคราว (session-only) — banner จะกลับมาเมื่อ reload
+function updateDeletedWithPositionsBanner() {
+  const banner = document.getElementById('deleted-with-positions-banner');
+  if (!banner) return;
+  const dwp = bots.filter((b) => b.deletedAt && (b.activePositionsCount || 0) > 0);
+  if (dwp.length === 0) {
+    banner.hidden = true;
+    return;
+  }
+  const countEl = document.getElementById('dwp-count');
+  if (countEl) countEl.textContent = String(dwp.length);
+  const restoreAllBtn = document.getElementById('dwp-restore-all-btn');
+  if (restoreAllBtn && !restoreAllBtn._bound) {
+    restoreAllBtn._bound = true;
+    restoreAllBtn.addEventListener('click', () => {
+      const restorable = dwp.filter((b) => {
+        const d = b.deletedAt ? new Date(b.deletedAt) : null;
+        if (!d) return false;
+        return Math.floor((Date.now() - d.getTime()) / 86400000) <= 30;
+      });
+      if (restorable.length === 0) {
+        luxAlert({ variant: 'danger', icon: '🔒', title: 'ไม่มีบอทที่ Restore ได้', sub: 'เกิน 30 วันหมดแล้ว', message: 'ทุกบอทที่ถูกลบเกิน 30 วัน — ต้อง permanent delete + สร้างใหม่' });
+        return;
+      }
+      const names = restorable.map((b) => `${b.name || b.symbol} (${b.symbol}/${b.timeframe})`).join(', ');
+      luxConfirm({
+        variant: 'success',
+        icon: '♻️',
+        title: `Restore ${restorable.length} บอท?`,
+        sub: 'จะ restore ทุกบอทที่อยู่ใน 30-วัน window',
+        message: `Restore: ${names}`,
+        requirePassword: true,
+        confirmLabel: `Restore ${restorable.length} บอท`,
+        confirmGlyph: '♻️',
+      }).then(async (pw) => {
+        if (pw === null) return;
+        let okCount = 0; const failList = [];
+        for (const b of restorable) {
+          try {
+            await callBotWithPassword('POST', `/api/bots/${b._id}/restore`, { password: pw || undefined }, `restore ${b.symbol}`);
+            okCount += 1;
+          } catch (e) { failList.push(`${b.symbol}: ${e.message}`); }
+        }
+        await loadBots();
+        await luxAlert({
+          variant: failList.length > 0 ? 'warning' : 'success',
+          icon: failList.length > 0 ? '⚠️' : '✅',
+          title: `Restore เสร็จ · ${okCount}/${restorable.length} สำเร็จ`,
+          sub: failList.length > 0 ? `ล้มเหลว: ${failList.length}` : '',
+          message: failList.length > 0 ? failList.join('\n') : 'บอททั้งหมดกลับมาแล้ว — อย่าลืมกด ▶ เริ่ม',
+        });
+      });
+    });
+  }
+  const dismissBtn = document.getElementById('dwp-dismiss-btn');
+  if (dismissBtn && !dismissBtn._bound) {
+    dismissBtn._bound = true;
+    dismissBtn.addEventListener('click', () => { banner.hidden = true; });
+  }
+  banner.hidden = false;
 }
 
 function updateFilterCounter() {
@@ -934,9 +1012,15 @@ async function loadBots(opts = {}) {
     // FIX-2026-08-02: ?expand=1 → server includes volatility snapshot (1.5s on cold cache)
     //   - default (compact) = skip vol → fast first paint (~200ms)
     //   - expand mode = need vol tiles, so pass expand=1
+    // FIX-2026-08-22: always include ?includeDeleted=1 — soft-deleted bots must appear in UI
+    //   - previously server filter { deletedAt: null } hid them → user couldn't find/restore them
+    //   - frontend controls visibility via chip filter "🗑 Deleted" (default hidden)
     const viewMode = getBotViewMode();
     const expand = opts.expand != null ? opts.expand : (viewMode === 'expand' && !opts.skipVol);
-    const url = expand ? '/api/bots?expand=1' : '/api/bots';
+    const params = new URLSearchParams();
+    if (expand) params.set('expand', '1');
+    params.set('includeDeleted', '1');
+    const url = `/api/bots?${params.toString()}`;
     const resp = await API.get(url);
     bots = resp.bots;
     // FIX-2026-08-20: global all-time stats from Trade collection (source of truth)
@@ -1213,6 +1297,7 @@ function renderOpenPositionsModalBody() {
   //   - fresh=true → "Binance bookTicker" badge (authoritative)
   //   - fresh=false → "cache" badge (may be stale)
   //   - freshFailedSymbols → show warning note
+  // FIX-2026-08-22: append "X 🗑 deleted bot" counter when positions belong to soft-deleted bots
   const sub = document.getElementById('opm-sub');
   if (sub) {
     const botIds = new Set(open.map((p) => p.botId));
@@ -1223,7 +1308,11 @@ function renderOpenPositionsModalBody() {
     const failedNote = failed.length > 0
       ? ` · <span class="text-warning" title="${escapeHtml(failed.join(','))}">⚠️ ${failed.length} sym fallback</span>`
       : '';
-    sub.innerHTML = `${open.length} ไม้ · จาก ${botIds.size} บอท · อัปเดต ${fmt2(openPositionsAsOf)} · ${sourceBadge}${failedNote}`;
+    const deletedCount = open.filter((p) => p.botDeletedAt).length;
+    const deletedNote = deletedCount > 0
+      ? ` · <span class="text-danger" title="position ของบอทที่ถูก soft-delete — bot จะไม่ทำงานต่อ">🗑 ${deletedCount} deleted</span>`
+      : '';
+    sub.innerHTML = `${open.length} ไม้ · จาก ${botIds.size} บอท · อัปเดต ${fmt2(openPositionsAsOf)} · ${sourceBadge}${failedNote}${deletedNote}`;
   }
 
   // compute aggregates (cost + unrealized) using live price
@@ -1260,15 +1349,46 @@ function renderOpenPositionsModalBody() {
     return;
   }
   // ใช้ shared partial — แสดง bot name + link + retry pill (ต่างจาก bot-detail ที่ซ่อน retry)
+  // FIX-2026-08-22: pass botStatusBadge per-position — PositionCard renders inline pill
+  //   - botDeletedAt → red "🗑 Bot deleted Nd" badge
+  //   - botAutoPauseReason → amber "⏸ auto-paused" badge
   const opts = { botLink: true, showRetry: true, forceCloseBtnClass: 'btn-force-close-opm' };
   listEl.innerHTML = open
-    .map((p) => window.PositionCard.renderCard({ ...p, _id: p.tradeId }, getLivePriceForPosition(p), { ...opts, botName: p.botName || p.symbol }))
+    .map((p) => {
+      const cardOpts = { ...opts, botName: p.botName || p.symbol, botStatusBadge: buildBotStatusBadge(p) };
+      return window.PositionCard.renderCard({ ...p, _id: p.tradeId }, getLivePriceForPosition(p), cardOpts);
+    })
     .join('');
   if (mobEl) {
     mobEl.innerHTML = open
-      .map((p) => window.PositionCard.renderCardMobile({ ...p, _id: p.tradeId }, getLivePriceForPosition(p), { ...opts, botName: p.botName || p.symbol }))
+      .map((p) => {
+        const cardOpts = { ...opts, botName: p.botName || p.symbol, botStatusBadge: buildBotStatusBadge(p) };
+        return window.PositionCard.renderCardMobile({ ...p, _id: p.tradeId }, getLivePriceForPosition(p), cardOpts);
+      })
       .join('');
   }
+}
+
+// FIX-2026-08-22: build inline bot-status badge for Open Positions modal cards
+//   - shown when position belongs to soft-deleted or auto-paused bot
+//   - returns HTML string (empty if bot is healthy)
+//   - click "🗑 Bot deleted" badge → opens confirm → POST /api/bots/:botId/restore
+function buildBotStatusBadge(p) {
+  if (p.botDeletedAt) {
+    const days = Math.floor((Date.now() - new Date(p.botDeletedAt).getTime()) / 86400000);
+    const within = days <= 30;
+    const cls = within ? 'is-deleted is-clickable' : 'is-deleted is-locked';
+    const onclick = within ? `onclick="restoreBot('${escapeHtml(p.botId)}')"` : '';
+    const title = within
+      ? `บอทถูก soft-delete เมื่อ ${escapeHtml(new Date(p.botDeletedAt).toLocaleString('th-TH'))} · คลิกเพื่อ Restore`
+      : `บอทถูก soft-delete เมื่อ ${escapeHtml(new Date(p.botDeletedAt).toLocaleString('th-TH'))} · หมดเวลา Restore (เกิน 30 วัน)`;
+    return `<button type="button" class="bot-status-pill ${cls}" ${onclick} title="${title}">🗑 Bot deleted ${days}d${within ? ' · ♻️ Restore' : ' 🔒'}</button>`;
+  }
+  if (p.botAutoPauseReason) {
+    const reason = String(p.botAutoPauseReason).replace(/_/g, ' ');
+    return `<span class="bot-status-pill is-autopaused" title="บอทถูก auto-pause: ${escapeHtml(reason)} — bot ไม่เปิดไม้ใหม่ แต่ position เดิมยังคงทำงาน">⏸ ${escapeHtml(reason)}</span>`;
+  }
+  return '';
 }
 
 /**
@@ -1324,6 +1444,8 @@ function renderBots() {
   const container = document.getElementById('bots-list');
   // counter update เสมอ (รวมกรณี bots.length === 0)
   updateFilterCounter();
+  // FIX-2026-08-22: แจ้งเตือนบอทที่ถูก soft-delete แต่ยังมี position เปิดอยู่
+  updateDeletedWithPositionsBanner();
   if (bots.length === 0) {
     container.innerHTML = '<div class="alert alert-secondary">ยังไม่มีบอท — คลิก <strong>+ New Bot</strong> เพื่อเริ่มต้น</div>';
     teardownMiniCharts();
@@ -1568,10 +1690,16 @@ function renderBotCard(b) {
   const hasCbv2Lock = b.cbv2LockedUntil && new Date(b.cbv2LockedUntil).getTime() > Date.now();
   // FIX-2026-08-08: Feature #2 — CBv3 lock badge (mirror CBv2)
   const hasCbv3Lock = b.cbv3LockedUntil && new Date(b.cbv3LockedUntil).getTime() > Date.now();
+  // FIX-2026-08-22: soft-delete lifecycle — badge + class + button swap
+  const isDeleted = !!b.deletedAt;
+  const deletedAtDate = b.deletedAt ? new Date(b.deletedAt) : null;
+  const daysSinceDelete = deletedAtDate ? Math.floor((Date.now() - deletedAtDate.getTime()) / 86400000) : 0;
+  const withinRestoreWindow = isDeleted && daysSinceDelete <= 30; // backend enforces 30d restore window
 
   // class flags for highlight
   const classes = ['bot-card-v2'];
-  if (isRunning) classes.push('is-running'); else classes.push('is-disabled');
+  if (isDeleted) classes.push('is-deleted');
+  else if (isRunning) classes.push('is-running'); else classes.push('is-disabled');
   if (hasPosition) classes.push('has-position');
   if (hasError) classes.push('has-error');
   if (hasWarning) classes.push('has-warning');
@@ -1748,6 +1876,11 @@ function renderBotCard(b) {
   // FIX-2026-08-06: Binance delist badge — แสดงเมื่อ symbol �ีความเสี่ยงจะถูก delist
   const delistBadge = buildDelistBadge(b);
 
+  // FIX-2026-08-22: soft-deleted badge — prominent red pill with days-since-delete + restore window
+  const deletedBadge = isDeleted
+    ? `<span class="deleted-pill" title="ถูก soft-delete เมื่อ ${escapeHtml(deletedAtDate.toLocaleString('th-TH'))}${withinRestoreWindow ? ' — ยัง restore ได้ (ภายใน 30 วัน)' : ' — หมดเวลา restore แล้ว (เกิน 30 วัน)'}">🗑 DELETED · ${daysSinceDelete}d${withinRestoreWindow ? '' : ' ⚠️'}</span>`
+    : '';
+
   return `
     <div class="${classes.join(' ')}" data-bot-id="${b._id}" data-symbol="${b.symbol}" data-timeframe="${b.timeframe}">
       <div class="bc-head">
@@ -1761,13 +1894,22 @@ function renderBotCard(b) {
             ${dcaBadge}
             ${trendlineBadge}
             ${delistBadge}
+            ${deletedBadge}
             ${coinChip}
           </div>
         </div>
         <div class="bc-head-right">
-          <span class="run-badge ${isRunning ? 'on' : 'off'}">${isRunning ? '▶ RUNNING' : '⏸ STOPPED'}</span>
+          <span class="run-badge ${isDeleted ? 'is-deleted' : (isRunning ? 'on' : 'off')}">${isDeleted ? '🗑 DELETED' : (isRunning ? '▶ RUNNING' : '⏸ STOPPED')}</span>
         </div>
       </div>
+      ${isDeleted
+        ? `<div class="bc-deleted-banner">
+             <span class="bc-deleted-msg">🗑 บอทนี้ถูก soft-delete เมื่อ <strong>${escapeHtml(deletedAtDate.toLocaleString('th-TH'))}</strong> (${daysSinceDelete} วันก่อน)${hasPosition ? ' · <span class="text-warning">⚠️ ยังมี position เปิดอยู่ — bot จะไม่ทำงานจนกว่าจะ restore</span>' : ''}</span>
+             ${withinRestoreWindow
+               ? `<button class="btn-lux btn-bull btn-sm" type="button" onclick="restoreBot('${b._id}')" title="Restore บอทกลับมา (ภายใน 30 วัน)">♻️ Restore</button>`
+               : `<span class="bc-deleted-locked">🔒 หมดเวลา restore (เกิน 30 วัน)</span>`}
+           </div>`
+        : ''}
       ${isRunning
         ? `<div class="bc-minichart-wrap" data-mini-wrap>
              <div class="bc-minichart" data-mini-chart data-bot-id="${b._id}" data-symbol="${b.symbol}" data-timeframe="${b.timeframe}">
@@ -1819,11 +1961,13 @@ function renderBotCard(b) {
       ${b.dynamicSizeEnabled === true ? `<div class="bc-dps-indicator" title="DPS — size ${b.dynamicSizeEffective || b.dynamicSizeCurrent || '?'} / layers ${b.dynamicLayersEffective || b.dynamicLayersCurrent || '?'}${b.dynamicSizeInCooldown ? ' (cooldown)' : ''}"><span class="bc-dps-label">📊 DPS</span><span class="bc-dps-value">$${b.dynamicSizeEffective || b.dynamicSizeCurrent || '?'} × ${b.dynamicLayersEffective || b.dynamicLayersCurrent || '?'} layers${b.dynamicSizeInCooldown ? ' ⏸' : ''}</span></div>` : ''}
       <div class="bc-actions">
         <a href="/bot-detail.html?id=${b._id}" class="btn-lux btn-info btn-sm">📊 Detail</a>
-        <a href="/bot-edit.html?id=${b._id}" class="btn-lux btn-gold btn-sm">⚙️ Edit</a>
-        ${isRunning
-          ? `<button class="btn-lux btn-warn btn-sm" onclick="toggleBot('${b._id}', false)">⏸ หยุด</button>`
-          : `<button class="btn-lux btn-bull btn-sm" onclick="toggleBot('${b._id}', true)">▶ เริ่ม</button>`}
-        <button class="btn-lux btn-bear btn-sm" onclick="deleteBot('${b._id}')">🗑</button>
+        ${isDeleted
+          ? `<button class="btn-lux btn-bull btn-sm" onclick="restoreBot('${b._id}')" title="Restore บอทกลับมา (ภายใน 30 วัน)">♻️ Restore</button>`
+          : `<a href="/bot-edit.html?id=${b._id}" class="btn-lux btn-gold btn-sm">⚙️ Edit</a>
+             ${isRunning
+               ? `<button class="btn-lux btn-warn btn-sm" onclick="toggleBot('${b._id}', false)">⏸ หยุด</button>`
+               : `<button class="btn-lux btn-bull btn-sm" onclick="toggleBot('${b._id}', true)">▶ เริ่ม</button>`}
+             <button class="btn-lux btn-bear btn-sm" onclick="deleteBot('${b._id}')">🗑</button>`}
       </div>
     </div>
   `;
@@ -2190,6 +2334,62 @@ window.deleteBot = async (id) => {
       variant: 'danger',
       icon: '⚠️',
       title: 'ลบบอทไม่สำเร็จ',
+      sub: '', message: err.message, dangerNote: null,
+    });
+  }
+};
+
+// FIX-2026-08-22: restoreBot — undo a soft-delete within 30-day window
+//   - ปุ่ม "♻️ Restore" ปรากฏบน bot card ของบอทที่ถูก soft-delete (deletedAt != null)
+//   - เรียก POST /api/bots/:id/restore ซึ่ง backend:
+//       1) ตรวจ 30-day restore window (reject ถ้าเกิน)
+//       2) ตั้ง deletedAt=null, scheduledDeleteAt=null, deleteNotificationSentAt=null, status='idle'
+//       3) emit 'bot:updated' → frontend loadBots() refresh
+window.restoreBot = async (id) => {
+  const bot = bots.find((b) => b._id === id);
+  const target = bot ? { name: bot.name || bot.symbol, symbol: bot.symbol, timeframe: bot.timeframe } : null;
+  const deletedAt = bot && bot.deletedAt ? new Date(bot.deletedAt) : null;
+  const daysSince = deletedAt ? Math.floor((Date.now() - deletedAt.getTime()) / 86400000) : 0;
+  const withinWindow = daysSince <= 30;
+  if (!withinWindow) {
+    await luxAlert({
+      variant: 'danger',
+      icon: '🔒',
+      title: 'หมดเวลา restore',
+      sub: 'เลย 30 วันนับจาก soft-delete แล้ว',
+      message: `บอทนี้ถูกลบเมื่อ ${daysSince} วันก่อน — ไม่สามารถ restore ได้ (ต้องใช้ permanent delete + สร้างใหม่)`,
+      dangerNote: null,
+    });
+    return;
+  }
+  const pw = await luxConfirm({
+    variant: 'success',
+    icon: '♻️',
+    title: 'Restore บอทกลับมา?',
+    sub: `ถูกลบเมื่อ ${daysSince} วันก่อน · บอทจะกลับมา status='idle' (ต้องกด ▶ เริ่มอีกครั้ง)`,
+    message: 'Restore บอทนี้ให้กลับมาใช้งานได้อีกครั้ง?',
+    target, requirePassword: true,
+    dangerNote: 'หากมี position เปิดอยู่ บอทจะยังไม่จัดการจนกว่าจะกด ▶ เริ่ม',
+    confirmLabel: 'Restore',
+    confirmGlyph: '♻️',
+  });
+  if (pw === null) return;
+  try {
+    await callBotWithPassword('POST', `/api/bots/${id}/restore`, { password: pw || undefined }, 'restore');
+    await loadBots();
+    await luxAlert({
+      variant: 'success',
+      icon: '✅',
+      title: 'Restore สำเร็จ',
+      sub: 'บอทกลับมาแล้ว — อย่าลืมกด ▶ เริ่ม',
+      message: 'บอทถูก restore เรียบร้อย · กดปุ่ม ▶ เริ่ม เพื่อให้บอทกลับมาทำงาน',
+      dangerNote: null,
+    });
+  } catch (err) {
+    await luxAlert({
+      variant: 'danger',
+      icon: '⚠️',
+      title: 'Restore ไม่สำเร็จ',
       sub: '', message: err.message, dangerNote: null,
     });
   }

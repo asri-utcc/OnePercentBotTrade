@@ -414,7 +414,12 @@ router.get('/positions', requireAuth, async (req, res) => {
     }
     const botIds = [...new Set(trades.map((t) => String(t.botId)))];
     // FIX-2026-08-05: include kcMult for upper-KC prediction (per-bot mult)
-    const bots = await Bot.find({ _id: { $in: botIds } }).select('_id name symbol timeframe retryMax kcMult enabled').lean();
+    // FIX-2026-08-22: include deletedAt/enabled/autoPauseReason/disabledAt — frontend needs to show
+    //   "🗑 Bot ถูกลบ" / "⏸ Auto-paused" badges in Open Positions modal + offer Restore button
+    //   (positions of soft-deleted bots keep showing because bot doc still exists in DB)
+    const bots = await Bot.find({ _id: { $in: botIds } })
+      .select('_id name symbol timeframe retryMax kcMult enabled deletedAt autoPauseReason disabledAt scheduledDeleteAt deleteNotificationSentAt')
+      .lean();
     const botMap = new Map(bots.map((b) => [String(b._id), b]));
 
     // FIX-2026-08-08 ACTUSDT orphan-positions: filter out trades whose botId doesn't exist in bots
@@ -575,6 +580,14 @@ router.get('/positions', requireAuth, async (req, res) => {
         tradeId: String(t._id),
         botId: String(t.botId),
         botName: bot.name || bot.symbol || '',
+        // FIX-2026-08-22: expose bot lifecycle flags — frontend shows badges + Restore button
+        //   when position belongs to a soft-deleted or auto-paused bot
+        botDeletedAt: bot.deletedAt || null,
+        botEnabled: bot.enabled !== false,
+        botAutoPauseReason: bot.autoPauseReason || null,
+        botDisabledAt: bot.disabledAt || null,
+        botScheduledDeleteAt: bot.scheduledDeleteAt || null,
+        botDeleteNotifiedAt: bot.deleteNotificationSentAt || null,
         symbol: t.symbol,
         timeframe: t.timeframe,
         state: t.state,

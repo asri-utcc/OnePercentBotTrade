@@ -1861,6 +1861,93 @@ small.text-muted {
   50% { opacity: 0.7; }
 }
 
+/* FIX-2026-08-22: soft-deleted-bot lifecycle styling
+   - .deleted-pill: red pill with days-since-delete in bot meta row
+   - .bot-card-v2.is-deleted: full-card dim + red border (visual hierarchy: clearly broken)
+   - .bc-deleted-banner: prominent red banner with Restore button
+   - .bot-status-pill: inline badge in Open Positions modal cards (deleted/auto-paused)
+   - .run-badge.is-deleted: bright red badge replaces ▶ RUNNING/⏸ STOPPED */
+.deleted-pill {
+  display: inline-flex; align-items: center; gap: 0.25rem;
+  font-family: var(--font-mono); font-size: 0.72rem; font-weight: 700;
+  padding: 0.2rem 0.55rem; border-radius: 999px;
+  background: rgba(192, 57, 43, 0.18);
+  color: #ff6b6b;
+  border: 1px solid rgba(192, 57, 43, 0.45);
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+.bot-card-v2.is-deleted {
+  opacity: 0.78;
+  border: 1px solid rgba(192, 57, 43, 0.35) !important;
+  background: rgba(192, 57, 43, 0.04);
+}
+.bot-card-v2.is-deleted .bc-title {
+  text-decoration: line-through;
+  text-decoration-color: rgba(255, 107, 107, 0.45);
+}
+.bot-card-v2 .run-badge.is-deleted {
+  background: rgba(192, 57, 43, 0.22);
+  color: #ff6b6b;
+  border: 1px solid rgba(192, 57, 43, 0.55);
+  animation: deletedPulse 1.6s ease-in-out infinite;
+}
+@keyframes deletedPulse {
+  0%, 100% { box-shadow: 0 0 8px rgba(192, 57, 43, 0.30); }
+  50% { box-shadow: 0 0 16px rgba(192, 57, 43, 0.65); }
+}
+.bot-card-v2 .bc-deleted-banner {
+  margin: 0.6rem 0 0.4rem;
+  padding: 0.55rem 0.85rem;
+  border-radius: 6px;
+  background: rgba(192, 57, 43, 0.10);
+  border: 1px solid rgba(192, 57, 43, 0.30);
+  display: flex; align-items: center; justify-content: space-between; gap: 0.75rem;
+  flex-wrap: wrap;
+  font-family: var(--font-mono); font-size: 0.78rem;
+  color: #ffd6d6;
+}
+.bot-card-v2 .bc-deleted-banner .bc-deleted-msg { flex: 1; min-width: 240px; }
+.bot-card-v2 .bc-deleted-banner .bc-deleted-locked {
+  color: #ff6b6b; font-weight: 700; opacity: 0.85;
+}
+.bot-card-v2 .bc-deleted-banner strong { color: #ff6b6b; font-weight: 700; }
+
+/* Open Positions modal — inline bot-status badge (inside PositionCard) */
+.bot-status-pill {
+  display: inline-flex; align-items: center; gap: 0.25rem;
+  font-family: var(--font-mono); font-size: 0.7rem; font-weight: 700;
+  padding: 0.18rem 0.5rem; border-radius: 999px;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  cursor: default;
+  border: none;
+  font-family: var(--font-mono);
+}
+.bot-status-pill.is-deleted {
+  background: rgba(192, 57, 43, 0.20);
+  color: #ff6b6b;
+  border: 1px solid rgba(192, 57, 43, 0.45);
+}
+.bot-status-pill.is-deleted.is-clickable {
+  cursor: pointer;
+  transition: filter 0.15s ease, transform 0.1s ease;
+}
+.bot-status-pill.is-deleted.is-clickable:hover {
+  filter: brightness(1.18);
+  transform: translateY(-1px);
+}
+.bot-status-pill.is-deleted.is-locked {
+  background: rgba(127, 140, 141, 0.18);
+  color: #95a5a6;
+  border: 1px solid rgba(127, 140, 141, 0.35);
+}
+.bot-status-pill.is-autopaused {
+  background: rgba(241, 196, 15, 0.18);
+  color: #f1c40f;
+  border: 1px solid rgba(241, 196, 15, 0.45);
+}
+
 /* FIX-2026-08-06: delist-banner — full-width warning banner at bot-detail header
    - is-urgent:    red,    ฺsymbol delist ใน ≤ 3 วัน
    - is-warning:   amber,  ฺsymbol delist ใน ≤ 7 วัน

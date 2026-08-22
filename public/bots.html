@@ -207,8 +207,25 @@
         <button type="button" class="bot-chip" data-filter="cooldown" title="บอทที่มี cooldown active (CBv2/CBv3/DCA-freeze/SELL-partial)">⏸ Cooldown</button>
         <button type="button" class="bot-chip" data-filter="cbv2-cooldown" title="บอทที่ cooldown CBv2">💎 CBv2</button>
         <button type="button" class="bot-chip" data-filter="cbv3-cooldown" title="บอทที่ cooldown CBv3 (v3 active)">💎 CBv3</button>
+        <!-- FIX-2026-08-22: deleted chip — แสดงบอทที่ถูก soft-delete (autoDeleteBot หรือ user delete)
+             default = "not-deleted" (active) — ซ่อน deleted อัตโนมัติ จนกว่า user จะกดเปิด chip นี้ -->
+        <button type="button" class="bot-chip" data-filter="not-deleted" title="ซ่อนบอทที่ถูก soft-delete (default)">🚫 Hide Deleted</button>
+        <button type="button" class="bot-chip" data-filter="deleted" title="แสดงเฉพาะบอทที่ถูก soft-delete — กด Restore เพื่อนำกลับมา (ภายใน 30 วัน)">🗑 Deleted</button>
         <button type="button" class="bot-chip is-clear" id="bot-filter-clear" hidden title="ล้างการค้นหา + filter chips ทั้งหมด">✕ ล้างทั้งหมด</button>
       </div>
+    </div>
+
+    <!-- FIX-2026-08-22: banner — แจ้งเตือนเมื่อมีบอทถูก soft-delete แต่ยังมี position เปิดอยู่
+         (bot จะไม่ทำงานจนกว่าจะ restore — user อาจงงว่าทำไม position ค้าง) -->
+    <div id="deleted-with-positions-banner" hidden
+         style="background:rgba(255,107,107,0.08);border:1px solid rgba(255,107,107,0.35);border-radius:8px;padding:0.7rem 1rem;margin:0.5rem 0 1rem;display:flex;align-items:center;gap:0.75rem;">
+      <span style="font-size:1.4rem;">🗑</span>
+      <div style="flex:1;">
+        <div style="font-weight:600;color:#ff6b6b;">มีบอท <span id="dwp-count">0</span> ตัวที่ถูก soft-delete แต่ยังมี position เปิดอยู่</div>
+        <div style="font-size:0.85rem;color:#94a3b8;">บอทเหล่านี้จะไม่ทำงานจนกว่าจะ Restore — กดปุ่ม ♻️ Restore บนการ์ด หรือเปิด filter "🗑 Deleted" เพื่อดู</div>
+      </div>
+      <button type="button" class="btn-lux btn-bull btn-sm" id="dwp-restore-all-btn" title="Restore ทุกบอทที่ถูกลบ (ภายใน 30 วัน)">♻️ Restore All</button>
+      <button type="button" class="btn-close-x" id="dwp-dismiss-btn" title="ซ่อน banner (จะปรากฏอีกเมื่อ reload)">✕</button>
     </div>
 
     <div id="bots-list"></div>

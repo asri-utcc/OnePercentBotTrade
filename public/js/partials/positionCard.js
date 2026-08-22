@@ -350,6 +350,11 @@ window.PositionCard = {
         ? `<span class="sl-armed-pill is-pending" title="ยังไม่ได้ arm — รอ candle close ถัดไป (loss>10% + age>4h)">⏳ Au-pending</span>`
         : '');
 
+    // FIX-2026-08-22: bot lifecycle pill — แสดงเมื่อ position เป็นของบอทที่ถูก soft-delete หรือ auto-pause
+    //   - opts.botStatusBadge ถูกส่งมาจาก bot-detail/bots (computed per-trade จาก botLifecycle fields)
+    //   - ถ้าไม่ส่ง opts มา (back-compat) → ไม่แสดง
+    const botStatusPill = opts.botStatusBadge || '';
+
     return `
       <div class="position-card ${pnlCls} ${slArmedCls}" data-trade-id="${this.escapeHtml(tradeId)}" data-bot-id="${this.escapeHtml(botId)}">
         <div class="pos-head">
@@ -358,6 +363,7 @@ window.PositionCard = {
             <span class="tf-tag">${this.escapeHtml(t.timeframe || '-')}</span>
             <span class="status-pill is-${stateColor}">${this.escapeHtml(t.state || '-')}</span>
             ${slArmedPill}
+            ${botStatusPill}
             ${opts.showRetry ? `<span class="retry-pill" title="retry slots">🔄 ${t.retryCount ?? 0}/${retryMax}</span>` : ''}
           </div>
           <div class="right">
@@ -472,11 +478,15 @@ window.PositionCard = {
         ? `<span class="sl-armed-pill is-pending" title="ยังไม่ได้ arm — รอ candle close ถัดไป">⏳ Au-pending</span>`
         : '');
 
+    // FIX-2026-08-22: bot lifecycle pill (mobile) — mirror desktop
+    const botStatusPill = opts.botStatusBadge || '';
+
     return `
       <div class="mob-card position-mob ${pnlCls} ${slArmedCls}" data-trade-id="${this.escapeHtml(tradeId)}" data-bot-id="${this.escapeHtml(botId)}">
         <div class="top">
           <span class="status-pill is-${stateColor}">${this.escapeHtml(t.state || '-')}</span>
           ${slArmedPill}
+          ${botStatusPill}
           <span class="ts" style="color:var(--text-3);font-size:0.72rem;">⏱ ${ageTxt} · 🔄 ${t.retryCount ?? 0}/${retryMax}</span>
         </div>
         <div class="row"><span class="k">Symbol</span><span class="v mono">${this.escapeHtml(t.symbol || '-')} · ${this.escapeHtml(t.timeframe || '-')}</span></div>
