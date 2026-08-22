@@ -8461,11 +8461,19 @@ class Trader {
 
   // FIX 6: เพิ่ม random suffix กัน -2010 Duplicate order sent
   // (กรณี retry ที่ ts+retry+side ตรงกัน)
+  // FIX 2026-08-22: sanitize outputs to Binance legal regex `^[a-zA-Z0-9-_]{1,36}$`
+  //   - retry อาจเป็น decimal เช่น `(retryCount || 0) + 0.5` (line 5077 — SELL -2010 retry)
+  //     → '.' ทำให้ Binance ตอบ -1100 "Illegal characters found in parameter 'newClientOrderId'"
+  //     → PEPE (1000PEPE) โดนบ่อยเพราะ SELL race/balance settle ช้า → trigger retry path นี้
+  //   - sanitize: strip ทุก char ที่ไม่ใช่ [a-zA-Z0-9_-] แบบป้องกันทุก caller
   makeClientOrderId(side, refTs, retry) {
     const ts = typeof refTs === 'number' ? refTs : new Date(refTs).getTime();
     const shortBot = this.bot._id.toString().slice(-6);
     const rand = Math.random().toString(36).slice(2, 8); // 6-char random
-    return `b${shortBot}-${ts}-${retry}-${side}-${rand}`.slice(0, 36); // Binance limit 36 chars
+    const safeRetry = String(retry ?? 0).replace(/[^a-zA-Z0-9_-]/g, '');
+    const safeSide = String(side || 'x').replace(/[^a-zA-Z0-9_-]/g, '');
+    const id = `b${shortBot}-${ts}-${safeRetry}-${safeSide}-${rand}`;
+    return id.slice(0, 36); // Binance hard limit 36 chars
   }
 }
 
