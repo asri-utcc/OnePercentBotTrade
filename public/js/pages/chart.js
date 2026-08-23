@@ -42,6 +42,7 @@ let lowerSeries = null;
 let markers = [];
 let currentData = null;
 let refreshTimer = null;
+let chartSymbol = ''; // FIX-2026-07-31: current chart symbol (for PriceFormat in signal marker)
 
 // ─── Timezone helpers (force Asia/Bangkok +07:00) ──────
 const TZ = 'Asia/Bangkok';
@@ -72,8 +73,17 @@ async function init() {
     return;
   }
 
+  // FIX-2026-08-03: deep-link support — รับ ?symbol=XXX&tf=YYY จาก URL
+  //   - ใช้ตอน user กดปุ่ม "📈 Chart" จาก Position card ในหน้า /bots.html → /chart.html
+  //   - apply หลัง symbols/timeframe options พร้อม (กัน select.value หาย)
+  const params = new URLSearchParams(location.search);
+  const dlSymbol = (params.get('symbol') || '').trim().toUpperCase();
+  const dlTf = (params.get('tf') || '').trim();
+
   setupChart();
   await loadSymbols();
+  // FIX-2026-07-31: preload Binance tickSize precision สำหรับ PriceFormat
+  if (window.PriceFormat) await window.PriceFormat.load();
   WSClient.start();
 
   document.getElementById('c-load').onclick = loadChart;
@@ -83,10 +93,30 @@ async function init() {
 
   bindSignalInfoPanel();
 
+  // FIX-2026-08-03: apply deep-link values (ถ้ามี) ก่อน loadChart()
+  //   - ถ้า symbol ไม่อยู่ใน dropdown (เช่น de-listed) → fallback เป็น BNBUSDT (default)
+  //   - ถ้า tf ไม่อยู่ในรายการ → fallback เป็น 5m (default)
+  if (dlSymbol) {
+    const symSel = document.getElementById('c-symbol');
+    const hasOption = Array.from(symSel.options).some((o) => o.value === dlSymbol);
+    if (hasOption) symSel.value = dlSymbol;
+  }
+  if (dlTf) {
+    const tfSel = document.getElementById('c-timeframe');
+    const hasOption = Array.from(tfSel.options).some((o) => o.value === dlTf);
+    if (hasOption) tfSel.value = dlTf;
+  }
+  // FIX-2026-08-03: อัปเดต document.title ให้แสดง symbol/tf ใน browser tab
+  const curSymbol = document.getElementById('c-symbol').value;
+  const curTf = document.getElementById('c-timeframe').value;
+  if (dlSymbol || dlTf) {
+    document.title = `📈 ${curSymbol} ${curTf} — Chart`;
+  }
+
   await loadChart();
 
-  // auto refresh ทุก 30 วินาที (เนื่องจาก WebSocket ส่งมาเองอยู่แล้ว แต่ historical แท่งเก่าต้อง refetch)
-  refreshTimer = setInterval(loadChart, 30000);
+  // FIX-2026-08-04: auto refresh 30s → 60s (ลด kline API load; WS push updates current candle real-time)
+  refreshTimer = setInterval(loadChart, 60000);
 
   WSClient.on('kline:update', (p) => {
     if (!currentData) return;
@@ -112,12 +142,16 @@ async function init() {
 // ปรับจำนวนทศนิยมตามขนาดราคา เพื่อให้อ่านค่าได้ละเอียดพอในทุกช่วงราคา
 //   - ≥ 1000              → 2 ตำแหน่ง  (BTC @ 60000.00)
 //   - ≥ 1                 → 4 ตำแหน่ง  (ETH @ 3500.1234)
-//   - ≥ 0.01              → 4 ตำแหน่ง  (low-price alt @ 0.1870)  ← ที่ผู้ใช้ขอ
-//   - ≥ 0.0001            → 5 ตำแหน่ง
-//   - < 0.0001            → 6 ตำแหน่ง
-// ใช้ค่า absolute เพื่อรองรับราคาติดลบ (กรณี edge case)
+// FIX-2026-07-31: ใช้ Binance tickSize precision (authoritative) — fallback heuristic
+//   - ZILUSDT tickSize = 0.000001 → 6 ตำแหน่ง (ตรงกับ Binance UI)
+//   - เดิม heuristic >=0.01 → 4 ตำแหน่ง ทำให้ ZIL/BANK/COTI แสดงผิด
 function chartPriceFormatter(price) {
   if (price === null || price === undefined || !Number.isFinite(price)) return '';
+  // ดึง symbol ปัจจุบันจาก dropdown
+  const symbolEl = document.getElementById('c-symbol');
+  const symbol = symbolEl ? symbolEl.value : null;
+  if (window.PriceFormat) return window.PriceFormat.format(price, symbol);
+  // fallback heuristic (เดิม)
   const abs = Math.abs(price);
   if (abs >= 1000) return price.toFixed(2);
   if (abs >= 1) return price.toFixed(4);
@@ -203,6 +237,7 @@ async function loadSymbols() {
 
 async function loadChart() {
   const symbol = document.getElementById('c-symbol').value;
+  chartSymbol = symbol; // FIX-2026-07-31: expose for signal marker label formatting (ZILUSDT needs 6 dp not 4)
   const timeframe = document.getElementById('c-timeframe').value;
   const limit = document.getElementById('c-limit').value;
   if (!symbol) return;
@@ -264,7 +299,7 @@ function renderSignalList(resp) {
     ${recent.length === 0 ? '<span class="text-muted">ไม่มีสัญญาณในช่วงที่เลือก</span>' :
       recent.map((s) => {
         const d = new Date(s.closeTime);
-        return `<span class="signal-marker" title="${d.toISOString()} price=${s.close.toFixed(4)} bg=${s.bgPrev}→${s.bgState}">S1 @ ${fmtDateTime(d)} ($${s.close.toFixed(4)})</span> `;
+        return `<span class="signal-marker" title="${d.toISOString()} price=${PriceFormat.format(s.close, chartSymbol)} bg=${s.bgPrev}→${s.bgState}">S1 @ ${fmtDateTime(d)} ($${PriceFormat.format(s.close, chartSymbol)})</span> `;
       }).join('')
     }
   `;

@@ -11,7 +11,7 @@
 <body class="login-page">
   <div class="login-card">
     <div class="login-brand">
-      <span class="mark">%</span>
+      <img src="/favicon.svg" alt="OnePercentBotTrade" class="login-logo" />
       <span class="name">OnePercentBotTrade<small>Spot Trading Bot</small></span>
     </div>
 
@@ -46,6 +46,32 @@
       <button class="btn btn-primary w-100" id="login-btn">เข้าสู่ระบบ</button>
     </div>
 
+    <!-- 2026-08-09: Telegram Login (alternative login channel — ใช้แทน password เมื่อลืม) -->
+    <div id="telegram-login-form" style="display:none;">
+      <hr style="border-color: var(--border-mid); margin: 1.25rem 0;">
+      <h6 class="text-muted-2 mb-2">📨 Login with Telegram (ลืม password)</h6>
+      <div class="small text-muted-3 mb-2">
+        กดปุ่มเพื่อรับรหัส OTP 6 หลักเข้า Telegram → กรอกรหัสแทน password
+      </div>
+      <div id="tg-step-1">
+        <button class="btn btn-info w-100" id="tg-request-btn">📨 ส่ง OTP เข้า Telegram</button>
+      </div>
+      <div id="tg-step-2" style="display:none;">
+        <div class="mb-2">
+          <label class="form-label">OTP 6 หลัก (จาก Telegram)</label>
+          <input type="text" class="form-control text-center" id="tg-otp-input"
+                 maxlength="6" pattern="\d{6}" inputmode="numeric" placeholder="000000"
+                 style="font-size:1.5rem;letter-spacing:0.5rem;font-family:var(--font-mono);" />
+        </div>
+        <div class="small text-muted-3 mb-2">
+          ⏱ <span id="tg-countdown">5:00</span>
+        </div>
+        <button class="btn btn-primary w-100" id="tg-verify-btn">🔓 Verify &amp; Login</button>
+        <button class="btn btn-link btn-sm w-100 mt-2" id="tg-resend-btn">🔄 ส่ง OTP ใหม่</button>
+      </div>
+      <div id="tg-status" class="small mt-2"></div>
+    </div>
+
     <div id="error" class="alert alert-danger mt-3" style="display:none;"></div>
 
     <div class="login-foot">
@@ -66,6 +92,10 @@
       if (!status.setupCompleted) {
         document.getElementById('setup-form').style.display = 'block';
         document.getElementById('login-form').style.display = 'none';
+      }
+      // 2026-08-09: โชว์ Telegram login form ถ้าตั้งค่าไว้
+      if (status.telegramLoginEnabled) {
+        document.getElementById('telegram-login-form').style.display = 'block';
       }
     }
     function showError(msg) {
@@ -97,6 +127,85 @@
 
     document.getElementById('login-password').addEventListener('keypress', (e) => {
       if (e.key === 'Enter') document.getElementById('login-btn').click();
+    });
+
+    // ─── 2026-08-09: Telegram login flow ───
+    let tgCountdownTimer = null;
+    function setTgStatus(msg, kind) {
+      const el = document.getElementById('tg-status');
+      el.textContent = msg;
+      el.style.color = kind === 'bull' ? 'var(--bull-1)'
+        : kind === 'bear' ? 'var(--bear-1)'
+        : kind === 'warn' ? 'var(--warn-1)'
+        : 'var(--text-3)';
+    }
+    function startTgCountdown(sec) {
+      if (tgCountdownTimer) clearInterval(tgCountdownTimer);
+      const el = document.getElementById('tg-countdown');
+      let remaining = sec;
+      const tick = () => {
+        if (remaining <= 0) {
+          el.textContent = 'หมดเวลา';
+          clearInterval(tgCountdownTimer);
+          tgCountdownTimer = null;
+          document.getElementById('tg-step-2').style.display = 'none';
+          document.getElementById('tg-step-1').style.display = 'block';
+          setTgStatus('⏱ OTP หมดอายุ — กดส่งใหม่', 'warn');
+          return;
+        }
+        const m = Math.floor(remaining / 60);
+        const s = remaining % 60;
+        el.textContent = `${m}:${String(s).padStart(2,'0')}`;
+        remaining--;
+      };
+      tick();
+      tgCountdownTimer = setInterval(tick, 1000);
+    }
+    async function requestTgOtp() {
+      const btn = document.getElementById('tg-request-btn');
+      btn.disabled = true;
+      setTgStatus('⏳ กำลังส่ง OTP...', 'muted');
+      try {
+        const r = await API.post('/api/auth/login-telegram/request', {});
+        setTgStatus('✅ ส่ง OTP เข้า Telegram แล้ว — ดูในแชท', 'bull');
+        document.getElementById('tg-step-1').style.display = 'none';
+        document.getElementById('tg-step-2').style.display = 'block';
+        startTgCountdown(r.expiresInSec || 300);
+        document.getElementById('tg-otp-input').focus();
+      } catch (err) {
+        if (err.status === 429 && err.body && err.body.retryAfterSec) {
+          setTgStatus(`⏱ ส่งซ้ำได้ใน ${err.body.retryAfterSec}s`, 'warn');
+        } else {
+          setTgStatus(`❌ ${err.message}`, 'bear');
+        }
+      } finally {
+        btn.disabled = false;
+      }
+    }
+    async function verifyTgOtp() {
+      const code = document.getElementById('tg-otp-input').value;
+      if (!/^\d{6}$/.test(code)) {
+        return setTgStatus('❌ กรอก OTP 6 หลัก', 'bear');
+      }
+      const btn = document.getElementById('tg-verify-btn');
+      btn.disabled = true;
+      setTgStatus('⏳ กำลังตรวจสอบ...', 'muted');
+      try {
+        await API.post('/api/auth/login-telegram/verify', { code });
+        location.href = '/bots.html';
+      } catch (err) {
+        setTgStatus(`❌ ${err.message}`, 'bear');
+        btn.disabled = false;
+      }
+    }
+    document.getElementById('tg-request-btn').addEventListener('click', requestTgOtp);
+    document.getElementById('tg-verify-btn').addEventListener('click', verifyTgOtp);
+    document.getElementById('tg-resend-btn').addEventListener('click', requestTgOtp);
+    document.getElementById('tg-otp-input').addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') verifyTgOtp();
+    });
+    document.getElementById('tg-otp-input').addEventListener('input', (e) => {
+      e.target.value = e.target.value.replace(/\D/g, '');
     });
 
     init();

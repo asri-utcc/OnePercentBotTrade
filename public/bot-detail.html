@@ -28,7 +28,11 @@
           <span class="chip bull" id="hero-enabled">-</span>
           <span class="chip" id="hero-uptime" title="เวลาที่ enable ล่าสุด">⏱ uptime: -</span>
           <span class="chip" id="hero-id" style="font-size:0.7rem;color:var(--text-4);">id: -</span>
+          <!-- FIX-2026-08-06: Binance Delist pill (early warning + scheduled) -->
+          <span class="delist-pill" id="hero-delist" style="display:none;"></span>
         </div>
+        <!-- FIX-2026-08-06: Delist warning banner (เมื่อ symbol มี delist schedule) -->
+        <div class="delist-banner" id="delist-banner" style="display:none;"></div>
       </div>
       <div class="actions">
         <a href="#" id="edit-btn" class="btn-lux btn-gold">⚙️ แก้ไข</a>
@@ -230,6 +234,7 @@
                     <th class="num">Retry</th>
                     <th class="num">SELL</th>
                     <th class="num">PnL</th>
+                    <th>Reason</th>
                     <th>Order ID</th>
                   </tr>
                 </thead>
@@ -357,9 +362,15 @@
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
   <script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
   <script src="/js/api.js"></script>
+  <script src="/js/priceFormat.js"></script>
+  <script src="/js/utils/sellReasons.js"></script>
   <script src="/js/ws-client.js"></script>
   <script src="/js/partials/nav.js"></script>
+  <script src="/js/partials/dailyTargetGauge.js"></script>
+  <script src="/js/partials/rateLimitGauge.js"></script>
   <script src="/js/luxConfirm.js"></script>
+  <script src="/js/partials/positionCard.js"></script>
+  <script src="/js/partials/stackCard.js"></script>
   <script src="/js/pages/bot-detail.js"></script>
 </body>
 </html>

@@ -3,6 +3,7 @@
 const express = require('express');
 const session = require('express-session');
 const MongoStore = require('connect-mongo');
+const cookieParser = require('cookie-parser'); // 2026-08-09: Telegram Login — read tg_login_token cookie
 const path = require('path');
 
 const config = require('../config');
@@ -23,11 +24,20 @@ const accountRoutes = require('./api/routes/account.routes');
 const fxRoutes = require('./api/routes/fx.routes');
 const healthRoutes = require('./api/routes/health.routes');
 const scanRoutes = require('./api/routes/scan.routes');
+const bnbAutoBuyRoutes = require('./api/routes/bnbAutoBuy.routes'); // FIX-2026-08-05: auto-buy BNB
+const autoAddBotRoutes = require('./api/routes/autoAddBot.routes'); // FIX-2026-08-07: auto add new bot
+const adminRoutes = require('./api/routes/admin.routes'); // FIX-2026-08-08: master config + admin endpoints
+// 2026-08-19: Wallet — holdings + USDT reserve
+const walletRoutes = require('./api/routes/wallet.routes');
 // FIX-2026-07-24: Telegram + History (ใหม่)
 const telegramRoutes = require('./api/routes/telegram.routes');
 const historyRoutes = require('./api/routes/history.routes');
 // FIX-2026-07-29: PnL Calendar + PnL Chart (ใหม่)
 const pnlRoutes = require('./api/routes/pnl.routes');
+// 2026-08-06: Daily Profit Target gauge (radial gauge below navbar)
+const dailyTargetRoutes = require('./api/routes/dailyTarget.routes');
+// 2026-08-23: Live Binance API weight gauge (navbar pill)
+const rateLimitRoutes = require('./api/routes/rateLimit.routes');
 
 function createApp() {
   const app = express();
@@ -65,6 +75,9 @@ function createApp() {
   app.use(express.json({ limit: '1mb' }));
   app.use(express.urlencoded({ extended: true, limit: '1mb' }));
 
+  // 2026-08-09: Cookie parser (ต้องมาก่อน session — ใช้ใน /api/auth/login-telegram/* เพื่ออ่าน tg_login_token)
+  app.use(cookieParser());
+
   // Session
   app.use(session({
     secret: config.sessionSecret,
@@ -83,6 +96,21 @@ function createApp() {
       ttl: 7 * 24 * 60 * 60,
     }),
   }));
+
+  // 2026-08-09: Password & Sessions Manager — update lastSeenAt ทุก authenticated request
+  //   - ใช้สำหรับแสดง "last active 5 min ago" ในหน้า Sessions Manager
+  //   - skip /api/auth/login + /api/auth/status (ยังไม่ authenticate)
+  //   - throttle: เขียน session ทุก 60s ต่อ session (กัน Mongo write storm)
+  app.use((req, res, next) => {
+    if (!req.session || !req.session.authenticated) return next();
+    if (req.path.startsWith('/api/auth/login') || req.path.startsWith('/api/auth/status')) return next();
+    const now = Date.now();
+    const last = req.session.lastSeenAt ? new Date(req.session.lastSeenAt).getTime() : 0;
+    if (now - last >= 60 * 1000) {
+      req.session.lastSeenAt = new Date().toISOString();
+    }
+    next();
+  });
 
   // Request log
   app.use((req, res, next) => {
@@ -105,23 +133,78 @@ function createApp() {
   app.use('/api/fx', fxRoutes);
   app.use('/api/health', healthRoutes);
   app.use('/api/scan', scanRoutes);
+  app.use('/api/bnb-auto-buy', bnbAutoBuyRoutes); // FIX-2026-08-05
+  app.use('/api/auto-add-bot', autoAddBotRoutes); // FIX-2026-08-07
+  app.use('/api/admin', adminRoutes); // FIX-2026-08-08: master config + force-run autoDeleteBot
+  app.use('/api/wallet', walletRoutes); // 2026-08-19: wallet holdings + USDT reserve
   // FIX-2026-07-24: register telegram + history
   app.use('/api/telegram', telegramRoutes);
   // FIX-2026-07-29: register pnl (calendar + series)
   app.use('/api/pnl', pnlRoutes);
   app.use('/api/history', historyRoutes);
+  app.use('/api/daily-target', dailyTargetRoutes); // 2026-08-06: Daily Profit Target gauge
+  app.use('/api/system', rateLimitRoutes); // 2026-08-23: live Binance API weight gauge
+  app.use('/api/coins', require('./api/routes/coin.routes')); // FIX-2026-08-01: coin info aggregator
+// FIX-2026-08-21: Trade Analysis aggregator (includes soft-deleted bots)
+app.use('/api/analysis', require('./api/routes/analysis.routes'));
 
   // Health
   app.get('/health', (req, res) => {
     res.json({ ok: true, ts: Date.now() });
   });
 
-  // Static files (dashboard)
-  app.use(express.static(config.paths.public));
+  // ─── Static files (HTML auth-gated) ──────────────────────────────
+  // 2026-08-10: ล็อค HTML/JS ทุกหน้ายกเว้น login + favicon + CSS + /js/api.js
+  //   - ป้องกัน AI/AI-coding-tool scrape HTML/JS labels + feature names + modal flow
+  //   - session lookup จาก MongoDB เกิดขึ้นอยู่แล้ว (express-session global) → overhead ≈ 0
+  //   - ไฟล์ HTML ที่ต้อง auth → Cache-Control: no-store (กัน back-button cache leak หลัง logout)
+  //   - Public (whitelist): /login.html, /favicon.svg, /css/*, /js/api.js, /js/botConfigIO.js
+  //   - ทุก path อื่น → ต้อง session.authenticated === true ถึงจะเห็นเนื้อหา
+  const PUBLIC_EXACT = new Set(['/login.html', '/favicon.svg']);
+  const PUBLIC_PREFIXES = ['/css/', '/js/api.js', '/js/botConfigIO.js'];
 
-  // SPA fallback: ส่ง index.html สำหรับ routes ที่ไม่ใช่ API
-  app.get(/^\/(?!api\/|health).*/, (req, res) => {
-    res.sendFile(path.join(config.paths.public, 'index.html'));
+  function isPublicStaticPath(p) {
+    if (PUBLIC_EXACT.has(p)) return true;
+    return PUBLIC_PREFIXES.some((prefix) => p.startsWith(prefix));
+  }
+
+  const serveStatic = express.static(config.paths.public, {
+    index: 'index.html',
+    setHeaders: (res, filePath) => {
+      // HTML ที่ต้อง auth → ห้าม cache (กัน back-button cache leak หลัง logout)
+      // Public HTML (login.html) → browser cache ได้ตามปกติ (Etag + 304)
+      if (filePath.endsWith('.html') && !filePath.endsWith('login.html')) {
+        res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+        res.setHeader('Pragma', 'no-cache');
+      }
+    },
+  });
+
+  app.get(/^\/(?!api\/|health).*/, (req, res, next) => {
+    // 1. Public static → serve ทันที ไม่ต้อง auth (login.html, favicon, CSS, core JS)
+    if (isPublicStaticPath(req.path)) {
+      return serveStatic(req, res, next);
+    }
+
+    // 2. Auth required
+    if (!req.session || req.session.authenticated !== true) {
+      // Programmatic / non-browser → JSON 401
+      if (!req.accepts('html')) {
+        return res.status(401).json({ error: 'Unauthorized' });
+      }
+      // Browser → redirect to login (เก็บ original URL ไว้ redirect กลับหลัง login)
+      const redirectTo = encodeURIComponent(req.originalUrl || req.path);
+      logger.debug({ path: req.path, ip: req.ip }, 'static: redirect to login (unauthenticated)');
+      return res.redirect(`/login.html?next=${redirectTo}`);
+    }
+
+    // 3. Authenticated → serve static. ถ้าไฟล์ไม่มี → fallback to index.html (SPA)
+    return serveStatic(req, res, (err) => {
+      if (err && err.statusCode === 404) {
+        return res.sendFile(path.join(config.paths.public, 'index.html'));
+      }
+      return next(err);
+    });
   });
 
   // Error handler

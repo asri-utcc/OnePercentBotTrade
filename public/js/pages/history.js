@@ -10,7 +10,7 @@
 //   - Mobile: detect <768px → mob-card list
 //   - Signals filter = currently-enabled bots (per backend)
 
-const TRADE_STATES = ['placed', 'partial_wait', 'filled', 'retrying', 'cancelled', 'holding', 'stopping', 'selling', 'sold', 'failed'];
+const TRADE_STATES = ['placed', 'partial_wait', 'filled', 'retrying', 'cancelled', 'holding', 'stopping', 'selling', 'partial_sell_wait', 'sold', 'failed'];
 const SIGNAL_OUTCOMES = ['detected', 'order_placed', 'filled', 'expired', 'failed', 'skipped'];
 // FIX-2026-07-24: mirror backend default — เก็บในตัวแปรเพื่อให้ "Hide failed" ทำงานถูก
 const DEFAULT_HIDE_TRADE = ['failed', 'cancelled'];
@@ -26,6 +26,27 @@ let state = {
   signalOutcomes: null, // null | Set<string> | 'all'
 };
 let bots = [];
+
+// FIX-2026-08-02: %PnL helper — realized / (buyPrice * buyQty) * 100
+//   - ใช้ buyPrice * buyQty (notional ตอนซื้อ) เป็น baseline
+//   - ถ้า buyPrice/buyQty ไม่ครบ → คืน NaN (UI แสดง —)
+//   - ใช้ได้ทั้ง trades table + mobile card + 'all' view
+function pnlPctOf(t) {
+  const buyPrice = Number(t && t.buyPrice);
+  const buyQty = Number(t && t.buyQty);
+  const realized = Number(t && t.realizedPnl);
+  if (!Number.isFinite(buyPrice) || !Number.isFinite(buyQty) || buyQty <= 0) return NaN;
+  if (!Number.isFinite(realized)) return NaN;
+  return (realized / (buyPrice * buyQty)) * 100;
+}
+
+function pnlPctClass(p) {
+  return p > 0.0001 ? 'text-success' : p < -0.0001 ? 'text-danger' : '';
+}
+
+function pnlPctStr(p) {
+  return Number.isFinite(p) ? (p >= 0 ? '+' : '') + p.toFixed(2) + '%' : '—';
+}
 let statsTimer = null;
 let loadTimer = null;
 
@@ -43,6 +64,8 @@ async function init() {
     location.href = '/login.html';
     return;
   }
+  // FIX-2026-07-31: preload tickSize cache ก่อน — ZILUSDT ต้องแสดง 6 dp ไม่ใช่ 4
+  await window.PriceFormat.load().catch(() => {});
   renderSkeleton();
   await Promise.all([loadBots(), loadStats(), loadHistory()]);
   statsTimer = setInterval(loadStats, 60000);
@@ -353,22 +376,34 @@ function renderTable(items, botMap) {
   let headers = [];
   let rowRender = () => '';
   if (state.kind === 'trades') {
-    headers = ['Time', 'Bot', 'Symbol', 'Side', 'Qty', 'Price', 'P&L', 'State'];
+    headers = ['Time', 'Bot', 'Symbol', 'Side', 'Qty', 'Price', 'P&L', '%', 'State', 'Reason'];
     rowRender = (t) => {
       const bot = botMap.get(String(t.botId)) || {};
       const pnl = Number(t.realizedPnl);
       const pnlClass = Number.isFinite(pnl) ? (pnl > 0 ? 'text-success' : pnl < 0 ? 'text-danger' : '') : '';
       const pnlStr = Number.isFinite(pnl) ? (pnl >= 0 ? '+' : '') + pnl.toFixed(4) : '—';
+      // FIX-2026-08-02: %PnL column = realizedPnl / (buyPrice * buyQty) * 100
+      const pct = pnlPctOf(t);
+      const pctClass = pnlPctClass(pct);
+      // FIX-2026-08-02: DCA stack badge — show layer count on Symbol cell + BEP hint on Price cell
+      const dcaBadge = t.isDcaStack === true
+        ? `<span class="dca-pill" title="DCA stack — ${t.dcaLayerCount || '?'} layers, BEP=${Number(t.stackBep || t.buyPrice || 0).toFixed(8)}">📚 L${t.dcaLayerCount || '?'}</span>`
+        : '';
+      const priceCell = t.isDcaStack === true
+        ? `${formatPrice(t.symbol, t.sellPrice || t.stackBep || t.buyPrice)}<div class="muted" style="font-size:0.7rem;">BEP ${Number(t.stackBep || 0).toFixed(8)}</div>`
+        : formatPrice(t.symbol, t.sellPrice || t.buyPrice);
       return `
         <tr>
           <td class="ts">${formatTime(t.createdAt)}</td>
           <td>${escapeHtml(bot.name || '?')}</td>
-          <td class="code">${escapeHtml(t.symbol || '?')}</td>
+          <td class="code">${escapeHtml(t.symbol || '?')} ${dcaBadge}</td>
           <td><span class="status-pill ${t.buyFilledAt ? 'is-buy' : ''}">${t.buyFilledAt ? 'BUY' : (t.sellFilledAt ? 'SELL' : '—')}</span></td>
           <td class="num">${formatNum(t.sellQty || t.buyQty)}</td>
-          <td class="num">${formatNum(t.sellPrice || t.buyPrice)}</td>
+          <td class="num">${priceCell}</td>
           <td class="num ${pnlClass}">${pnlStr}</td>
+          <td class="num ${pctClass}">${pnlPctStr(pct)}</td>
           <td><span class="status-pill state-${escapeHtml(t.state || '?')}">${escapeHtml(t.state || '?')}</span></td>
+          <td>${SellReasons.renderSellReasonPill(t.sellReason, t.sellReasonDetail)}</td>
         </tr>`;
     };
   } else if (state.kind === 'signals') {
@@ -381,16 +416,16 @@ function renderTable(items, botMap) {
           <td>${escapeHtml(bot.name || '?')}</td>
           <td class="code">${escapeHtml(s.symbol || '?')}/${escapeHtml(s.timeframe || '?')}</td>
           <td>${escapeHtml(s.type || '?')}</td>
-          <td class="num">${formatNum(s.closePrice)}</td>
-          <td class="num">${formatNum(s.basisKC)}</td>
-          <td class="num">${formatNum(s.upperKC)}</td>
-          <td class="num">${formatNum(s.lowerKC)}</td>
+          <td class="num">${formatPrice(s.symbol, s.closePrice)}</td>
+          <td class="num">${formatPrice(s.symbol, s.basisKC)}</td>
+          <td class="num">${formatPrice(s.symbol, s.upperKC)}</td>
+          <td class="num">${formatPrice(s.symbol, s.lowerKC)}</td>
           <td class="num">${s.bgState ?? '—'}</td>
           <td><span class="status-pill outcome-${escapeHtml(s.outcome || '?')}">${escapeHtml(s.outcome || '?')}</span></td>
         </tr>`;
     };
   } else {
-    headers = ['Time', 'Kind', 'Bot', 'Symbol', 'Summary', 'Status'];
+    headers = ['Time', 'Kind', 'Bot', 'Symbol', 'Summary', 'Status', 'Reason'];
     rowRender = (it) => {
       const isTrade = it._kind === 'trade';
       const bot = botMap.get(String(it.botId)) || {};
@@ -398,13 +433,17 @@ function renderTable(items, botMap) {
       if (isTrade) {
         const pnl = Number(it.realizedPnl);
         const pnlClass = Number.isFinite(pnl) ? (pnl > 0 ? 'text-success' : pnl < 0 ? 'text-danger' : '') : '';
-        summary = `<span class="${pnlClass}">qty ${formatNum(it.sellQty || it.buyQty)} @ ${formatNum(it.sellPrice || it.buyPrice)}</span>`;
+        // FIX-2026-08-02: เพิ่ม %PnL ใน summary (both view) — ใช้ helper เดียวกับ desktop table
+        const pct = pnlPctOf(it);
+        const pctClass = pnlPctClass(pct);
+        summary = `<span class="${pnlClass}">qty ${formatNum(it.sellQty || it.buyQty)} @ ${formatPrice(it.symbol, it.sellPrice || it.buyPrice)}</span> · <span class="${pctClass}">${pnlPctStr(pct)}</span>`;
         status = `<span class="status-pill state-${escapeHtml(it.state || '?')}">${escapeHtml(it.state || '?')}</span>`;
       } else {
-        summary = `${escapeHtml(it.type || 'S1')} · close ${formatNum(it.closePrice)} · bg ${it.bgState ?? '?'}`;
+        summary = `${escapeHtml(it.type || 'S1')} · close ${formatPrice(it.symbol, it.closePrice)} · bg ${it.bgState ?? '?'}`;
         status = `<span class="status-pill outcome-${escapeHtml(it.outcome || '?')}">${escapeHtml(it.outcome || '?')}</span>`;
       }
       const time = isTrade ? it.createdAt : it.candleCloseTime;
+      const reasonCell = isTrade ? SellReasons.renderSellReasonPill(it.sellReason, it.sellReasonDetail) : '—';
       return `
         <tr>
           <td class="ts">${formatTime(time)}</td>
@@ -413,6 +452,7 @@ function renderTable(items, botMap) {
           <td class="code">${escapeHtml(it.symbol || '?')}</td>
           <td>${summary}</td>
           <td>${status}</td>
+          <td>${reasonCell}</td>
         </tr>`;
     };
   }
@@ -440,16 +480,24 @@ function renderMobileCards(items, botMap) {
     if (isTrade) {
       const pnl = Number(it.realizedPnl);
       const pnlClass = Number.isFinite(pnl) ? (pnl > 0 ? 'text-success' : pnl < 0 ? 'text-danger' : '') : '';
+      // FIX-2026-08-02: %PnL ใน mobile card ด้วย (parity กับ desktop table)
+      const pct = pnlPctOf(it);
+      const pctClass = pnlPctClass(pct);
+      const dcaBadgeMobile = it.isDcaStack === true
+        ? `<span class="dca-pill" title="DCA stack — ${it.dcaLayerCount || '?'} layers">📚 L${it.dcaLayerCount || '?'}</span>`
+        : '';
       return `
         <div class="mob-card">
           <div class="d-flex justify-content-between">
             <span class="status-pill is-trade">TRADE</span>
             <span class="ts">${formatTime(time)}</span>
           </div>
-          <div class="mob-row"><b>${escapeHtml(bot.name || '?')}</b> · ${escapeHtml(it.symbol || '?')}</div>
-          <div class="mob-row">qty ${formatNum(it.sellQty || it.buyQty)} @ ${formatNum(it.sellPrice || it.buyPrice)}</div>
+          <div class="mob-row"><b>${escapeHtml(bot.name || '?')}</b> · ${escapeHtml(it.symbol || '?')} ${dcaBadgeMobile}</div>
+          <div class="mob-row">qty ${formatNum(it.sellQty || it.buyQty)} @ ${formatPrice(it.symbol, it.sellPrice || it.buyPrice)}</div>
           <div class="mob-row ${pnlClass}">P&L: ${Number.isFinite(pnl) ? (pnl >= 0 ? '+' : '') + pnl.toFixed(4) : '—'}</div>
+          <div class="mob-row ${pctClass}">%PnL: ${pnlPctStr(pct)}</div>
           <div class="mob-row"><span class="status-pill state-${escapeHtml(it.state || '?')}">${escapeHtml(it.state || '?')}</span></div>
+          <div class="mob-row">Reason: ${SellReasons.renderSellReasonPill(it.sellReason, it.sellReasonDetail)}</div>
         </div>`;
     }
     return `
@@ -459,7 +507,7 @@ function renderMobileCards(items, botMap) {
           <span class="ts">${formatTime(time)}</span>
         </div>
         <div class="mob-row"><b>${escapeHtml(bot.name || '?')}</b> · ${escapeHtml(it.symbol || '?')}/${escapeHtml(it.timeframe || '?')}</div>
-        <div class="mob-row">${escapeHtml(it.type || 'S1')} · close ${formatNum(it.closePrice)} · bg ${it.bgState ?? '?'}</div>
+        <div class="mob-row">${escapeHtml(it.type || 'S1')} · close ${formatPrice(it.symbol, it.closePrice)} · bg ${it.bgState ?? '?'}</div>
         <div class="mob-row"><span class="status-pill outcome-${escapeHtml(it.outcome || '?')}">${escapeHtml(it.outcome || '?')}</span></div>
       </div>`;
   }).join('');
@@ -483,6 +531,12 @@ function formatNum(n) {
   if (x === 0) return '0';
   if (Math.abs(x) >= 1) return x.toFixed(4);
   return x.toFixed(8);
+}
+
+// FIX-2026-07-31: format price ตาม tickSize (authoritative per-symbol) — แทน formatNum heuristic
+//   ใช้กับ price fields เท่านั้น (qty ใช้ formatNum ต่อ)
+function formatPrice(symbol, n) {
+  return window.PriceFormat ? PriceFormat.format(n, symbol) : formatNum(n);
 }
 
 function escapeHtml(s) {

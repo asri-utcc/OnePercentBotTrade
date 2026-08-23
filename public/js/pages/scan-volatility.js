@@ -7,6 +7,36 @@
  * - click symbol → /chart.html?symbol=XXX&timeframe=YYY
  */
 
+// FIX-2026-07-31: cache รายชื่อ symbols ที่ "มีบอทอยู่แล้ว" — ใช้ mark 🔥 ในผลสแกน
+//   - Set<string> ของ symbols ที่มีบอทในระบบ
+//   - FIX-2026-08-07: เกณฑ์คือ "มีบอทอยู่หรือไม่" ไม่สนใจ enabled/disabled
+//     เดิมกรอง `b.enabled` → บอทที่ปิดอยู่ยังขึ้นปุ่ม "+ สร้างบอท" → สร้างซ้ำ symbol เดิมได้
+//   - refresh ก่อนสแกนแต่ละครั้ง (กัน stale — user อาจสร้าง/ลบบอทระหว่างนี้)
+//   - ถ้า fetch ล้มเหลว → ไม่ mark (กัน false negative)
+let existingBotSymbols = new Set();
+
+// FIX-2026-08-01: escapeHtml helper (ใช้ใน coin info chip + cell — mirror bot-detail.js / bots.js)
+function escapeHtml(s) {
+  if (!s) return '';
+  return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+async function loadExistingBotSymbols() {
+  try {
+    const resp = await API.get('/api/bots');
+    const list = Array.isArray(resp && resp.bots) ? resp.bots : [];
+    // FIX-2026-08-07: นับทุกบอท ไม่ว่าจะ enabled หรือ disabled
+    existingBotSymbols = new Set(list.map((b) => String(b.symbol || '').toUpperCase()).filter(Boolean));
+  } catch (err) {
+    console.warn('scan-volatility: loadExistingBotSymbols failed', err && err.message);
+    // ไม่ทิ้ง Set เก่า — ถ้าเคยโหลดได้แล้ว ใช้ของเก่าต่อ
+  }
+}
+
+// FIX-2026-08-10: Auto Add Bot config moved entirely to Settings → 🤖 Auto Add New Bot
+//   (เดิมมี quick card ที่นี่ + ฟังก์ชัน load/save/run — ทำให้หน้า Scan รก
+//    ตอนนี้เหลือแค่ hint banner บนหน้า Scan ส่วนการตั้งค่าทั้งหมดอยู่ที่ Settings เท่านั้น)
+
 async function init() {
   const me = await API.get('/api/auth/me').catch(() => null);
   if (!me || !me.authenticated) {
@@ -16,6 +46,9 @@ async function init() {
 
   const runBtn = document.getElementById('s-run');
   if (runBtn) runBtn.onclick = runScan;
+
+  // FIX-2026-07-31: preload existing bot symbols (ใช้ mark 🔥 ในตาราง)
+  await loadExistingBotSymbols();
 }
 
 function readParams() {
@@ -74,6 +107,8 @@ async function runScan() {
   setLoading(true);
 
   try {
+    // FIX-2026-07-31: refresh existing bot symbols ก่อนสแกน (กัน stale หลังสร้าง/ลบบอท)
+    await loadExistingBotSymbols();
     const resp = await API.post('/api/scan/volatility', params);
     renderResult(resp, params);
   } catch (err) {
@@ -89,12 +124,113 @@ function fmtNum(v, digits = 2) {
   return v.toFixed(digits);
 }
 
+// FIX-2026-08-22 (weight spike): coin info cache + helpers (scan-volatility) — bulk endpoint
+//   - เดิม: parallel GET /api/coins/info/:sym × N symbols = N×22 weight burst
+//   - ใหม่: POST /api/coins/info-bulk = 100 weight ต่อ page load (1 ticker + 1 exchangeInfo)
+//   - cache 5min in-process (server-side 5min, client-side 5min — aligned)
+//   - fail-safe: 503 CIRCUIT_OPEN → fall back per-symbol + cache error
+const scanCoinInfoCache = new Map(); // symbol -> { data, ts, error? }
+async function prefetchScanCoinInfos(rows) {
+  const symbols = [...new Set(rows.map((r) => r.symbol).filter(Boolean))];
+  if (symbols.length === 0) return;
+  const now = Date.now();
+  const toFetch = symbols.filter((s) => !scanCoinInfoCache.has(s) || (now - scanCoinInfoCache.get(s).ts) > 5 * 60 * 1000);
+  if (toFetch.length === 0) return;
+  try {
+    const r = await API.post('/api/coins/info-bulk', { symbols: toFetch });
+    Object.entries(r.coins || {}).forEach(([sym, data]) => {
+      scanCoinInfoCache.set(sym, { data, ts: now });
+    });
+    for (const sym of toFetch) {
+      if (!scanCoinInfoCache.has(sym)) {
+        scanCoinInfoCache.set(sym, { data: null, ts: now, error: 'not found in bulk response' });
+      }
+    }
+  } catch (err) {
+    if (err.status === 503 && err.data && err.data.code === 'CIRCUIT_OPEN') {
+      console.warn('coinInfo scan bulk: circuit open, falling back to per-symbol', err.data);
+      await prefetchScanCoinInfosFallback(toFetch);
+    } else {
+      for (const sym of toFetch) {
+        scanCoinInfoCache.set(sym, { data: null, ts: now, error: err.message });
+      }
+    }
+  }
+  // re-render table body ให้แสดง coin info (ถ้ามีการ render ก่อน fetch เสร็จ)
+  if (typeof renderTableBody === 'function') renderTableBody();
+}
+async function prefetchScanCoinInfosFallback(symbols) {
+  const now = Date.now();
+  await Promise.all(symbols.map(async (sym) => {
+    try {
+      const r = await API.get(`/api/coins/info/${encodeURIComponent(sym)}`);
+      scanCoinInfoCache.set(sym, { data: r.coin, ts: now });
+    } catch (_err) {
+      scanCoinInfoCache.set(sym, { data: null, ts: now, error: 'fallback failed' });
+    }
+  }));
+}
+function getScanCoinInfo(symbol) {
+  const e = scanCoinInfoCache.get(symbol);
+  return e ? e.data : null;
+}
+function renderScanCoinCell(coin, symbol) {
+  if (!coin) {
+    return `<div class="coin-info-cell"><span class="coin-meta">⏳ ${escapeHtml(symbol)}</span></div>`;
+  }
+  const status = coin.status || 'UNKNOWN';
+  const statusCls = status === 'TRADING' ? 'is-trading' : (status === 'BREAK' ? 'is-break' : 'is-halt');
+  const pct = coin.priceChangePct;
+  let pctHtml = '<span class="muted">—</span>';
+  if (pct != null && Number.isFinite(pct)) {
+    const cls = pct >= 0 ? 'pct-up' : 'pct-down';
+    const sign = pct >= 0 ? '+' : '';
+    pctHtml = `<span class="coin-pct ${cls}">${sign}${pct.toFixed(2)}%</span>`;
+  }
+  const lot = coin.lotSize ? coin.lotSize.minQty : '?';
+  const tick = coin.priceFilter ? coin.priceFilter.tickSize : '?';
+  const lotShort = shortenTick(lot);
+  const tickShort = shortenTick(tick);
+  const vol24h = coin.quoteVolume ? Number(coin.quoteVolume).toLocaleString('en-US', { maximumFractionDigits: 0 }) : '?';
+
+  // FIX-2026-08-01: logo + fullName (จาก BAPI marketing list)
+  const fullName = coin.fullName || '';
+  const logoUrl = coin.logo || '';
+  const logoHtml = logoUrl
+    ? `<img class="coin-cell-logo" src="${escapeHtml(logoUrl)}" alt="${escapeHtml(fullName)}" loading="lazy" onerror="this.style.display='none'">`
+    : '';
+  const fullNameHtml = fullName && fullName !== coin.baseAsset
+    ? ` <span class="coin-cell-fullname" title="${escapeHtml(fullName)}">${escapeHtml(fullName)}</span>`
+    : '';
+  const cmcLine = (coin.cmcRank != null) ? ` · CMC#${coin.cmcRank}` : '';
+
+  return `
+    <div class="coin-info-cell" title="${escapeHtml(fullName || coin.baseAsset)}${cmcLine} · base=${coin.baseAsset} · lot ${lot} · tick ${tick} · 24h vol ${vol24h} USDT">
+      <div class="coin-cell-row1">${logoHtml}<span class="coin-status ${statusCls}">${status}</span></div>
+      <div class="coin-cell-row2"><strong>${escapeHtml(coin.baseAsset)}</strong>${fullNameHtml}</div>
+      <div class="coin-cell-row3">lot ${lotShort} · tick ${tickShort}</div>
+      <div class="coin-cell-row4">24h ${pctHtml}</div>
+    </div>
+  `;
+}
+function shortenTick(v) {
+  if (v == null) return '—';
+  const n = Number(v);
+  if (!Number.isFinite(n) || n === 0) return String(v);
+  let s = n.toString();
+  if (s.includes('.')) s = s.replace(/0+$/, '').replace(/\.$/, '');
+  return s;
+}
+
 function renderResult(resp, params) {
   const ranked = resp.ranked || [];
   const scanned = resp.scanned || 0;
   const scanMs = resp.scanMs || 0;
   const threshold = resp.threshold;
   const winBars = resp.window;
+
+  // FIX-2026-08-01: prefetch coin info สำหรับ symbols ใน ranked list (dedupe + 5min cache)
+  prefetchScanCoinInfos(ranked).catch((e) => console.warn('scan: coinInfo prefetch', e));
 
   if (ranked.length === 0) {
     document.getElementById('result').innerHTML = `
@@ -151,7 +287,10 @@ function renderResult(resp, params) {
     <div class="lux-card">
       <div class="lux-header">
         <span class="title">🏆 Top ${ranked.length} Symbols</span>
-        <span class="text-muted-2 small" id="scan-results-sub">คลิกหัวคอลัมน์เพื่อเรียงใหม่ · trend filter: ${params.trends.join(', ')}</span>
+        <span class="text-muted-2 small" id="scan-results-sub">
+          <span title="คู่เหรียญที่ยังไม่มีบอทในระบบ (ไม่ว่าจะรันหรือไม่) — นำไปสร้างบอทได้ทันที" style="cursor:help;">🔥 = ยังไม่มีบอท</span>
+          · คลิกหัวคอลัมน์เพื่อเรียงใหม่ · trend filter: ${params.trends.join(', ')}
+        </span>
       </div>
       <div class="lux-body p-0">
         <div class="lux-table-wrap">
@@ -160,6 +299,7 @@ function renderResult(resp, params) {
               <tr>
                 <th class="num">#</th>
                 <th class="sortable" data-sort-key="symbol">${headerLabel('Symbol', 'symbol')}</th>
+                <th class="sortable" data-sort-key="coinStatus">${headerLabel('Coin Info <span class="col-help" title="Binance status (TRADING/BREAK/HALT) + 24h change + lot/tick constraints">ⓘ</span>', 'coinStatus')}</th>
                 <th class="sortable" data-sort-key="trend">${headerLabel('Trend', 'trend')}</th>
                 <th class="num sortable" data-sort-key="score">${headerLabel('Score', 'score')}</th>
                 <th class="num sortable" data-sort-key="avgVol">${headerLabel('Avg Vol %', 'avgVol')}</th>
@@ -293,10 +433,17 @@ function renderResult(resp, params) {
 }
 
 /**
- * Adapt decimal display to price magnitude — avoid 0.000001234 looking like 0.00
+ * FIX-2026-07-31: ใช้ Binance tickSize (authoritative) สำหรับ price display
+ *   - ก่อนหน้านี้ heuristic ตาม magnitude ทำให้ ZILUSDT (~0.01) แสดง 5 dp ทั้งที่ Binance UI ใช้ 6 dp
+ *   - ตอนนี้ใช้ window.PriceFormat.format() ตาม PRICE_FILTER.tickSize (เหมือนหน้าอื่นในระบบ)
+ *   - ถ้า PriceFormat ยังโหลดไม่เสร็จ → fallback magnitude heuristic (เพื่อกันพัง)
  */
-function formatPrice(p) {
+function formatPrice(p, symbol) {
   if (p === null || p === undefined || !Number.isFinite(p)) return '—';
+  if (window.PriceFormat && typeof PriceFormat.format === 'function') {
+    return PriceFormat.format(p, symbol);
+  }
+  // fallback heuristic (เดิม) — magnitude-based
   const abs = Math.abs(p);
   if (abs >= 1000) return p.toFixed(2);
   if (abs >= 1) return p.toFixed(4);
@@ -403,7 +550,7 @@ function renderTrendEma(r) {
   const glyph = state === 'upper' ? '🟢' : '🔴';
   // trendTF is server-controlled (from TREND_TF_MAP) — safe to inject directly
   const tfLabel = r.trendTF || '';
-  return `<span class="trend-state is-${state}" title="EMA20 (${tfLabel}): ${fmtNum(r.trendEma20, 6)} · lastClose: ${fmtNum(r.trendLastClose, 6)}">${glyph} ${arrow} ${gapSign}${gapPct.toFixed(2)}% <span class="trend-tf">${tfLabel}</span></span>`;
+  return `<span class="trend-state is-${state}" title="EMA20 (${tfLabel}): ${PriceFormat ? PriceFormat.format(r.trendEma20, r.symbol) : fmtNum(r.trendEma20, 6)} · lastClose: ${PriceFormat ? PriceFormat.format(r.trendLastClose, r.symbol) : fmtNum(r.trendLastClose, 6)}">${glyph} ${arrow} ${gapSign}${gapPct.toFixed(2)}% <span class="trend-tf">${tfLabel}</span></span>`;
 }
 
 /**
@@ -437,17 +584,27 @@ function renderSortedRowsHTML() {
     const atrCls = summary && r.currentAtrPct >= summary.meanAtr * 1.2
       ? 'pnl-bull'
       : (summary && r.currentAtrPct < summary.meanAtr * 0.8 ? 'pnl-bear' : '');
-    const priceStr = formatPrice(r.lastClose);
+    const priceStr = formatPrice(r.lastClose, r.symbol);
     const trendKey = (r.trend || 'sideways').toLowerCase();
     const trendGlyph = trendKey === 'uptrend' ? '📈' : (trendKey === 'downtrend' ? '📉' : '↔️');
     const trendPill = `<span class="trend-pill is-${trendKey}">${trendGlyph} ${r.trend || 'sideways'}</span>`;
+    // FIX-2026-08-01: coin info cell (Binance status + 24h % + lot/tick)
+    const ci = (typeof getScanCoinInfo === 'function') ? getScanCoinInfo(r.symbol) : null;
+    const coinCell = renderScanCoinCell(ci, r.symbol);
     return `
       <tr>
         <td class="num">${i + 1}</td>
         <td>
+          ${existingBotSymbols.has(String(r.symbol || '').toUpperCase())
+            ? ''
+            : `<span class="hot-symbol" title="ยังไม่มีบอทของเหรียญนี้ — พร้อมสร้างใหม่" aria-label="hot symbol">🔥</span>
+               <a href="/bots.html?newBot=1&symbol=${encodeURIComponent(r.symbol)}&tf=${encodeURIComponent(tf)}"
+                  class="btn-create-bot-mini"
+                  title="สร้างบอท ${encodeURIComponent(r.symbol)} ${encodeURIComponent(tf)} (auto-fill)">+ สร้างบอท</a> `}
           <a href="/chart.html?symbol=${encodeURIComponent(r.symbol)}&timeframe=${encodeURIComponent(tf)}"
              class="mono fw-bold" style="color:var(--gold-1);">${r.symbol}</a>
         </td>
+        <td>${coinCell}</td>
         <td>${trendPill}</td>
         <td class="num ${scoreCls}"><strong>${fmtNum(r.score, 2)}</strong></td>
         <td class="num">${fmtNum(r.avgVol, 3)}</td>

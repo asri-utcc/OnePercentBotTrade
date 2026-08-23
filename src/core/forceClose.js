@@ -31,16 +31,52 @@
 const config = require('../../config');
 const binanceRest = require('../binance/binanceRest');
 const fees = require('../binance/fees');
+const symbolInfo = require('../binance/symbolInfo');
 const logger = require('../utils/logger');
 const eventBus = require('../services/eventBus');
 const Bot = require('../db/models/Bot');
 const Trade = require('../db/models/Trade');
 const botManager = require('./botManager');
+// FIX-2026-08-09: DPS loss-path coverage — every force-close MARKET branch must
+//   invoke dpsAfterClose so Rule 3 (loss-streak) actually fires. Synthetic close
+//   branch has no real PnL → skip DPS entirely.
+const dpsAfterClose = require('./dpsAfterClose');
 
-// Mirror OPEN_TRADE_STATES from bot-detail.js — duplicated to avoid circular require on trader.js
-// FIX-2026-07-23b: เพิ่ม 'stopping' เพื่อให้ manual force-close ทำงานได้ระหว่าง stop-loss atomic-claim window
-//   - ถ้า user กด force-close ขณะ stop-loss กำลัง force-close อยู่ → ทั้งคู่แข่งกัน, ใคร update 'sold' ก่อนชนะ
-const FORCE_OPEN_STATES = ['placed', 'filled', 'holding', 'selling', 'retrying', 'stopping'];
+// FIX-2026-08-12 (audit Q14): Shared atomic force-close state set.
+//   - FORCE_OPEN_STATES (8 states, includes 'placed') — used by manual force-close
+//     which can cancel a pending BUY (no SELL needed).
+//   - ATOMIC_FORCE_CLOSE_STATES (7 states, excludes 'placed') — used by automated
+//     force-close paths (MARKET SELL requires the BUY to have filled first).
+//   - Both sets are extracted to src/core/tradeStates.js to avoid divergence
+//     between markTradeSold (forceClose.js) and _forceCloseTradeNow (trader.js).
+const { FORCE_OPEN_STATES, ATOMIC_FORCE_CLOSE_STATES } = require('./tradeStates');
+
+// FIX-2026-08-02: DCA stack BEP computation (local copy — avoid circular require on trader.js)
+//   - ใช้ใน forceClose เพื่อ derive buyPrice/buyQty จาก stack fields
+function computeStackBEP(trade) {
+  if (Array.isArray(trade.buyLayers) && trade.buyLayers.length > 0) {
+    let totalQty = 0;
+    let totalSpent = 0;
+    for (const layer of trade.buyLayers) {
+      if (!layer || layer.status !== 'FILLED') continue;
+      const p = Number(layer.price);
+      const q = Number(layer.qty);
+      if (!Number.isFinite(p) || !Number.isFinite(q) || q <= 0 || p <= 0) continue;
+      totalQty += q;
+      totalSpent += p * q;
+    }
+    if (totalQty > 0) {
+      return { totalQty, totalSpent, bep: totalSpent / totalQty };
+    }
+  }
+  // Fallback to scalar fields (mirror from _handleDcaBuyFilled)
+  const buyPrice = Number(trade.buyPrice);
+  const buyQty = Number(trade.buyQty);
+  if (Number.isFinite(buyPrice) && Number.isFinite(buyQty) && buyPrice > 0 && buyQty > 0) {
+    return { totalQty: buyQty, totalSpent: buyPrice * buyQty, bep: buyPrice };
+  }
+  return { totalQty: 0, totalSpent: 0, bep: null };
+}
 
 /**
  * Look up free + locked balances for the base asset derived from a USDT symbol.
@@ -112,28 +148,47 @@ async function placeMarketSell(symbol, qty, clientOrderTag) {
  * (e.g. the WS recovered and handleSellFilled ran) the `modifiedCount` is 0
  * and we treat it as a no-op success so we don't double-decrement bot totals.
  */
-async function markTradeSold({ trade, sold, errorNote, reason }) {
+async function markTradeSold({ trade, sold, errorNote, reason, sellReason, sellReasonDetail, sellReasonSource, isDcaStack }) {
+  // FIX-2026-08-12 (audit Q14): idempotency check — if trade already 'sold', return ok
+  //   - Prevents double-write when watchdog + manual force-close race
+  //   - normalized state comparison (handles 'sold' and 'SOLD' legacy)
+  if (trade && (trade.state === 'sold' || trade.state === 'SOLD' || trade.state === 'partial_sold_done')) {
+    logger.info({
+      tradeId: trade._id && trade._id.toString(),
+      state: trade.state,
+      reason: 'already_sold',
+    }, 'forceClose: markTradeSold called on already-sold trade — no-op');
+    return true;
+  }
+  const setFields = {
+    state: 'sold',
+    sellOrderId: sold.sellOrderId ?? null,
+    sellClientOrderId: sold.sellClientOrderId ?? null,
+    sellPrice: sold.sellPrice ?? null,
+    sellQty: sold.sellQty ?? null,
+    sellQuoteQty: sold.sellQuoteQty ?? null,
+    sellStatus: sold.sellStatus ?? 'FORCED',
+    sellFilledAt: sold.sellFilledAt ?? new Date(),
+    sellPlacedAt: sold.sellPlacedAt ?? new Date(),
+    realizedPnl: sold.realizedPnl ?? null,
+    pnlPercent: sold.pnlPercent ?? null,
+    error: errorNote || '',
+    // FIX-2026-08-01: structured sellReason — caller passes sellReason enum + free-text detail
+    sellReason: sellReason || null,
+    sellReasonDetail: sellReasonDetail || errorNote || null,
+    sellReasonAt: new Date(),
+    sellReasonSource: sellReasonSource || 'forceClose.markTradeSold',
+  };
+  // FIX-2026-08-02: DCA stack — stamp stackClosedAt
+  if (isDcaStack) {
+    setFields.stackClosedAt = new Date();
+  }
   const upd = await Trade.updateOne(
     {
       _id: trade._id,
       state: { $in: FORCE_OPEN_STATES },
     },
-    {
-      $set: {
-        state: 'sold',
-        sellOrderId: sold.sellOrderId ?? null,
-        sellClientOrderId: sold.sellClientOrderId ?? null,
-        sellPrice: sold.sellPrice ?? null,
-        sellQty: sold.sellQty ?? null,
-        sellQuoteQty: sold.sellQuoteQty ?? null,
-        sellStatus: sold.sellStatus ?? 'FORCED',
-        sellFilledAt: sold.sellFilledAt ?? new Date(),
-        sellPlacedAt: sold.sellPlacedAt ?? new Date(),
-        realizedPnl: sold.realizedPnl ?? null,
-        pnlPercent: sold.pnlPercent ?? null,
-        error: errorNote || '',
-      },
-    }
+    { $set: setFields }
   );
   const ok = upd.modifiedCount === 1;
   if (!ok) {
@@ -149,14 +204,38 @@ async function markTradeSold({ trade, sold, errorNote, reason }) {
  * Centralised force-close for one trade. Returns a structured result so the
  * API route can report `mode` ("market" / "synthetic") back to the client.
  *
+ * FIX-2026-08-09: เ�ิ่ม opts.source เพื่อแยก sellReason 4 sources:
+ *   - 'api' (default) — UI button → manual_api_market
+ *   - 'watchdog' — positionWatchdog force-close → manual_api_watchdog
+ *   - 'cleanup_script' — scripts/cleanup-orphan.js / recover-orphan-trades.js → manual_api_cleanup_script
+ *
  * @param {object} opts
  * @param {object} opts.trade   - Mongoose trade document (must have _id, symbol, botId, buyPrice, buyQty)
  * @param {object} [opts.bot]   - Optional; if omitted we look up by trade.botId (needed for symbol in cancel)
  * @param {boolean} [opts.allowMarketSell=true] - When false, never places a MARKET SELL (cleanup mode)
+ * @param {string} [opts.source='api'] - caller source for sellReason derivation
  * @returns {Promise<{ok: boolean, mode: string, executedQty: number, avgSellPrice: number|null, pnl: number, error?: string}>}
  */
-async function forceCloseTrade({ trade, bot = null, allowMarketSell = true }) {
+async function forceCloseTrade({ trade, bot = null, allowMarketSell = true, source = 'api' }) {
   const logCtx = { tradeId: trade._id && trade._id.toString(), symbol: trade.symbol };
+  // FIX-2026-08-02: DCA stack branch — derive qty/buyPrice from stack fields
+  const isDcaStack = trade.isDcaStack === true;
+  let stackBep = null;
+  let stackTotalQty = 0;
+  if (isDcaStack) {
+    const stack = computeStackBEP(trade);
+    stackBep = stack.bep;
+    stackTotalQty = stack.totalQty;
+    if (!stackBep || stackTotalQty <= 0) {
+      return { ok: false, mode: 'none', executedQty: 0, avgSellPrice: null, pnl: 0, error: 'DCA stack missing BEP/qty' };
+    }
+    logger.info({
+      ...logCtx,
+      stackId: trade.stackId?.toString(),
+      stackBep, stackTotalQty,
+      dcaLayerCount: trade.dcaLayerCount,
+    }, 'forceClose: DCA stack detected — using stackBep + stackTotalQty');
+  }
   try {
     if (!trade || !trade._id) {
       return { ok: false, mode: 'none', executedQty: 0, avgSellPrice: null, pnl: 0, error: 'trade missing' };
@@ -199,12 +278,66 @@ async function forceCloseTrade({ trade, bot = null, allowMarketSell = true }) {
     if (resolved.freeQty > 0) {
       if (!allowMarketSell) {
         // Cleanup mode — treat as synthetic close since caller said no MARKET.
+        // FIX-2026-08-09: forward source so synthetic close gets correct reason (cleanup_script vs api)
         return await forceCloseTrade_synthetic({
-          trade, logCtx, reason: 'cleanup-mode (allowMarketSell=false, freeQty present)',
+          trade, logCtx, reason: 'cleanup-mode (allowMarketSell=false, freeQty present)', source,
         });
       }
       const tradeSymbol = trade.symbol || bot.symbol;
-      const placed = await placeMarketSell(tradeSymbol, resolved.freeQty, 'fc');
+
+      // FIX-2026-08-06: round qty to LOT_SIZE stepSize BEFORE placing MARKET SELL.
+      //   - Bug: freeQty มาจาก Binance account API อาจมี fractional component (เช่น 947.095 HOME
+      //     จาก 945 trade + 2.095 orphan) — Binance จะ reject -1013 LOT_SIZE ถ้าไม่ใช่ multiple of stepSize
+      //   - pattern เดียวกับ scripts/fix-stuck-fee-deduct-positions.js (FIX-2026-08-05) แต่ apply ที่ runtime
+      //   - cap = min(freeQty, buyQty × 0.998) — กัน over-sell orphan ของบอทอื่น (multi-bot same symbol)
+      //   - round down to stepSize + enforce minQty (skip if rounding → 0)
+      const buyQtyCap = parseFloat(trade.buyQty) > 0 ? parseFloat(trade.buyQty) * 0.998 : resolved.freeQty;
+      const candidateRaw = Math.min(resolved.freeQty, buyQtyCap);
+      let marketSellQty = candidateRaw;
+      try {
+        const sym = await symbolInfo.loadSymbol(tradeSymbol);
+        if (sym && sym.lotSize && sym.lotSize.stepSize) {
+          const stepSize = parseFloat(sym.lotSize.stepSize.toString());
+          const minQty = parseFloat(sym.lotSize.minQty.toString());
+          // floor to stepSize (works for both stepSize=1 and fractional stepSize like 0.001)
+          marketSellQty = Math.floor(candidateRaw / stepSize) * stepSize;
+          // precision: ตัดทศนิยย่อยเกินจริงตาม stepSize
+          if (stepSize >= 1) {
+            marketSellQty = Math.floor(marketSellQty);
+          } else {
+            const decimals = (stepSize.toString().split('.')[1] || '').replace(/0+$/, '').length;
+            marketSellQty = parseFloat(marketSellQty.toFixed(decimals));
+          }
+          if (marketSellQty < minQty) {
+            logger.warn({
+              ...logCtx,
+              freeQty: resolved.freeQty,
+              buyQtyCap,
+              candidateRaw,
+              marketSellQty,
+              minQty,
+            }, 'forceClose: rounded qty below minQty — falling through to synthetic close');
+            return await forceCloseTrade_synthetic({
+              trade, logCtx, reason: `rounded qty ${marketSellQty} < minQty ${minQty} (freeQty=${resolved.freeQty})`, source,
+            });
+          }
+          if (Math.abs(marketSellQty - candidateRaw) > 1e-12) {
+            logger.info({
+              ...logCtx,
+              freeQty: resolved.freeQty,
+              candidateRaw,
+              marketSellQty,
+              stepSize, minQty,
+            }, 'forceClose: qty rounded down to LOT_SIZE stepSize');
+          }
+        } else {
+          logger.warn({ ...logCtx, tradeSymbol }, 'forceClose: symbolInfo.lotSize missing — sending qty raw (may reject)');
+        }
+      } catch (symErr) {
+        logger.warn({ ...logCtx, err: symErr.message }, 'forceClose: loadSymbol failed — sending qty raw (may reject)');
+      }
+
+      const placed = await placeMarketSell(tradeSymbol, marketSellQty, 'fc');
       if (!placed.ok) {
         return { ok: false, mode: 'market-failed', executedQty: 0, avgSellPrice: null, pnl: 0, error: JSON.stringify(placed.error) };
       }
@@ -214,7 +347,7 @@ async function forceCloseTrade({ trade, bot = null, allowMarketSell = true }) {
         || parseFloat(resp.avgPrice)
         || (parseFloat(resp.cummulativeQuoteQty) / parseFloat(resp.executedQty))
         || 0;
-      const buyPrice = parseFloat(trade.buyPrice) || 0;
+      const buyPrice = isDcaStack ? stackBep : (parseFloat(trade.buyPrice) || 0);
       // MARKET is a taker leg — use taker rate. (The buy was a maker, but we don't
       // store buy fee separate per leg in this minimal helper; for v1 we accept the
       // same fee on both legs and document the approximation.)
@@ -225,6 +358,31 @@ async function forceCloseTrade({ trade, bot = null, allowMarketSell = true }) {
         qty: executed,
         feeRate,
       });
+
+      // FIX-2026-08-02: DCA stack — use dca_stack_force_close reason + stamp stackClosedAt
+      // FIX-2026-08-09: source-aware sellReason — แยก 4 sources (api/watchdog/cleanup_script)
+      let finalSellReason;
+      let finalSellReasonSource;
+      if (isDcaStack) {
+        finalSellReason = 'dca_stack_force_close';
+        finalSellReasonSource = 'forceClose.forceCloseTrade_dca';
+      } else if (source === 'watchdog') {
+        finalSellReason = 'manual_api_watchdog';
+        finalSellReasonSource = 'forceClose.forceCloseTrade_watchdog';
+      } else if (source === 'cleanup_script') {
+        finalSellReason = 'manual_api_cleanup_script';
+        finalSellReasonSource = 'forceClose.forceCloseTrade_cleanup';
+      } else {
+        finalSellReason = 'manual_api_market';
+        finalSellReasonSource = 'forceClose.forceCloseTrade';
+      }
+      const finalSellReasonDetail = isDcaStack
+        ? `manual close via API (DCA stack) — MARKET @ ${avgSell} qty=${executed} stackBep=${stackBep} layers=${trade.dcaLayerCount || 0}`
+        : source === 'cleanup_script'
+          ? `cleanup script (synthetic) — ${reason || 'asset missing'}`
+          : source === 'watchdog'
+            ? `positionWatchdog force-close — MARKET @ ${avgSell} qty=${executed}`
+            : `manual close via API — MARKET @ ${avgSell} qty=${executed}`;
 
       const marked = await markTradeSold({
         trade,
@@ -240,8 +398,12 @@ async function forceCloseTrade({ trade, bot = null, allowMarketSell = true }) {
           realizedPnl: pnl.net,
           pnlPercent: pnl.pnlPercent,
         },
-        errorNote: 'force_close: MARKET SELL via API',
+        errorNote: isDcaStack ? 'force_close: DCA stack MARKET SELL via API' : 'force_close: MARKET SELL via API',
         reason: 'market',
+        sellReason: finalSellReason,
+        sellReasonDetail: finalSellReasonDetail,
+        sellReasonSource: finalSellReasonSource,
+        isDcaStack,
       });
 
       if (marked) {
@@ -256,12 +418,42 @@ async function forceCloseTrade({ trade, bot = null, allowMarketSell = true }) {
             $set: { status: 'idle' },
           }
         );
+        // FIX-2026-08-09: DPS loss-path coverage — real MARKET fill (Binance order filled).
+        //   - cbv3_panic / cbv2_panic / sl_ukc_f1_armed / manual_api_market / dca_stack_force_close
+        //     all funnel through here and previously bypassed DPS entirely
+        //   - source tag for logs: 'forceClose:market' lets ops see which close path fired
+        //   - DPS evaluates isWin=pnl.net>0 → Rule 3 (loss-streak) shrinks size on loss
+        try {
+          await dpsAfterClose.evaluateDpsAfterClose({
+            bot,
+            pnl: pnl.net,
+            pnlPct: pnl.pnlPercent,
+            source: `forceClose:market:${finalSellReason}`,
+          });
+        } catch (dpsErr) {
+          // dpsAfterClose already wraps in try/catch — this is defense-in-depth
+          logger.warn({ ...logCtx, err: dpsErr.message }, 'forceClose: dpsAfterClose failed (non-fatal)');
+        }
       }
-      eventBus.emit('trade:update', { tradeId: trade._id, state: 'sold' });
+      eventBus.emit('trade:update', {
+        tradeId: trade._id,
+        botId: trade.botId,
+        state: 'sold',
+        reason: finalSellReason,
+        reasonDetail: finalSellReasonDetail,
+        stackId: isDcaStack ? trade.stackId : undefined,
+        dcaLayerCount: isDcaStack ? (trade.dcaLayerCount || 0) : undefined,
+        stackBep: isDcaStack ? stackBep : undefined,
+        stackTotalQty: isDcaStack ? stackTotalQty : undefined,
+        realizedPnl: pnl.net,
+        pnlPercent: pnl.pnlPercent,
+      });
       eventBus.emit('bot:status', { botId: trade.botId, status: 'idle' });
       logger.info({
         ...logCtx,
-        mode: 'market', executedQty: executed, avgSellPrice: avgSell, pnl: pnl.net, freeQty: resolved.freeQty,
+        isDcaStack,
+        mode: 'market', executedQty: executed, avgSellPrice: avgSell, pnl: pnl.net,
+        requestedQty: marketSellQty, freeQty: resolved.freeQty,
       }, 'forceCloseTrade: MARKET SELL completed');
       return { ok: true, mode: 'market', executedQty: executed, avgSellPrice: avgSell, pnl: pnl.net };
     }
@@ -285,8 +477,28 @@ async function forceCloseTrade({ trade, bot = null, allowMarketSell = true }) {
  * eventually clearing its currentTrade pointer via WS / reconcile; the next
  * botManager.reconcilePendingTrades() will see the trade as 'sold' and skip.
  */
-async function forceCloseTrade_synthetic({ trade, logCtx, reason }) {
+async function forceCloseTrade_synthetic({ trade, logCtx, reason, source = 'api' }) {
   const now = new Date();
+  // FIX-2026-08-02: DCA stack — use dca_stack_force_close + stamp stackClosedAt
+  // FIX-2026-08-09: source-aware sellReason — cleanup_script → manual_api_cleanup_script, others → manual_api_synthetic
+  const isDcaStack = trade.isDcaStack === true;
+  let finalSellReason;
+  let finalSellReasonSource;
+  if (isDcaStack) {
+    finalSellReason = 'dca_stack_force_close';
+    finalSellReasonSource = 'forceClose.forceCloseTrade_synthetic_dca';
+  } else if (source === 'cleanup_script') {
+    finalSellReason = 'manual_api_cleanup_script';
+    finalSellReasonSource = 'forceClose.forceCloseTrade_cleanup_synthetic';
+  } else {
+    finalSellReason = 'manual_api_synthetic';
+    finalSellReasonSource = 'forceClose.forceCloseTrade_synthetic';
+  }
+  const finalSellReasonDetail = isDcaStack
+    ? `manual close via API (DCA stack, synthetic) — ${reason || 'asset missing'} layers=${trade.dcaLayerCount || 0}`
+    : source === 'cleanup_script'
+      ? `cleanup script (synthetic) — ${reason || 'asset missing'}`
+      : (reason || 'asset missing on exchange');
   const marked = await markTradeSold({
     trade,
     sold: {
@@ -301,8 +513,13 @@ async function forceCloseTrade_synthetic({ trade, logCtx, reason }) {
       realizedPnl: 0,
       pnlPercent: 0,
     },
-    errorNote: `force_close: synthetic close — ${reason}`,
+    errorNote: isDcaStack ? `force_close: DCA stack synthetic close — ${reason}` : `force_close: synthetic close — ${reason}`,
     reason: 'synthetic',
+    // FIX-2026-08-01: structured sellReason — manual close via API (synthetic — asset missing)
+    sellReason: finalSellReason,
+    sellReasonDetail: finalSellReasonDetail,
+    sellReasonSource: finalSellReasonSource,
+    isDcaStack,
   });
   if (marked) {
     await Bot.updateOne(
@@ -312,8 +529,19 @@ async function forceCloseTrade_synthetic({ trade, logCtx, reason }) {
         $set: { status: 'idle' },
       }
     );
+    // FIX-2026-08-09: DPS — SKIP for synthetic close.
+    //   - synthetic close = no real Binance fill (asset missing / cleanup mode / etc.)
+    //   - pnl.net = 0 → tagging as loss would artificially shrink DPS size on what is
+    //     effectively an admin cleanup or stuck-position recovery, not a real loss
+    //   - DPS history is only meaningful for actual market fills
   }
-  eventBus.emit('trade:update', { tradeId: trade._id, state: 'sold' });
+  eventBus.emit('trade:update', {
+    tradeId: trade._id,
+    botId: trade.botId,
+    state: 'sold',
+    reason: 'manual_api_synthetic',
+    reasonDetail: reason || 'asset missing on exchange',
+  });
   eventBus.emit('bot:status', { botId: trade.botId, status: 'idle' });
   logger.warn({ ...logCtx, reason }, 'forceCloseTrade: synthetic close recorded');
   return { ok: true, mode: 'synthetic', executedQty: 0, avgSellPrice: 0, pnl: 0 };
@@ -323,12 +551,16 @@ async function forceCloseTrade_synthetic({ trade, logCtx, reason }) {
  * Force-close ALL open trades for a bot and disable it. Sequential (one at a
  * time) to stay well under Binance weight limits.
  *
+ * FIX-2026-08-09: forward `source` param to per-trade forceCloseTrade so sellReason
+ *   correctly attributes UI vs watchdog vs script.
+ *
  * @param {object} opts
  * @param {string} opts.botId
  * @param {boolean} [opts.allowMarketSell=true]
  * @param {boolean} [opts.disableBot=true]   - if false, just close positions (don't disable)
+ * @param {string}  [opts.source='api']     - caller source forwarded to forceCloseTrade
  */
-async function forceCloseBot({ botId, allowMarketSell = true, disableBot = true }) {
+async function forceCloseBot({ botId, allowMarketSell = true, disableBot = true, source = 'api' }) {
   const results = { ok: true, closedTrades: [], errors: [], disabled: false };
   const bot = await Bot.findById(botId).catch(() => null);
   if (!bot) {
@@ -339,11 +571,11 @@ async function forceCloseBot({ botId, allowMarketSell = true, disableBot = true 
     state: { $in: FORCE_OPEN_STATES },
   });
   logger.warn({
-    botId: botId.toString(), symbol: bot.symbol, count: opens.length, allowMarketSell, disableBot,
+    botId: botId.toString(), symbol: bot.symbol, count: opens.length, allowMarketSell, disableBot, source,
   }, 'forceCloseBot: starting');
   for (const t of opens) {
     try {
-      const r = await forceCloseTrade({ trade: t, bot, allowMarketSell });
+      const r = await forceCloseTrade({ trade: t, bot, allowMarketSell, source });
       const entry = { tradeId: t._id.toString(), symbol: t.symbol, mode: r.mode, executedQty: r.executedQty, avgSellPrice: r.avgSellPrice, pnl: r.pnl };
       if (!r.ok) {
         results.errors.push({ ...entry, error: r.error || 'unknown' });

@@ -13,6 +13,8 @@ Node.js Binance Spot Trading Bot ที่ใช้ **S1 signal** จาก Pine
 - 🔌 **Local MongoDB**: เก็บ bots/trades/signals/backtest results
 - 🔐 **Session Auth**: password-based login พร้อม bcrypt + AES-256-GCM encrypted API keys
 - 🔁 **Auto-reconnect**: Binance WebSocket ตัด → reconnect + resubscribe + backfill
+- 📚 **DCA + BEP Stack Mode** (opt-in per bot): เปิด DCA → S1 signal ตัวแรกเปิด stack, ตัวถัดไปเพิ่ม layer (สูงสุด `dcaMaxLayers`, default 3) → BEP = weighted avg → aggregate SELL ที่ BEP+TP. **CB panic-sell ปิดใน DCA mode** (no cut loss). Spot only, no leverage. ดู [DCA Stack Mode](#dca--bep-stack-mode)
+- 🎲 **DCA + Martingale sizing** (opt-in per bot, DCA-only): เปิด Martingale ใน DCA mode → layer N notional = `capitalPerTrade × multiplier^(N-1)`, capped by per-layer cap (default 100 USDT). ทำให้ BEP recover เร็วขึ้น แต่ max loss สูงขึ้นเมื่อถึง max layers. ดู [DCA Stack Mode](#dca--bep-stack-mode)
 
 ## Quick Start
 
@@ -107,6 +109,77 @@ public/                # Frontend dashboard (plain HTML/JS)
 - **Maker-only**: ใช้ `LIMIT_MAKER` order type — ถ้าจะ match ทันทีจะถูก reject
 - **Fee buffer**: sell price = buy × (1 + TP% + 2×makerFee) — เพื่อให้กำไรสุทธิ ≥ TP%
 - **Race conditions**: ใช้ clientOrderId deterministic + state guard กัน double-place
+
+## DCA + BEP Stack Mode
+
+**Opt-in alternative** to the 1 BUY → 1 SELL model. Default off (`dcaEnabled: false`) → existing bots 100% unchanged.
+
+### Design (locked-in choices)
+
+- **Single Stack Mode** — 1 bot = 1 open DCA stack at a time (each S1 adds a layer, not a new trade)
+- **Per-bot configurable**: `dcaMaxLayers` (default **3**, range 1-100), reuses `capitalPerTrade` per layer
+- **BEP** = `totalSpent / totalQty` (weighted average), recomputed on every layer fill
+- **SL-UKC on stack BEP** (gated by `autoArmStopLossOnUKC`)
+- **CB panic-sell DISABLED** in DCA mode (matches "no cut loss" philosophy)
+- **Spot only** — no leverage, no liquidation risk
+- **Telegram**: full notifications on every layer BUY + target hit + max-layers hit
+
+### Quick start
+
+1. **Migrate** (one-time, idempotent):
+   ```bash
+   pm2 stop onepercentbot
+   node scripts/migrate-dca-fields.js
+   pm2 start onepercentbot
+   ```
+2. **Edit bot** → enable "📚 DCA + BEP Stack Mode" → set `dcaMaxLayers` (default 3, max 100)
+3. **Run** as usual — first S1 opens stack, subsequent S1s add layers until `dcaMaxLayers`
+4. **Backtest**: tick "DCA mode" in backtest form → runs `runDcaBacktest` (single-stack simulator)
+
+### Backtest stats (DCA mode)
+
+- `stacksCount` = total stacks opened (NOT layers)
+- `dcaTargetHitCount` = TP fills closing whole stack
+- `dcaStackStopLossCount` = SL-UKC force-closes
+- `dcaMaxLayersHitCount` = signals skipped due to layer cap
+- `avgLayersPerStack` = average fill efficiency
+
+### Where to look
+
+- **Bot card** → 📚 DCA/N badge next to bot name
+- **Bot detail** → DCA Stack card (BEP, total qty, per-layer table, ❄️ Frozen pill if SELL partial-fill)
+- **History** → 📚 L{n} badge on Symbol column + BEP hint under Price
+- **PnL modal** → DCA stack rows with layer count + BEP as Entry
+- **API**: `GET /api/trades/:id/stack` — resolves layer OR stack _id, returns full stack view
+- **Telegram**: `dcaLayerAdded` (every BUY), `dcaTargetHit` (close), `dcaMaxLayersHit` (warning)
+
+### Files involved
+
+| Layer | Files |
+|---|---|
+| Schema | `src/db/models/Bot.js`, `src/db/models/Trade.js`, `scripts/migrate-dca-fields.js` |
+| Trader core | `src/core/trader.js` (helpers: `_isDcaMode`, `_computeStackBEP`, `_computeDcaTp`, `_cancelAndReplaceSell`) |
+| Force-close | `src/core/forceClose.js` |
+| Backtester | `src/core/backtester.js` (`runDcaBacktest` + DCA pass in `runMultiBacktest`) |
+| API | `src/api/routes/bot.routes.js`, `src/api/routes/backtest.routes.js`, `src/api/routes/trade.routes.js` (`/:id/stack`) |
+| Telegram | `src/services/telegramNotifier.js` (3 new events) |
+| UI | `public/js/pages/bot-edit.js`, `public/js/pages/bots.js`, `public/js/pages/bot-detail.js`, `public/js/pages/history.js`, `public/js/pages/pnl.js`, `public/js/partials/stackCard.js`, `public/js/utils/sellReasons.js`, `public/css/app.css` |
+
+### Race conditions handled
+
+1. 2 BUYs in flight → atomic claim via `dcaLayerIndex` + state='selling'
+2. BUY in flight when SELL fills → recheck state in `_handleDcaBuyFilled`
+3. Cancel SELL while new BUY placing → `dcaAdding: true` transient lock
+4. Bot restart mid-stack → `_reconcileDcaStackOnStart` verifies with Binance
+5. SELL partial-fill in DCA → FREEZE policy (no cancel, no MARKET replace)
+6. Duplicate WS events → all transitions guarded by atomic-claim with `modifiedCount === 1`
+
+### Backward compatibility
+
+- All new fields have safe defaults (`dcaEnabled: false`, `isDcaStack: false`, `dcaLayerCount: 0`)
+- Default `dcaEnabled: false` keeps existing code 100% unchanged
+- Migration is idempotent (re-running shows 0 modified)
+- Existing CB / SL-UKC / partial-fill / force-close code paths work for non-DCA trades
 
 ## License
 

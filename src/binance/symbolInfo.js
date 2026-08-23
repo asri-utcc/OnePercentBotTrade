@@ -66,15 +66,20 @@ function getCached(symbol) {
 // ─── Precision helpers ─────────────────────────────────
 function getPrecision(stepSize) {
   // stepSize เช่น "0.00010000" → precision = 4 (จำนวนทศนิยมที่ significant)
+  // FIX-2026-07-31: ตัด trailing zeros ก่อนนับ ไม่งั้น "0.01000000" จะคืน 8 (ผิด)
+  //   ZILUSDT tickSize="0.00000100" → "0.000001" → precision=6 (ตรงกับ Binance UI)
   if (!stepSize) return 0;
-  const s = stepSize.toString();
+  let s = stepSize.toString();
   if (s.includes('e-')) {
     const m = s.match(/\d+(?:\.(\d+))?e-(\d+)/);
     if (m) return parseInt(m[2], 10);
   }
   const dot = s.indexOf('.');
   if (dot === -1) return 0;
-  return s.length - dot - 1;
+  // ตัด trailing zeros หลังจุดทศนิยม
+  let frac = s.slice(dot + 1);
+  frac = frac.replace(/0+$/, '');
+  return frac.length;
 }
 
 // floor qty ตาม stepSize
@@ -97,13 +102,26 @@ function floorPrice(price, tickSize) {
   return new Decimal(price).div(tickSize).floor().mul(tickSize);
 }
 
-// ตรวจว่า order ผ่าน LOT_SIZE / PRICE_FILTER / NOTIONAL หรือไม่
+// ตรวจว่า order ผ่าน LOT_SIZE / PRICE_FILTER / NOTIONAL / DELIST หรือไม่
+// FIX-2026-08-06: เพิ่ม delist gate — ถ้า symbol อยู่ใน /sapi/v1/spot/delist-schedule
+//   และ delistTime - now <= 7 วัน → reject (defense-in-depth นอกเหนือจาก trader pre-flight)
 function validateOrder({ symbol, price, qty }) {
   const info = getCached(symbol);
   if (!info) {
     return { ok: false, reason: 'symbol info not loaded' };
   }
   const errors = [];
+
+  // FIX-2026-08-06: delist gate (load lazily to avoid circular require at module load)
+  try {
+    const delistMonitor = require('../services/binanceDelistMonitor');
+    if (delistMonitor.isDelisted(symbol)) {
+      errors.push(`symbol already delisted on Binance`);
+    } else if (delistMonitor.willDelistWithin(symbol, 7)) {
+      const dt = delistMonitor.getDelistTime(symbol);
+      errors.push(`symbol scheduled for delisting at ${new Date(dt).toISOString()} (within 7 days)`);
+    }
+  } catch (_) { /* delistMonitor not yet started — fail-open */ }
 
   if (info.lotSize) {
     if (new Decimal(qty).lessThan(info.lotSize.minQty)) {
@@ -165,6 +183,9 @@ function clearCache() {
 }
 
 // ดึงรายชื่อ symbols ทั้งหมดที่ TRADING (cache 5 นาที)
+// FIX-2026-07-31: ส่ง object { symbol, pricePrecision, tickSize } — ให้ client ใช้ tickSize
+//   เป็น authoritative precision (ตรงกับ Binance UI) ไม่ต้องเดาจาก price magnitude
+//   shape ใหม่: { symbols: ['BTCUSDT', ...], symbolInfo: { 'BTCUSDT': { tickSize: '0.01', pricePrecision: 2 }, ... } }
 let symbolsCache = { data: null, ts: 0 };
 async function listSymbols() {
   const now = Date.now();
@@ -172,12 +193,58 @@ async function listSymbols() {
     return symbolsCache.data;
   }
   const info = await binanceRest.getExchangeInfo({});
-  const symbols = (info.symbols || [])
-    .filter((s) => s.isSpotTradingAllowed && s.status === 'TRADING' && s.quoteAsset === 'USDT')
-    .map((s) => s.symbol)
-    .sort();
-  symbolsCache = { data: symbols, ts: now };
-  return symbols;
+  const trading = (info.symbols || []).filter(
+    (s) => s.isSpotTradingAllowed && s.status === 'TRADING' && s.quoteAsset === 'USDT'
+  );
+  const symbolInfoMap = {};
+  for (const s of trading) {
+    const pf = (s.filters || []).find((f) => f.filterType === 'PRICE_FILTER');
+    if (!pf || !pf.tickSize) continue;
+    const tickSizeStr = String(pf.tickSize);
+    symbolInfoMap[s.symbol] = {
+      tickSize: tickSizeStr,
+      pricePrecision: getPrecision(tickSizeStr),
+    };
+  }
+  const symbols = trading.map((s) => s.symbol).sort();
+  symbolsCache = { data: { symbols, symbolInfo: symbolInfoMap }, ts: now };
+  return symbolsCache.data;
+}
+
+// FIX-2026-07-31: format price ตาม tickSize (authoritative per-symbol)
+//   - ใช้ใน telegramNotifier.js เพื่อแสดงราคาในแชทให้ตรงกับ Binance UI
+//   - ก่อนหน้านี้ heuristic: >=1 → 6 dp, <1 → 10 dp (over-precise สำหรับ ZILUSDT)
+//   - ZILUSDT จริงควรแสดง 6 dp (เช่น "0.014500") ตาม PRICE_FILTER.tickSize
+//   - ถ้า symbol ไม่อยู่ใน cache → fallback heuristic แบบเดิม (เพื่อกันพัง)
+const tickSizeCache = new Map(); // symbol -> { tickSize: Decimal, pricePrecision: number }
+function getTickSize(symbol) {
+  if (!symbol) return null;
+  const sym = String(symbol).toUpperCase();
+  if (tickSizeCache.has(sym)) return tickSizeCache.get(sym);
+  // load from listSymbols cache (ไม่ await — ถ้ายังไม่ load ใช้ fallback)
+  const data = symbolsCache.data;
+  if (data && data.symbolInfo && data.symbolInfo[sym]) {
+    const info = data.symbolInfo[sym];
+    const Decimal = require('decimal.js');
+    const ts = new Decimal(info.tickSize);
+    const entry = { tickSize: ts, pricePrecision: info.pricePrecision };
+    tickSizeCache.set(sym, entry);
+    return entry;
+  }
+  return null;
+}
+
+function formatPrice(price, symbol) {
+  if (price == null) return String(price);
+  const n = Number(price);
+  if (!Number.isFinite(n)) return String(price);
+  const ts = getTickSize(symbol);
+  if (ts && ts.pricePrecision != null) {
+    return n.toFixed(ts.pricePrecision);
+  }
+  // fallback heuristic (เดิม) — กันพังกรณี cache ยังไม่พร้อม
+  if (Math.abs(n) >= 1) return n.toFixed(6);
+  return n.toFixed(10);
 }
 
 module.exports = {
@@ -191,4 +258,6 @@ module.exports = {
   getPrecision,
   clearCache,
   listSymbols,
+  formatPrice, // FIX-2026-07-31: format price ตาม tickSize ใช้ใน telegramNotifier
+  getTickSize, // expose for testing
 };

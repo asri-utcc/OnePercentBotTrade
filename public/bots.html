@@ -70,6 +70,33 @@
       </div>
     </div>
 
+    <!-- FIX-2026-08-05: BNB oil gauge (horizontal fuel-bar — glanceable % ของ target USDT) -->
+<div class="lux-card mb-3" id="bnb-gauge-card">
+  <div class="lux-body py-2">
+    <div class="d-flex justify-content-between align-items-center mb-1" style="font-size:0.85rem;">
+      <span>
+        <span style="color:var(--gold-1);">💎</span>
+        <strong style="color:var(--text-2);margin-right:0.3rem;">BNB fuel gauge:</strong>
+        <span id="bnb-gauge-status" class="text-muted">กำลังโหลด…</span>
+      </span>
+      <span class="text-mono text-muted" id="bnb-gauge-value">— / — USDT</span>
+    </div>
+    <div class="bnb-gauge-track">
+      <div class="bnb-gauge-fill" id="bnb-gauge-fill" style="width:0%;"></div>
+    </div>
+  </div>
+</div>
+
+<!-- FIX-2026-08-05: BNB low-balance warning banner (แสดงเมื่อ BNB value < $1 USDT)
+         - ป้องกัน BNB-empty fee-deduct incident ซ้ำ (BNB หมด → Binance หัก fee 0.1% จาก base asset)
+         - poll ทุก 60s จาก /api/account/bnb-status (threshold=$1)
+         - hidden by default — JS จะ unhide เมื่อ isLow=true -->
+    <div id="bnb-low-banner" class="alert alert-warning mb-3 align-items-center" hidden style="display:none;">
+      <strong>💎 BNB balance ต่ำ:</strong>
+      <span id="bnb-low-detail" class="ms-1">กำลังโหลด…</span>
+      <small class="text-muted ms-2">(Binance จะหัก 0.1% fee จาก base asset เมื่อ BNB หมด — เติม BNB ด่วน)</small>
+    </div>
+
     <!-- Summary stats -->
     <div class="summary-row">
       <div class="stat-tile is-info">
@@ -78,11 +105,27 @@
         <div class="value" id="stat-active">0</div>
         <div class="sub">ทำงานอยู่</div>
       </div>
+      <div class="stat-tile is-emerald" id="tile-recommended-capital" title="ทุนแนะนำรวม = ผลรวม (ทุน/ไม้ × จำนวนไม้สูงสุด) ของทุกบอท — เป็นเงินทุนขั้นต่ำที่ควรมีในบัญชี Binance เพื่อรันบอททั้งหมดพร้อมกัน">
+        <span class="glyph">💰</span>
+        <div class="label">ทุนแนะนำรวม</div>
+        <div class="value" id="stat-recommended-capital">0.00</div>
+        <div class="sub" id="stat-recommended-capital-sub">จาก 0 บอท</div>
+      </div>
       <div class="stat-tile is-violet">
         <span class="glyph">📈</span>
         <div class="label">Total Trades</div>
         <div class="value" id="stat-trades">0</div>
         <div class="sub">ทั้งหมด</div>
+      </div>
+      <div class="stat-tile is-gold is-clickable"
+           id="tile-open-positions"
+           data-bs-toggle="modal"
+           data-bs-target="#openPositionsModal"
+           title="คลิกเพื่อดู positions ที่เปิดอยู่ทั้งหมด">
+        <span class="glyph">📂</span>
+        <div class="label">Open Positions</div>
+        <div class="value" id="stat-open-positions">0</div>
+        <div class="sub" id="stat-open-positions-sub">ไม้ที่กำลังถืออยู่ · คลิกเพื่อดู</div>
       </div>
       <div class="stat-tile">
         <span class="glyph">🎯</span>
@@ -124,119 +167,433 @@
 
     <!-- Bots list -->
     <div class="page-title">
-      <h3>🤖 บอททั้งหมด</h3>
-      <button class="btn btn-primary" id="new-bot-btn" data-bs-toggle="modal" data-bs-target="#newBotModal">+ New Bot</button>
+      <h3>
+        🤖 บอททั้งหมด
+        <span class="bot-filter-counter" id="bot-filter-counter" title="จำนวนบอทที่แสดง / ทั้งหมด">0</span>
+      </h3>
+      <div class="d-flex align-items-center gap-2 flex-wrap">
+        <!-- FIX-2026-07-31: สลับมุมมอง Compact / Expand -->
+        <div class="view-mode-toggle btn-group btn-group-sm" role="group" aria-label="มุมมองบอท">
+          <button type="button" class="btn btn-outline-gold is-active" data-mode="compact" id="vm-compact" title="ย่อ — ซ่อนกราฟและ tiles แสดงเฉพาะสถิติและปุ่ม">📋 Compact</button>
+          <button type="button" class="btn btn-outline-gold" data-mode="expand" id="vm-expand" title="ขยาย — แสดงทุกอย่าง (กราฟ + tiles + สถิติ)">📊 Expand</button>
+        </div>
+        <button class="btn btn-primary" id="new-bot-btn" data-bs-toggle="modal" data-bs-target="#newBotModal">+ New Bot</button>
+        <!-- FIX-2026-08-01: Master Config — bulk-edit หลายบอทพร้อมกัน -->
+        <button class="btn btn-outline-primary" id="btn-master-config" title="ตั้งค่าหลายบอทพร้อมกัน (clobber mode)">⚙️ Master Config</button>
+      </div>
     </div>
+
+    <!-- FIX-2026-08-05: Search & filter row
+         - search input: ค้นหา name / symbol / TF / status (case-insensitive)
+         - filter chips: multi-select (Running / Stopped / Has Position / Error / Warning / DCA)
+         - counter: "3/10" เมื่อกำลัง filter, "10" เมื่อไม่ filter
+         - ค้นหา + chips persist ใน localStorage (BOT_FILTER_KEY) — refresh แล้ว state คงอยู่ -->
+    <div class="bot-search-bar">
+      <div class="bot-search-wrap">
+        <span class="bot-search-icon" aria-hidden="true">🔍</span>
+        <input type="text" id="bot-search-input" class="bot-search-input"
+               placeholder="ค้นหา ชื่อบอท / symbol / TF / สถานะ  (เช่น BTC, 5m, holding)"
+               autocomplete="off" spellcheck="false" />
+        <button type="button" class="bot-search-clear" id="bot-search-clear" hidden aria-label="ล้างการค้นหา" title="ล้าง (Esc)">×</button>
+      </div>
+      <div class="bot-filter-chips" id="bot-filter-chips" role="group" aria-label="ตัวกรองบอท">
+        <button type="button" class="bot-chip" data-filter="running" title="บอทที่กำลังทำงานอยู่ (enabled)">▶ Running</button>
+        <button type="button" class="bot-chip" data-filter="stopped" title="บอทที่หยุดอยู่ (disabled)">⏸ Stopped</button>
+        <button type="button" class="bot-chip" data-filter="has-position" title="บอทที่กำลังถือ position อยู่">📂 Has Position</button>
+        <button type="button" class="bot-chip" data-filter="has-error" title="บอทที่มี lastError">⚠️ Error</button>
+        <button type="button" class="bot-chip" data-filter="has-warning" title="บอทที่มี warning (เช่น SELL partial-fill latched 1h)">⏰ Warning</button>
+        <button type="button" class="bot-chip" data-filter="dca" title="บอท DCA + BEP stack mode">📚 DCA</button>
+        <!-- FIX-2026-08-08: Cooldown filter (CBv2/CBv3/DCA-freeze/SELL-partial) — Feature #4 -->
+        <button type="button" class="bot-chip" data-filter="cooldown" title="บอทที่มี cooldown active (CBv2/CBv3/DCA-freeze/SELL-partial)">⏸ Cooldown</button>
+        <button type="button" class="bot-chip" data-filter="cbv2-cooldown" title="บอทที่ cooldown CBv2">💎 CBv2</button>
+        <button type="button" class="bot-chip" data-filter="cbv3-cooldown" title="บอทที่ cooldown CBv3 (v3 active)">💎 CBv3</button>
+        <!-- FIX-2026-08-22: deleted chip — แสดงบอทที่ถูก soft-delete (autoDeleteBot หรือ user delete)
+             default = "not-deleted" (active) — ซ่อน deleted อัตโนมัติ จนกว่า user จะกดเปิด chip นี้ -->
+        <button type="button" class="bot-chip" data-filter="not-deleted" title="ซ่อนบอทที่ถูก soft-delete (default)">🚫 Hide Deleted</button>
+        <button type="button" class="bot-chip" data-filter="deleted" title="แสดงเฉพาะบอทที่ถูก soft-delete — กด Restore เพื่อนำกลับมา (ภายใน 30 วัน)">🗑 Deleted</button>
+        <button type="button" class="bot-chip is-clear" id="bot-filter-clear" hidden title="ล้างการค้นหา + filter chips ทั้งหมด">✕ ล้างทั้งหมด</button>
+      </div>
+    </div>
+
+    <!-- FIX-2026-08-22: banner — แจ้งเตือนเมื่อมีบอทถูก soft-delete แต่ยังมี position เปิดอยู่
+         (bot จะไม่ทำงานจนกว่าจะ restore — user อาจงงว่าทำไม position ค้าง) -->
+    <div id="deleted-with-positions-banner" hidden
+         style="background:rgba(255,107,107,0.08);border:1px solid rgba(255,107,107,0.35);border-radius:8px;padding:0.7rem 1rem;margin:0.5rem 0 1rem;display:flex;align-items:center;gap:0.75rem;">
+      <span style="font-size:1.4rem;">🗑</span>
+      <div style="flex:1;">
+        <div style="font-weight:600;color:#ff6b6b;">มีบอท <span id="dwp-count">0</span> ตัวที่ถูก soft-delete แต่ยังมี position เปิดอยู่</div>
+        <div style="font-size:0.85rem;color:#94a3b8;">บอทเหล่านี้จะไม่ทำงานจนกว่าจะ Restore — กดปุ่ม ♻️ Restore บนการ์ด หรือเปิด filter "🗑 Deleted" เพื่อดู</div>
+      </div>
+      <button type="button" class="btn-lux btn-bull btn-sm" id="dwp-restore-all-btn" title="Restore ทุกบอทที่ถูกลบ (ภายใน 30 วัน)">♻️ Restore All</button>
+      <button type="button" class="btn-close-x" id="dwp-dismiss-btn" title="ซ่อน banner (จะปรากฏอีกเมื่อ reload)">✕</button>
+    </div>
+
     <div id="bots-list"></div>
   </div>
 
   <!-- New Bot Modal -->
   <div class="modal fade" id="newBotModal" tabindex="-1">
-    <div class="modal-dialog modal-dialog-centered modal-dialog-scrollable">
+    <div class="modal-dialog modal-lg modal-dialog-centered modal-dialog-scrollable">
       <div class="modal-content lux-modal">
         <div class="modal-header lux-modal-header is-gold">
           <div class="lux-modal-title-wrap">
             <span class="lux-modal-icon">✨</span>
             <div>
               <h5 class="modal-title mb-0">สร้างบอทใหม่</h5>
-              <div class="lux-modal-sub">ตั้งค่าบอทเทรดใหม่ — บอทจะหยุดอยู่ จนกว่าจะกดเริ่ม</div>
+              <div class="lux-modal-sub">ตั้งค่าตามลำดับจากพื้นฐาน → ซื้อ → ขาย → ระบบป้องกัน</div>
             </div>
           </div>
           <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
         </div>
         <div class="modal-body">
-          <div class="lux-form-section">
-            <div class="lux-form-label">ตั้งชื่อบอท</div>
-            <input type="text" class="form-control" id="nb-name" placeholder="เช่น SOL scalp · 1m" />
-          </div>
-          <div class="row g-2 lux-form-section">
-            <div class="col-6">
-              <div class="lux-form-label">คู่เทรด</div>
-              <select class="form-select" id="nb-symbol"></select>
-            </div>
-            <div class="col-6">
-              <div class="lux-form-label">Timeframe</div>
-              <select class="form-select" id="nb-timeframe">
-                <option value="1m">1m</option><option value="3m">3m</option>
-                <option value="5m" selected>5m</option><option value="15m">15m</option>
-                <option value="30m">30m</option><option value="1h">1h</option>
-                <option value="2h">2h</option><option value="4h">4h</option><option value="1d">1d</option>
-              </select>
-            </div>
-          </div>
-          <div class="lux-divider"><span>ทุน & ความเสี่ยง</span></div>
-          <div class="row g-2 lux-form-section">
-            <div class="col-6">
-              <div class="lux-form-label">ทุน/ไม้ (USDT)</div>
-              <input type="number" class="form-control" id="nb-capital" value="10" step="0.01" min="1" />
-            </div>
-            <div class="col-6">
-              <div class="lux-form-label">จำนวนไม้</div>
-              <input type="number" class="form-control" id="nb-maxtrades" value="10" step="1" min="1" max="100" />
-            </div>
-          </div>
-          <div class="row g-2 lux-form-section">
-            <div class="col-4">
-              <div class="lux-form-label d-flex justify-content-between align-items-center">
-                <span>TP %</span>
-                <button type="button" class="btn btn-sm btn-outline-warning" id="nb-tp-recommend" title="คำนวณ TP% จาก Min %KC(500 bars) + trend(upper-TF)">
-                  ✨ Get
-                </button>
+          <div class="bot-settings-form">
+          <details class="lux-details" id="nb-group-basic" data-settings-group="basic" open>
+            <summary class="lux-details-summary">
+              <span class="bot-settings-group-icon">🪪</span>
+              <span class="bot-settings-group-title">ข้อมูลบอทและเงินทุน</span>
+              <span class="bot-settings-group-hint">ชื่อ · คู่เทรด · Timeframe · ทุน</span>
+            </summary>
+            <div class="lux-details-body">
+              <div class="bot-settings-grid">
+                <div class="bot-settings-field is-full">
+                  <label class="lux-form-label" for="nb-name">ชื่อบอท</label>
+                  <input type="text" class="form-control" id="nb-name" placeholder="เช่น BTC(bAdd) — ระบบเติมจากคู่เทรดให้อัตโนมัติ" />
+                </div>
+                <div class="bot-settings-field">
+                  <label class="lux-form-label" for="nb-symbol">คู่เทรด</label>
+                  <select class="form-select" id="nb-symbol"></select>
+                </div>
+                <div class="bot-settings-field">
+                  <label class="lux-form-label" for="nb-timeframe">กรอบเวลา (Timeframe)</label>
+                  <select class="form-select" id="nb-timeframe">
+                    <option value="1m">1m</option><option value="3m" selected>3m</option>
+                    <option value="5m">5m</option><option value="15m">15m</option>
+                    <option value="30m">30m</option><option value="1h">1h</option>
+                    <option value="2h">2h</option><option value="4h">4h</option><option value="1d">1d</option>
+                  </select>
+                </div>
+                <div class="bot-settings-field">
+                  <label class="lux-form-label" for="nb-capital">ทุนต่อไม้ (USDT)</label>
+                  <input type="number" class="form-control" id="nb-capital" value="9" step="0.01" min="1" />
+                </div>
+                <div class="bot-settings-field">
+                  <label class="lux-form-label" for="nb-maxtrades">จำนวนไม้สูงสุด</label>
+                  <input type="number" class="form-control" id="nb-maxtrades" value="1" step="1" min="1" max="100" />
+                </div>
+                <div class="bot-settings-option is-full">
+                  <label class="form-check form-switch">
+                    <input class="form-check-input" type="checkbox" id="nb-auto-enable" checked />
+                    <span class="form-check-label">▶️ <strong>เปิดบอททันทีหลังสร้าง</strong></span>
+                  </label>
+                  <small class="text-muted d-block mt-1">ปิดตัวเลือกนี้หากต้องการสร้างบอทไว้ก่อน แล้วค่อยกด Start ภายหลัง</small>
+                </div>
               </div>
-              <input type="number" class="form-control" id="nb-tp" value="0.1" step="0.01" min="0.001" />
             </div>
-            <div class="col-4">
-              <div class="lux-form-label">Retry (นาที)</div>
-              <input type="number" class="form-control" id="nb-retry" value="1" step="0.1" min="0.1" max="60" />
-              <small class="text-muted">ทศนิยมได้ เช่น 0.5 = 30 วินาที</small>
+          </details>
+
+          <details class="lux-details" id="nb-group-entry" data-settings-group="entry">
+            <summary class="lux-details-summary">
+              <span class="bot-settings-group-icon">📥</span>
+              <span class="bot-settings-group-title">เงื่อนไขเข้าและการวาง BUY</span>
+              <span class="bot-settings-group-hint">S1 · XS1 · Retry · KC · Spread</span>
+            </summary>
+            <div class="lux-details-body">
+              <div class="bot-settings-grid">
+                <div class="bot-settings-field">
+                  <label class="lux-form-label" for="nb-retry">เวลารอก่อนลองซื้อใหม่ (นาที)</label>
+                  <input type="number" class="form-control" id="nb-retry" value="0.2" step="0.1" min="0.1" max="60" />
+                  <small class="text-muted">ทศนิยมได้ เช่น 0.5 = 30 วินาที</small>
+                </div>
+                <div class="bot-settings-field">
+                  <label class="lux-form-label" for="nb-retry-max">จำนวนครั้งที่ลองใหม่สูงสุด</label>
+                  <input type="number" class="form-control" id="nb-retry-max" value="8" step="1" min="0" max="10" />
+                  <small class="text-muted">0 = วางครั้งเดียว ไม่ retry</small>
+                </div>
+                <div class="bot-settings-field">
+                  <label class="lux-form-label" for="nb-kc-mult">ความกว้าง KC (Multiplier)</label>
+                  <input type="number" class="form-control" id="nb-kc-mult" value="1.2" step="0.1" min="0.5" max="5" title="ความกว้างของ Keltner Channel (default 1.2)" />
+                </div>
+                <div class="bot-settings-field">
+                  <label class="lux-form-label" for="nb-min-spread">ระยะห่างราคา BUY ขั้นต่ำ (ticks)</label>
+                  <input type="number" class="form-control" id="nb-min-spread" value="1" step="1" min="0" max="10" title="0=ไม่สนใจ, 1=ใช้ bid (low-cap), 2=ต้อง margin 1 tick" />
+                  <small class="text-muted">0 = ไม่กรอง · 1 = ใช้ bid · 2 = ต้องมี margin 1 tick</small>
+                </div>
+                <div class="bot-settings-option is-full">
+                  <label class="form-check form-switch">
+                    <input class="form-check-input" type="checkbox" id="nb-s1-only-down" checked />
+                    <span class="form-check-label">📉 <strong>S1 เฉพาะ bg 2→3 (ขาลง)</strong> — ข้าม bg 2→1 เพื่อลดการซื้อราคาสูง</span>
+                  </label>
+                  <small class="text-muted d-block mt-1">เปิด: รับเฉพาะสัญญาณ bg_prev=2 และ bg=3 · ปิด: รับทั้ง bg=1 และ bg=3</small>
+                </div>
+                <div class="bot-settings-option is-full">
+                  <label class="form-check form-switch">
+                    <input class="form-check-input" type="checkbox" id="nb-xs1-enabled" checked />
+                    <span class="form-check-label">🚫 <strong>XS1 anti-dump gate</strong> — ข้าม S1 เมื่อพบ candle-wide dump</span>
+                  </label>
+                  <small class="text-muted d-block mt-1">ช่วยป้องกันการซื้อระหว่างราคากำลังไหลลงเร็ว (เปิดเป็นค่าเริ่มต้น)</small>
+                </div>
+              </div>
             </div>
-            <div class="col-4">
-              <div class="lux-form-label">Retry max</div>
-              <input type="number" class="form-control" id="nb-retry-max" value="1" step="1" min="0" max="10" />
+          </details>
+
+          <details class="lux-details" id="nb-group-tp" data-settings-group="tp" open>
+            <summary class="lux-details-summary">
+              <span class="bot-settings-group-icon">🎯</span>
+              <span class="bot-settings-group-title">Take Profit และการขาย</span>
+              <span class="bot-settings-group-hint">TP% สุทธิ · Auto-update · Trend ×N</span>
+            </summary>
+            <div class="lux-details-body">
+              <div class="bot-settings-grid">
+                <div class="bot-settings-field">
+                  <label class="lux-form-label d-flex justify-content-between align-items-center" for="nb-tp">
+                    <span>กำไรเป้าหมายสุทธิ (TP%)</span>
+                    <button type="button" class="btn btn-sm btn-outline-warning" id="nb-tp-recommend" title="คำนวณ TP% จาก Min %KC + trend ของ upper-TF">✨ Get</button>
+                  </label>
+                  <input type="number" class="form-control" id="nb-tp" value="0.1" step="0.01" min="0.001" />
+                  <small class="text-muted">ระบบบวก fee buffer ให้ตอนคำนวณราคาขาย</small>
+                </div>
+                <div class="bot-settings-field">
+                  <label class="lux-form-label" for="nb-suggest-tp-window">ช่วงข้อมูลแนะนำ TP (แท่ง)</label>
+                  <input type="number" class="form-control" id="nb-suggest-tp-window" value="30" step="10" min="30" max="1000" />
+                  <small class="text-muted">จำนวนแท่งที่ใช้หา Min %KC</small>
+                </div>
+                <div class="bot-settings-option is-full">
+                  <label class="form-check form-switch">
+                    <input class="form-check-input" type="checkbox" id="nb-auto-update-tp" checked />
+                    <span class="form-check-label">⏰ <strong>อัปเดต TP% อัตโนมัติทุกต้นชั่วโมง</strong></span>
+                  </label>
+                  <small class="text-muted d-block mt-1">คำนวณใหม่จาก Min %KC และ EMA20 ของ upper-TF แล้วบันทึกทุก HH:00</small>
+                </div>
+                <div class="bot-settings-option is-full">
+                  <label class="form-check form-switch mb-0">
+                    <input class="form-check-input" type="checkbox" id="nb-tp-trend-enabled" checked />
+                    <span class="form-check-label">📈 <strong>ขยาย TP ตามแนวโน้ม (Trend ×N)</strong></span>
+                  </label>
+                  <div class="bot-settings-dependent">
+                    <label class="form-label" for="nb-tp-trend-multiplier">ตัวคูณ TP เมื่อ upper-TF อยู่เหนือ EMA20</label>
+                    <input type="number" class="form-control" id="nb-tp-trend-multiplier" step="0.1" min="1" max="10" value="2" />
+                    <small class="text-muted">1 = ไม่คูณ · 2 = สองเท่า · มีผลเฉพาะ position ใหม่</small>
+                  </div>
+                </div>
+                <div class="bot-settings-note is-full" id="nb-tp-hint">กด ✨ Get เพื่อคำนวณ TP% จาก Min %KC และ EMA20 trend ของคู่เทรด/Timeframe ที่เลือก ระบบจะคำนวณให้อัตโนมัติเมื่อเปิดหน้าต่างนี้</div>
+              </div>
             </div>
-            <div class="col-4">
-              <div class="lux-form-label">KC Mult</div>
-              <input type="number" class="form-control" id="nb-kc-mult" value="1.5" step="0.1" min="0.5" max="5" title="ความกว้างของ Keltner Channel (default 1.5)" />
+          </details>
+
+          <details class="lux-details" id="nb-group-automation" data-settings-group="automation">
+            <summary class="lux-details-summary">
+              <span class="bot-settings-group-icon">⚙️</span>
+              <span class="bot-settings-group-title">ระบบอัตโนมัติและขนาด Position</span>
+              <span class="bot-settings-group-hint">DPS · Auto-pause</span>
+            </summary>
+            <div class="lux-details-body">
+              <div class="bot-settings-grid">
+                <div class="bot-settings-option">
+                  <label class="form-check form-switch">
+                    <input class="form-check-input" type="checkbox" id="nb-dynamic-size-enabled" checked />
+                    <span class="form-check-label">📊 <strong>Dynamic Position Sizing (DPS)</strong></span>
+                  </label>
+                  <small class="text-muted d-block mt-1">ปรับทุนและจำนวนไม้ตามประวัติเทรด; ระบบจะข้าม DPS เมื่อใช้ DCA/Martingale</small>
+                </div>
+                <div class="bot-settings-option">
+                  <label class="form-check form-switch mb-0">
+                    <input class="form-check-input" type="checkbox" id="nb-auto-pause-enabled" checked />
+                    <span class="form-check-label">⏸️ <strong>หยุดบอทเมื่อ Min-%KC หรือ 24h Vol ต่ำ</strong></span>
+                  </label>
+                  <div class="bot-settings-dependent">
+                    <div class="row g-2">
+                      <div class="col-md-6">
+                        <label class="form-label" for="nb-auto-pause-min-kc">Min-%KC threshold (%)</label>
+                        <input type="number" class="form-control form-control-sm" id="nb-auto-pause-min-kc" value="2" step="0.1" min="0.1" max="50" />
+                        <small class="text-muted">pause เมื่อ Keltner Channel width ต่ำกว่า</small>
+                      </div>
+                      <div class="col-md-6">
+                        <label class="form-label" for="nb-auto-pause-min-24h-vol">Min 24h Vol (USDT)</label>
+                        <input type="number" class="form-control form-control-sm" id="nb-auto-pause-min-24h-vol" value="1000000" step="1000" min="0" />
+                        <small class="text-muted">pause เมื่อ 24h quote-volume ต่ำกว่า; resume ต้องผ่านทั้ง 2 เงื่อนไข</small>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
             </div>
-          </div>
-          <div class="lux-form-hint">0 = วางครั้งเดียว ไม่ retry · 1 = วางได้อีก 1 ครั้งถ้า bid ขยับ · บอทจะบวก fee buffer ให้อัตโนมัติ</div>
-          <div class="lux-form-hint" id="nb-tp-hint">กด ✨ Get เพื่อให้ระบบคำนวณ TP% จาก Min %KC(500 bars) + EMA20 trend(upper-TF) ของคู่เทรด/tf ที่เลือก</div>
-          <div class="lux-form-section">
-            <div class="form-check">
-              <input class="form-check-input" type="checkbox" id="nb-stop-loss-upper-kc" />
-              <label class="form-check-label" for="nb-stop-loss-upper-kc">
-                🛑 <strong>Stop Loss เมื่อราคาปิดทะลุ upper-KC</strong> (เฉพาะตอนขาดทุน)
-              </label>
-              <small class="text-muted-3 d-block mt-1">
-                ตรวจทุก <code>kline:closed</code>: ถ้า <code>candle.close &gt; upperKC</code> และ position ยังขาดทุน → cancel LIMIT_MAKER SELL ค้าง + MARKET SELL ทันที
-              </small>
+          </details>
+
+          <details class="lux-details" id="nb-group-risk" data-settings-group="risk">
+            <summary class="lux-details-summary">
+              <span class="bot-settings-group-icon">🛑</span>
+              <span class="bot-settings-group-title">Stop Loss และ Circuit Breaker</span>
+              <span class="bot-settings-group-hint">SL-UKC · Auto-arm · CB · Cooldown</span>
+            </summary>
+            <div class="lux-details-body">
+              <div class="bot-settings-grid">
+                <div class="bot-settings-option is-full">
+                  <label class="form-check form-switch">
+                    <input class="form-check-input" type="checkbox" id="nb-stop-loss-upper-kc" />
+                    <span class="form-check-label">🛑 <strong>Stop Loss เมื่อแท่งปิดเหนือ Upper-KC</strong></span>
+                  </label>
+                  <small class="text-muted d-block mt-1">เมื่อ position ขาดทุนและแท่งปิดเหนือ Upper-KC ระบบจะยกเลิก SELL เดิมแล้ว MARKET SELL</small>
+                </div>
+                <div class="bot-settings-option is-full">
+                  <label class="form-check form-switch mb-0">
+                    <input class="form-check-input" type="checkbox" id="nb-auto-arm-stop-loss-ukc" checked />
+                    <span class="form-check-label">🛡️ <strong>เปิดใช้ SL-UKC อัตโนมัติเมื่อขาดทุนนาน</strong></span>
+                  </label>
+                  <div class="bot-settings-dependent bot-settings-grid">
+                    <div>
+                      <label class="form-label" for="nb-auto-arm-loss-pct">ขาดทุนขั้นต่ำ (%)</label>
+                      <input type="number" class="form-control" id="nb-auto-arm-loss-pct" step="0.5" min="1" max="90" value="6.3" />
+                    </div>
+                    <div>
+                      <label class="form-label" for="nb-auto-arm-age-hours">อายุ Position ขั้นต่ำ (ชม.)</label>
+                      <input type="number" class="form-control" id="nb-auto-arm-age-hours" step="0.5" min="0.5" max="168" value="4" />
+                    </div>
+                  </div>
+                  <small class="text-muted d-block mt-2">เมื่อครบทั้ง loss% และอายุ ระบบจะ arm safety flag ให้ position นั้น</small>
+                </div>
+                <div class="bot-settings-option is-full">
+                  <label class="form-check form-switch">
+                    <input class="form-check-input" type="checkbox" id="nb-sl-ukc-trigger-on-profit" checked />
+                    <span class="form-check-label">💰 <strong>ให้ SL-UKC ปิด Position ที่กำไรด้วย</strong></span>
+                  </label>
+                  <small class="text-muted d-block mt-1">เปิด = ใช้เป็น exit at upper band ทั้งกำไรและขาดทุน · ปิด = trigger เฉพาะตอนขาดทุน</small>
+                </div>
+                <div class="bot-settings-option is-full">
+                  <label class="form-check form-switch">
+                    <input class="form-check-input" type="checkbox" id="nb-cb-enabled" />
+                    <span class="form-check-label">🚨 <strong>Circuit Breaker (CB)</strong> — Panic-sell เมื่อกราฟดิ่ง 3 แท่งติด</span>
+                  </label>
+                  <small class="text-muted d-block mt-1">ปิดทุก position ทันทีเมื่อแท่งแดงอยู่ใต้ Lower-KC ตาม pattern ต่อเนื่อง</small>
+                </div>
+
+                <!-- แสดงเฉพาะ version ที่ AppConfig เลือกผ่าน applyCbVersionToNewBot() -->
+                <div id="nb-cbv2-section" class="bot-settings-option is-full">
+                  <label class="form-check form-switch mb-0">
+                    <input class="form-check-input" type="checkbox" id="nb-cbv2-enabled" checked />
+                    <span class="form-check-label">💎 <strong>CBv2</strong> — Panic-sell 4 แท่ง + ล็อก S1 BUY</span>
+                  </label>
+                  <div class="bot-settings-dependent">
+                    <label for="nb-cbv2-lock-hours" class="form-label">ระยะเวลา Cooldown (ชั่วโมง)</label>
+                    <input type="number" class="form-control form-control-sm" id="nb-cbv2-lock-hours" min="0.5" max="168" step="0.5" value="8" />
+                    <small class="text-muted">0.5–168 ชม. · บอทยัง enable และ Auto-pause/resume ยังทำงานแยก</small>
+                  </div>
+                </div>
+                <div id="nb-cbv3-section" class="bot-settings-option is-full">
+                  <label class="form-check form-switch mb-0">
+                    <input class="form-check-input" type="checkbox" id="nb-cbv3-enabled" checked />
+                    <span class="form-check-label">💎 <strong>CBv3</strong> — CBv2 + ST3 บน Upper-TF</span>
+                  </label>
+                  <div class="bot-settings-dependent">
+                    <label for="nb-cbv3-lock-hours" class="form-label">ระยะเวลา Cooldown (ชั่วโมง)</label>
+                    <input type="number" class="form-control form-control-sm" id="nb-cbv3-lock-hours" min="0.5" max="168" step="0.5" value="8" />
+                    <small class="text-muted">0.5–168 ชม. · Active version: <span id="nb-cbv-version-badge" class="lux-badge lux-badge-warn">v3</span></small>
+                  </div>
+                </div>
+                <!-- FIX-2026-08-10: CBv5 (Support Zone Circuit Breaker) — independent of cbVersion -->
+                <div id="nb-cbv5-section" class="bot-settings-option is-full">
+                  <label class="form-check form-switch mb-0">
+                    <input class="form-check-input" type="checkbox" id="nb-cbv5-enabled" checked />
+                    <span class="form-check-label">💎 <strong>CBv5</strong> — Support Zone + Deepest Low + Volume</span>
+                  </label>
+                  <div class="bot-settings-dependent">
+                    <label for="nb-cbv5-lock-hours" class="form-label">ระยะเวลา Cooldown (ชั่วโมง)</label>
+                    <input type="number" class="form-control form-control-sm" id="nb-cbv5-lock-hours" min="0.5" max="168" step="0.5" value="4" />
+                    <small class="text-muted">0.5–168 ชม. · ทำงานขนานกับ CBv2/CBv3 (อิสระจาก cbVersion) — ยิงเมื่อหลุด Lower-KC + ทลาย deepest pivot low + bearish + volume spike</small>
+                    <button type="button" class="btn btn-sm btn-link ps-0 mt-1" id="nb-cbv5-advanced-toggle">⚙️ ขั้นสูง (KC + Pivot + Volume)</button>
+                    <div id="nb-cbv5-advanced" style="display:none">
+                      <div class="row g-2 mt-1">
+                        <div class="col-6"><label class="form-label small">KC length</label><input type="number" class="form-control form-control-sm" id="nb-cbv5-kc-len" min="5" max="100" step="1" value="20" /></div>
+                        <div class="col-6"><label class="form-label small">KC multiplier</label><input type="number" class="form-control form-control-sm" id="nb-cbv5-kc-mult" min="0.5" max="5" step="0.1" value="1.2" /></div>
+                        <div class="col-6"><label class="form-label small">Pivot lookback (count)</label><input type="number" class="form-control form-control-sm" id="nb-cbv5-pivot-lookback" min="2" max="10" step="1" value="3" /></div>
+                        <div class="col-6"><label class="form-label small">Pivot left length</label><input type="number" class="form-control form-control-sm" id="nb-cbv5-pivot-left" min="2" max="50" step="1" value="5" /></div>
+                        <div class="col-6"><label class="form-label small">Pivot right length</label><input type="number" class="form-control form-control-sm" id="nb-cbv5-pivot-right" min="2" max="50" step="1" value="5" /></div>
+                        <div class="col-6"><label class="form-label small">Volume MA length</label><input type="number" class="form-control form-control-sm" id="nb-cbv5-vol-ma-len" min="5" max="100" step="1" value="20" /></div>
+                        <div class="col-6"><label class="form-label small">Volume multiplier</label><input type="number" class="form-control form-control-sm" id="nb-cbv5-vol-mult" min="1.0" max="10" step="0.1" value="1.5" /></div>
+                        <div class="col-6"><label class="form-label small">Debounce candles</label><input type="number" class="form-control form-control-sm" id="nb-cbv5-debounce" min="1" max="20" step="1" value="5" /></div>
+                        <div class="col-12 mt-2">
+                          <label class="form-check form-switch mb-0">
+                            <input class="form-check-input" type="checkbox" id="nb-cbv5-strict-break" checked />
+                            <span class="form-check-label small">ต้องเป็น bearish candle (close &lt; open)</span>
+                          </label>
+                          <label class="form-check form-switch mb-0 mt-1">
+                            <input class="form-check-input" type="checkbox" id="nb-cbv5-use-volume" checked />
+                            <span class="form-check-label small">ใช้ volume filter (volume &gt; MA × multiplier)</span>
+                          </label>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+                <div class="bot-settings-option is-full">
+                  <label class="form-check form-switch mb-0">
+                    <input class="form-check-input" type="checkbox" id="nb-cb-auto-unlock-enabled" />
+                    <span class="form-check-label">🔓 <strong>ปลด CB Cooldown อัตโนมัติ</strong></span>
+                  </label>
+                  <div class="bot-settings-dependent">
+                    <label for="nb-cb-auto-unlock-threshold" class="form-label">กำไรขั้นต่ำของสัญญาณ (%)</label>
+                    <input type="number" class="form-control form-control-sm" id="nb-cb-auto-unlock-threshold" min="0.5" max="5" step="0.1" value="1" />
+                    <small class="text-muted">ปลดเมื่อพบ profitable signals อย่างน้อย 3 ครั้ง (ไม่มี whipsaw guard)</small>
+                  </div>
+                </div>
+              </div>
             </div>
-            <div class="form-check mt-2">
-              <input class="form-check-input" type="checkbox" id="nb-auto-update-tp" />
-              <label class="form-check-label" for="nb-auto-update-tp">
-                ⏰ <strong>อัพเดท TP% อัตโนมัติทุกต้นชั่วโมง</strong>
-              </label>
-              <small class="text-muted-3 d-block mt-1">
-                ระบบจะ recompute TP% จาก Min %KC(500 bars) + EMA20 trend(upper-TF) แล้ว persist ทุก <code>HH:00:00</code> (top-of-hour)
-              </small>
+          </details>
+
+          <details class="lux-details" id="nb-group-safe-trade" data-settings-group="safe-trade">
+            <summary class="lux-details-summary">
+              <span class="bot-settings-group-icon">🛡️</span>
+              <span class="bot-settings-group-title">ตัวกรอง Safe Trade ก่อนซื้อ</span>
+              <span class="bot-settings-group-hint">แนวโน้มใหญ่ · Trendline · Bearish pattern</span>
+            </summary>
+            <div class="lux-details-body">
+              <div class="bot-settings-grid">
+                <div class="bot-settings-option is-full">
+                  <label class="form-check form-switch">
+                    <input class="form-check-input" type="checkbox" id="nb-safe-trade-enabled" />
+                    <span class="form-check-label">🛡️ <strong>Safe Trade #1 — แนวโน้ม Super Upper-TF</strong></span>
+                  </label>
+                  <small class="text-muted d-block mt-1">ผ่านเมื่อแท่งล่าสุดเป็นเขียวหรือราคาปิดเหนือ EMA20 · FAIL-OPEN เมื่อ Binance error</small>
+                </div>
+                <div class="bot-settings-option is-full">
+                  <label class="form-check form-switch">
+                    <input class="form-check-input" type="checkbox" id="nb-safe-trade-trendline-enabled" checked />
+                    <span class="form-check-label">📐 <strong>Safe Trade #2 — Trendline Support</strong></span>
+                  </label>
+                  <small class="text-muted d-block mt-1">ข้าม BUY เมื่อราคาต่ำกว่าเส้น LuxAlgo pivot-low บน upper-TF · ไม่แนะนำสำหรับ DCA</small>
+                </div>
+                <div class="bot-settings-option is-full">
+                  <label class="form-check form-switch">
+                    <input class="form-check-input" type="checkbox" id="nb-safe-trade-no-trade-enabled" checked />
+                    <span class="form-check-label">🚫 <strong>Safe Trade #3 — Bearish Engulfing / Shooting Star</strong></span>
+                  </label>
+                  <small class="text-muted d-block mt-1">ข้าม BUY เมื่อ upper-TF มี no-trade pattern แบบ real-time · ไม่แนะนำสำหรับ DCA · FAIL-OPEN เมื่อข้อมูลไม่พอ</small>
+                </div>
+              </div>
             </div>
-          </div>
-          <div class="alert alert-info mt-3 mb-0 lux-summary-tile" id="nb-total">
-            <div class="lbl">ทุนรวมที่ต้องเตรียม</div>
-            <div class="val" id="nb-total-val">0.00 <span class="cur">USDT</span></div>
-          </div>
-          <div class="lux-divider"><span>ยืนยัน</span></div>
-          <div class="lux-form-section">
-            <div class="lux-form-label">รหัสยืนยัน <span class="text-muted-3">(ตั้งใน .env: BOT_ACTION_PASSWORD)</span></div>
+          </details>
+
+          <div class="bot-settings-review">
+            <div class="alert alert-info mb-3 lux-summary-tile" id="nb-total">
+              <div class="lbl">ทุนรวมที่ต้องเตรียม</div>
+              <div class="val" id="nb-total-val">0.00 <span class="cur">USDT</span></div>
+            </div>
+            <label class="lux-form-label" for="nb-password">รหัสยืนยัน <span class="text-muted-3">(BOT_ACTION_PASSWORD)</span></label>
             <div class="lux-password-field">
               <input type="password" class="form-control" id="nb-password" autocomplete="off" placeholder="••••••" />
               <button class="lux-pw-toggle" type="button" data-target="nb-password" aria-label="แสดงรหัส">👁</button>
             </div>
-            <div class="lux-form-hint">ถ้า backend ไม่ได้ตั้งรหัส ให้เว้นว่างไว้</div>
+            <div class="lux-form-hint">หาก backend ไม่ได้ตั้งรหัส ให้เว้นว่างไว้</div>
+            <div class="text-danger small mt-2" id="nb-error"></div>
           </div>
-          <div class="text-danger small mt-2" id="nb-error"></div>
+          </div>
         </div>
         <div class="modal-footer lux-modal-footer">
+          <!-- FIX-2026-08-14: Import file-based (export only on bot-edit) -->
+          <div class="d-flex gap-2 flex-wrap align-items-center w-100 mb-2">
+            <button type="button" class="btn btn-sm btn-outline-info" id="nb-import-replace" title="โหลดไฟล์ทับฟอร์ม (symbol ไม่ถูกแก้)">📥 Import (Replace)</button>
+            <button type="button" class="btn btn-sm btn-outline-info" id="nb-import-merge" title="โหลดไฟล์แบบ merge · อัพเดทเฉพาะ field ที่อยู่ในไฟล์">📥 Import (Merge)</button>
+          </div>
+          <div id="nb-io-status" class="text-muted small w-100 mb-2"></div>
           <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">ยกเลิก</button>
           <button type="button" class="btn btn-primary" id="nb-create">
             <span class="btn-glyph">✨</span>
@@ -348,13 +705,71 @@
     </div>
   </div>
 
+  <!-- 2026-07-30: Open Positions Modal — รายละเอียดทุกไม้ที่เปิดอยู่ across all bots -->
+  <div class="modal fade" id="openPositionsModal" tabindex="-1">
+    <div class="modal-dialog modal-dialog-centered modal-dialog-scrollable modal-xl">
+      <div class="modal-content lux-modal">
+        <div class="modal-header lux-modal-header is-gold">
+          <div class="lux-modal-title-wrap">
+            <span class="lux-modal-icon">📂</span>
+            <div>
+              <h5 class="modal-title mb-0">Open Positions — ทุกบอท</h5>
+              <div class="lux-modal-sub" id="opm-sub">กำลังโหลด…</div>
+            </div>
+          </div>
+          <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+        </div>
+        <div class="modal-body">
+          <div class="opm-summary">
+            <div class="opm-tile">
+              <div class="k">Positions</div>
+              <div class="v mono" id="opm-count">0</div>
+              <div class="sub">ไม้ที่เปิดอยู่</div>
+            </div>
+            <div class="opm-tile">
+              <div class="k">Total Cost</div>
+              <div class="v mono" id="opm-cost">0.00 USDT</div>
+              <div class="sub thb-eq" id="opm-cost-thb"></div>
+            </div>
+            <div class="opm-tile">
+              <div class="k">Unrealized PnL</div>
+              <div class="v mono" id="opm-upnl">0.0000 USDT</div>
+              <div class="sub thb-eq" id="opm-upnl-thb"></div>
+            </div>
+            <div class="opm-tile">
+              <div class="k">ราคา ณ</div>
+              <div class="v mono" id="opm-asof">-</div>
+              <div class="sub text-muted-3">อัปเดตล่าสุด</div>
+            </div>
+          </div>
+          <div id="opm-list" class="positions-list opm-list">
+            <div class="empty-positions">กำลังโหลด…</div>
+          </div>
+          <div id="opm-mob" class="mob-card-list opm-mob" style="padding:0.5rem;display:none;"></div>
+        </div>
+        <div class="modal-footer lux-modal-footer">
+          <button type="button" class="btn btn-outline-info btn-sm" id="opm-refresh">🔄 Refresh</button>
+          <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">ปิด</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
   <script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
   <script src="/js/api.js"></script>
+  <script src="/js/priceFormat.js"></script>
   <script src="/js/ws-client.js"></script>
   <script>window.NAV_ACTIVE = 'bots';</script>
   <script src="/js/partials/nav.js"></script>
+  <script src="/js/partials/dailyTargetGauge.js"></script>
+  <script src="/js/partials/rateLimitGauge.js"></script>
   <script src="/js/luxConfirm.js"></script>
+  <script src="/js/partials/positionCard.js"></script>
+  <!-- FIX-2026-08-14: Import/Export bot settings (shared across 4 surfaces) -->
+  <script src="/js/botConfigIO.js"></script>
+  <!-- FIX-2026-08-01: Master Config modal — bulk-edit หลายบอท -->
+  <script src="/js/partials/masterConfigModal.js"></script>
   <script src="/js/pages/bots.js"></script>
 </body>
 </html>

@@ -31,13 +31,15 @@ const logger = require('../utils/logger');
 
 const SUGGEST_WINDOW_DEFAULT = 500; // FIX-2026-07-25: per-bot override ผ่าน bot.suggestTpWindow (range 30..1000)
 
-// FIX-2026-07-28: auto-floor — เมื่อ NET TP% (ก่อน format) < MIN → override เป็น OVERRIDE
+// FIX-2026-08-02: TP floor bumped 0.111 → 0.281 (per user request)
+//   - ถ้า NET TP% (ก่อน format) < 0.281 → override เป็น 0.281% (เดิม 0.111%)
 //   - ใช้กับ autoUpdateTp flow ตอน low-volatility regime
-//   - ไม่ทำให้บอทหยุดเทรด (TP 0.111% ยังดีกว่าไม่เทรดเลย)
-//   - tpLowPnL warning (threshold 0.2%) ยังคง trigger เพราะ 0.111 < 0.2
+//   - ไม่ทำให้บอทหยุดเทรด (TP 0.281% ยังดีกว่าไม่เทรดเลย + ลดโอกาส fee กินกำไร)
+//   - tpLowPnL warning (threshold 0.2%) ตอนนี้ effectively dead (floor 0.281 > 0.2)
+//     ถ้าอยากให้ warning ยังทำงาน → ปรับ TP_LOW_PNL_THRESHOLD_PCT เป็นค่าที่ต่ำกว่า 0.281
 //   - ใช้ helper เดียวกันทั้งใน computeSuggestedTpForBot + suggest-tp route (single source of truth)
-const TP_FLOOR_THRESHOLD_PCT = 0.1; // NET TP < ค่านี้ → trigger override
-const TP_FLOOR_OVERRIDE_PCT = 0.111; // ค่าที่ใช้แทน (pass formatTpToXxx1 → 0.111)
+const TP_FLOOR_THRESHOLD_PCT = 0.281; // NET TP < ค่านี้ → trigger override
+const TP_FLOOR_OVERRIDE_PCT = 0.281; // ค่าที่ใช้แทน (pass formatTpToXxx1 → 0.281)
 
 /**
  * FIX-2026-07-23: format TP ให้เป็นทศนิยม 3 ตำแหน่ง โดยหลักพัน (ตำแหน่งที่ 3) ต้องเป็น 1 เสมอ
@@ -50,7 +52,8 @@ function formatTpToXxx1(value) {
 }
 
 /**
- * FIX-2026-07-28: auto-floor — ถ้า NET TP% (raw ก่อน format) < TP_FLOOR_THRESHOLD_PCT → override เป็น TP_FLOOR_OVERRIDE_PCT
+ * FIX-2026-08-02: auto-floor — ถ้า NET TP% (raw ก่อน format) < TP_FLOOR_THRESHOLD_PCT → override เป็น TP_FLOOR_OVERRIDE_PCT
+ *   - FIX-2026-08-02: threshold + override เป็น 0.281% (เดิม 0.1% / 0.111%)
  *   - return { value, overridden, rawNetBeforeOverride }
  *     - value: ค่าที่จะใช้ (post-floor) — caller ต้องผ่าน formatTpToXxx1 อีกครั้ง
  *     - overridden: true ถ้าเคย override (ให้ caller แสดง tooltip / log)
@@ -141,7 +144,7 @@ async function computeSuggestedTpForBot(bot) {
     const netSuggestedTpPct = rawSuggestedTpPct == null
       ? null
       : Math.max(0, rawSuggestedTpPct - feeBufferPct);
-    // FIX-2026-07-28: auto-floor — ถ้า NET TP ต่ำเกินไป (< 0.1%) → override เป็น 0.111%
+    // FIX-2026-08-02: auto-floor — ถ้า NET TP ต่ำเกินไป (< 0.281%) → override เป็น 0.281%
     //   - ใช้กับบอทที่ autoUpdateTp=true เพื่อให้ยัง trade ได้ใน low-volatility regime
     const floored = applyMinNetTpFloor(netSuggestedTpPct);
     const suggestedTpPct = floored.value == null ? null : formatTpToXxx1(floored.value);
@@ -209,6 +212,10 @@ async function runTpUpdateForAllEligibleBots() {
         const expectedFloor = !!calc.tpOverridden;
         if (!!bot.tpOnFloor !== expectedFloor) {
           await Bot.updateOne({ _id: bot._id }, { $set: { tpOnFloor: expectedFloor } });
+          // FIX-2026-08-06: also notify running trader (small flag-only change but UI uses tpOnFloor badge too)
+          try {
+            eventBus.emit('bot:updated', { botId: String(bot._id) });
+          } catch (_) { /* eventBus may not be available in some test contexts */ }
           logger.info({ botId, symbol: bot.symbol, tpOnFloor: expectedFloor }, 'tpUpdater: tpOnFloor flag synced (no TP value change)');
         }
         skipped += 1;
@@ -226,6 +233,20 @@ async function runTpUpdateForAllEligibleBots() {
           },
         }
       );
+      // FIX-2026-08-06: emit bot:updated so running trader's cached this.bot.tpPercent refreshes
+      //   - FIDA incident: tpUpdater changed DB 5 times but trader kept stale 0.661 → pnl% locked at 1.32%
+      //   - _botUpdatedHandler in trader.js reads fresh bot from DB and overwrites this.bot.tpPercent
+      //   - safe: only ~5-20 bots affected per hour, 1 DB query each (acceptable)
+      try {
+        eventBus.emit('bot:updated', { botId: String(bot._id) });
+      } catch (_) { /* eventBus may not be available in some test contexts */ }
+      // FIX-2026-08-02: invalidate per-bot volatility snapshot cache ด้วย
+      //   - volSuggestedTpPct ที่ UI แสดงใน tile "TP แนะนำ % (NET)" มาจาก volatilityForBot
+      //   - ถ้าไม่ invalidate → UI แสดง TP เก่าจนกว่า 60s TTL จะหมด
+      try {
+        const volatilityForBot = require('./volatilityForBot');
+        volatilityForBot.invalidate(bot.symbol, bot.timeframe);
+      } catch (_) { /* volatilityForBot may not be loaded in this context */ }
       // FIX-2026-07-28: log เมื่อ auto-floor ทำงาน (NET TP ต่ำกว่า threshold)
       const logMsg = calc.tpOverridden ? 'tpUpdater: TP updated (auto-floor applied)' : 'tpUpdater: TP updated';
       logger.info({

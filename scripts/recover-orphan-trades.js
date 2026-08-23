@@ -15,6 +15,14 @@
  *   3. Scan Binance ทุก base asset ของบอทที่ enabled เทียบกับ DB
  *      → ถ้าเจอ orphan (มี asset แต่ไม่มี active trade) → flag ให้ผู้ใช้รู้
  *
+ *   3. (Phase 3) — FIX-2026-07-30: trade state='sold' but Binance SELL status ≠ FILLED
+ *      → flag via orphanDetected/orphanReason field
+ *
+ *   4. (Phase 4) — FIX-2026-08-02: auto-cancel orphan SELLs for state∈[cancelled/failed] trades
+ *      → binanceRest.cancelOrder ของ SELL ที่ DB state='cancelled' but SELL still NEW on Binance
+ *      → fix DEXE race: handleBuyOrderUpdate PARTIALLY_FILLED วาง SELL, race set state='cancelled',
+ *        SELL ไม่ถูก cancel
+ *
  * ใช้งาน:
  *   node scripts/recover-orphan-trades.js              # dry-run (default)
  *   node scripts/recover-orphan-trades.js --execute    # แก้จริง
@@ -195,10 +203,148 @@ async function main() {
     }
   }
 
+  // ─── Phase 3: FIX-2026-07-30 — scan state='sold' trades vs Binance SELL order status ────────
+  //   ตรวจจับ pattern ใหม่: DB says sold แต่ Binance SELL order ยังไม่ FILLED (เช่น DEXE incident)
+  //   - แตกต่างจาก Phase 1 (ghost trade state=cancelled/failed + sellQty>0)
+  //   - แตกต่างจาก Phase 2 (orphan balance — DB ไม่รู้จัก asset)
+  log(`\n--- Phase 3: scan state='sold' trades vs Binance SELL order status ---`);
+  let orphanSellCount = 0;
+  for (const bot of bots) {
+    const soldTrades = await Trade.find({
+      botId: bot._id,
+      state: 'sold',
+      sellOrderId: { $exists: true, $ne: null },
+      // ดึง trade ที่เพิ่งปิด (24 ชม.) หรือที่ยังไม่ verify
+      $or: [
+        { soldVerifiedAt: { $exists: false } },
+        { orphanDetected: true, soldFilledAt: { $gte: new Date(Date.now() - 24 * 60 * 60 * 1000) } },
+      ],
+    }).limit(50).lean();
+
+    for (const st of soldTrades) {
+      try {
+        const liveSell = await binanceRest.getOrder({ symbol: bot.symbol, orderId: st.sellOrderId });
+        if (liveSell.status !== 'FILLED') {
+          const orphanQty = parseFloat(liveSell.origQty) - parseFloat(liveSell.executedQty);
+          log(`  ⚠️ ${bot.symbol} trade ${st._id}: DB=sold, Binance=${liveSell.status}, executed ${liveSell.executedQty}/${liveSell.origQty}, orphan=${orphanQty}`);
+          orphanSellCount += 1;
+          if (!DRY_RUN) {
+            await Trade.updateOne(
+              { _id: st._id },
+              {
+                $set: {
+                  soldVerifiedAt: new Date(),
+                  orphanDetected: true,
+                  orphanReason: `Phase 3 — SELL ${liveSell.status} (executedQty=${liveSell.executedQty}/${liveSell.origQty})`,
+                },
+              }
+            );
+            fixCount += 1;
+          }
+        } else if (!st.soldVerifiedAt) {
+          // verify OK — mark verified (ไม่นับเป็น fix)
+          if (!DRY_RUN) {
+            await Trade.updateOne({ _id: st._id }, { $set: { soldVerifiedAt: new Date() } });
+          }
+        }
+      } catch (err) {
+        log(`  ✗ ${bot.symbol} trade ${st._id}: getOrder failed — ${err.message}`);
+      }
+    }
+  }
+  log(`  orphan SELL detected: ${orphanSellCount}`);
+
+  // ─── Phase 4: FIX-2026-08-02 — auto-cancel orphan SELLs for state∈[cancelled/failed] trades ──
+  //   - Phase 1 hand-flip trades state='cancelled' → 'sold' but DIDN'T cancel the SELL on Binance
+  //   - Phase 3 only flags — doesn't cancel
+  //   - This phase ACTUALLY cancels via binanceRest.cancelOrder
+  //   - Root cause: DEXE incident 2026-08-02 — handleBuyOrderUpdate PARTIALLY_FILLED branch
+  //     placed SELL, race set state='cancelled', SELL never cancelled on Binance side
+  log(`\n--- Phase 4: auto-cancel orphan SELLs for state∈[cancelled/failed] trades ---`);
+  let cancelledSells = 0;
+  let sellCancelFailed = 0;
+  for (const bot of bots) {
+    const orphanTrades = await Trade.find({
+      botId: bot._id,
+      state: { $in: ['cancelled', 'failed'] },
+      sellOrderId: { $exists: true, $ne: null },
+      sellOrderCancelled: { $ne: true }, // กัน double-cancel
+    }).limit(100).lean();
+
+    if (orphanTrades.length === 0) continue;
+
+    for (const ot of orphanTrades) {
+      try {
+        const liveSell = await binanceRest.getOrder({ symbol: bot.symbol, orderId: ot.sellOrderId });
+        if (liveSell.status === 'FILLED') {
+          // SELL actually filled on Binance but DB state say cancelled — shouldn't happen normally
+          // (Phase 1 would have caught this). Flag for manual review.
+          log(`  ⚠️ ${bot.symbol} trade ${ot._id}: state=${ot.state} but SELL is FILLED on Binance (executedQty=${liveSell.executedQty}) — manual review`);
+          continue;
+        }
+        if (liveSell.status === 'CANCELED' || liveSell.status === 'EXPIRED') {
+          // Already gone — just mark flag
+          if (!DRY_RUN) {
+            await Trade.updateOne(
+              { _id: ot._id },
+              { $set: { sellOrderCancelled: true, sellOrderCancelledAt: new Date() } }
+            );
+          }
+          continue;
+        }
+        // NEW / PARTIALLY_FILLED → cancel
+        if (DRY_RUN) {
+          log(`  [DRY-RUN] would cancel SELL ${ot.sellOrderId} for trade ${ot._id} state=${ot.state} (Binance=${liveSell.status}, qty=${liveSell.origQty})`);
+          cancelledSells += 1;
+        } else {
+          try {
+            const cancelResp = await binanceRest.cancelOrder({ symbol: bot.symbol, orderId: ot.sellOrderId });
+            if (cancelResp && cancelResp.status === 'CANCELED') {
+              cancelledSells += 1;
+              await Trade.updateOne(
+                { _id: ot._id },
+                {
+                  $set: {
+                    sellOrderCancelled: true,
+                    sellOrderCancelledAt: new Date(),
+                    sellOrderCancelReason: `Phase 4 — auto-cancelled orphan SELL (was ${liveSell.status})`,
+                  },
+                }
+              );
+              log(`  ✓ ${bot.symbol} trade ${ot._id}: cancelled SELL ${ot.sellOrderId} (was ${liveSell.status})`);
+            } else {
+              sellCancelFailed += 1;
+              log(`  ✗ ${bot.symbol} trade ${ot._id}: cancel SELL ${ot.sellOrderId} returned unexpected status: ${cancelResp && cancelResp.status}`);
+            }
+          } catch (cancelErr) {
+            sellCancelFailed += 1;
+            const msg = cancelErr.message || String(cancelErr);
+            // -2011 Unknown order → already gone → not failure
+            if (/2011|Unknown order|UNKNOWN_ORDER/i.test(msg)) {
+              await Trade.updateOne(
+                { _id: ot._id },
+                { $set: { sellOrderCancelled: true, sellOrderCancelledAt: new Date(), sellOrderCancelReason: 'Phase 4 — already gone (-2011)' } }
+              );
+              log(`  ℹ️ ${bot.symbol} trade ${ot._id}: SELL ${ot.sellOrderId} already gone (-2011)`);
+            } else {
+              log(`  ✗ ${bot.symbol} trade ${ot._id}: cancel SELL ${ot.sellOrderId} failed — ${msg}`);
+            }
+          }
+        }
+      } catch (err) {
+        log(`  ✗ ${bot.symbol} trade ${ot._id}: getOrder failed — ${err.message}`);
+      }
+    }
+  }
+  log(`  orphan SELLs cancelled: ${cancelledSells}, failed: ${sellCancelFailed}`);
+
   log(`\n=== SUMMARY ===`);
   log(`mode: ${DRY_RUN ? 'DRY-RUN (use --execute to apply)' : 'EXECUTE'}`);
   log(`ghost trades fixed: ${fixCount}`);
   log(`orphan quantities detected: ${orphanCount}`);
+  log(`orphan SELL detected (Phase 3): ${orphanSellCount}`);
+  log(`orphan SELLs cancelled (Phase 4): ${cancelledSells}`);
+  log(`orphan SELL cancel failed (Phase 4): ${sellCancelFailed}`);
   log(`log file: ${LOG_FILE}`);
 
   await mongoose.disconnect();

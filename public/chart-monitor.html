@@ -1,0 +1,883 @@
+<!doctype html>
+<html lang="th">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Chart Monitor - OnePercentBotTrade</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet" />
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+  <link href="/css/app.css" rel="stylesheet" />
+  <style>
+    /* ─── Chart Monitor grid ────────────────────────────── */
+    .cm-grid {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 0.85rem;
+    }
+    @media (min-width: 768px)  { .cm-grid { grid-template-columns: repeat(2, 1fr); } }
+    @media (min-width: 1200px) { .cm-grid { grid-template-columns: repeat(3, 1fr); } }
+    @media (min-width: 1700px) { .cm-grid { grid-template-columns: repeat(4, 1fr); } }
+
+    .cm-card {
+      background: var(--surface-1, #0f172a);
+      border: 1px solid rgba(255,255,255,0.06);
+      border-radius: 11px;
+      box-shadow: 0 2px 8px -2px rgba(0,0,0,0.4);
+      padding: 0.75rem 0.85rem 0.85rem;
+      display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+      transition: border-color 0.15s ease, box-shadow 0.15s ease;
+    }
+    .cm-card:hover {
+      border-color: rgba(255,255,255,0.14);
+      box-shadow: 0 4px 16px -4px rgba(0,0,0,0.55);
+    }
+    .cm-card.is-stopped { opacity: 0.55; }
+    .cm-card.is-error { border-color: rgba(255,77,109,0.35); }
+    /* Signal-derived highlights */
+    .cm-card.is-hot {
+      border-color: rgba(245,184,0,0.55);
+      box-shadow: 0 0 0 1px rgba(245,184,0,0.25), 0 4px 18px -4px rgba(245,184,0,0.35);
+      animation: cm-hot-pulse 2.4s ease-in-out infinite;
+    }
+    @keyframes cm-hot-pulse {
+      0%, 100% { box-shadow: 0 0 0 1px rgba(245,184,0,0.25), 0 4px 18px -4px rgba(245,184,0,0.35); }
+      50%      { box-shadow: 0 0 0 2px rgba(245,184,0,0.45), 0 6px 22px -4px rgba(245,184,0,0.55); }
+    }
+    .cm-card.is-near-s1 {
+      border-color: rgba(255,184,0,0.35);
+      box-shadow: inset 0 0 0 1px rgba(255,184,0,0.10);
+    }
+
+    .cm-card-header {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      flex-wrap: wrap;
+    }
+    .cm-card-name {
+      font-weight: 600;
+      font-size: 0.95rem;
+      color: var(--text-1, #f1f5f9);
+      flex: 1 1 auto;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .cm-card-symbol {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.75rem;
+      color: var(--text-2, #cbd5e1);
+      background: rgba(255,255,255,0.04);
+      padding: 0.1rem 0.4rem;
+      border-radius: 4px;
+    }
+    .cm-card-tf {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.7rem;
+      color: var(--gold-1, #f5b800);
+      padding: 0.1rem 0.4rem;
+      border: 1px solid rgba(245,184,0,0.25);
+      border-radius: 4px;
+    }
+
+    .cm-status {
+      font-size: 0.7rem;
+      padding: 0.15rem 0.5rem;
+      border-radius: 999px;
+      font-weight: 600;
+      letter-spacing: 0.02em;
+    }
+    .cm-status.is-running  { background: rgba(0,229,184,0.15); color: var(--bull-1, #00e5b8); }
+    .cm-status.is-stopped  { background: rgba(148,163,184,0.15); color: #94a3b8; }
+    .cm-status.is-error    { background: rgba(255,77,109,0.15); color: var(--bear-1, #ff4d6d); }
+    .cm-status.is-warning  { background: rgba(245,184,0,0.15); color: var(--gold-1, #f5b800); }
+
+    .cm-kpi-row {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 0.3rem;
+      font-size: 0.72rem;
+      color: var(--text-2, #cbd5e1);
+    }
+    .cm-kpi {
+      background: rgba(255,255,255,0.025);
+      border-radius: 5px;
+      padding: 0.25rem 0.4rem;
+      text-align: center;
+    }
+    .cm-kpi .k-value {
+      font-family: 'JetBrains Mono', monospace;
+      font-weight: 600;
+      font-size: 0.85rem;
+      display: block;
+      line-height: 1.1;
+    }
+    .cm-kpi .k-label { opacity: 0.65; font-size: 0.65rem; }
+    .cm-kpi .k-value.is-bull { color: var(--bull-1, #00e5b8); }
+    .cm-kpi .k-value.is-bear { color: var(--bear-1, #ff4d6d); }
+    .cm-kpi .k-value.is-gold { color: var(--gold-1, #f5b800); }
+
+    .cm-minichart {
+      width: 100%;
+      height: 140px;
+      position: relative;
+      background: rgba(0,0,0,0.18);
+      border-radius: 6px;
+      overflow: hidden;
+    }
+    .cm-minichart-loading {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      height: 100%;
+      color: var(--text-muted, #94a3b8);
+      font-size: 0.8rem;
+    }
+    .cm-minichart-error {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      height: 100%;
+      color: var(--bear-1, #ff4d6d);
+      font-size: 0.8rem;
+    }
+
+    .cm-zone-pill {
+      display: inline-block;
+      font-size: 0.65rem;
+      font-family: 'JetBrains Mono', monospace;
+      padding: 0.1rem 0.35rem;
+      border-radius: 4px;
+      font-weight: 600;
+    }
+    .cm-zone-pill.zone-1 { background: rgba(0,229,184,0.15); color: var(--bull-1, #00e5b8); }
+    .cm-zone-pill.zone-2 { background: rgba(148,163,184,0.12); color: #94a3b8; }
+    .cm-zone-pill.zone-3 { background: rgba(255,77,109,0.15); color: var(--bear-1, #ff4d6d); }
+    .cm-zone-pill.zone-0 { background: rgba(167,139,250,0.12); color: var(--violet-1, #a78bfa); }
+
+    .cm-card-footer {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 0.7rem;
+      color: var(--text-muted, #94a3b8);
+    }
+    .cm-card-footer a {
+      color: var(--text-2, #cbd5e1);
+      text-decoration: none;
+    }
+    .cm-card-footer a:hover { color: var(--gold-1, #f5b800); }
+
+    /* Empty state */
+    .cm-empty {
+      text-align: center;
+      padding: 3rem 1rem;
+      color: var(--text-muted, #94a3b8);
+    }
+    .cm-empty .glyph { font-size: 2.5rem; opacity: 0.5; display: block; margin-bottom: 0.5rem; }
+
+    /* Filter bar */
+    .cm-filter-bar {
+      display: flex;
+      gap: 0.5rem;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+    .cm-filter-bar select.form-select-sm,
+    .cm-filter-bar input.form-control-sm {
+      background: rgba(0,0,0,0.18);
+      color: var(--text-1, #f1f5f9);
+      border: 1px solid rgba(255,255,255,0.08);
+      max-width: 200px;
+    }
+    .cm-filter-bar select.form-select-sm option {
+      background: #0f172a;
+      color: var(--text-1, #f1f5f9);
+    }
+
+    /* ─── Signal-row (under header) ─────────────────────── */
+    .cm-signal-row {
+      display: flex;
+      gap: 0.35rem;
+      flex-wrap: wrap;
+    }
+    .cm-signal-pill {
+      font-size: 0.7rem;
+      font-weight: 700;
+      padding: 0.18rem 0.55rem;
+      border-radius: 999px;
+      letter-spacing: 0.02em;
+      cursor: help;
+    }
+    .cm-signal-pill.is-active {
+      background: rgba(245,184,0,0.18);
+      color: #f5b800;
+      border: 1px solid rgba(245,184,0,0.45);
+      animation: cm-signal-pulse 1.6s ease-in-out infinite;
+    }
+    .cm-signal-pill.is-blocked {
+      background: rgba(255,77,109,0.15);
+      color: #ff8aa3;
+      border: 1px dashed rgba(255,77,109,0.45);
+    }
+    @keyframes cm-signal-pulse {
+      0%, 100% { opacity: 1; }
+      50%      { opacity: 0.6; }
+    }
+
+    /* ─── Prediction label (Zone row) ───────────────────── */
+    .cm-prediction {
+      font-size: 0.65rem;
+      font-family: 'JetBrains Mono', monospace;
+      padding: 0.1rem 0.4rem;
+      border-radius: 4px;
+      font-weight: 600;
+    }
+    .cm-pred-near-s1     { background: rgba(167,139,250,0.18); color: #c4b5fd; border: 1px solid rgba(167,139,250,0.35); }
+    .cm-pred-strong-up   { background: rgba(0,229,184,0.15); color: var(--bull-1, #00e5b8); }
+    .cm-pred-strong-down { background: rgba(255,77,109,0.15); color: var(--bear-1, #ff4d6d); }
+    .cm-pred-above-basis { background: rgba(148,163,184,0.10); color: #94a3b8; }
+    .cm-pred-breakout    { background: rgba(0,229,184,0.25); color: var(--bull-1, #00e5b8); border: 1px solid rgba(0,229,184,0.45); }
+    .cm-pred-breakdown   { background: rgba(255,77,109,0.25); color: var(--bear-1, #ff4d6d); border: 1px solid rgba(255,77,109,0.45); }
+    .cm-pred-unknown     { background: rgba(148,163,184,0.10); color: #94a3b8; }
+
+    /* ─── Blocked badges (per-bot's last blocked signal) ── */
+    .cm-blocked-row {
+      display: flex;
+      gap: 0.3rem;
+      flex-wrap: wrap;
+    }
+    .cm-blocked-pill {
+      font-size: 0.62rem;
+      padding: 0.1rem 0.4rem;
+      border-radius: 4px;
+      font-weight: 600;
+      cursor: help;
+      line-height: 1.2;
+      max-width: 100%;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .cm-blocked-pill.kind-xs1        { background: rgba(255,77,109,0.14); color: #ff8aa3; border: 1px dashed rgba(255,77,109,0.35); }
+    .cm-blocked-pill.kind-noTrade    { background: rgba(255,184,0,0.14);  color: #ffd969; border: 1px dashed rgba(255,184,0,0.35); }
+    .cm-blocked-pill.kind-trendline  { background: rgba(167,139,250,0.14); color: #c4b5fd; border: 1px dashed rgba(167,139,250,0.35); }
+    .cm-blocked-pill.kind-s1OnlyDown { background: rgba(148,163,184,0.12); color: #cbd5e1; border: 1px dashed rgba(148,163,184,0.35); }
+
+    /* ─── Latest Signals panel (top 20 across all running bots) ─── */
+    .cm-latest-signals-card {
+      background: var(--surface-1, #0f172a);
+      border: 1px solid rgba(255,255,255,0.06);
+      border-radius: 11px;
+      padding: 0.6rem 0.85rem;
+      margin-bottom: 1rem;
+    }
+    .cm-latest-header {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      flex-wrap: wrap;
+      margin-bottom: 0.5rem;
+    }
+    .cm-latest-title {
+      font-weight: 600;
+      font-size: 0.95rem;
+      color: var(--text-1, #f1f5f9);
+    }
+    .cm-latest-meta {
+      font-size: 0.7rem;
+      color: var(--text-muted, #94a3b8);
+      margin-left: auto;
+    }
+    .cm-latest-scroll {
+      max-height: 560px;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 0.3rem;
+      padding-right: 0.25rem;
+    }
+    .cm-latest-scroll::-webkit-scrollbar { width: 6px; }
+    .cm-latest-scroll::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.12); border-radius: 3px; }
+    .cm-ls-row {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 0.5rem;
+      padding: 0.4rem 0.5rem;
+      border-radius: 6px;
+      background: rgba(255,255,255,0.02);
+      border: 1px solid rgba(255,255,255,0.04);
+    }
+    .cm-ls-row.is-active  { border-left: 3px solid rgba(0,229,184,0.55); }
+    .cm-ls-row.is-blocked { border-left: 3px solid rgba(255,77,109,0.55); opacity: 0.85; }
+    .cm-ls-left { display: flex; gap: 0.5rem; align-items: flex-start; min-width: 0; flex: 1 1 auto; }
+    .cm-ls-status { font-size: 1rem; line-height: 1.2; flex: 0 0 auto; }
+    .cm-ls-body { min-width: 0; flex: 1 1 auto; }
+    .cm-ls-bot {
+      font-size: 0.85rem;
+      font-weight: 600;
+      color: var(--text-1, #f1f5f9);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .cm-ls-meta { font-weight: 400; color: var(--text-muted, #94a3b8); font-size: 0.72rem; }
+    .cm-ls-time { font-size: 0.7rem; color: var(--text-muted, #94a3b8); margin-top: 0.1rem; }
+    .cm-ls-right { display: flex; flex-direction: column; align-items: flex-end; gap: 0.2rem; flex: 0 0 auto; }
+    .cm-ls-price {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.85rem;
+      font-weight: 600;
+      color: var(--text-1, #f1f5f9);
+    }
+    .cm-ls-reasons { display: flex; gap: 0.25rem; flex-wrap: wrap; justify-content: flex-end; }
+    .cm-latest-empty { padding: 1.5rem 0.5rem; text-align: center; color: var(--text-muted, #94a3b8); font-size: 0.85rem; }
+
+    /* ─── 2026-08-20: Action / outcome badge (per signal row) ───
+       Shows the DB outcome + reason note of each signal (filled, safetrade1,
+       retry max, เงินไม่พอ, etc.). Color-coded by class. */
+    .cm-ls-action {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.25rem;
+      font-size: 0.65rem;
+      padding: 0.12rem 0.4rem;
+      border-radius: 4px;
+      font-weight: 700;
+      letter-spacing: 0.02em;
+      max-width: 100%;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      line-height: 1.2;
+    }
+    .cm-ls-action .cm-ls-action-label {
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      font-size: 0.6rem;
+      opacity: 0.85;
+    }
+    /* filled / order_placed → bull (green) */
+    .cm-ls-action.is-filled         { background: rgba(0,229,184,0.20); color: #5eead4; border: 1px solid rgba(0,229,184,0.55); }
+    .cm-ls-action.is-order_placed   { background: rgba(0,229,184,0.16); color: #6ee7d2; border: 1px solid rgba(0,229,184,0.45); }
+    /* skipped (graceful) → grey */
+    .cm-ls-action.is-skipped        { background: rgba(148,163,184,0.16); color: #cbd5e1; border: 1px solid rgba(148,163,184,0.40); }
+    .cm-ls-action.is-skipped_predicted { background: rgba(148,163,184,0.12); color: #94a3b8; border: 1px dashed rgba(148,163,184,0.40); }
+    /* expired (timed-out, e.g. retry max / spread) → gold */
+    .cm-ls-action.is-expired        { background: rgba(245,184,0,0.18); color: #fcd34d; border: 1px solid rgba(245,184,0,0.45); }
+    /* failed (hard error) → bear */
+    .cm-ls-action.is-failed         { background: rgba(255,77,109,0.20); color: #ff8aa3; border: 1px solid rgba(255,77,109,0.55); }
+    /* detected / pending → violet (no decision yet) */
+    .cm-ls-action.is-detected,
+    .cm-ls-action.is-pending        { background: rgba(167,139,250,0.16); color: #c4b5fd; border: 1px solid rgba(167,139,250,0.40); }
+    /* no_audit (2026-08-20 rev2) — scan เจอ แต่ trader ไม่เคย process → muted question mark */
+    .cm-ls-action.is-no-audit       { background: rgba(148,163,184,0.10); color: #cbd5e1; border: 1px dashed rgba(148,163,184,0.40); font-style: italic; }
+    /* trade link on filled rows */
+    .cm-ls-trade-link { font-size: 0.65rem; color: var(--text-muted, #94a3b8); text-decoration: none; padding: 0.05rem 0.3rem; border-radius: 4px; border: 1px dashed rgba(255,255,255,0.18); }
+    .cm-ls-trade-link:hover { color: var(--gold-1, #f5b800); border-color: rgba(245,184,0,0.45); }
+    /* 2026-08-20: row that holds (action badge + trade link) under the bot meta line */
+    .cm-ls-action-row { display: flex; gap: 0.35rem; align-items: center; flex-wrap: wrap; margin-top: 0.18rem; }
+
+    /* ─── Open Positions panel (above chart grid) ───────── */
+    .cm-positions-card {
+      background: var(--surface-1, #0f172a);
+      border: 1px solid rgba(255,255,255,0.06);
+      border-radius: 11px;
+      padding: 0.6rem 0.85rem 0.85rem;
+      margin-bottom: 1rem;
+    }
+    .cm-positions-header {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      flex-wrap: wrap;
+      margin-bottom: 0.55rem;
+    }
+    .cm-positions-title {
+      font-weight: 600;
+      font-size: 0.95rem;
+      color: var(--text-1, #f1f5f9);
+      display: inline-flex;
+      align-items: center;
+      gap: 0.35rem;
+    }
+    .cm-positions-count {
+      font-size: 0.7rem;
+      font-weight: 700;
+      background: rgba(245,184,0,0.18);
+      color: #f5b800;
+      padding: 0.05rem 0.5rem;
+      border-radius: 999px;
+      border: 1px solid rgba(245,184,0,0.35);
+    }
+    .cm-positions-meta {
+      font-size: 0.7rem;
+      color: var(--text-muted, #94a3b8);
+      margin-left: auto;
+      display: inline-flex;
+      align-items: center;
+      gap: 0.4rem;
+    }
+    .cm-positions-grid {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 0.7rem;
+    }
+    @media (min-width: 768px)  { .cm-positions-grid { grid-template-columns: repeat(2, 1fr); } }
+    @media (min-width: 1400px) { .cm-positions-grid { grid-template-columns: repeat(3, 1fr); } }
+    .cm-positions-empty {
+      padding: 1.4rem 0.5rem;
+      text-align: center;
+      color: var(--text-muted, #94a3b8);
+      font-size: 0.85rem;
+    }
+    /* Compact position card styling tweaks for grid use */
+    .cm-positions-grid .position-card {
+      cursor: pointer;
+      transition: transform 0.12s ease, border-color 0.12s ease, box-shadow 0.12s ease;
+    }
+    .cm-positions-grid .position-card:hover {
+      transform: translateY(-1px);
+      border-color: rgba(245,184,0,0.45);
+      box-shadow: 0 8px 22px -10px rgba(245,184,0,0.35);
+    }
+    .cm-positions-grid .position-card .pos-foot {
+      gap: 0.4rem;
+      flex-wrap: wrap;
+    }
+    /* Slight size reduction in the grid so 3 cards fit per row */
+    .cm-positions-grid .position-card {
+      padding: 0.55rem 0.65rem;
+      font-size: 0.85rem;
+    }
+    .cm-positions-grid .position-card .pos-grid {
+      gap: 0.4rem 0.5rem;
+    }
+    .cm-positions-grid .position-card .cell .k { font-size: 0.65rem; }
+    .cm-positions-grid .position-card .cell .v { font-size: 0.85rem; }
+    .cm-positions-grid .position-card .cell .sub { font-size: 0.62rem; }
+    /* ─── 2026-08-08: Make $PnL cells pop on Chart Monitor ───
+       Larger + bolder + glow + soft highlight. Responsive on mobile. */
+    .cm-positions-grid .position-card .cell-pnl {
+      background: rgba(245, 184, 0, 0.07);
+      border: 1px solid rgba(245, 184, 0, 0.22);
+      border-radius: 8px;
+      padding: 0.5rem 0.55rem;
+      margin: -0.18rem -0.05rem;
+    }
+    .cm-positions-grid .position-card .cell-pnl .k {
+      font-size: 0.7rem;
+      color: #e2e8f0;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+    }
+    .cm-positions-grid .position-card .cell-pnl .v {
+      font-size: 1.45rem;
+      font-weight: 700;
+      letter-spacing: -0.01em;
+      line-height: 1.1;
+    }
+    .cm-positions-grid .position-card .cell-pnl .v.pnl-bull {
+      text-shadow: 0 0 14px rgba(0, 229, 184, 0.6), 0 0 4px rgba(0, 229, 184, 0.4);
+    }
+    .cm-positions-grid .position-card .cell-pnl .v.pnl-bear {
+      text-shadow: 0 0 14px rgba(255, 77, 109, 0.6), 0 0 4px rgba(255, 77, 109, 0.4);
+    }
+    .cm-positions-grid .position-card .cell-pnl .sub {
+      font-size: 0.72rem;
+      margin-top: 0.1rem;
+    }
+    /* Mobile: keep $PnL prominent but fit narrower cards */
+    @media (max-width: 640px) {
+      .cm-positions-grid .position-card .cell-pnl {
+        padding: 0.4rem 0.45rem;
+        margin: -0.12rem -0.05rem;
+        border-radius: 6px;
+      }
+      .cm-positions-grid .position-card .cell-pnl .k { font-size: 0.65rem; }
+      .cm-positions-grid .position-card .cell-pnl .v { font-size: 1.15rem; }
+      .cm-positions-grid .position-card .cell-pnl .sub { font-size: 0.65rem; }
+    }
+    .cm-positions-grid .position-card .pos-progress-label { font-size: 0.7rem; }
+    /* Source badge on grid header */
+    .cm-positions-source {
+      font-size: 0.65rem;
+      padding: 0.05rem 0.4rem;
+      border-radius: 4px;
+      font-weight: 600;
+    }
+    .cm-positions-source.is-binance { background: rgba(0,229,184,0.15); color: var(--bull-1, #00e5b8); }
+    .cm-positions-source.is-cache   { background: rgba(148,163,184,0.12); color: #94a3b8; }
+
+    /* Collapsible positions card (2026-08-06) — default collapsed */
+    .cm-positions-card .cm-positions-toggle {
+      background: rgba(255,255,255,0.05);
+      border: 1px solid rgba(255,255,255,0.1);
+      color: var(--text-2, #cbd5e1);
+      width: 26px; height: 26px; border-radius: 6px;
+      cursor: pointer; font-size: 0.85rem; line-height: 1;
+      display: inline-flex; align-items: center; justify-content: center;
+      padding: 0; transition: transform 0.18s ease, background 0.15s ease;
+    }
+    .cm-positions-card .cm-positions-toggle:hover {
+      background: rgba(245,184,0,0.18); color: var(--gold-1, #f5b800);
+    }
+    .cm-positions-card.is-collapsed .cm-positions-toggle {
+      transform: rotate(-90deg);
+    }
+    .cm-positions-card.is-collapsed #cm-positions-list,
+    .cm-positions-card.is-collapsed #cm-positions-refresh {
+      display: none !important;
+    }
+    /* ─── 2026-08-08: Totals in header (next to title) — Cost + Unrealized PnL + THB ─── */
+    .cm-positions-totals {
+      display: inline-flex;
+      align-items: baseline;
+      flex-wrap: wrap;
+      gap: 0.2rem 0.45rem;
+      font-size: 0.76rem;
+      color: #cbd5e1;
+      margin-right: 0.4rem;
+    }
+    .cm-positions-totals[hidden] { display: none !important; }
+    .cm-pt-line { display: inline-flex; align-items: baseline; gap: 0.3rem; }
+    .cm-pt-val { font-weight: 700; color: #e2e8f0; }
+    .cm-positions-totals .cm-pt-val.pnl-bull { color: #00e5b8; }
+    .cm-positions-totals .cm-pt-val.pnl-bear { color: #ff4d6d; }
+    .cm-pt-unit { color: #64748b; font-size: 0.88em; font-weight: 500; }
+    .cm-pt-sub { color: #94a3b8; font-size: 0.9em; margin-left: 0.15rem; font-weight: 500; }
+    .cm-pt-sep { color: #475569; opacity: 0.7; font-size: 0.85em; }
+    .cm-positions-totals .thb-eq { font-size: 0.78em; opacity: 0.75; }
+    @media (max-width: 640px) {
+      .cm-positions-totals { font-size: 0.68rem; gap: 0.15rem 0.35rem; margin-right: 0.2rem; }
+      .cm-positions-totals .thb-eq { display: none; } /* save space on mobile */
+    }
+    /* ─── 2026-08-08: Auto-refresh toggle for Open Positions ───
+       Default OFF on every page load (state not persisted). */
+    .cm-auto-toggle {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.4rem;
+      padding: 0.18rem 0.55rem;
+      font-size: 0.78rem;
+      line-height: 1.1;
+      background: rgba(255,255,255,0.04);
+      border: 1px solid rgba(255,255,255,0.14);
+      color: #94a3b8;
+      border-radius: 6px;
+      cursor: pointer;
+      transition: background 0.18s ease, border-color 0.18s ease, color 0.18s ease;
+      font-weight: 600;
+    }
+    .cm-auto-toggle:hover {
+      border-color: rgba(245,184,0,0.45);
+      color: #f5b800;
+    }
+    .cm-auto-toggle .cm-auto-dot {
+      display: inline-block;
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      background: #64748b;
+      box-shadow: inset 0 0 0 1px rgba(0,0,0,0.25);
+      transition: background 0.18s ease, box-shadow 0.18s ease;
+    }
+    .cm-auto-toggle.is-on {
+      background: rgba(0,229,184,0.14);
+      border-color: rgba(0,229,184,0.55);
+      color: #00e5b8;
+    }
+    .cm-auto-toggle.is-on:hover {
+      background: rgba(255,77,109,0.14);
+      border-color: rgba(255,77,109,0.55);
+      color: #ff4d6d;
+    }
+    .cm-auto-toggle.is-on .cm-auto-dot {
+      background: #00e5b8;
+      box-shadow: 0 0 8px rgba(0,229,184,0.75), inset 0 0 0 1px rgba(0,0,0,0.2);
+      animation: cmAutoPulse 1.8s ease-in-out infinite;
+    }
+    .cm-auto-toggle.is-on:hover .cm-auto-dot {
+      background: #ff4d6d;
+      box-shadow: 0 0 8px rgba(255,77,109,0.75), inset 0 0 0 1px rgba(0,0,0,0.2);
+      animation: none;
+    }
+    @keyframes cmAutoPulse {
+      0%, 100% { box-shadow: 0 0 6px rgba(0,229,184,0.55), inset 0 0 0 1px rgba(0,0,0,0.2); }
+      50%      { box-shadow: 0 0 12px rgba(0,229,184,0.95), inset 0 0 0 1px rgba(0,0,0,0.2); }
+    }
+    /* Mobile: tighter padding to fit in header */
+    @media (max-width: 640px) {
+      .cm-auto-toggle { padding: 0.15rem 0.45rem; font-size: 0.72rem; }
+      .cm-auto-toggle .cm-auto-dot { width: 7px; height: 7px; }
+    }
+    /* When collapsed, click on the header (whole top row) still toggles */
+    .cm-positions-card .cm-positions-header { cursor: pointer; user-select: none; }
+    .cm-positions-card.is-collapsed .cm-positions-header:hover {
+      background: rgba(245,184,0,0.06);
+    }
+
+    /* Clickable stat tile (Today PnL → opens pnl modal) */
+    .stat-tile.is-clickable { cursor: pointer; transition: transform 0.12s ease, box-shadow 0.12s ease; }
+    .stat-tile.is-clickable:hover { transform: translateY(-1px); box-shadow: 0 6px 18px -8px rgba(245,184,0,0.45); }
+    .stat-tile .thb-eq { display: block; font-size: 0.85rem; opacity: 0.8; font-weight: 500; margin-top: 2px; }
+
+    /* S1 signal row — date+time sub line (2026-08-06) */
+    .cm-ls-datetime { font-size: 0.62rem; opacity: 0.55; font-family: 'JetBrains Mono', monospace; margin-top: 1px; }
+
+    /* Expand chart button (2026-08-06) — small magnifier on card header */
+    .cm-card-expand {
+      background: rgba(255,255,255,0.05);
+      border: 1px solid rgba(255,255,255,0.1);
+      color: var(--text-2, #cbd5e1);
+      width: 24px; height: 24px; border-radius: 6px;
+      cursor: pointer; font-size: 0.78rem; line-height: 1;
+      padding: 0; display: inline-flex; align-items: center; justify-content: center;
+      transition: background 0.15s ease, transform 0.12s ease;
+    }
+    .cm-card-expand:hover {
+      background: rgba(245,184,0,0.18); color: var(--gold-1, #f5b800);
+      transform: scale(1.05);
+    }
+
+    /* Expand modal — signal row mirrors card decorations */
+    #cmExpandSignalRow .cm-signal-pill,
+    #cmExpandSignalRow .cm-blocked-pill,
+    #cmExpandSignalRow .cm-zone-pill,
+    #cmExpandSignalRow .cm-prediction {
+      font-size: 0.7rem;
+    }
+    #cmExpandSignalRow .cm-status { font-size: 0.7rem; padding: 0.15rem 0.5rem; border-radius: 999px; font-weight: 600; }
+  </style>
+</head>
+<body>
+  <nav class="app-nav" id="app-nav"></nav>
+
+  <div class="container-fluid px-3 px-md-4 py-3 py-md-4">
+
+    <!-- Page title -->
+    <div class="page-title">
+      <h3>📊 Chart Monitor</h3>
+      <div class="d-flex gap-2 align-items-center flex-wrap">
+        <!-- FIX-2026-08-23: Master Config (mirror bots.html) — bulk-edit many bots at once -->
+        <button class="btn btn-outline-primary btn-sm" id="btn-cm-master-config" type="button"
+          title="ตั้งค่าหลายบอทพร้อมกัน (clobber mode)">⚙️ Master Config</button>
+        <button class="btn btn-primary btn-sm" id="cm-refresh-btn" type="button">🔄 Refresh</button>
+      </div>
+    </div>
+
+    <!-- Summary tiles -->
+    <div class="summary-row">
+      <div class="stat-tile is-info">
+        <span class="glyph">▶️</span>
+        <div class="label">Running Bots</div>
+        <div class="value" id="cm-stat-running">0</div>
+        <div class="sub" id="cm-stat-running-sub">กำลังเทรดอยู่</div>
+      </div>
+      <div class="stat-tile is-gold">
+        <span class="glyph">⏸️</span>
+        <div class="label">Stopped Bots</div>
+        <div class="value" id="cm-stat-stopped">0</div>
+        <div class="sub">ปิดอยู่</div>
+      </div>
+      <div class="stat-tile is-bull is-clickable" id="cm-stat-pnl-tile" title="คลิกเพื่อดูรายละเอียดเทรดวันนี้">
+        <span class="glyph">📈</span>
+        <div class="label">Today PnL</div>
+        <div class="value" id="cm-stat-pnl">0.00</div>
+        <div class="sub" id="cm-stat-pnl-sub">USDT</div>
+      </div>
+      <div class="stat-tile is-violet">
+        <span class="glyph">🟢</span>
+        <div class="label">Strong Up</div>
+        <div class="value" id="cm-stat-up">0</div>
+        <div class="sub">อยู่ในโซน Bull</div>
+      </div>
+      <div class="stat-tile" id="cm-stat-down-tile">
+        <span class="glyph">🔴</span>
+        <div class="label">Strong Down</div>
+        <div class="value" id="cm-stat-down">0</div>
+        <div class="sub">อยู่ในโซน Bear</div>
+      </div>
+    </div>
+
+    <!-- FIX-2026-08-06: BNB oil gauge (mirror bots.html) — glanceable % ของ target USDT
+         CSS: .bnb-gauge-track / .bnb-gauge-fill.is-{healthy|low|critical} ใน app.css
+         Data: GET /api/account/bnb-status (gaugeTargetUsdt + gaugePct + gaugeZone) -->
+    <div class="lux-card mb-3" id="cm-bnb-gauge-card">
+      <div class="lux-body py-2">
+        <div class="d-flex justify-content-between align-items-center mb-1" style="font-size:0.85rem;">
+          <span>
+            <span style="color:var(--gold-1);">💎</span>
+            <strong style="color:var(--text-2);margin-right:0.3rem;">BNB fuel gauge:</strong>
+            <span id="cm-bnb-gauge-status" class="text-muted">กำลังโหลด…</span>
+          </span>
+          <span class="text-mono text-muted" id="cm-bnb-gauge-value">— / — USDT</span>
+        </div>
+        <div class="bnb-gauge-track">
+          <div class="bnb-gauge-fill" id="cm-bnb-gauge-fill" style="width:0%;"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- FIX-2026-08-06: BNB low-balance warning banner (mirror bots.html)
+         แสดงเมื่อ BNB value < $1 USDT — ป้องกัน BNB-empty fee-deduct incident -->
+    <div id="cm-bnb-low-banner" class="alert alert-warning mb-3 align-items-center" hidden style="display:none;">
+      <strong>💎 BNB balance ต่ำ:</strong>
+      <span id="cm-bnb-low-detail" class="ms-1">กำลังโหลด…</span>
+      <small class="text-muted ms-2">(Binance จะหัก 0.1% fee จาก base asset เมื่อ BNB หมด — เติม BNB ด่วน)</small>
+    </div>
+
+    <!-- Open Positions panel — compact cards row, click → detail modal. 2026-08-06: collapsible, default collapsed -->
+    <div class="cm-positions-card is-collapsed" id="cm-positions-card">
+      <div class="cm-positions-header" id="cm-positions-header" title="คลิกเพื่อยุบ/ขยาย">
+        <span class="cm-positions-title">📂 Open Positions <span class="cm-positions-count" id="cm-positions-count">0</span></span>
+        <span class="cm-positions-totals" id="cm-positions-totals" hidden>
+          <span class="cm-pt-line">
+            💰 <span class="cm-pt-val mono" id="cm-pt-cost">0.00</span> <span class="cm-pt-unit">USDT</span><span class="thb-eq" id="cm-pt-cost-thb"></span>
+          </span>
+          <span class="cm-pt-sep">·</span>
+          <span class="cm-pt-line">
+            📊 <span class="cm-pt-val mono" id="cm-pt-pnl">+0.0000</span> <span class="cm-pt-unit">USDT</span><span class="cm-pt-sub mono" id="cm-pt-pnl-pct">(+0.000%)</span><span class="thb-eq" id="cm-pt-pnl-thb"></span>
+          </span>
+        </span>
+        <span class="cm-positions-meta">
+          <span id="cm-positions-sub">กำลังโหลด…</span>
+          <button type="button" class="cm-positions-toggle" id="cm-positions-toggle" title="ยุบ/ขยาย" aria-label="ยุบ/ขยาย">▾</button>
+          <button type="button" class="cm-auto-toggle is-off" id="cm-positions-auto" title="Auto Refresh (default OFF ทุกครั้งที่โหลดหน้า) — คลิกเพื่อเปิด" aria-pressed="false">
+            <span class="cm-auto-dot"></span><span class="cm-auto-label">Auto</span>
+          </button>
+          <button type="button" class="btn btn-sm btn-outline-info" id="cm-positions-refresh" title="รีเฟรชราคา (Binance bookTicker)">🔄 Refresh</button>
+        </span>
+      </div>
+      <div id="cm-positions-list" class="cm-positions-grid">
+        <div class="cm-positions-empty">⏳ กำลังโหลด…</div>
+      </div>
+    </div>
+
+    <!-- Filter bar -->
+    <div class="lux-card mb-3">
+      <div class="lux-body py-2">
+        <div class="cm-filter-bar">
+          <select id="cm-filter-status" class="form-select form-select-sm">
+            <option value="all">ทุกสถานะ</option>
+            <option value="running">Running เท่านั้น</option>
+            <option value="running-with-position" selected>Running + มีไม้</option>
+            <option value="stopped">Stopped เท่านั้น</option>
+          </select>
+          <select id="cm-sort" class="form-select form-select-sm">
+            <option value="default">เรียงตามทุน/ไม้ (แนะนำ)</option>
+            <option value="name">เรียงตามชื่อ</option>
+            <option value="symbol">เรียงตาม Symbol</option>
+            <option value="pnl">เรียงตาม Today PnL</option>
+            <option value="tf">เรียงตาม Timeframe</option>
+          </select>
+          <span class="text-muted small ms-auto" id="cm-showing-count">—</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Grid of mini-charts -->
+    <div id="cm-grid" class="cm-grid"></div>
+
+    <!-- Empty state -->
+    <div id="cm-empty" class="cm-empty" hidden>
+      <span class="glyph">📭</span>
+      <div>ยังไม่มีบอทที่ตรงกับเงื่อนไข</div>
+      <div class="small mt-1">ลองเปลี่ยน filter ด้านบน หรือไปที่ <a href="/bots.html" style="color:var(--gold-1);">หน้า Bots</a> เพื่อเปิดบอท</div>
+    </div>
+
+    <!-- Latest Signals panel (top 20 across all running bots) — moved to bottom per request -->
+    <div class="cm-latest-signals-card" id="cm-latest-signals-card">
+      <div class="cm-latest-header">
+        <span class="cm-latest-title">📡 S1 Signals ล่าสุด (50 รายการ)</span>
+        <span class="cm-latest-meta">
+          <span id="cm-latest-signals-count">กำลังโหลด…</span>
+          · <span id="cm-latest-signals-ts">—</span>
+        </span>
+      </div>
+      <div id="cm-latest-signals" class="cm-latest-scroll">
+        <div class="cm-latest-empty">⏳ กำลังโหลด…</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Position detail modal (open when clicking a position card on chart-monitor page) -->
+  <div class="modal fade" id="cmPositionModal" tabindex="-1">
+    <div class="modal-dialog modal-dialog-centered modal-dialog-scrollable modal-lg">
+      <div class="modal-content lux-modal">
+        <div class="modal-header lux-modal-header is-gold">
+          <div class="lux-modal-title-wrap">
+            <span class="lux-modal-icon">📂</span>
+            <div>
+              <h5 class="modal-title mb-0" id="cmPositionModalTitle">Position Detail</h5>
+              <div class="lux-modal-sub" id="cmPositionModalSub">—</div>
+            </div>
+          </div>
+          <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+        </div>
+        <div class="modal-body" id="cmPositionModalBody">
+          <div class="empty-positions">เลือก position เพื่อดูรายละเอียด</div>
+        </div>
+        <div class="modal-footer lux-modal-footer">
+          <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">ปิด</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 2026-08-06: Expand mini-chart modal (default 500 bars, load more) -->
+  <div class="modal fade" id="cmExpandModal" tabindex="-1">
+    <div class="modal-dialog modal-dialog-centered modal-xl">
+      <div class="modal-content lux-modal">
+        <div class="modal-header lux-modal-header is-gold">
+          <div class="lux-modal-title-wrap">
+            <span class="lux-modal-icon">📈</span>
+            <div>
+              <h5 class="modal-title mb-0" id="cmExpandModalTitle">—</h5>
+              <div class="lux-modal-sub" id="cmExpandModalSub">—</div>
+            </div>
+          </div>
+          <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+        </div>
+        <div class="modal-body" id="cmExpandModalBody" style="padding: 0.75rem 1rem;">
+          <div class="d-flex flex-wrap gap-2 align-items-center mb-2" id="cmExpandSignalRow" style="font-size:0.85rem;"></div>
+          <div id="cmExpandChartWrap" style="width:100%; height:500px; background:rgba(0,0,0,0.18); border-radius:8px; position:relative; overflow:hidden;">
+            <div class="cm-minichart-loading">⏳ กำลังโหลด…</div>
+          </div>
+          <div class="d-flex justify-content-between align-items-center mt-2 flex-wrap gap-2">
+            <span class="text-muted-2 small" id="cmExpandStats">—</span>
+            <div class="d-flex gap-2">
+              <button type="button" class="btn btn-sm btn-outline-info" id="cmExpandLoadMore" title="เพิ่มแท่งอีก 500">🔄 Load more (+500)</button>
+              <button type="button" class="btn btn-sm btn-outline-secondary" id="cmExpandReset" title="กลับไป 500 แท่ง">↻ Reset</button>
+            </div>
+          </div>
+        </div>
+        <div class="modal-footer lux-modal-footer">
+          <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">ปิด</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+  <script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
+  <script src="/js/api.js"></script>
+  <script src="/js/priceFormat.js"></script>
+  <script src="/js/ws-client.js"></script>
+  <script>window.NAV_ACTIVE = 'chart-monitor';</script>
+  <script src="/js/partials/nav.js"></script>
+  <script src="/js/partials/dailyTargetGauge.js"></script>
+  <script src="/js/partials/rateLimitGauge.js"></script>
+  <script src="/js/partials/positionCard.js"></script>
+  <script src="/js/luxConfirm.js"></script>
+  <script src="/js/utils/sellReasons.js"></script>
+  <script src="/js/utils/pnlModalColumns.js"></script>
+  <!-- FIX-2026-08-23: Master Config modal (same partial as bots.html) -->
+  <script src="/js/botConfigIO.js"></script>
+  <script src="/js/partials/masterConfigModal.js"></script>
+  <script src="/js/pages/chart-monitor.js"></script>
+</body>
+</html>

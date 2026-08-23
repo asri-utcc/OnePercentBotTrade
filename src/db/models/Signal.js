@@ -27,6 +27,11 @@ const signalSchema = new mongoose.Schema(
 );
 
 signalSchema.index({ symbol: 1, timeframe: 1, candleCloseTime: -1 });
+// FIX-2026-08-04: performance indexes — drives bot-detail signals query + history endpoint
+//   - botId + candleCloseTime (desc) — signals query per bot (most recent first)
+//   - botId + createdAt (desc) — botDetail GET /api/bots/:id, history endpoints
+signalSchema.index({ botId: 1, candleCloseTime: -1 });
+signalSchema.index({ botId: 1, createdAt: -1 });
 
 module.exports = mongoose.model('Signal', signalSchema);
 module.exports.SIGNAL_TYPES = SIGNAL_TYPES;

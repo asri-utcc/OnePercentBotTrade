@@ -8,6 +8,15 @@ const { createApp } = require('./app');
 const dashboardWs = require('./realtime/dashboardWs');
 const botManager = require('./core/botManager');
 const healthMonitor = require('./services/healthMonitor');
+const positionWatchdog = require('./services/positionWatchdog');
+const autoBnbBuyer = require('./services/autoBnbBuyer'); // FIX-2026-08-05: auto-buy BNB service
+const autoAddBot = require('./services/autoAddBot'); // FIX-2026-08-07: auto-add new bot service
+const delistMonitor = require('./services/binanceDelistMonitor'); // FIX-2026-08-06: binance delist detection
+const autoDeleteBot = require('./services/autoDeleteBot'); // FIX-2026-08-08: auto-delete bot (soft delete + 30d restore)
+const { syncBotActionPasswordFromAppConfig } = require('./utils/botActionPasswordSync'); // FIX-2026-08-10: persist login password change to botActionPassword
+const binanceRateLimitConfig = require('./services/binanceRateLimitConfig'); // FIX-2026-08-21: dynamic Binance rate-limit capacity
+const binanceRest = require('./binance/binanceRest'); // FIX-2026-08-21: apply capacity to live token-bucket
+const walletSnapshot = require('./services/walletSnapshot'); // FIX-2026-08-22: daily portfolio-value snapshot scheduler
 
 async function main() {
   logger.info({ env: config.env, port: config.port }, 'starting OnePercentBotTrade');
@@ -38,12 +47,73 @@ async function main() {
     } catch (err) {
       logger.error({ err: err.message }, 'botManager start failed');
     }
+    // FIX-2026-08-10: re-load botActionPassword from AppConfig
+    //   - ถ้า user เคยเปลี่ยน login password ผ่าน /change-password
+    //     ค่าใหม่จะถูก persist ที่ AppConfig.botActionPassword
+    //   - ที่นี่ re-apply เข้า runtime config เพื่อให้ requireBotActionPassword
+    //     ทำงานต่อเนื่องหลัง restart
+    try {
+      await syncBotActionPasswordFromAppConfig();
+    } catch (err) {
+      logger.warn({ err: err.message }, 'botActionPassword sync failed (non-fatal)');
+    }
+    // FIX-2026-08-21: apply persisted Binance rate-limit capacity to live limiter
+    //   - read AppConfig.binanceRateLimitPerMin → push into binanceRest.RateLimiter
+    //   - non-fatal: ถ้า fail จะใช้ default 6000 ที่ hardcode ใน module load
+    try {
+      const cap = await binanceRateLimitConfig.getBinanceRateLimit({ forceRefresh: true });
+      binanceRest.setRateLimitCapacity(cap);
+      logger.info({ capacity: cap }, 'binanceRateLimit: applied at startup');
+    } catch (err) {
+      logger.warn({ err: err.message }, 'binanceRateLimit: startup apply failed (using default 6000)');
+    }
   }).catch((err) => {
     logger.error({ err: err.message }, 'mongoDB connect ultimately failed');
   });
 
   // 6. Start health monitor immediately (so /api/health responds right away)
   healthMonitor.start();
+
+  // FIX-2026-08-22 (weight spike fix): stagger subsystem starts to avoid burst of periodic timers
+  //   - แต่ละ subsystem (healthMonitor/positionWatchdog/autoBnbBuyer/autoAddBot/delistMonitor/
+  //     autoDeleteBot/walletSnapshot) ลงทะเบียน periodic timer ที่จะยิง Binance API
+  //   - ถ้า start พร้อมกัน T=0 → periodic fetch พร้อมกันในอีก 60s ข้างหน้า (burst pattern)
+  //   - delay ระหว่าง start() กระจายเวลา periodic tick ออกจากกัน
+  //   - 500ms × 7 = 3.5s extra startup; negligible vs benefit
+  const SUBSYSTEM_STAGGER_MS = 500;
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  // FIX-2026-08-03: Position Watchdog — F1 + SL-UKC for disabled bots (auto-paused etc.)
+  //   Runs independently of botManager/Trader so paused bots still get armed + force-closed
+  positionWatchdog.start();
+  await sleep(SUBSYSTEM_STAGGER_MS);
+
+  // FIX-2026-08-05: Auto-Buy BNB — periodic scan + MARKET BUY BNB/USDT when value < threshold
+  //   user-configurable via /api/bnb-auto-buy/config (default OFF — must opt-in)
+  autoBnbBuyer.start();
+  await sleep(SUBSYSTEM_STAGGER_MS);
+
+  // FIX-2026-08-07: Auto Add New Bot — periodic scan + create bots for new symbols
+  //   user-configurable via /api/auto-add-bot/config (default OFF — must opt-in)
+  autoAddBot.start();
+  await sleep(SUBSYSTEM_STAGGER_MS);
+
+  // FIX-2026-08-06: Delist Monitor — poll Binance marketing/symbol + /sapi/v1/spot/delist-schedule
+  //   - emits delistMonitor:scheduled → telegram + botManager auto-pause/force-close
+  //   - fail-open: fetch errors keep stale cache + warn only
+  delistMonitor.start();
+  await sleep(SUBSYSTEM_STAGGER_MS);
+
+  // FIX-2026-08-08: Auto Delete Bot — periodic scan + soft-delete bots that are stopped > N days
+  //   - user-configurable via /api/telegram/config (autoDeleteBotEnabled, autoDeleteBotDays, autoDeleteBotWarningDays)
+  //   - default OFF — user must opt-in
+  autoDeleteBot.start();
+  await sleep(SUBSYSTEM_STAGGER_MS);
+
+  // FIX-2026-08-22: Wallet Daily Snapshot — snapshot portfolio value at 00:01 BKK every day
+  //   - On startup: ensures "today" snapshot exists (backfill if missing), then schedules next 00:01 BKK
+  //   - Idempotent upsert by dateKey — no toggle needed, always runs (safe + small footprint)
+  walletSnapshot.start();
 
   // Graceful shutdown
   let shuttingDown = false;
@@ -52,6 +122,12 @@ async function main() {
     shuttingDown = true;
     logger.info({ signal }, 'shutting down');
     try { healthMonitor.stop(); } catch (e) { /* ignore */ }
+    try { positionWatchdog.stop(); } catch (e) { /* ignore */ }
+    try { autoBnbBuyer.stop(); } catch (e) { /* ignore */ }
+    try { autoAddBot.stop(); } catch (e) { /* ignore */ }
+    try { delistMonitor.stop(); } catch (e) { /* ignore */ }
+    try { autoDeleteBot.stop(); } catch (e) { /* ignore */ }
+    try { walletSnapshot.stop(); } catch (e) { /* ignore */ }
     try { await botManager.flushActiveTimeOnShutdown(); } catch (e) { /* ignore */ }
     try { await botManager.stop(); } catch (e) { /* ignore */ }
     server.close(() => {

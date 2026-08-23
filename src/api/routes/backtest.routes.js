@@ -20,6 +20,34 @@ router.post('/', requireAuth, async (req, res) => {
       capitalPerTrade = 10,
       useBnbForFees = false,
       maxConcurrentTrades = 10,
+      // FIX-2026-08-02: DCA mode — opt-in via dcaEnabled. Dispatch to runDcaBacktest when true.
+      dcaEnabled = false,
+      dcaMaxLayers = 3,
+      kcMult = 1.5,
+      xs1Enabled = true,
+      stopLossOnUpperKC = false,
+      autoArmStopLossOnUKC = false,
+      // FIX-2026-08-03: F1 thresholds + SL-UKC profit toggle (Option B parity)
+      autoArmLossPct = 10,
+      autoArmAgeHours = 4,
+      slUkcTriggerOnProfit = false,
+      // FIX-2026-08-03: DCA + Martingale sizing (opt-in, default off — backward compat 100%)
+      //   - martingaleEnabled requires dcaEnabled=true (validated below)
+      //   - layer N notional = capitalPerTrade × mult^(N-1), capped by martingaleMaxLayerNotional
+      martingaleEnabled = false,
+      martingaleMultiplier = 1.5,
+      martingaleMaxLayerNotional = 100,
+      // FIX-2026-08-03: Safe-trade filter #2 (LuxAlgo red pivot-low trendline) — opt-in, default OFF
+      //   - when true: backtester pre-fetches upper-TF (TREND_TF_MAP) klines + computes trendline;
+      //     signal skipped if lastClose <= trendline value at signal time
+      //   - when false (default): no trendline pre-fetch — backward compatible
+      safeTradeTrendlineEnabled = false,
+      // FIX-2026-08-05: Safe-trade filter #3 (no-trade engulfing/SS) — opt-in, default OFF
+      //   - when true: backtester pre-fetches upper-TF (TREND_TF_MAP) klines + computes nt/nt1 per-bar;
+      //     signal skipped if lastKind === 'nt' | 'nt1' at signal time
+      //   - when false (default): no no-trade pre-fetch — backward compatible
+      //   - ใช้ kcMult จาก bot เพื่อ consistent กับ live behavior
+      safeTradeNoTradeEnabled = false,
     } = req.body || {};
 
     if (!symbol || !timeframe || !from || !to) {
@@ -29,7 +57,60 @@ router.post('/', requireAuth, async (req, res) => {
       return res.status(400).json({ error: 'invalid timeframe' });
     }
 
-    logger.info({ symbol, timeframe, from, to }, 'backtest requested');
+    logger.info({
+      symbol, timeframe, from, to, dcaEnabled: !!dcaEnabled, dcaMaxLayers,
+    }, 'backtest requested');
+
+    // FIX-2026-08-02: dispatch to DCA simulator when dcaEnabled=true.
+    // DCA mode is single-stack (1 bot = 1 open stack) so maxConcurrentTrades is irrelevant.
+    if (dcaEnabled) {
+      // FIX-2026-08-03: Martingale requires DCA — reject if user toggles Martingale without DCA
+      if (martingaleEnabled) {
+        return res.status(400).json({
+          error: 'martingaleEnabled requires dcaEnabled=true (Martingale is DCA-only)',
+        });
+      }
+      const result = await backtester.runDcaBacktest({
+        symbol: symbol.toUpperCase(),
+        timeframe,
+        from,
+        to,
+        tpPercent: parseFloat(tpPercent),
+        capitalPerTrade: parseFloat(capitalPerTrade),
+        dcaMaxLayers: parseInt(dcaMaxLayers, 10),
+        useBnbForFees: !!useBnbForFees,
+        kcMult: parseFloat(kcMult),
+        xs1Enabled: xs1Enabled !== false,
+        stopLossOnUpperKC: stopLossOnUpperKC === true,
+        autoArmStopLossOnUKC: autoArmStopLossOnUKC === true,
+        // FIX-2026-08-03: F1 thresholds + SL-UKC profit toggle (Option B parity)
+        autoArmLossPct: parseFloat(autoArmLossPct) || 10,
+        autoArmAgeHours: parseFloat(autoArmAgeHours) || 4,
+        slUkcTriggerOnProfit: slUkcTriggerOnProfit === true,
+        // FIX-2026-08-03: pass-through Martingale params (parity with trader._computeDcaLayerNotional)
+        martingaleEnabled: martingaleEnabled === true,
+        martingaleMultiplier: parseFloat(martingaleMultiplier) || 1.5,
+        martingaleMaxLayerNotional: parseFloat(martingaleMaxLayerNotional) || 100,
+        // FIX-2026-08-03: Safe-trade filter #2 (trendline) — forward flag to DCA backtest
+        safeTradeTrendlineEnabled: safeTradeTrendlineEnabled === true,
+        // FIX-2026-08-05: Safe-trade filter #3 (no-trade engulfing/SS) — forward flag to DCA backtest
+        safeTradeNoTradeEnabled: safeTradeNoTradeEnabled === true,
+      });
+      return res.json({
+        id: result.id,
+        executionModel: result.executionModel,
+        stats: result.stats,
+        signalsCount: result.signalsCount,
+        stacksCount: result.stacksCount,
+        truncated: result.truncated,
+        candlesFetched: result.candlesFetched,
+        requestedDays: result.requestedDays,
+        actualDays: result.actualDays,
+        stacks: result.stacks,
+        signalTrades: result.signalTrades,
+        stillHoldingPositions: result.stillHoldingPositions,
+      });
+    }
 
     const result = await backtester.runBacktest({
       symbol: symbol.toUpperCase(),
@@ -40,6 +121,18 @@ router.post('/', requireAuth, async (req, res) => {
       capitalPerTrade: parseFloat(capitalPerTrade),
       useBnbForFees: !!useBnbForFees,
       maxConcurrentTrades: parseInt(maxConcurrentTrades, 10),
+      // FIX-2026-08-03: F1 thresholds + SL-UKC profit toggle (Option B parity)
+      kcMult: parseFloat(kcMult),
+      xs1Enabled: xs1Enabled !== false,
+      stopLossOnUpperKC: stopLossOnUpperKC === true,
+      autoArmStopLossOnUKC: autoArmStopLossOnUKC === true,
+      autoArmLossPct: parseFloat(autoArmLossPct) || 10,
+      autoArmAgeHours: parseFloat(autoArmAgeHours) || 4,
+      slUkcTriggerOnProfit: slUkcTriggerOnProfit === true,
+      // FIX-2026-08-03: Safe-trade filter #2 (trendline) — forward flag to non-DCA backtest
+      safeTradeTrendlineEnabled: safeTradeTrendlineEnabled === true,
+      // FIX-2026-08-05: Safe-trade filter #3 (no-trade engulfing/SS) — forward flag to non-DCA backtest
+      safeTradeNoTradeEnabled: safeTradeNoTradeEnabled === true,
     });
 
     res.json({
@@ -122,6 +215,21 @@ router.post('/multi', requireAuth, async (req, res) => {
         useBnbForFees: !!b.useBnbForFees,
         kcMult: b.kcMult != null ? parseFloat(b.kcMult) : 1.5,
         xs1Enabled: b.xs1Enabled !== false,
+        // FIX-2026-08-01: forward CB + Upper-KC stop-loss toggles per bot — เดิมชื่อ sls1Enabled
+        cbEnabled: b.cbEnabled !== false,             // default true (parity กับ live)
+        stopLossOnUpperKC: b.stopLossOnUpperKC === true, // default false
+        // FIX-2026-08-02: DCA mode (per bot) — when true, single-stack simulator runs instead of per-trade
+        dcaEnabled: b.dcaEnabled === true,
+        dcaMaxLayers: parseInt(b.dcaMaxLayers != null ? b.dcaMaxLayers : 3, 10),
+        autoArmStopLossOnUKC: b.autoArmStopLossOnUKC === true,
+        // FIX-2026-08-03: F1 thresholds + SL-UKC profit toggle (Option B parity)
+        autoArmLossPct: b.autoArmLossPct != null ? parseFloat(b.autoArmLossPct) : 10,
+        autoArmAgeHours: b.autoArmAgeHours != null ? parseFloat(b.autoArmAgeHours) : 4,
+        slUkcTriggerOnProfit: b.slUkcTriggerOnProfit === true,
+        // FIX-2026-08-03: Safe-trade filter #2 (trendline) — forward per-bot flag
+        safeTradeTrendlineEnabled: b.safeTradeTrendlineEnabled === true,
+        // FIX-2026-08-05: Safe-trade filter #3 (no-trade engulfing/SS) — forward per-bot flag
+        safeTradeNoTradeEnabled: b.safeTradeNoTradeEnabled === true,
       })),
     });
 

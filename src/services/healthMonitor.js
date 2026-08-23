@@ -80,6 +80,34 @@ class HealthMonitor {
   _tick() {
     const status = this.getStatus();
     eventBus.emit('health:update', status);
+
+    // FIX-2026-08-23: piggyback live Binance API weight snapshot on the
+    //   same 5s cadence so the navbar pill updates without a separate timer.
+    //   Read-through only — never throws out of _tick().
+    try {
+      const rl = binanceRest.getRateLimitStatus();
+      const usedPct = rl.capacity > 0
+        ? Math.round((rl.usedEstimated / rl.capacity) * 100)
+        : 0;
+      eventBus.emit('rateLimit:update', {
+        capacity: rl.capacity,
+        tokens: Math.round(rl.tokens),
+        usedEstimated: Math.round(rl.usedEstimated),
+        usedPct,
+        refillRate: rl.refillRate,
+        banRemainingSec: rl.banRemainingSec,
+        circuitBreaker: rl.circuitBreaker
+          ? {
+              state: rl.circuitBreaker.state,
+              usedPct: rl.circuitBreaker.usedPct,
+              cooldownRemainingMs: rl.circuitBreaker.cooldownRemainingMs,
+            }
+          : null,
+        ts: Date.now(),
+      });
+    } catch (err) {
+      logger.warn({ err: err.message }, 'rateLimit:update emit failed');
+    }
   }
 
   getStatus() {

@@ -9,6 +9,8 @@
 let currentYear = new Date().getFullYear();
 let currentMonth = new Date().getMonth() + 1; // 1..12
 let currentBotId = '';
+// FIX-2026-07-31: map botId → symbol — ใช้กับ PriceFormat เพื่อรู้ precision ต่อบอท
+const botSymbolById = new Map();
 let currencyMode = 'USDT'; // 'USDT' | 'THB'
 let calendarData = null; // last /calendar response
 let pnlChart = null;
@@ -16,8 +18,14 @@ let pnlSeries = null;
 let lastSoldUpdateAt = 0; // debounce WS burst refresh
 const WS_DEBOUNCE_MS = 1000;
 
-// ─── chartBaseOptions (mirror bot-detail.js:929-966) ─
+// FIX-2026-07-31: ใช้ Binance tickSize precision (authoritative) — fallback heuristic
+//   botSymbolById map ใช้หา symbol จาก botId filter ปัจจุบัน
 function chartPriceFormatter(price) {
+  if (price === null || price === undefined || !Number.isFinite(price)) return '';
+  let symbol = null;
+  if (currentBotId) symbol = botSymbolById.get(currentBotId) || null;
+  if (window.PriceFormat) return window.PriceFormat.format(price, symbol);
+  // fallback heuristic (เดิม)
   const abs = Math.abs(price);
   if (abs >= 1000) return price.toFixed(2);
   if (abs >= 1) return price.toFixed(4);
@@ -108,6 +116,7 @@ async function loadBots() {
       const status = b.enabled ? '🟢' : '⚪';
       opt.textContent = `${status} ${b.name} (${b.symbol}/${b.timeframe})`;
       sel.appendChild(opt);
+    botSymbolById.set(b._id, b.symbol);
     });
   } catch (err) {
     console.warn('pnl: loadBots failed', err);
@@ -132,44 +141,80 @@ async function loadCalendar() {
 // ─── KPI tiles ───────────────────────────────────────
 function renderKPITiles(data) {
   const { totals, bestDay, worstDay } = data;
+  // FIX-2026-08-01: helper — บังคับ class ให้ดูง่าย
+  //   - pnl > 0 → is-bull (เขียว)
+  //   - pnl < 0 → is-bear (แดง)
+  //   - pnl = 0 → is-flat (เทา, ไม่ใช่ทอง — สีทองหมายถึง Win Rate)
+  const tileClassForPnL = (v) => {
+    if (v > 0) return 'is-bull';
+    if (v < 0) return 'is-bear';
+    return 'is-flat';
+  };
   const tiles = [
     {
       label: 'Total PnL',
       value: formatUsdt(totals.pnl),
-      sub: tileThb(totals.pnl),
-      cls: tileClass(totals.pnl),
+      sub: `${totals.wins}W / ${totals.losses}L`,
+      subThb: tileThb(totals.pnl),
+      icon: totals.pnl >= 0 ? '📈' : '📉',
+      cls: tileClassForPnL(totals.pnl),
+    },
+    {
+      label: 'Gross Profit',
+      value: `+${(totals.grossProfit || 0).toFixed(4)}`,
+      sub: `${totals.wins}W · avg +${(totals.avgWin || 0).toFixed(4)}/ไม้`,
+      subThb: tileThb(totals.grossProfit || 0),
+      icon: '✅',
+      cls: 'is-bull',
+    },
+    {
+      label: 'Gross Loss',
+      value: formatUsdt(totals.grossLoss || 0),
+      sub: `${totals.losses}L · avg ${(totals.avgLoss || 0).toFixed(4)}/ไม้`,
+      subThb: tileThb(totals.grossLoss || 0),
+      icon: '🛑',
+      cls: 'is-bear',
     },
     {
       label: 'Win Rate',
       value: `${totals.winRate}%`,
       sub: `${totals.wins}W / ${totals.losses}L`,
+      subThb: null,
+      icon: '🎯',
       cls: 'is-gold',
     },
     {
       label: 'Total Trades',
       value: totals.trades,
       sub: 'ไม้',
+      subThb: null,
+      icon: '📊',
       cls: 'is-info',
     },
     {
       label: 'Best Day',
       value: bestDay ? formatUsdt(bestDay.pnl) : '—',
       sub: bestDay ? bestDay.date.slice(5) : '—',
-      cls: bestDay ? tileClass(bestDay.pnl) : 'muted',
+      subThb: bestDay ? tileThb(bestDay.pnl) : null,
+      icon: '🏆',
+      cls: bestDay && bestDay.pnl > 0 ? 'is-bull' : 'is-flat',
     },
     {
       label: 'Worst Day',
       value: worstDay ? formatUsdt(worstDay.pnl) : '—',
       sub: worstDay ? worstDay.date.slice(5) : '—',
-      cls: worstDay ? tileClass(worstDay.pnl) : 'muted',
+      subThb: worstDay ? tileThb(worstDay.pnl) : null,
+      icon: '💀',
+      cls: worstDay && worstDay.pnl < 0 ? 'is-bear' : 'is-flat',
     },
   ];
   document.getElementById('pnl-stats-row').innerHTML = tiles
     .map(
       (t) => `<div class="stat-tile ${t.cls}">
-        <div class="tile-label">${t.label}</div>
+        <div class="tile-label">${escapeHtml(t.label)}${t.icon ? ` <span class="glyph">${t.icon}</span>` : ''}</div>
         <div class="tile-value">${t.value}</div>
         ${t.sub ? `<div class="tile-sub">${escapeHtml(t.sub)}</div>` : ''}
+        ${t.subThb ? `<div class="sub-thb">🇹🇭 ${escapeHtml(t.subThb)}</div>` : ''}
       </div>`,
     )
     .join('');
@@ -239,7 +284,7 @@ function renderCalendar(data) {
     `;
     cell.title =
       day.trades > 0
-        ? `${day.date}\nPnL: ${formatUsdt(day.pnl)} USDT${thb != null ? ' (≈ ฿' + formatThbInline(thb) + ')' : ''}\nWins: ${day.wins} · Losses: ${day.losses}\nTrades: ${day.trades}\n(คลิกเพื่อดูรายละเอียด)`
+        ? `${day.date}\nPnL: ${formatUsdt(day.pnl)} USDT${thb != null ? ' (≈ ฿' + formatThbInline(thb) + ')' : ''}\nGross Profit: +${(day.grossProfit || 0).toFixed(4)} USDT (${day.wins}W)\nGross Loss: ${(day.grossLoss || 0).toFixed(4)} USDT (${day.losses}L)\nTrades: ${day.trades}\n(คลิกเพื่อดูรายละเอียด)`
         : day.date;
     // FIX-2026-07-29: คลิกที่ cell (ที่มี trades) → เปิด modal รายละเอียดของวันนั้น
     if (day.trades > 0) {
@@ -272,11 +317,35 @@ async function openDayModal(day) {
   const totalEl = overlay.querySelector('#pnl-modal-total');
 
   titleEl.textContent = `📊 ${day.date}`;
-  const thb = (window.__fx && window.__fx.rate) ? (day.pnl * window.__fx.rate) : null;
+  // FIX-2026-08-01: แสดง grossProfit + grossLoss + มูลค่า THB ครบใน modal header
+  const grossProfit = (day.grossProfit || 0);
+  const grossLoss = (day.grossLoss || 0);
+  const total = day.pnl;
+  const fxRate = (window.__fx && window.__fx.rate) ? window.__fx.rate : null;
+  const thb = fxRate != null ? (total * fxRate) : null;
+  const grossProfitThb = fxRate != null ? (grossProfit * fxRate) : null;
+  const grossLossThb = fxRate != null ? (grossLoss * fxRate) : null;
+  const totalSignCls = total > 0 ? 'is-bull' : (total < 0 ? 'is-bear' : '');
   totalEl.innerHTML = `
-    <span class="${day.pnl >= 0 ? 'is-bull' : 'is-bear'}">${formatUsdt(day.pnl)} USDT</span>
-    ${thb != null ? `<span class="muted">≈ ฿${formatThbInline(thb)}</span>` : ''}
-    <span class="muted">· ${day.trades} ไม้ · ${day.wins}W/${day.losses}L · ${day.trades ? Math.round((day.wins / day.trades) * 100) : 0}% win</span>
+    <div class="pnl-modal-summary-row">
+      <span class="pnl-modal-main-pnl ${totalSignCls}">${formatUsdt(total)} <span class="unit">USDT</span></span>
+      ${thb != null ? `<span class="pnl-modal-thb ${totalSignCls}">≈ ${thb >= 0 ? '+' : ''}฿${formatThbInline(thb)}</span>` : '<span class="muted">FX ไม่พร้อม</span>'}
+    </div>
+    <div class="pnl-modal-gl-row">
+      <span class="gl-pill is-bull" title="ผลรวมไม้ที่กำไร — ${day.wins} ไม้">
+        <span class="gl-label">กำไร</span>
+        +${grossProfit.toFixed(4)} USDT
+        ${grossProfitThb != null ? `<span class="gl-thb">≈ +฿${formatThbInline(grossProfitThb)}</span>` : ''}
+        <span class="gl-count">(${day.wins}W)</span>
+      </span>
+      <span class="gl-pill is-bear" title="ผลรวมไม้ที่ขาดทุน — ${day.losses} ไม้">
+        <span class="gl-label">ขาดทุน</span>
+        ${grossLoss.toFixed(4)} USDT
+        ${grossLossThb != null ? `<span class="gl-thb">≈ ฿${formatThbInline(Math.abs(grossLossThb))}</span>` : ''}
+        <span class="gl-count">(${day.losses}L)</span>
+      </span>
+      <span class="muted">· ${day.trades} ไม้ · ${day.trades ? Math.round((day.wins / day.trades) * 100) : 0}% win</span>
+    </div>
   `;
   body.innerHTML = '<div class="text-center py-4 text-muted-3">กำลังโหลด…</div>';
   overlay.classList.add('is-open');
@@ -286,7 +355,16 @@ async function openDayModal(day) {
     const params = new URLSearchParams({ from: day.date, to: day.date });
     if (currentBotId) params.set('botId', currentBotId);
     const data = await API.get(`/api/pnl/day?${params}`);
-    renderModalTrades(body, data.trades || []);
+    const trades = data.trades || [];
+    _modalOverlay._lastTrades = trades; // stash for column-toggle re-render
+    renderModalTrades(body, trades);
+    // update count badge
+    const countEl = overlay.querySelector('#pnl-col-count');
+    if (countEl) {
+      const visibleIds = window.PnlModalColumns.loadVisibleColumns();
+      const total = window.PnlModalColumns.COLUMN_DEFS.length;
+      countEl.textContent = `${visibleIds.length}/${total}`;
+    }
   } catch (err) {
     body.innerHTML = `<div class="text-center py-4 text-muted-3">โหลดล้มเหลว: ${escapeHtml(err.message || 'unknown')}</div>`;
   }
@@ -297,35 +375,16 @@ function renderModalTrades(container, trades) {
     container.innerHTML = '<div class="text-center py-4 text-muted-3">ไม่มีไม้</div>';
     return;
   }
-  const rows = trades.map((t) => {
-    const pnl = t.realizedPnl || 0;
-    const cls = pnl > 0 ? 'pnl-bull' : pnl < 0 ? 'pnl-bear' : '';
-    const ts = t.sellFilledAt ? new Date(t.sellFilledAt).toLocaleString('th-TH', { hour: '2-digit', minute: '2-digit', day: '2-digit', month: 'short' }) : '';
-    const thb = (window.__fx && window.__fx.rate) ? (pnl * window.__fx.rate) : null;
-    return `<tr>
-      <td><span class="badge-bot">${escapeHtml(t.botName || '?')}</span></td>
-      <td>${escapeHtml(t.symbol || '')}</td>
-      <td class="text-end">${t.entryPrice ? parseFloat(t.entryPrice).toFixed(4) : '—'}</td>
-      <td class="text-end">${t.exitPrice ? parseFloat(t.exitPrice).toFixed(4) : '—'}</td>
-      <td class="text-end">${t.qty ? parseFloat(t.qty).toFixed(4) : '—'}</td>
-      <td class="text-end ${cls}">${formatUsdt(pnl)}${thb != null ? `<br><span class="thb-sub">≈ ฿${formatThbInline(thb)}</span>` : ''}</td>
-      <td class="text-end muted">${ts}</td>
-    </tr>`;
-  }).join('');
-  container.innerHTML = `
-    <table class="pnl-modal-table">
-      <thead>
-        <tr>
-          <th>Bot</th><th>Symbol</th>
-          <th class="text-end">Entry</th><th class="text-end">Exit</th>
-          <th class="text-end">Qty</th>
-          <th class="text-end">PnL</th>
-          <th class="text-end">เวลา</th>
-        </tr>
-      </thead>
-      <tbody>${rows}</tbody>
-    </table>
-  `;
+  // FIX-2026-08-09 (rev2): delegate to shared module pnlModalColumns.js
+  //   - column definitions + render + toggle UI centralized
+  //   - removes essential lock — all 9 columns toggleable
+  //   - shared with chart-monitor.js for Today PnL modal
+  const table = window.PnlModalColumns.buildTableHtml(trades, {
+    escHtml: escapeHtml,
+    formatUsdt,
+    formatThbInline,
+  });
+  container.innerHTML = `<table class="pnl-modal-table">${table.html}</table>`;
 }
 
 function buildModalSkeleton() {
@@ -335,7 +394,14 @@ function buildModalSkeleton() {
     <div class="pnl-modal-card">
       <div class="pnl-modal-header">
         <h5 id="pnl-modal-title">—</h5>
-        <button type="button" class="pnl-modal-close" aria-label="ปิด">✕</button>
+        <div class="pnl-modal-actions">
+          <button type="button" id="pnl-col-toggle" class="pnl-col-toggle-btn" aria-label="เลือกคอลัมน์">
+            <span>⚙️ คอลัมน์</span>
+            <span class="count" id="pnl-col-count">—</span>
+          </button>
+          <button type="button" class="pnl-modal-close" aria-label="ปิด">✕</button>
+        </div>
+        <div id="pnl-col-menu" class="pnl-col-menu" style="display:none;"></div>
       </div>
       <div id="pnl-modal-total" class="pnl-modal-total"></div>
       <div id="pnl-modal-body" class="pnl-modal-body"></div>
@@ -347,6 +413,49 @@ function buildModalSkeleton() {
   overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.classList.remove('is-open'); });
   document.addEventListener('keydown', (e) => { if (e.key === 'Escape') overlay.classList.remove('is-open'); });
   _modalOverlay = overlay;
+
+  // FIX-2026-08-09: column toggle handler
+  const toggleBtn = overlay.querySelector('#pnl-col-toggle');
+  const menu = overlay.querySelector('#pnl-col-menu');
+  toggleBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (menu.style.display === 'none') {
+      renderColumnMenu(menu);
+      menu.style.display = 'block';
+    } else {
+      menu.style.display = 'none';
+    }
+  });
+  // close menu when clicking outside
+  document.addEventListener('click', (e) => {
+    if (!menu.contains(e.target) && e.target !== toggleBtn && !toggleBtn.contains(e.target)) {
+      menu.style.display = 'none';
+    }
+  });
+}
+
+// FIX-2026-08-09 (rev2): delegate to shared module — column definitions + render + menu centralized
+//   - all 9 columns are toggleable (no essential lock)
+//   - menu actions: แสดงทั้งหมด / ปิดทั้งหมด / รีเซ็ต (default per viewport)
+function renderColumnMenu(menu) {
+  const onChange = () => {
+    const body = _modalOverlay.querySelector('#pnl-modal-body');
+    if (body && _modalOverlay._lastTrades) {
+      renderModalTrades(body, _modalOverlay._lastTrades);
+    }
+    // update count badge
+    const countEl = _modalOverlay.querySelector('#pnl-col-count');
+    if (countEl) {
+      const visibleIds = window.PnlModalColumns.loadVisibleColumns();
+      const total = window.PnlModalColumns.COLUMN_DEFS.length;
+      countEl.textContent = `${visibleIds.length}/${total}`;
+    }
+  };
+  window.PnlModalColumns.renderColumnMenu(menu, onChange);
+}
+
+function saveAndReapply(_ids, _body) {
+  // no-op (kept for back-compat) — onChange callback in renderColumnMenu handles re-render
 }
 
 // ─── Chart load + render ─────────────────────────────
@@ -543,6 +652,8 @@ function setupNav() {
 // ─── Init ────────────────────────────────────────────
 (async () => {
   setupNav();
+  // FIX-2026-07-31: preload Binance tickSize precision สำหรับ PriceFormat
+  if (window.PriceFormat) await window.PriceFormat.load();
   await loadBots();
   await Promise.all([loadCalendar(), loadChart()]);
   setupWS();

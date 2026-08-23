@@ -62,6 +62,16 @@ router.get('/calendar', requireAuth, async (req, res) => {
             },
           },
           pnl: { $sum: '$realizedPnl' },
+          // FIX-2026-08-01: แยก gross profit vs gross loss (mirror frontend UX request)
+          //   - grossProfit: sum ของ realizedPnl > 0 (only winning trades)
+          //   - grossLoss: sum ของ realizedPnl < 0 (absolute value ไม่ใส่ - — เก็บเป็นลบเพื่อความง่าย)
+          //   - verify: grossProfit + grossLoss ≈ pnl (จะตรงเสมอเพราะ sum ของค่าทั้งสองกลุ่ม = sum ใหญ่)
+          grossProfit: {
+            $sum: { $cond: [{ $gt: ['$realizedPnl', 0] }, '$realizedPnl', 0] },
+          },
+          grossLoss: {
+            $sum: { $cond: [{ $lt: ['$realizedPnl', 0] }, '$realizedPnl', 0] },
+          },
           trades: { $sum: 1 },
           wins: { $sum: { $cond: [{ $gt: ['$realizedPnl', 0] }, 1, 0] } },
           losses: { $sum: { $cond: [{ $lt: ['$realizedPnl', 0] }, 1, 0] } },
@@ -80,6 +90,9 @@ router.get('/calendar', requireAuth, async (req, res) => {
       result.push({
         date: dateStr,
         pnl: row ? Number(row.pnl.toFixed(4)) : 0,
+        // FIX-2026-08-01: grossProfit + grossLoss (per-day)
+        grossProfit: row ? Number(row.grossProfit.toFixed(4)) : 0,
+        grossLoss: row ? Number(row.grossLoss.toFixed(4)) : 0, // negative number
         trades: row ? row.trades : 0,
         wins: row ? row.wins : 0,
         losses: row ? row.losses : 0,
@@ -90,11 +103,13 @@ router.get('/calendar', requireAuth, async (req, res) => {
     const totals = result.reduce(
       (a, d) => ({
         pnl: a.pnl + d.pnl,
+        grossProfit: a.grossProfit + d.grossProfit,
+        grossLoss: a.grossLoss + d.grossLoss, // sum of negatives
         trades: a.trades + d.trades,
         wins: a.wins + d.wins,
         losses: a.losses + d.losses,
       }),
-      { pnl: 0, trades: 0, wins: 0, losses: 0 },
+      { pnl: 0, grossProfit: 0, grossLoss: 0, trades: 0, wins: 0, losses: 0 },
     );
     const tradeDays = result.filter((d) => d.trades > 0);
     const best = tradeDays.length
@@ -111,11 +126,23 @@ router.get('/calendar', requireAuth, async (req, res) => {
       days: result,
       totals: {
         pnl: Number(totals.pnl.toFixed(4)),
+        // FIX-2026-08-01: grossProfit + grossLoss (totals) — grossLoss คงเป็นลบ
+        grossProfit: Number(totals.grossProfit.toFixed(4)),
+        grossLoss: Number(totals.grossLoss.toFixed(4)),
         trades: totals.trades,
         wins: totals.wins,
         losses: totals.losses,
         winRate: totals.trades
           ? Number(((totals.wins / totals.trades) * 100).toFixed(1))
+          : 0,
+        // FIX-2026-08-01: avgWin / avgLoss per trade (เฉพ่ยต่อไม้)
+        //   - avgWin: grossProfit / wins (0 ถ้าไม่มีไม้ชนะ)
+        //   - avgLoss: grossLoss / losses (negative, 0 ถ้าไม่มีไม้แพ้)
+        avgWin: totals.wins
+          ? Number((totals.grossProfit / totals.wins).toFixed(4))
+          : 0,
+        avgLoss: totals.losses
+          ? Number((totals.grossLoss / totals.losses).toFixed(4))
           : 0,
       },
       bestDay: best ? { date: best.date, pnl: best.pnl } : null,
@@ -151,8 +178,11 @@ router.get('/series', requireAuth, async (req, res) => {
     }
 
     const trades = await Trade.find(match)
-      .select('_id botId symbol realizedPnl sellFilledAt')
+      // FIX-2026-08-09: include sellReason* fields so pnl.html can render pills + tooltip
+      .select('_id botId symbol realizedPnl sellFilledAt sellReason sellReasonDetail sellReasonSource sellReasonAt')
       .sort({ sellFilledAt: 1 }) // ascending — chart builds cumulative left→right
+      // FIX-2026-08-04: cap with .limit() to prevent unbounded year-range queries (was 10k+ docs JSON-serialized)
+      .limit(5000)
       .lean();
 
     // enrich with bot name (สำหรับ tooltip / drill-down)
@@ -165,6 +195,26 @@ router.get('/series', requireAuth, async (req, res) => {
       to: req.query.to,
       botId: botId || null,
       count: trades.length,
+      // FIX-2026-08-01: grossProfit + grossLoss + avgWin + avgLoss (เหมือน /day endpoint)
+      totals: (() => {
+        const grossProfit = trades
+          .filter((t) => (t.realizedPnl || 0) > 0)
+          .reduce((s, t) => s + t.realizedPnl, 0);
+        const grossLoss = trades
+          .filter((t) => (t.realizedPnl || 0) < 0)
+          .reduce((s, t) => s + t.realizedPnl, 0);
+        const wins = trades.filter((t) => (t.realizedPnl || 0) > 0).length;
+        const losses = trades.filter((t) => (t.realizedPnl || 0) < 0).length;
+        return {
+          pnl: Number((grossProfit + grossLoss).toFixed(4)),
+          grossProfit: Number(grossProfit.toFixed(4)),
+          grossLoss: Number(grossLoss.toFixed(4)),
+          wins,
+          losses,
+          avgWin: wins ? Number((grossProfit / wins).toFixed(4)) : 0,
+          avgLoss: losses ? Number((grossLoss / losses).toFixed(4)) : 0,
+        };
+      })(),
       trades: trades.map((t) => ({
         _id: t._id,
         botId: t.botId,
@@ -172,6 +222,11 @@ router.get('/series', requireAuth, async (req, res) => {
         symbol: t.symbol,
         realizedPnl: t.realizedPnl,
         sellFilledAt: t.sellFilledAt,
+        // FIX-2026-08-09: pass through sellReason fields so frontend can render pill + tooltip
+        sellReason: t.sellReason || null,
+        sellReasonDetail: t.sellReasonDetail || null,
+        sellReasonSource: t.sellReasonSource || null,
+        sellReasonAt: t.sellReasonAt || null,
       })),
     });
   } catch (err) {
@@ -201,8 +256,17 @@ router.get('/day', requireAuth, async (req, res) => {
     }
 
     const trades = await Trade.find(match)
-      .select('_id botId symbol entryPrice exitPrice qty realizedPnl sellFilledAt side')
+      // FIX-2026-08-09: include sellReason* + qty (entry/exit) + entry/exit price fields so pnl.html modal can render pills + Entry/Exit Qty columns
+      //   - entryPrice = buyPrice (avg buy fill price)
+      //   - exitPrice = sellAvgPrice (avg SELL fill price) — fallback sellPrice
+      //   - entryQty = buyQty (total bought)
+      //   - exitQty = sellFilledQty (actually filled on SELL; partial-fill → < buyQty)
+      //   - isPartialSell flag สำหรับบอกผู้ใช้เมื่อ partial-fill
+      //   - stackTotalQty / stackBep / dcaLayerCount สำหรับ DCA stack branch (เดิมมีอยู่แล้ว)
+      .select('_id botId symbol buyPrice sellAvgPrice sellPrice qty realizedPnl sellFilledAt side sellReason sellReasonDetail sellReasonSource sellReasonAt buyQty sellFilledQty sellQty isPartialSell isDcaStack stackTotalQty stackBep dcaLayerCount')
       .sort({ sellFilledAt: 1 })
+      // FIX-2026-08-04: cap with .limit() to prevent unbounded single-day queries
+      .limit(5000)
       .lean();
 
     const botIds = [...new Set(trades.map((t) => String(t.botId)))];
@@ -214,17 +278,61 @@ router.get('/day', requireAuth, async (req, res) => {
       to: req.query.to,
       botId: botId || null,
       count: trades.length,
+      // FIX-2026-08-01: grossProfit + grossLoss + avgWin + avgLoss สำหรับ modal summary
+      //   - grossProfit: sum ของ realizedPnl > 0
+      //   - grossLoss: sum ของ realizedPnl < 0 (คงเป็นลบ)
+      //   - wins/losses: นับจำนวนไม้
+      totals: (() => {
+        const grossProfit = trades
+          .filter((t) => (t.realizedPnl || 0) > 0)
+          .reduce((s, t) => s + t.realizedPnl, 0);
+        const grossLoss = trades
+          .filter((t) => (t.realizedPnl || 0) < 0)
+          .reduce((s, t) => s + t.realizedPnl, 0);
+        const wins = trades.filter((t) => (t.realizedPnl || 0) > 0).length;
+        const losses = trades.filter((t) => (t.realizedPnl || 0) < 0).length;
+        return {
+          pnl: Number((grossProfit + grossLoss).toFixed(4)),
+          grossProfit: Number(grossProfit.toFixed(4)),
+          grossLoss: Number(grossLoss.toFixed(4)),
+          wins,
+          losses,
+          avgWin: wins ? Number((grossProfit / wins).toFixed(4)) : 0,
+          avgLoss: losses ? Number((grossLoss / losses).toFixed(4)) : 0,
+        };
+      })(),
       trades: trades.map((t) => ({
         _id: t._id,
         botId: t.botId,
         botName: botNameMap[String(t.botId)] || '?',
         symbol: t.symbol,
         side: t.side,
-        entryPrice: t.entryPrice,
-        exitPrice: t.exitPrice,
+        // FIX-2026-08-09: map schema fields buyPrice → entryPrice + sellAvgPrice → exitPrice
+        //   - เดิม frontend ใช้ t.entryPrice/t.exitPrice แต่ schema เก็บเป็น buyPrice/sellAvgPrice
+        //     → ผลลัพธ์คือ cell แสดง '—' ตลอด
+        //   - fallback: DCA stack → stackBep for entry, sellPrice for exit
+        entryPrice: t.isDcaStack ? t.stackBep : t.buyPrice,
+        exitPrice: t.sellAvgPrice != null ? t.sellAvgPrice : t.sellPrice,
         qty: t.qty,
         realizedPnl: t.realizedPnl,
         sellFilledAt: t.sellFilledAt,
+        // FIX-2026-08-09: pass through sellReason fields so pnl.html modal can render pill + tooltip
+        sellReason: t.sellReason || null,
+        sellReasonDetail: t.sellReasonDetail || null,
+        sellReasonSource: t.sellReasonSource || null,
+        sellReasonAt: t.sellReasonAt || null,
+        // FIX-2026-08-09: Entry/Exit Qty columns for pnl modal (mobile toggle-friendly)
+        //   - entryQty = buyQty (total bought)
+        //   - exitQty = sellFilledQty (actually filled on SELL; partial-fill → < buyQty)
+        //     - falls back to sellQty when sellFilledQty is null (fully-filled trades ส่วนใหญ่)
+        //   - DCA stack: stackTotalQty (aggregate of all layers)
+        entryQty: t.isDcaStack ? t.stackTotalQty : t.buyQty,
+        exitQty: t.sellFilledQty != null ? t.sellFilledQty : t.sellQty,
+        sellQtyOrdered: t.sellQty,
+        isPartialSell: t.isPartialSell === true || (t.buyQty && t.sellFilledQty && t.sellFilledQty < t.buyQty),
+        isDcaStack: t.isDcaStack === true,
+        dcaLayerCount: t.dcaLayerCount || null,
+        stackBep: t.stackBep || null,
       })),
     });
   } catch (err) {

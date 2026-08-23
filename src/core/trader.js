@@ -7,10 +7,34 @@ const fees = require('../binance/fees');
 const klineCache = require('../services/klineCache');
 const eventBus = require('../services/eventBus');
 const signalEngine = require('./signalEngine');
+const indicators = require('./indicators'); // FIX-2026-08-01: needed by signalEngine.checkSafeTrade (ema)
+const volatilityScanner = require('./volatilityScanner');
+const dps = require('./dynamicPositionSizing'); // FIX-2026-08-08: Feature #1 — Dynamic Position Sizing
+const cbAutoUnlock = require('./cbAutoUnlock'); // FIX-2026-08-08: Feature #3 — Auto Unlock Cooldown
+const cbVersion = require('./cbVersion'); // FIX-2026-08-08: Feature #2 — CB Version routing (v2 vs v3)
+const cbv5MasterToggle = require('./cbv5MasterToggle'); // FIX-2026-08-12 (audit Q9): master CBv5 toggle (AppConfig.cbv5MasterEnabled)
+const cbCooldownGate = require('./cbCooldownGate'); // FIX-2026-08-12 (audit Q11): pre-BUY CBv5 uses evaluateCbCooldown for fresh DB read
+const cbPatternEvaluator = require('./cbPatternEvaluator'); // FIX-2026-08-09: canonical REST window + 2-tick confirmation
+const cbCrossCooldown = require('./cbCrossCooldown'); // FIX-2026-08-10: CBv5 cross-version cooldown interaction (Direction A/B)
+const masterConfig = require('./masterConfig'); // FIX-2026-08-08: master toggles (DPS, CB Auto-Unlock)
+const walletReserve = require('../services/walletReserve'); // FIX-2026-08-19: USDT reserve (กั๊กเงิน) — ลด availableUsdt ก่อนตรวจ BUY
+const buyCommitment = require('../services/buyCommitment'); // FIX-2026-08-21: atomic in-process claim กัน race ระหว่างบอท (แก้ "กั๊กเงินหลุด")
+const telegramNotifier = require('../services/telegramNotifier');
 const logger = require('../utils/logger');
 const Bot = require('../db/models/Bot');
 const Trade = require('../db/models/Trade');
 const Signal = require('../db/models/Signal');
+
+// FIX-2026-08-01 (audit H1/R4): CB fire-suppression window
+//   - หลัง CB panic-close สำเร็จ ห้ามเปิด BUY ใหม่เป็นเวลา N ms
+//   - กัน race: onCandleClosed CB fires (force-close) + S1 BUY on same candle
+//   - default 5 minutes (300_000 ms) — ให้เวลา panic-sell dust settle + กัน FOMO re-entry
+const CB_SUPPRESS_MS = 5 * 60 * 1000;
+
+// FIX-2026-08-07: CBv2 cooldown duration (HYBRID mode — replaces short CBV2_SUPPRESS_MS)
+//   - ใช้ bot.cbv2LockHours (user-configurable, default 8) แปลงเป็น ms แบบ dynamic ใน placeBuy
+//   - เดิม: short 30s suppression + bot.enabled=false (lock) → HYBRID: long window + bot ยัง enabled
+//   - ค่านี้ไม่ fixed เพราะ duration ขึ้นกับ cbv2LockHours ของบอทนั้น (เปลี่ยนได้ runtime)
 
 /**
  * Trader class — state machine ต่อบอท สำหรับ maker-only BUY → TP SELL
@@ -62,6 +86,10 @@ class Trader {
     // FIX-2026-07-23: deadline tracking for partial-fill finalizer (instance-only, not persisted)
     this.partialFillDeadlineAt = null;
     this._partialFillTradeId = null;
+    // FIX-2026-07-30: SELL partial-fill watcher — mirror BUY side (issue: DEXE orphan incident)
+    this.sellPartialFillTimer = null;
+    this.sellPartialFillDeadlineAt = null;
+    this._sellPartialFillTradeId = null;
     // FIX P1.3: explicit init กัน undefined reference
     this.reconcileInFlight = false;
     // FIX P1.5: holding retry counter (instance-level) — กัน retry loop infinite
@@ -70,6 +98,28 @@ class Trader {
     this.stopLossCheckInFlight = false;
     // FIX P2.1: serialized bot:status emit — กัน race ระหว่าง error/idle/selling
     this._statusEmitQueue = Promise.resolve();
+    // FIX-2026-07-31 (BUG-14): track startup timers T3/T4 + BUY cooldown timer T5
+    //   เดิม: setTimeout แบบไม่ assign handle → ไม่สามารถ clear ใน stop() → timer leak
+    //   ถ้า bot.stop() แล้ว timer fires → placeBuy บน stopped bot + ใช้ stale candle
+    this.startupSweepTimer = null;
+    this.startupBalanceTimer = null;
+    this.buyCooldownTimer = null;
+    // FIX-2026-08-06 (FIDA incident): tpPercent TTL cache — defense-in-depth กันกรณี bot:updated event ตกหล่น
+    //   - primary: bot:updated event (emit จาก tpUpdater / botManager / API routes) → _botUpdatedHandler refresh this.bot
+    //   - secondary: ทุก 5s _computeTp() จะเช็คว่า this.bot.tpPercent เก่าเกิน TTL หรือไม่
+    //     ถ้าเก่า → re-read จาก DB (เฉพาะ tpPercent-related fields) แล้ว update this.bot
+    //   - ทำให้แม้ event bus มีปัญหา TP ก็ sync ภายใน ≤5s
+    //   - เก็บ cache time per-field เพื่อให้ selective refresh (ไม่ re-fetch ทั้ง doc)
+    this._tpCacheAt = 0;
+    this._tpCacheFields = {}; // { tpPercent, tpTrendEnabled, tpTrendMultiplier, tpOnFloor, updateTpAt }
+    this._tpCacheTtlMs = 5000; // 5s — balance between freshness + DB load
+
+    // FIX-2026-08-22 (weight spike): per-instance sweep jitter — de-align 57 bots' periodic ticks
+    //   - เดิมทุก trader start() ใช้ SWEEP_INTERVAL_MS เดียวกัน → reconcileKlines() burst เดียวกันทุก 5 นาที
+    //   - ±10% jitter: 5min→4.5-5.5min, 15min→13.5-16.5min → ticks กระจายตัวใน window ~33s
+    const _jitter = (base, pct = 0.1) => Math.round(base * (1 + (Math.random() * 2 - 1) * pct));
+    this.sweepIntervalMs = _jitter(SWEEP_INTERVAL_MS);                 // 5min ±10%
+    this.reconcileBalanceIntervalMs = _jitter(15 * 60 * 1000);            // 15min ±10%
   }
 
   // ─── FIX P2.1: serialized bot:status emit ──────────────────────────
@@ -132,37 +182,215 @@ class Trader {
       this.reconcileKlines('periodic-sweep')
         .catch((err) => logger.warn({ err: err.message }, 'trader: periodic sweep failed'))
         .finally(() => { this.sweepInFlight = false; });
-    }, SWEEP_INTERVAL_MS);
+    }, this.sweepIntervalMs);
+
+    // FIX-2026-07-31 (BUG-9): periodic reconcileAccountBalance — previously fired only on startup
+    //   (one-shot L166) so SELL-orphan cross-check + balance reconciliation never ran after first
+    //   4s post-start. Now runs every 15min per bot (FIX-2026-08-04: 5min → 15min เพื่อลด Binance account API load).
+    //   - logic เดิม 100% — reconcileAccountBalance() ยังทำงานเหมือนเดิม
+    //   - orphan detection ยังครบถ้วน แค่ห่างขึ้น
+    this.reconcileBalanceTimer = null;
+    this._reconcileBalanceInFlight = false;
+    // FIX-2026-08-22 (weight spike): per-instance jitter set in constructor (this.reconcileBalanceIntervalMs)
+    this.reconcileBalanceTimer = setInterval(() => {
+      if (!this.running || this._reconcileBalanceInFlight) return;
+      this._reconcileBalanceInFlight = true;
+      this.reconcileAccountBalance({ force: false })
+        .catch((err) => logger.warn({ err: err.message }, 'trader: periodic reconcileAccountBalance failed'))
+        .finally(() => { this._reconcileBalanceInFlight = false; });
+    }, this.reconcileBalanceIntervalMs);
 
     // FIX-2026-07-15: also reconcile on WS reconnect (immediate catch-up vs 90s sweep wait)
+    // FIX-2026-08-22: per-symbol debounce + jitter — �ัน burst ตอน WS reconnect
+    //   - ปัญหาเดิม: ทุก trader debounce 500ms เท่า�ัน → 100+ reconcileKlines() พร้อมกัน
+    //     → CB evaluators ยิง getKlines({limit:500}) burst → Binance weight 5990/6000 → IP ban 41s
+    //   - fix 1: per-symbol debounce Map — coalesce multi-bot same-symbol
+    //   - fix 2: jitter 200-1500ms — กระจาย reconcileKlines ในหน้าต่าง ~1.3s แทนพร้อมกัน
+    //   - เมื่อ rate limiter refill 100/s, jitter 1.3s ลด peak load ลง ~10×
+    this._marketReconnectDebounceMap = null; // init ใน handler เพื่อ lazy alloc
     this._marketReconnectHandler = () => {
-      // เล็กน้อย debounce กัน reconnect storm (Binance อาจ reconnect หลายรอบ)
-      if (this._marketReconnectDebounce) clearTimeout(this._marketReconnectDebounce);
-      this._marketReconnectDebounce = setTimeout(() => {
+      if (!this.running) return;
+      if (!this._marketReconnectDebounceMap) this._marketReconnectDebounceMap = new Map();
+      const sym = this.bot.symbol;
+      const prev = this._marketReconnectDebounceMap.get(sym);
+      if (prev) clearTimeout(prev);
+      const jitterMs = 200 + Math.floor(Math.random() * 1300); // 200-1500ms
+      const handle = setTimeout(() => {
+        if (this._marketReconnectDebounceMap) this._marketReconnectDebounceMap.delete(sym);
         if (!this.running) return;
         this.reconcileKlines('ws-reconnect').catch((err) =>
           logger.warn({ err: err.message }, 'trader: ws-reconnect sweep failed')
         );
-      }, 500);
+      }, jitterMs);
+      this._marketReconnectDebounceMap.set(sym, handle);
     };
     eventBus.on('market:reconnected', this._marketReconnectHandler);
 
+    // FIX-2026-07-31: F1 auto-arm SL-on-UKC state (mutex per candle)
+    this._autoArmInFlight = false;
+    // FIX-2026-07-31: F2 TP trend multiplier state (60s cache)
+    this._tpTrendCache = { at: 0, trendState: null, trendTF: null };
+    this._tpTrendInFlight = false;
+    // FIX-2026-08-01 (audit H1/R4): CB fire-suppression gate
+    //   - timestamp of last successful CB panic-close (Date.now() ms)
+    //   - placeBuy consults this to skip new BUY for CB_SUPPRESS_MS after a panic-close
+    //   - prevents S1 BUY on the SAME candle that triggered CB (race in onCandleClosed)
+    this._cbFiredAt = 0;
+    // FIX-2026-08-01: restore cbLastFiredAt from DB → continue suppression across bot restart
+    // FIX-2026-08-09: NaN guard — new Date(undefined).getTime() returns NaN → gate bypass risk
+    if (this.bot.cbLastFiredAt) {
+      const restoredAt = new Date(this.bot.cbLastFiredAt).getTime();
+      if (Number.isFinite(restoredAt)) {
+        this._cbFiredAt = restoredAt;
+        logger.info({
+          botId: this.bot._id.toString(),
+          cbLastFiredAt: this.bot.cbLastFiredAt,
+          restoredAt,
+        }, 'trader: cbLastFiredAt restored from DB → suppression continues');
+      } else {
+        logger.warn({
+          botId: this.bot._id.toString(),
+          cbLastFiredAt: this.bot.cbLastFiredAt,
+          cbLastFiredAtType: typeof this.bot.cbLastFiredAt,
+        }, 'trader: cbLastFiredAt invalid (NaN/Infinity) — _cbFiredAt reset to 0');
+      }
+    }
+    // FIX-2026-08-07: CBv2 cooldown gate (HYBRID — replaces 30s suppression with cbv2LockHours window)
+    //   - timestamp of last CBv2 fire (Date.now() ms) — placeBuy consults (now - _cbv2FiredAt) < cbv2LockHours*3600000
+    //   - prevents S1 BUY during the cooldown window after a CBv2 force-close
+    //   - HYBRID: bot stays enabled, Auto-pause still works — _cbv2FiredAt is the only gate
+    //   - restore from bot.cbv2LastFiredAt across restart (cross-restart continuity)
+    // FIX-2026-08-09: NaN guard — new Date(undefined).getTime() returns NaN → gate bypass risk
+    //   - mirror cbCooldownGate.evaluateCbCooldown behavior
+    this._cbv2FiredAt = 0;
+    if (this.bot.cbv2LastFiredAt) {
+      const restoredAt = new Date(this.bot.cbv2LastFiredAt).getTime();
+      if (Number.isFinite(restoredAt)) {
+        this._cbv2FiredAt = restoredAt;
+        logger.info({
+          botId: this.bot._id.toString(),
+          symbol: this.bot.symbol,
+          cbv2LastFiredAt: this.bot.cbv2LastFiredAt,
+          restoredAt,
+          cbv2LockedUntil: this.bot.cbv2LockedUntil,
+        }, 'trader: cbv2LastFiredAt restored from DB → suppression continues');
+      } else {
+        logger.warn({
+          botId: this.bot._id.toString(),
+          cbv2LastFiredAt: this.bot.cbv2LastFiredAt,
+          cbv2LastFiredAtType: typeof this.bot.cbv2LastFiredAt,
+        }, 'trader: cbv2LastFiredAt invalid (NaN/Infinity) — _cbv2FiredAt reset to 0');
+      }
+    }
+
+    // FIX-2026-08-08: Feature #2 — CBv3 cooldown gate (mirror CBv2 schema)
+    //   - CBv3 = CBv2 + ST3 no-trade pattern match on upper-TF (TREND_TF_MAP)
+    //   - active version resolved lazily via cbVersion.getActiveVersion() — AppConfig.cbVersion
+    //   - only consulted in placeBuy IF cbVersion === 'v3' (mutually exclusive with CBv2)
+    //   - restore from bot.cbv3LastFiredAt across restart (parallel to CBv2)
+    // FIX-2026-08-09: NaN guard + startup log
+    this._cbv3FiredAt = 0;
+    if (this.bot.cbv3LastFiredAt) {
+      const restoredAt = new Date(this.bot.cbv3LastFiredAt).getTime();
+      if (Number.isFinite(restoredAt)) {
+        this._cbv3FiredAt = restoredAt;
+        logger.info({
+          botId: this.bot._id.toString(),
+          symbol: this.bot.symbol,
+          cbv3LastFiredAt: this.bot.cbv3LastFiredAt,
+          restoredAt,
+          cbv3LockedUntil: this.bot.cbv3LockedUntil,
+        }, 'trader: cbv3LastFiredAt restored from DB → suppression continues');
+      } else {
+        logger.warn({
+          botId: this.bot._id.toString(),
+          symbol: this.bot.symbol,
+          cbv3LastFiredAt: this.bot.cbv3LastFiredAt,
+          cbv3LastFiredAtType: typeof this.bot.cbv3LastFiredAt,
+        }, 'trader: cbv3LastFiredAt invalid (NaN/Infinity) — _cbv3FiredAt reset to 0');
+      }
+    }
+
+    // FIX-2026-08-10: CBv5 cooldown gate (Support Zone + Deepest Low + Volume Filter)
+    //   - INDEPENDENT of cbVersion enum — CBv5 always runs in parallel if bot.cbv5Enabled !== false
+    //   - CBv5 fires when close < lowerKC + close < deepest pivot low + bearish + volume spike
+    //   - HYBRID mode: force-close + cooldown BUY cbv5LockHours hours, bot stays enabled
+    //   - restore from bot.cbv5LastFiredAt across restart (parallel to CBv2/CBv3)
+    // FIX-2026-08-10: NaN guard (mirror CBv3 pattern)
+    this._cbv5FiredAt = 0;
+    if (this.bot.cbv5LastFiredAt) {
+      const restoredAt = new Date(this.bot.cbv5LastFiredAt).getTime();
+      if (Number.isFinite(restoredAt)) {
+        this._cbv5FiredAt = restoredAt;
+        logger.info({
+          botId: this.bot._id.toString(),
+          symbol: this.bot.symbol,
+          cbv5LastFiredAt: this.bot.cbv5LastFiredAt,
+          restoredAt,
+          cbv5LockedUntil: this.bot.cbv5LockedUntil,
+        }, 'trader: cbv5LastFiredAt restored from DB → suppression continues');
+      } else {
+        logger.warn({
+          botId: this.bot._id.toString(),
+          symbol: this.bot.symbol,
+          cbv5LastFiredAt: this.bot.cbv5LastFiredAt,
+          cbv5LastFiredAtType: typeof this.bot.cbv5LastFiredAt,
+        }, 'trader: cbv5LastFiredAt invalid (NaN/Infinity) — _cbv5FiredAt reset to 0');
+      }
+    }
+
+    // FIX-2026-08-02: DCA mode startup reconciliation
+    //   - load active DCA stack → set this.currentTrade + register
+    //   - verify Binance SELL order → sync state (FILLED → handleSellFilled, PARTIALLY_FILLED → handleSellPartialFill, CANCELED/EXPIRED → holding)
+    //   - block new S1 signals until reconciliation completes (via setImmediate)
+    if (this._isDcaMode()) {
+      setImmediate(() => {
+        this._reconcileDcaStackOnStart().catch((err) =>
+          logger.warn({ err: err.message }, 'trader: _reconcileDcaStackOnStart failed'));
+      });
+    }
+
     // FIX-2026-07-15: startup sweep — catch up missed closes ถ้า bot เพิ่ง restart
     //   (รอ 2s ให้ klineCache warm-up เสร็จก่อน)
-    setTimeout(() => {
+    // FIX-2026-07-31 (BUG-14): track handles (T3 = 2s startup sweep, T4 = inner 4s balance)
+    // FIX-2026-08-22 (weight spike): stagger startup sweep + balance timers — root cause fix
+    //   - เดิม: 57 bots × (T3=2s + T4=4s) ทั้งหมดยิงพร้อมกันใน 17s spawn window
+    //   - per bot: startupSweep (weight 2-5) + startupBalance (weight 10) = 12-15 weight
+    //   - 57 × 12-15 = 684-855 weight burst + reconcilePendingTrades + marketReconnect handlers
+    //     → peak > 100 weight/s → Binance 418 ban (15:07:54 incident, weight 7001)
+    //   - fix: random 0-30s jitter บน T3 → T4 inherits (T4 = T3 + 4s)
+    //   - กระจาย burst ลด peak ~10x (17s → 47s window) พอ fit ใต้ refill rate 100/s
+    //   - downside: orphan BUY detection delay สูงสุด 34s vs เดิม 6s
+    //     ยอมรับได้เพราะ periodic reconcileAccountBalance (15min) เป็น safety net อยู่แล้ว
+    const startupSweepJitterMs = 2000 + Math.floor(Math.random() * 30000); // 2-32s
+    this.startupSweepTimer = setTimeout(() => {
+      this.startupSweepTimer = null; // mark fired
       if (!this.running) return;
       this.reconcileKlines('startup').catch((err) =>
         logger.warn({ err: err.message }, 'trader: startup sweep failed')
       );
       // FIX-2026-07-23: หลัง startup sweep ตรวจ Binance balance ของบอทนี้
       //   ถ้ามี base asset ค้างโดยไม่มี active trade → log orphan + sync BUY order ที่ยังมีชีวิต
-      setTimeout(() => {
+      this.startupBalanceTimer = setTimeout(() => {
+        this.startupBalanceTimer = null; // mark fired
         if (!this.running) return;
         this.reconcileAccountBalance({ force: true }).catch((err) =>
           logger.warn({ err: err.message }, 'trader: startup reconcileAccountBalance failed')
         );
       }, 4000);
-    }, 2000);
+    }, startupSweepJitterMs);
+
+    // FIX-2026-07-31 (BUG-19): re-arm partial-fill watchers for trades with persisted deadlines
+    //   เดิม: partialFillDeadlineAt/sellPartialDeadlineAt persist ใน DB แต่ restore เฉพาะในตัว timer
+    //   (checkPartialFill/checkSellPartialFill) — ถ้า timer ไม่ได้รัน (restart) → deadline ตาย
+    //   ใหม่: ใน start() ดึง trade ที่ยังมี deadline ในอนาคต → เรียก schedulePartialFillWatch/scheduleSellPartialFillWatch
+    //   (หลัง startup sweep ให้ reconcileKlines/processBUY-fill cycle เสร็จก่อน ไม่งั้น race)
+    setImmediate(() => {
+      if (!this.running) return;
+      this._rearmPersistedPartialFillWatchers().catch((err) =>
+        logger.warn({ err: err.message }, 'trader: _rearmPersistedPartialFillWatchers failed')
+      );
+    });
 
     // bookTicker handler — เก็บ bid ล่าสุด
     this._bookTickerHandler = (t) => {
@@ -177,11 +405,83 @@ class Trader {
     };
     eventBus.on('kline:closed', this._klineHandler);
 
+    // FIX-2026-08-01 (CRITICAL-BUG-1): CB direct kline:closed subscription
+    //   - bypass onCandleClosed gate (lastSignalIndex check at L1105) which can
+    //     short-circuit non-S1 candles and skip CB entirely
+    //   - COTI incident (12:15-12:42 ICT 2026-08-01): CB never fired
+    //   - mirror the _klineHandler pattern but independent of S1 flow
+    this._cbKlineHandler = (payload) => {
+      if (!this.running) return;
+      if (!payload || !payload.candle) return;
+      if (payload.symbol !== this.bot.symbol || payload.timeframe !== this.bot.timeframe) return;
+      this._checkCBPanicClose(payload.candle).catch((err) =>
+        logger.error({ err: err.message, stack: err.stack }, 'trader: CB direct handler threw'));
+    };
+    eventBus.on('kline:closed', this._cbKlineHandler);
+
+    // FIX-2026-08-06: CBv2 direct kline:closed subscription (mirror CB pattern)
+    //   - เรียก _checkCBv2PanicClose ทุก candle → strict pattern (4 red candles below lowerKC)
+    //   - on fire: force-close + lock bot cbv2LockHours hours + emit bot:locked
+    this._cbv2KlineHandler = (payload) => {
+      if (!this.running) return;
+      if (!payload || !payload.candle) return;
+      if (payload.symbol !== this.bot.symbol || payload.timeframe !== this.bot.timeframe) return;
+      this._checkCBv2PanicClose(payload.candle).catch((err) =>
+        logger.error({ err: err.message, stack: err.stack }, 'trader: CBv2 direct handler threw'));
+    };
+    eventBus.on('kline:closed', this._cbv2KlineHandler);
+
+    // FIX-2026-08-08: Feature #2 — CBv3 direct kline:closed subscription (mirror CBv2 pattern)
+    //   - CBv3 = CBv2 + ST3 no-trade pattern match on upper-TF (TREND_TF_MAP)
+    //   - active version resolved lazily via cbVersion.getActiveVersion()
+    //   - on fire: force-close + lock bot cbv3LockHours hours + emit bot:cooldown with version='v3'
+    //   - mutually exclusive with CBv2 (user picks one in Settings) — handler is always installed,
+    //     but _checkCBv3PanicClose returns early if cbVersion !== 'v3'
+    this._cbv3KlineHandler = (payload) => {
+      if (!this.running) return;
+      if (!payload || !payload.candle) return;
+      if (payload.symbol !== this.bot.symbol || payload.timeframe !== this.bot.timeframe) return;
+      this._checkCBv3PanicClose(payload.candle).catch((err) =>
+        logger.error({ err: err.message, stack: err.stack }, 'trader: CBv3 direct handler threw'));
+    };
+    eventBus.on('kline:closed', this._cbv3KlineHandler);
+
+    // FIX-2026-08-10: CBv5 direct kline:closed subscription (Support Zone + Deepest Low + Volume)
+    //   - INDEPENDENT of cbVersion enum — runs in parallel with CBv2 or CBv3 (no version gate)
+    //   - on fire: force-close + lock bot cbv5LockHours hours + emit bot:cooldown with version='v5'
+    //   - handler is always installed; _checkCBv5PanicClose returns early if cbv5Enabled === false
+    //   - cbCrossCooldown handles Direction A/B interaction with CBv2/CBv3
+    this._cbv5KlineHandler = (payload) => {
+      if (!this.running) return;
+      if (!payload || !payload.candle) return;
+      if (payload.symbol !== this.bot.symbol || payload.timeframe !== this.bot.timeframe) return;
+      this._checkCBv5PanicClose(payload.candle).catch((err) =>
+        logger.error({ err: err.message, stack: err.stack }, 'trader: CBv5 direct handler threw'));
+    };
+    eventBus.on('kline:closed', this._cbv5KlineHandler);
+
+    // FIX-2026-08-08: Feature #3 — Auto Unlock Cooldown on candle close (independent of SELL fill)
+    //   - bug-fix: cbAutoUnlock.evaluate() was inside handleSellFilled (deadlock — bot in cooldown
+    //     suppresses new BUYs → no new SELL → never evaluated → permanent lock)
+    //   - new flow: on every kline:closed (matching bot symbol+TF), check cooldown state + scan
+    //     signals since last CB fire. If 3+ profitable signals → unlock immediately.
+    //   - mutex _cbAutoUnlockInFlight กัน concurrent invocations across candles
+    this._cbAutoUnlockKlineHandler = (payload) => {
+      if (!this.running) return;
+      if (!payload || !payload.candle) return;
+      if (payload.symbol !== this.bot.symbol || payload.timeframe !== this.bot.timeframe) return;
+      this._evaluateAutoUnlockOnCandle(payload.candle).catch((err) =>
+        logger.error({ err: err.message, botId: this.bot._id.toString() }, 'trader: cbAutoUnlock handler threw'));
+    };
+    eventBus.on('kline:closed', this._cbAutoUnlockKlineHandler);
+
     // FIX 3 + FIX-2026-07-13: order update handler ใช้ Map lookup + DB fallback
     // (FIX-2026-07-13: _registerTrade บางที register แค่ {buyClientOrderId, sellClientOrderId}
     //  → trade snapshot ไม่มี buyPrice → handleSellFilled pnl.net=NaN → DB ไม่อัปเดต
     //  แก้โดยเช็ค trade.buyPrice ก่อน — ถ้าไม่มีก็ re-fetch จาก DB เพื่อให้ได้ full doc)
     this._orderHandler = async (update) => {
+      // FIX-2026-07-31 (BUG-16): running check — WS events continue after stop() otherwise
+      if (!this.running) return;
       if (update.symbol !== this.bot.symbol) return;
       const c = update.clientOrderId || '';
       if (!c) return;
@@ -231,7 +531,7 @@ class Trader {
         // FIX P2.2: ใช้ **blacklist** แทน whitelist — refresh ทุก field ยกเว้น hot-path state
         //   เดิม whitelist = 13 fields → ถ้า dev เพิ่ม field ใหม่แล้วลืม update array = bug
         //   fix: blacklist เฉพาะ fields ที่ต้อง preserve (status, currentTrade, lastSignalCloseTime, etc.)
-        const preservedKeys = ['_id', 'status', 'lastSignalCloseTime', 'lastSignalAt', 'totalPnl', 'totalTrades', 'winTrades', 'lastError', 'createdAt', 'updatedAt', '__v'];
+        const preservedKeys = ['_id', 'status', 'lastSignalCloseTime', 'lastSignalAt', 'totalPnl', 'totalTrades', 'winTrades', 'lastError', 'createdAt', 'updatedAt', '__v', 'cbLastFiredAt', 'cbv2LastFiredAt']; // FIX-2026-08-06: add cbv2LastFiredAt to preserve CBv2 suppression across bot:updated refresh
         for (const k of Object.keys(fresh)) {
           if (preservedKeys.includes(k)) continue;
           if (k in this.bot) {
@@ -244,12 +544,40 @@ class Trader {
           kcMult: this.bot.kcMult,
           s1OnlyDown: this.bot.s1OnlyDown,
           minSpreadTicks: this.bot.minSpreadTicks,
+          // FIX-2026-08-06: include tpPercent for visibility (FIDA incident — bot:tp-updated must propagate)
+          tpPercent: this.bot.tpPercent,
+          tpTrendMultiplier: this.bot.tpTrendMultiplier,
+          tpTrendEnabled: this.bot.tpTrendEnabled,
+          tpOnFloor: this.bot.tpOnFloor,
         }, 'trader: bot config refreshed from bot:updated event');
       } catch (err) {
         logger.warn({ err: err.message, botId: this.bot._id.toString() }, 'trader: bot:updated refresh failed');
       }
     };
     eventBus.on('bot:updated', this._botUpdatedHandler);
+
+    // FIX-2026-08-22: process exit safety net for eventBus listeners
+    //   - ปัญหา: PM2 SIGKILL (OOM/crash/restart) ฆ่าก่อน stop() รันครบ → orphan listeners ค้างบน EventBus
+    //     ของ process ใหม่ → 'kline:closed' listeners �ะสมข้าม restart cycle → 100+ fanout
+    //     → candle close ทุกครั้ง triggers ทุก bot → CB handlers fire พร้อมกัน → Binance weight spike → IP ban
+    //   - fix: process.on('exit') ลบ listeners แบบ sync (eventBus.off() เป็น sync อยู่แล้ว)
+    //   - node spec: process.exit callback ไม่รองรับ async — sync-only path ใช้ได้
+    //   - guard: register ครั้งเ�ียวต่อ instance, ลบใน stop() เพื่อกัน leak ในระหว่าง soft stop
+    if (!this._processExitCleanup) {
+      this._processExitCleanup = () => {
+        if (this._bookTickerHandler) eventBus.off('bookTicker', this._bookTickerHandler);
+        if (this._klineHandler) eventBus.off('kline:closed', this._klineHandler);
+        if (this._cbKlineHandler) eventBus.off('kline:closed', this._cbKlineHandler);
+        if (this._cbv2KlineHandler) eventBus.off('kline:closed', this._cbv2KlineHandler);
+        if (this._cbv3KlineHandler) eventBus.off('kline:closed', this._cbv3KlineHandler);
+        if (this._cbv5KlineHandler) eventBus.off('kline:closed', this._cbv5KlineHandler);
+        if (this._cbAutoUnlockKlineHandler) eventBus.off('kline:closed', this._cbAutoUnlockKlineHandler);
+        if (this._orderHandler) eventBus.off('order:update', this._orderHandler);
+        if (this._marketReconnectHandler) eventBus.off('market:reconnected', this._marketReconnectHandler);
+        if (this._botUpdatedHandler) eventBus.off('bot:updated', this._botUpdatedHandler);
+      };
+      process.on('exit', this._processExitCleanup);
+    }
   }
 
   async stop() {
@@ -267,17 +595,68 @@ class Trader {
       clearInterval(this.sweepTimer);
       this.sweepTimer = null;
     }
-    if (this._marketReconnectDebounce) {
-      clearTimeout(this._marketReconnectDebounce);
-      this._marketReconnectDebounce = null;
+    // FIX-2026-08-22: clear per-symbol debounce Map (replace legacy single _marketReconnectDebounce)
+    if (this._marketReconnectDebounceMap) {
+      for (const t of this._marketReconnectDebounceMap.values()) clearTimeout(t);
+      this._marketReconnectDebounceMap.clear();
+      this._marketReconnectDebounceMap = null;
+    }
+    // FIX-2026-07-30: clear SELL partial-fill watcher timer
+    if (this.sellPartialFillTimer) {
+      clearTimeout(this.sellPartialFillTimer);
+      this.sellPartialFillTimer = null;
+    }
+    // FIX-2026-07-31 (BUG-6): clear BUY partial-fill watcher timer (was leaking — checkPartialFill
+    //   would fire after stop() and place real BUY/SELL orders on a stopped bot).
+    if (this.partialFillTimer) {
+      clearTimeout(this.partialFillTimer);
+      this.partialFillTimer = null;
+    }
+    // FIX-2026-07-31 (BUG-9 / FIX-C3): clear periodic reconcile-balance interval
+    if (this.reconcileBalanceTimer) {
+      clearInterval(this.reconcileBalanceTimer);
+      this.reconcileBalanceTimer = null;
+    }
+    // FIX-2026-07-31 (BUG-14): clear startup timers (T3/T4) + BUY cooldown timer (T5)
+    //   เดิม: setTimeout แบบไม่ assign handle → restart-cycle ของ bot
+    //   (spawnTrader → stopTrader → spawnTrader) ทำให้ timer ค้างรัน reorder ที่อาจไม่ตรง state
+    if (this.startupSweepTimer) {
+      clearTimeout(this.startupSweepTimer);
+      this.startupSweepTimer = null;
+    }
+    if (this.startupBalanceTimer) {
+      clearTimeout(this.startupBalanceTimer);
+      this.startupBalanceTimer = null;
+    }
+    if (this.buyCooldownTimer) {
+      clearTimeout(this.buyCooldownTimer);
+      this.buyCooldownTimer = null;
     }
     if (this._bookTickerHandler) eventBus.off('bookTicker', this._bookTickerHandler);
     if (this._klineHandler) eventBus.off('kline:closed', this._klineHandler);
+    if (this._cbKlineHandler) eventBus.off('kline:closed', this._cbKlineHandler);
+    if (this._cbv2KlineHandler) eventBus.off('kline:closed', this._cbv2KlineHandler); // FIX-2026-08-06
+    if (this._cbv3KlineHandler) eventBus.off('kline:closed', this._cbv3KlineHandler); // FIX-2026-08-08: CBv3 handler
+    if (this._cbv5KlineHandler) eventBus.off('kline:closed', this._cbv5KlineHandler); // FIX-2026-08-10: CBv5 handler
+    if (this._cbAutoUnlockKlineHandler) eventBus.off('kline:closed', this._cbAutoUnlockKlineHandler); // FIX-2026-08-08: auto-unlock handler
     if (this._orderHandler) eventBus.off('order:update', this._orderHandler);
     if (this._marketReconnectHandler) eventBus.off('market:reconnected', this._marketReconnectHandler);
     if (this._botUpdatedHandler) eventBus.off('bot:updated', this._botUpdatedHandler);
+    // FIX-2026-08-22: remove process exit handler (normal stop path ลบ listeners เองแล้ว)
+    if (this._processExitCleanup) {
+      process.removeListener('exit', this._processExitCleanup);
+      this._processExitCleanup = null;
+    }
+    this._cbKlineHandler = null;
+    this._cbv2KlineHandler = null; // FIX-2026-08-06
+    this._cbv3KlineHandler = null; // FIX-2026-08-08: CBv3 handler
+    this._cbv5KlineHandler = null; // FIX-2026-08-10: CBv5 handler
+    this._cbAutoUnlockKlineHandler = null; // FIX-2026-08-08: auto-unlock handler
     this.tradesByClientOrderId.clear();
     this.handleBuyFilledLocks.clear();
+    // FIX-2026-08-06: reset TP cache flags so a respawned trader doesn't inherit stale values
+    this._tpCacheAt = 0;
+    this._tpCacheInFlight = false;
     logger.info({ botId: this.bot._id.toString() }, 'trader stopped');
     eventBus.emit('bot:status', { botId: this.bot._id, status: 'idle' });
   }
@@ -295,16 +674,485 @@ class Trader {
     if (trade.sellClientOrderId) this.tradesByClientOrderId.delete(trade.sellClientOrderId);
   }
 
+  // FIX-2026-08-02: cancel any leftover SELL orders on Binance before declaring trade "dead"
+  //   - Root cause of DEXE orphan SELL incident 2026-08-02: handleBuyOrderUpdate PARTIALLY_FILLED
+  //     branch placed SELL for the filled qty, then race set trade.state='cancelled' and
+  //     this.currentTrade=null — but the SELL order stayed LIVE on Binance.
+  //   - Defensive cancel: try (1) trade.sellOrderId from doc, (2) any open SELL orders on
+  //     this symbol that match this trade's qty. Best-effort — emit trade:orphan on failure
+  //     so the recover-orphan-trades.js script (or manual op) can clean up.
+  //   - Returns { cancelled: number, failed: number, orphans: array }
+  async _cancelOrphanedSells(trade, { reason = 'unspecified', ctx = null } = {}) {
+    const result = { cancelled: 0, failed: 0, errors: [], orphans: [] };
+    if (!trade) return result;
+    if (!this.bot || !this.bot.symbol) return result;
+
+    // Build list of SELL orderIds to try cancelling
+    const candidates = new Set();
+    if (trade.sellOrderId) candidates.add(trade.sellOrderId);
+    if (trade.sellOrderIds && Array.isArray(trade.sellOrderIds)) {
+      for (const id of trade.sellOrderIds) if (id) candidates.add(id);
+    }
+
+    if (candidates.size > 0) {
+      for (const orderId of candidates) {
+        try {
+          const r = await binanceRest.cancelOrder({ symbol: this.bot.symbol, orderId });
+          if (r && r.status === 'CANCELED') {
+            result.cancelled += 1;
+            logger.info({
+              botId: this.bot._id.toString(),
+              tradeId: trade._id && trade._id.toString(),
+              symbol: this.bot.symbol,
+              orderId,
+              reason, ctx,
+            }, 'trader: _cancelOrphanedSells — cancelled');
+          } else if (r && (r.status === 'NEW' || r.status === 'PARTIALLY_FILLED')) {
+            // -2011 "Unknown order" or order already filled → not an orphan, just be silent
+            logger.info({
+              botId: this.bot._id.toString(),
+              symbol: this.bot.symbol,
+              orderId, status: r.status,
+              reason,
+            }, 'trader: _cancelOrphanedSells — already state, skip');
+          } else {
+            result.failed += 1;
+            result.errors.push({ orderId, status: r && r.status, err: r && r.error });
+            result.orphans.push({ orderId, candidate: 'sellOrderId' });
+          }
+        } catch (err) {
+          // -2011 "Unknown order" → already gone → silent
+          const msg = (err && err.message) || String(err);
+          if (/2011|Unknown order|already cancelled|UNKNOWN_ORDER/i.test(msg)) {
+            logger.info({ botId: this.bot._id.toString(), orderId, msg }, 'trader: _cancelOrphanedSells — already gone');
+          } else {
+            result.failed += 1;
+            result.errors.push({ orderId, err: msg });
+            result.orphans.push({ orderId, candidate: 'sellOrderId', err: msg });
+            logger.warn({
+              botId: this.bot._id.toString(),
+              tradeId: trade._id && trade._id.toString(),
+              orderId, err: msg, reason,
+            }, 'trader: _cancelOrphanedSells — cancel failed');
+          }
+        }
+      }
+    }
+
+    // Defensive: scan Binance open orders on this symbol for any SELL that matches this trade's qty
+    //   - เผื่อ trade.sellOrderId ว่างแต่ Binance มี SELL ค้างจาก path อื่น
+    //   - Only do this for SELL-side cancel paths (where we KNOW SELL was placed); skip for BUY-only
+    //     cancel paths to avoid cancelling unrelated SELLs from previous trades
+    //   - Heuristic: SELL price >= trade.buyPrice (sell above buy)
+    if (reason && /partial|abort|cancel|orphan/i.test(reason)) {
+      try {
+        const openOrders = await binanceRest.getOpenOrders({ symbol: this.bot.symbol }).catch(() => []);
+        const buyPrice = parseFloat(trade.buyPrice);
+        const buyQty = parseFloat(trade.buyQty);
+        const candidatesQty = result.orphans.length > 0 ? null : buyQty; // only scan if not already cancelled
+        for (const o of (openOrders || [])) {
+          if (o.side !== 'SELL') continue;
+          const oQty = parseFloat(o.origQty || o.quantity || 0);
+          const oPrice = parseFloat(o.price || 0);
+          const matchQty = !candidatesQty || Math.abs(oQty - candidatesQty) / Math.max(candidatesQty, 1e-12) < 0.01;
+          const matchPrice = !buyPrice || oPrice >= buyPrice * 0.5; // very loose: at least 50% of buy price
+          if (matchQty && matchPrice) {
+            try {
+              const r = await binanceRest.cancelOrder({ symbol: this.bot.symbol, orderId: o.orderId });
+              if (r && r.status === 'CANCELED') {
+                result.cancelled += 1;
+                logger.info({
+                  botId: this.bot._id.toString(),
+                  tradeId: trade._id && trade._id.toString(),
+                  symbol: this.bot.symbol,
+                  orderId: o.orderId, qty: oQty, price: oPrice,
+                  reason, ctx,
+                }, 'trader: _cancelOrphanedSells — defensive cancel');
+              }
+            } catch (err) {
+              const msg = (err && err.message) || String(err);
+              if (!/2011|Unknown order|already cancelled|UNKNOWN_ORDER/i.test(msg)) {
+                result.failed += 1;
+                result.errors.push({ orderId: o.orderId, err: msg });
+                result.orphans.push({ orderId: o.orderId, candidate: 'defensive_scan', qty: oQty, price: oPrice, err: msg });
+              }
+            }
+          }
+        }
+      } catch (err) {
+        logger.warn({ botId: this.bot._id.toString(), err: err.message }, 'trader: _cancelOrphanedSells — defensive scan failed');
+      }
+    }
+
+    // Emit orphan event for any leftover orphans
+    if (result.orphans.length > 0) {
+      try {
+        eventBus.emit('trade:orphan', {
+          botId: this.bot._id && this.bot._id.toString(),
+          tradeId: trade._id && trade._id.toString(),
+          symbol: this.bot.symbol,
+          reason,
+          orphans: result.orphans,
+        });
+      } catch (_) { /* non-fatal */ }
+    }
+
+    return result;
+  }
+
+  // ─── FIX-2026-07-31: F1 auto-arm SL-on-UKC for stuck losing positions ───────
+  // เรียกจาก onCandleClosed entry-point (ก่อน CB check)
+  //   - gate: bot.autoArmStopLossOnUKC ต้องเปิดอยู่ (per-bot toggle, default true)
+  //   - ค้นหา trades ที่ state='selling' + buyFilledAt > autoArmAgeHours ago + loss > autoArmLossPct
+  //   - ถ้า match → set trade.useStopLossOnUKC=true (per-trade flag) + snapshot thresholds
+  //   - _checkStopLossOnUpperKC ใช้ flag นี้เป็น gate (1D)
+  //   - ล้าง flag เมื่อ trade ออกจาก selling (1E)
+  // FIX-2026-08-03 (Option B): ลบ M2 config asymmetry guard — F1 arm ทำงานแม้ bot.stopLossOnUpperKC=false
+  //   - เดิม audit 2026-08-01 ใส่ guard กัน arm flag ที่ไม่มี trigger → แต่ทำให้ live กับ DCA backtest diverge
+  //   - ตอนนี้ _checkStopLossOnUpperKC ใช้ per-trade flag เป็น gate เดียว (ไม่สน global toggle) → live = DCA backtest
+  async _autoArmStopLossOnUKC(candle) {
+    if (!this.running) return;
+    if (!this.bot.autoArmStopLossOnUKC) return; // bot toggle off
+    if (this._autoArmInFlight) return;
+    this._autoArmInFlight = true;
+    try {
+      // FIX-2026-08-03: per-bot configurable thresholds (default 4h + 10% to preserve original behavior)
+      const lossPct = (this.bot.autoArmLossPct ?? 10) / 100;
+      const ageHours = this.bot.autoArmAgeHours ?? 4;
+      const ageThresholdAgo = new Date(Date.now() - ageHours * 60 * 60 * 1000);
+      const closePrice = parseFloat(candle.close);
+      // FIX-2026-07-31: $expr คำนวณ (buyPrice - close) / buyPrice > lossPct ใน DB
+      //   - buyPrice > 0 → กัน divide by zero
+      //   - index { botId: 1, state: 1 } → match state='selling' filter ได้เร็ว
+      // FIX-2026-08-01 (audit H2): state เป็น exact 'selling' (ไม่ใช่ stopping/partial_wait/filled/holding)
+      //   - 'stopping' = CB หรือ SL-UKC กำลัง force-close อยู่ → ไม่ arm (race with concurrent close)
+      //   - 'partial_wait'/'filled'/'holding' = BUY ยังไม่เสร็จ → ไม่ arm
+      //   - exact 'selling' = SELL placed รอ fill → เป็น stuck losing scenario ที่ F1 ต้องการ
+      const candidates = await Trade.find({
+        botId: this.bot._id,
+        state: 'selling',
+        useStopLossOnUKC: { $ne: true }, // not yet armed
+        buyFilledAt: { $lte: ageThresholdAgo },
+        $expr: {
+          $and: [
+            { $gt: ['$buyPrice', 0] },
+            { $gt: [{ $divide: [{ $subtract: ['$buyPrice', closePrice] }, '$buyPrice'] }, lossPct] },
+          ],
+        },
+      }).lean();
+      if (candidates.length > 0) {
+        const ids = candidates.map(t => t._id);
+        // FIX-2026-08-01 (audit M2 from agent 1): tighten updateMany filter
+        //   - กัน race: race-loser reset flag → F1 overwrites back to true
+        //   - เพิ่ม state filter เพื่อให้แน่ใจว่า state ยังเป็น 'selling' ตอน update commit
+        // FIX-2026-08-03: snapshot thresholds ไว้บน trade เพื่อ positionCard.js แสดงผลตรงกับตอน arm (กันเคส user เปลี่ยนค่าทีหลัง)
+        await Trade.updateMany(
+          { _id: { $in: ids }, state: 'selling', useStopLossOnUKC: { $ne: true } },
+          {
+            $set: {
+              useStopLossOnUKC: true,
+              autoArmedAt: new Date(),
+              autoArmLossPct: this.bot.autoArmLossPct ?? 10,
+              autoArmAgeHours: this.bot.autoArmAgeHours ?? 4,
+            },
+          }
+        );
+        logger.warn({
+          botId: this.bot._id.toString(),
+          symbol: this.bot.symbol,
+          timeframe: this.bot.timeframe,
+          candleClose: closePrice,
+          autoArmLossPct: this.bot.autoArmLossPct ?? 10,
+          autoArmAgeHours: this.bot.autoArmAgeHours ?? 4,
+          armedCount: ids.length,
+          tradeIds: ids.map(i => String(i)),
+        }, 'trader: auto-arm SL-on-UKC for stuck losing positions');
+      }
+    } catch (err) {
+      logger.warn({ err: err.message }, 'trader: auto-arm SL-on-UKC failed');
+    } finally {
+      this._autoArmInFlight = false;
+    }
+  }
+
+  // ─── FIX-2026-07-31: F2 TP trend multiplier helper ──────────────────────────
+  // คำนวณ trend ของ upper-TF (TREND_TF_MAP) — ใช้ 60s in-process cache
+  //   - 'upper' = close > EMA20 → apply คูณ
+  //   - 'lower' = close < EMA20 → ไม่คูณ
+  //   - 'warmup' = ข้อมูลไม่พอ → ไม่คูณ
+  //   - เรียกจาก _handleBuyFilledImpl เท่านั้น (new position only)
+  // FIX-2026-08-02: extract _computeTp() helper — single source of truth for TP + fee buffer + trend mult
+  //   - was: 4 sites each had their own copy of (tpTrendEnabled gate → _getTrendState → mult → feeRate → calcSellPrice → roundPrice)
+  //   - 3 of those 4 sites used `this.bot.tpPercent` directly, skipping trend mult AND fee buffer
+  //   - net result: bots were placing SELL at buyPrice × (1 + tp/100) only, missing 2× mult + 0.15% fee buffer
+  //   - now: every SELL placement calls this helper → consistent + correct TP targeting
+  // FIX-2026-08-06: TTL refresh tpPercent-related fields from DB — defense-in-depth กัน event-bus miss
+  //   - primary sync: bot:updated event → _botUpdatedHandler refresh this.bot
+  //   - secondary sync: ถ้า this._tpCacheAt ห่างจาก now > 5s → re-read 4 fields (tpPercent, tpTrendEnabled, tpTrendMultiplier, tpOnFloor, updateTpAt)
+  //   - DB query ใช้ select แค่ 4 fields เพื่อ minimize load
+  async _computeTp({ buyPrice, skipTrend = false } = {}) {
+    // FIX-2026-08-06: defense-in-depth refresh — re-read TP fields from DB if cache stale
+    await this._refreshTpCacheIfStale();
+    const tpTrendEnabled = !skipTrend && this.bot.tpTrendEnabled !== false;
+    let effectiveTpPercent = this.bot.tpPercent;
+    let trendState = { trendState: 'warmup', trendTF: null };
+    if (tpTrendEnabled) {
+      trendState = await this._getTrendState();
+      const tpTrendMultiplier = Number(this.bot.tpTrendMultiplier);
+      effectiveTpPercent = (trendState.trendState === 'upper' && Number.isFinite(tpTrendMultiplier) && tpTrendMultiplier > 1)
+        ? this.bot.tpPercent * tpTrendMultiplier
+        : this.bot.tpPercent;
+    }
+    const feeRate = fees.getMakerRate();
+    const sellPriceRaw = fees.calcSellPrice({
+      buyPrice,
+      tpPercent: effectiveTpPercent,
+      feeRate,
+    });
+    const info = symbolInfo.getCached(this.bot.symbol);
+    const tickSize = info ? info.priceFilter.tickSize : null;
+    const sellPrice = tickSize
+      ? symbolInfo.roundPrice(sellPriceRaw, tickSize).toString()
+      : sellPriceRaw.toString();
+    return {
+      tpBase: this.bot.tpPercent,
+      tpEffective: effectiveTpPercent,
+      trendState: trendState.trendState,
+      trendTF: trendState.trendTF,
+      tpTrendMultiplier: Number(this.bot.tpTrendMultiplier) || 1,
+      tpTrendEnabled,
+      feeRate,
+      sellPriceRaw,
+      sellPrice,
+    };
+  }
+
+  // FIX-2026-08-06: TTL cache refresh — re-read tpPercent-related fields from DB if cache stale
+  //   - triggered from _computeTp() before TP calc
+  //   - refresh only 4 fields (cheap select) — preserves all hot-path fields
+  //   - idempotent + safe under concurrent calls (in-flight guard)
+  async _refreshTpCacheIfStale() {
+    if (!this.bot || !this.bot._id) return;
+    // FIX-2026-08-06: don't issue DB query after stop() — guard against late _computeTp calls
+    if (!this.running) return;
+    if (Date.now() - this._tpCacheAt < this._tpCacheTtlMs) return;
+    if (this._tpCacheInFlight) return;
+    this._tpCacheInFlight = true;
+    try {
+      const fresh = await Bot.findById(this.bot._id)
+        .select('tpPercent tpTrendEnabled tpTrendMultiplier tpOnFloor updateTpAt')
+        .lean();
+      if (!fresh) return;
+      const before = {
+        tpPercent: this.bot.tpPercent,
+        tpTrendEnabled: this.bot.tpTrendEnabled,
+        tpTrendMultiplier: this.bot.tpTrendMultiplier,
+        tpOnFloor: this.bot.tpOnFloor,
+        updateTpAt: this.bot.updateTpAt,
+      };
+      let changed = false;
+      for (const k of Object.keys(fresh)) {
+        if (this.bot[k] !== fresh[k]) {
+          this.bot[k] = fresh[k];
+          changed = true;
+        }
+      }
+      this._tpCacheAt = Date.now();
+      if (changed) {
+        logger.info({
+          botId: this.bot._id.toString(),
+          symbol: this.bot.symbol,
+          tpPercent: this.bot.tpPercent,
+          tpTrendMultiplier: this.bot.tpTrendMultiplier,
+          tpTrendEnabled: this.bot.tpTrendEnabled,
+          tpOnFloor: this.bot.tpOnFloor,
+          before,
+        }, 'trader: TP cache refreshed from DB (TTL expired, defense-in-depth)');
+      }
+    } catch (err) {
+      logger.warn({ err: err.message, botId: this.bot._id && this.bot._id.toString() }, 'trader: TP cache refresh failed');
+    } finally {
+      this._tpCacheInFlight = false;
+    }
+  }
+
+  // FIX-2026-08-06: SELL slippage helper — เรียกจากทุก SELL-fill path
+  //   - target > 0 และ sellPrice > 0 → slip% = (sell - target) / target * 100
+  //   - slip < -1% → log warn (เห็นใน logs ทันที)
+  //   - slip < -3% → log error + telegram alert (slippageWarning event) — สัญญาณว่า MARKET fallback ทำงานผิดปกติ
+  //   - returns slipPct (number) หรือ null ถ้าคำนวณไม่ได้
+  //   - safe — try/catch ทุกชั้น, ไม่กระทบ trade finalize path
+  _computeSlippage({ sellPrice, targetSellPrice, tradeId, sellReason, pnlPercent }) {
+    try {
+      if (!Number.isFinite(sellPrice) || !Number.isFinite(targetSellPrice) || targetSellPrice <= 0) {
+        return null;
+      }
+      const slip = ((sellPrice - targetSellPrice) / targetSellPrice) * 100;
+      if (slip < -1.0) {
+        logger.warn({
+          botId: this.bot && this.bot._id && this.bot._id.toString(),
+          symbol: this.bot && this.bot.symbol,
+          tradeId: tradeId && tradeId.toString(),
+          sellReason: sellReason || null,
+          sellPrice, targetSellPrice,
+          slipPct: slip.toFixed(3),
+          pnlPercent,
+        }, 'trader: SELL slippage warning — fill below target > 1%');
+      }
+      if (slip < -3.0) {
+        logger.error({
+          botId: this.bot && this.bot._id && this.bot._id.toString(),
+          symbol: this.bot && this.bot.symbol,
+          tradeId: tradeId && tradeId.toString(),
+          sellReason: sellReason || null,
+          sellPrice, targetSellPrice,
+          slipPct: slip.toFixed(3),
+          pnlPercent,
+        }, 'trader: SELL severe slippage — fill below target > 3%');
+        try {
+          // FIX-2026-08-06: telegram alert (non-blocking, swallow errors)
+          //   - sendNow() = public dispatcher, no need to hold reference
+          //   - require แบบ lazy เพราะ telegramNotifier อาจไม่ถูก load ใน test contexts
+          const telegramNotifier = require('../services/telegramNotifier');
+          telegramNotifier.sendNow('slippageWarning', {
+            botName: (this.bot && this.bot.name) || (this.bot && this.bot.symbol) || '?',
+            symbol: (this.bot && this.bot.symbol) || '?',
+            timeframe: (this.bot && this.bot.timeframe) || null,
+            tradeId: tradeId && tradeId.toString(),
+            sellReason: sellReason || 'unknown',
+            sellPrice,
+            targetSellPrice,
+            slipPct: Number(slip.toFixed(3)),
+            pnlPercent,
+          }).catch(() => null);
+        } catch (_) { /* telegram not loaded or sendNow missing */ }
+      }
+      return slip;
+    } catch (err) {
+      logger.warn({ err: err.message }, 'trader: _computeSlippage failed');
+      return null;
+    }
+  }
+
+  async _getTrendState() {
+    if (!this.running) return { trendState: 'warmup' };
+    // 60s cache — mirror volatilityForBot CACHE_TTL_MS pattern
+    if (Date.now() - this._tpTrendCache.at < 60_000 && this._tpTrendCache.trendState != null) {
+      return this._tpTrendCache;
+    }
+    if (this._tpTrendInFlight) return { trendState: null }; // concurrent skip
+    this._tpTrendInFlight = true;
+    try {
+      const trendTF = volatilityScanner.TREND_TF_MAP && volatilityScanner.TREND_TF_MAP[this.bot.timeframe] || null;
+      if (!trendTF) {
+        this._tpTrendCache = { at: Date.now(), trendState: 'warmup', trendTF: null };
+        return this._tpTrendCache;
+      }
+      const klines = await binanceRest.getKlines({ symbol: this.bot.symbol, interval: trendTF, limit: 30 });
+      this._tpTrendCache = { at: Date.now(), ...volatilityScanner.computeTrend(klines, trendTF) };
+      return this._tpTrendCache;
+    } catch (err) {
+      logger.warn({ err: err.message, symbol: this.bot.symbol, tf: this.bot.timeframe }, 'trader: getTrendState failed');
+      return { trendState: 'warmup' };
+    } finally {
+      this._tpTrendInFlight = false;
+    }
+  }
+
+  // ─── FIX-2026-08-02: DCA + BEP stack helpers ──────────────────────────────
+  // ใช้เฉพาะเมื่อ this.bot.dcaEnabled === true (single-stack mode)
+  //   - _isDcaMode: gate helper (single source of truth for "is this bot in DCA mode?")
+  //   - _computeStackBEP: รวม totalQty / totalSpent / bep จาก buyLayers (fallback scalar fields)
+  //   - _computeDcaTp: TP target สำหรับ stack — ใช้ _computeTp กับ stackBep (reuse TP+trend+fee logic)
+  _isDcaMode() {
+    return this.bot && this.bot.dcaEnabled === true;
+  }
+
+  // FIX-2026-08-11: CBv5 pre-BUY support — check if CBv2 or CBv3 cooldown is active
+  //   - Used by CBv5 pre-BUY block to skip the pre-check when another CB already
+  //     fired (the cooldown gate in placeBuy will block anyway)
+  //   - Returns true if CBv2 or CBv3 lock is in the future
+  _hasActiveCbCooldownExceptV5() {
+    const now = Date.now();
+    const cbv2LockedUntil = this.bot.cbv2LockedUntil ? new Date(this.bot.cbv2LockedUntil).getTime() : 0;
+    const cbv3LockedUntil = this.bot.cbv3LockedUntil ? new Date(this.bot.cbv3LockedUntil).getTime() : 0;
+    if (cbv2LockedUntil > now) return true;
+    if (cbv3LockedUntil > now) return true;
+    return false;
+  }
+
+  // FIX-2026-08-03: DCA + Martingale layer sizing
+  //   - Returns the per-layer notional (USDT) for the upcoming DCA layer
+  //   - When martingaleEnabled=false OR dcaEnabled=false → capitalPerTrade (unchanged, backward compat)
+  //   - When martingaleEnabled=true AND dcaEnabled=true → capitalPerTrade × mult^(layerIndex-1)
+  //     - layerIndex = stack.dcaLayerIndex (1 for first layer, 2 for second, ...)
+  //     - applied with per-layer cap (martingaleMaxLayerNotional) for safety
+  //   - Returns { notional, isMartingale, multiplier, layerIndex, capped }
+  //   - Pure function — does NOT mutate state or place orders
+  _computeDcaLayerNotional(stack) {
+    const base = parseFloat(this.bot.capitalPerTrade) || 0;
+    if (!this._isDcaMode() || !this.bot.martingaleEnabled) {
+      return { notional: base, isMartingale: false, multiplier: 1, layerIndex: 1, capped: false };
+    }
+    const layerIndex = Number(stack && stack.dcaLayerIndex) || 1;
+    const multiplier = parseFloat(this.bot.martingaleMultiplier) || 1.5;
+    const cap = parseFloat(this.bot.martingaleMaxLayerNotional) || 100;
+    const raw = base * Math.pow(multiplier, layerIndex - 1);
+    const capped = raw > cap;
+    const notional = capped ? cap : raw;
+    return { notional, isMartingale: true, multiplier, layerIndex, capped };
+  }
+
+  _computeStackBEP(trade) {
+    // Priority 1: walk buyLayers (canonical for DCA stacks)
+    if (Array.isArray(trade.buyLayers) && trade.buyLayers.length > 0) {
+      let totalQty = 0;
+      let totalSpent = 0;
+      for (const layer of trade.buyLayers) {
+        if (!layer || layer.status !== 'FILLED') continue;
+        const p = Number(layer.price);
+        const q = Number(layer.qty);
+        if (!Number.isFinite(p) || !Number.isFinite(q) || q <= 0 || p <= 0) continue;
+        totalQty += q;
+        totalSpent += p * q;
+      }
+      if (totalQty > 0) {
+        return { totalQty, totalSpent, bep: totalSpent / totalQty };
+      }
+    }
+    // Priority 2: fallback to scalar fields (works for first layer before any layer recorded, or non-DCA safety)
+    const buyPrice = Number(trade.buyPrice);
+    const buyQty = Number(trade.buyQty);
+    if (Number.isFinite(buyPrice) && Number.isFinite(buyQty) && buyPrice > 0 && buyQty > 0) {
+      return { totalQty: buyQty, totalSpent: buyPrice * buyQty, bep: buyPrice };
+    }
+    return { totalQty: 0, totalSpent: 0, bep: null };
+  }
+
+  // DCA stack TP — reuse _computeTp (single source of truth) by passing stackBep as buyPrice
+  async _computeDcaTp({ stackBep, totalQty, skipTrend = false } = {}) {
+    if (!Number.isFinite(stackBep) || stackBep <= 0) {
+      throw new Error(`_computeDcaTp: invalid stackBep=${stackBep}`);
+    }
+    // totalQty reserved for future fee/qty-aware logic — currently fees are percent-based
+    return this._computeTp({ buyPrice: stackBep, skipTrend });
+  }
+
   // ─── FIX-2026-07-23: Stop Loss on upper-KC ─────────────────────────────────
   // เรียกจาก onCandleClosed หลังจาก S1 detection เสร็จ
-  //   - gate: bot.stopLossOnUpperKC ต้องเปิดอยู่
+  //   - gate: bot.stopLossOnUpperKC ต้องเปิดอยู่ + trade.useStopLossOnUKC === true
   //   - คำนวณ upper-KC ของ timeframe นี้
-  //   - ถ้า candle.close > upperKC → scan active trades ที่ state='selling' + buyPrice > close (ขาดทุน)
+  //   - ถ้า candle.close > upperKC → scan active trades ที่ state='selling' + buyPrice > close (ขาดทุน) + useStopLossOnUKC=true
   //   - force close ทีละ trade (cancel SELL + MARKET SELL)
   async _checkStopLossOnUpperKC(candle) {
-    // FIX E7: gate running + flag
+    // FIX E7: gate running
     if (!this.running) return;
-    if (!this.bot.stopLossOnUpperKC) return;
+    // FIX-2026-08-03 (Option B): ลบ global gate `if (!this.bot.stopLossOnUpperKC) return;`
+    //   - เดิม: require bot.stopLossOnUpperKC=true (ทุก candle ต้องผ่าน global toggle)
+    //   - ใหม่: per-trade useStopLossOnUKC flag เป็น gate เดียว (F1 arm เท่านั้นที่ทำให้ SL-UKC ทำงาน)
+    //   - เหตุผล: live-vs-DCA-backtest parity (backtester.js:1057 ใช้ OR semantic มาตั้งแต่แรก)
+    //     → เปิด bot ที่ AU=on, SL-UKC=off → DCA backtest เห็น SL-UKC exit แต่ live ไม่ trigger (เคส GIGGLEUSDT)
+    //   - behavior: ถ้าไม่มี trade ที่ useStopLossOnUKC=true → query return [] → early return (ไม่มี work)
 
     // FIX P2.5: mutex กัน concurrent invocation (WS + sweep อาจ trigger พร้อมกัน)
     //   ถ้า in-flight อยู่ → skip (อีก call จะจบเร็วๆ นี้อยู่แล้ว)
@@ -335,14 +1183,89 @@ class Trader {
     // FIX: candle ต้องปิดเหนือ upperKC เท่านั้น → trigger
     if (closePrice <= upperKC) return;
 
+    // FIX-2026-08-02: DCA mode — SL-UKC applies per-stack using stack BEP
+    //   - หา DCA stack trades ที่กำลัง selling + ขาดทุน (stackBep > closePrice)
+    //   - ใช้ stackBep แทน buyPrice (BEP = weighted-avg ของทุก layer)
+    //   - force-close เป็น stack: totalQty = stackTotalQty, sellReason = 'dca_stack_stop_loss'
+    if (this._isDcaMode()) {
+      let dcaTargets;
+      try {
+        // FIX-2026-08-03 (B6): include state='filled' so SL-UKC catches stacks that have BUY filled
+        //   but SELL not yet placed (post-mirror, pre-cancel/replace, or post-startup reconcile)
+        // FIX-2026-08-03: bot.slUkcTriggerOnProfit toggle — DCA ใช้ stackBep แทน buyPrice
+        //   - false (default): stackBep > closePrice (loss only) — DCA mode is always loss-exit by design
+        //   - true: skip loss check → trigger ได้ทั้งกำไรและขาดทุน (rare; ใช้ strategy "exit DCA stack at upper band")
+        const dcaLossFilter = this.bot.slUkcTriggerOnProfit === true
+          ? { stackBep: { $exists: true, $ne: null } } // trigger on any close > upperKC (profit OR loss)
+          : { stackBep: { $gt: closePrice, $exists: true, $ne: null } }; // loss only (default)
+        dcaTargets = await Trade.find({
+          botId: this.bot._id,
+          isDcaStack: true,
+          state: { $in: ['selling', 'filled', 'partial_sell_wait'] },
+          useStopLossOnUKC: true,
+          ...dcaLossFilter,
+        }).lean();
+      } catch (err) {
+        logger.warn({ err: err.message }, 'trader: stop_loss_upper_kc DCA — Trade.find failed');
+        return;
+      }
+      if (!dcaTargets || dcaTargets.length === 0) {
+        logger.debug({
+          botId: this.bot._id.toString(),
+          symbol: this.bot.symbol,
+          closePrice, upperKC: upperKC.toFixed(6),
+        }, 'trader: stop_loss_upper_kc DCA — no stack to force-close');
+        return;
+      }
+      logger.warn({
+        botId: this.bot._id.toString(),
+        symbol: this.bot.symbol,
+        timeframe: this.bot.timeframe,
+        closePrice, upperKC: upperKC.toFixed(6),
+        stacks: dcaTargets.length,
+        stackIds: dcaTargets.map((t) => t.stackId?.toString() || t._id.toString()),
+      }, 'trader: stop_loss_upper_kc DCA — force-closing losing stacks');
+      for (const t of dcaTargets) {
+        if (!this.running) break;
+        try {
+          // stack fields: stackBep, stackTotalQty
+          await this._stopLossForceClose(t, {
+            upperKC,
+            closePrice,
+            isStack: true,
+            stackBep: t.stackBep,
+            stackTotalQty: t.stackTotalQty,
+            reason: 'dca_stack_stop_loss',
+          });
+        } catch (err) {
+          logger.error({
+            err: err.message, stack: err.stack,
+            stackId: t.stackId?.toString(),
+          }, 'trader: stop_loss_force_close DCA stack — exception');
+        }
+      }
+      return;
+    }
+
     // FIX E5: หา trades ที่กำลัง selling + ยังขาดทุน (buyPrice > close)
     //   ถ้า buyPrice < close (กำไร) → ไม่แตะ ปล่อยให้ TP ทำงานต่อ
+    // FIX-2026-07-31 (F1): gate ด้วย per-trade flag (default false; set ตอน auto-arm)
+    //   - trade.useStopLossOnUKC === true → trigger ได้
+    //   - trade.useStopLossOnUKC === false (default) → ไม่ trigger (backward compatible)
+    //   - $exists:false ใน DB เก่า → ก็ไม่ trigger (ต้อง arm ก่อน)
+    // FIX-2026-08-03: bot.slUkcTriggerOnProfit toggle — default false = loss only, true = any close>upperKC
+    //   - false (default): buyPrice > closePrice (loss only) — original behavior
+    //   - true: skip loss check → trigger ได้ทั้งกำไรและขาดทุน (strict upper-band exit strategy)
+    const lossFilter = this.bot.slUkcTriggerOnProfit === true
+      ? {} // trigger on any close > upperKC (profit OR loss)
+      : { buyPrice: { $gt: closePrice } }; // loss only (default — backward compat)
     let targets;
     try {
       targets = await Trade.find({
         botId: this.bot._id,
         state: 'selling',
-        buyPrice: { $gt: closePrice },
+        useStopLossOnUKC: true,
+        ...lossFilter,
       }).lean();
     } catch (err) {
       logger.warn({ err: err.message }, 'trader: stop_loss_upper_kc — Trade.find failed');
@@ -387,17 +1310,1561 @@ class Trader {
     }
   }
 
+  // ─── FIX-2026-07-30: CB panic-sell (3-candle persistent lower-band breach) ──
+  // เรียกจาก onCandleClosed หลังจาก _checkStopLossOnUpperKC เสร็จ
+  //   - gate: bot.cbEnabled !== false (default true)
+  //   - คำนวณ lower-KC ของ timeframe นี้
+  //   - ถ้า candle ใหม่ (และ 3 แท่งก่อนหน้า) ล้วน "แดง + อยู่ใต้ lowerKC" → panic-close ALL positions ในบอท
+  //   - target states: 'partial_wait', 'filled', 'retrying', 'holding', 'selling' (ทุก position ที่ยังเปิดอยู่)
+  //   - ใช้ shared _forceCloseTradeNow() กับ duplicate logic
+  async _checkCBPanicClose(candle) {
+    if (!this.running) {
+      logger.debug({ botId: this.bot._id.toString() }, 'trader: cb skip — not running');
+      return;
+    }
+    if (this.bot.cbEnabled === false) {
+      logger.debug({ botId: this.bot._id.toString() }, 'trader: cb skip — disabled');
+      return;
+    }
+    // FIX-2026-08-02: DCA mode — disable CB panic-sell entirely
+    //   - matches "no cut loss" philosophy of DCA stack strategy
+    //   - ให้ layer accumulation ทำงานต่อ (ราคาจะลงเท่าไหร่ก็ตาม — BEP จะลดลงเรื่อยๆ)
+    //   - SL-UKC ยังคงทำงาน (per-stack BEP) — เป็น exit mechanism เดียวใน DCA mode
+    if (this._isDcaMode()) {
+      logger.debug({ botId: this.bot._id.toString() }, 'trader: cb skip — DCA mode (no panic-sell per design)');
+      return;
+    }
+
+    // mutex กัน concurrent invocation
+    if (this.cbCheckInFlight) {
+      logger.debug({ botId: this.bot._id.toString() }, 'trader: cb check already in flight, skip');
+      return;
+    }
+
+    // FIX-2026-08-01 (CRITICAL-BUG-1): debug log at entry so we can confirm the helper ran
+    //   - COTI incident 2026-08-01: zero log activity between BUY and forced close
+    //   - ใส่ log entry นี้ทุก candle → ดูใน pm2 log ได้ว่า helper ถูกเรียกจริงหรือไม่
+    logger.debug({
+      botId: this.bot._id.toString(),
+      symbol: this.bot.symbol,
+      tf: this.bot.timeframe,
+      candleCloseTime: candle.closeTime,
+      candleClose: candle.close,
+    }, 'trader: CB check running');
+
+    this.cbCheckInFlight = true;
+    try {
+      const klines = klineCache.getAll(this.bot.symbol, this.bot.timeframe);
+      if (!klines || klines.length < 21) {
+        logger.debug({ botId: this.bot._id.toString(), klinesLen: klines?.length }, 'trader: cb skip — klines not warm');
+        return;
+      }
+
+      // คำนวณ lower-KC
+      // FIX-2026-08-08 ACTUSDT CB-CBv2/CBv3: parseFloat klines first
+      //   - เดิม klines[i].close/high/low อาจเป็น string จาก cache → computeBgStates ได้ NaN/string ใน lower[]
+      //   - กัน TypeError: Cannot read properties of undefined (reading 'toFixed') ที่ lastLower.toFixed(6)
+      const klineCloses = klines.map((k) => parseFloat(k.close));
+      const klineHighs = klines.map((k) => parseFloat(k.high));
+      const klineLows = klines.map((k) => parseFloat(k.low));
+      const { lower } = signalEngine.computeBgStates({
+        closes: klineCloses,
+        highs: klineHighs,
+        lows: klineLows,
+        length: 20,
+        mult: this.bot.kcMult || 1.5,
+        useTrueRange: true,
+      });
+
+      // FIX-2026-08-01 (CRITICAL-BUG-1, Layer B): find index of PASSED-IN candle in cache
+      //   - เดิม lastIdx = klines.length - 1 (cache tail) → ถ้า reconcileKlines replay
+      //     ย้อนหลัง candle ที่อยู่ก่อน cache tail → ตรวจผิด candle
+      //   - fix: scan cache tail (last 10 candles) for the one matching candle.closeTime
+      //   - fallback ถ้าไม่เจอ → ใช้ cache tail (live path)
+      let lastIdx = klines.length - 1;
+      if (candle && candle.closeTime) {
+        let found = -1;
+        const tail = Math.min(10, klines.length);
+        for (let i = klines.length - 1; i >= klines.length - tail; i--) {
+          if (klines[i].closeTime === candle.closeTime) { found = i; break; }
+        }
+        if (found >= 0) lastIdx = found;
+      }
+      const lastLower = lower[lastIdx];
+      // FIX-2026-08-08 ACTUSDT CB-CBv2/CBv3: use Number.isFinite guard (catches NaN, strings, undefined)
+      //   - เดิม `lastLower == null` ตรวจแค่ null/undefined แต่ถ้า computeBgStates คืน NaN หรือ string จะหลุดไป lastLower.toFixed(6) แล้ว throw
+      if (typeof lastLower !== 'number' || !Number.isFinite(lastLower)) {
+        logger.debug({
+          botId: this.bot._id.toString(),
+          lastIdx,
+          lastLowerType: typeof lastLower,
+          lastLowerValue: lastLower,
+        }, 'trader: cb skip — lastLower invalid (warmup or bad kline)');
+        return;
+      }
+
+      // ตรวจ pattern CB ที่ candle ที่ตรงกับ passed-in candle
+      const opens = klines.map((k) => parseFloat(k.open));
+      const closes = klines.map((k) => parseFloat(k.close));
+      // FIX-2026-08-01: info-level log เฉพาะตอน pattern match (หลัง isCBAt คืน true)
+      if (!signalEngine.isCBAt(lastIdx, opens, closes, lower)) return;
+
+      // FIX-2026-08-01: include 'partial_sell_wait' (was missing — partial-filled SELL positions ถูก skip)
+      const OPEN_STATES = ['partial_wait', 'filled', 'retrying', 'holding', 'selling', 'partial_sell_wait'];
+      let targets;
+      try {
+        targets = await Trade.find({
+          botId: this.bot._id,
+          state: { $in: OPEN_STATES },
+        }).lean();
+      } catch (err) {
+        logger.warn({ err: err.message }, 'trader: cb — Trade.find failed');
+        return;
+      }
+      if (!targets || targets.length === 0) {
+        logger.warn({
+          botId: this.bot._id.toString(),
+          symbol: this.bot.symbol,
+          timeframe: this.bot.timeframe,
+          candleCloseTime: candle.closeTime,
+          lastLower: lastLower.toFixed(6),
+        }, 'trader: cb — pattern matched but no open positions to force-close');
+        return;
+      }
+
+      logger.warn({
+        botId: this.bot._id.toString(),
+        symbol: this.bot.symbol,
+        timeframe: this.bot.timeframe,
+        candleCloseTime: candle.closeTime,
+        lastLower: lastLower.toFixed(6),
+        targets: targets.length,
+        tradeIds: targets.map((t) => t._id.toString()),
+      }, 'trader: cb — 3-candle lowerKC breach, force-closing ALL positions (panic-sell)');
+
+      // loop ทีละ trade — ตัว logic หลักเหมือน stop-loss: cancel SELL → MARKET SELL
+      // ทุก position ถูกปิด ไม่สนว่ากำไรหรือขาดทุน (panic mode)
+      for (const t of targets) {
+        if (!this.running) break;
+        try {
+          await this._forceCloseTradeNow(t, {
+            reason: 'cb_panic',
+            ctx: {
+              lastClose: parseFloat(candle.close),
+              lastLower: lastLower,
+              allowProfit: true, // CB ไม่สนกำไร/ขาดทุน — ปิดทุก position เพื่อกันกราฟไหล
+            },
+          });
+        } catch (err) {
+          logger.error({
+            err: err.message, stack: err.stack,
+            tradeId: t._id.toString(),
+          }, 'trader: cb_force_close — exception');
+        }
+      }
+
+      // FIX-2026-08-01 (audit H1/R4): set suppression timestamp
+      //   - placeBuy consults _cbFiredAt + Date.now() < CB_SUPPRESS_MS → skip
+      //   - กัน S1 BUY ใน candle เดียวกัน / candle ถัดไปทันทีหลัง panic-close (race)
+      this._cbFiredAt = Date.now();
+
+      // FIX-2026-08-01: persist cbLastFiredAt to Bot for cross-restart continuity
+      //   - audit trail ใน DB (optional future dashboard)
+      //   - restore ใน start() (Change 8) → continue suppression ข้าม bot restart
+      this.bot.cbLastFiredAt = new Date();
+      Bot.updateOne(
+        { _id: this.bot._id },
+        { $set: { cbLastFiredAt: this.bot.cbLastFiredAt } }
+      ).catch((err) => logger.warn({ err: err.message }, 'trader: persist cbLastFiredAt failed'));
+
+      // แจ้งเตือนผ่าน Telegram + EventBus
+      try {
+        const botName = this.bot.name || this.bot.symbol || this.bot._id.toString();
+        // FIX-2026-08-01: use sendNow (was incorrectly .notify() — not an export)
+        await telegramNotifier.sendNow('cbPanicClose', {
+          botName,
+          symbol: this.bot.symbol,
+          timeframe: this.bot.timeframe,
+          closedCount: targets.length,
+          candleCloseTime: candle.closeTime,
+          lastLower: lastLower.toFixed(6),
+        }).catch((err) => logger.warn({ err: err.message }, 'trader: cb telegram sendNow failed'));
+      } catch (_) { /* non-fatal */ }
+    } finally {
+      this.cbCheckInFlight = false;
+    }
+  }
+
+  // ─── FIX-2026-08-06: CBv2 sustained panic-sell + cooldown cbv2LockHours hours ────
+  // เรียกจาก _cbv2KlineHandler (direct kline:closed subscription) — bypass onCandleClosed gate
+  //   - gate: bot.cbv2Enabled !== false (default true)
+  //   - skip if DCA mode (mirror CB — "no cut loss" DCA philosophy)
+  //   - skip if already CBv2-cooldown active (cbv2LockedUntil > now) → idempotent
+  //   - คำนวณ lower-KC ของ timeframe นี้
+  //   - ถ้า candle ใหม่ AND previous candle match isCBv2At (4 red candles fully below lowerKC)
+  //     → force-close ALL positions + cooldown S1 BUY for cbv2LockHours hours (default 8)
+  //   - HYBRID mode (FIX-2026-08-07): force-close + cooldown only — ไม่ disable บอท, ไม่ override Auto-pause
+  //     - บอทยัง enabled, Auto-pause/resume on Min-%KC ยังทำงานปกติ (เป็นอิสระจาก CBv2 cooldown)
+  //     - BUY suppression = _cbv2FiredAt cooldown window (เดิม 30s → ตอนนี้ใช้ cbv2LockHours)
+  //     - ผู้ใช้ปลด cooldown manual ผ่าน POST /api/bots/:id/unlock-cbv2 ได้
+  //   - ใช้ shared _forceCloseTradeNow() with reason 'cbv2_panic'
+  //   - mutex cbv2CheckInFlight กัน concurrent invocations
+  async _checkCBv2PanicClose(candle) {
+    if (!this.running) {
+      logger.debug({ botId: this.bot._id.toString() }, 'trader: cbv2 skip — not running');
+      return;
+    }
+    // FIX-2026-08-08: Feature #2 — version gate (mutually exclusive with CBv3)
+    //   - cbVersion='v3' → CBv3 handler fires instead (it has ST3 upper-TF filter)
+    //   - cbVersion='v2' → CBv2 handler fires (pure 4-red-below-lowerKC)
+    const cbVer = await cbVersion.getActiveVersion();
+    if (cbVer !== 'v2') {
+      logger.debug({ botId: this.bot._id.toString(), cbVersion: cbVer }, 'trader: cbv2 skip — active version is v3');
+      return;
+    }
+    if (this.bot.cbv2Enabled === false) {
+      logger.debug({ botId: this.bot._id.toString() }, 'trader: cbv2 skip — disabled');
+      return;
+    }
+    // DCA mode — disable CBv2 entirely (mirror CB pattern)
+    if (this._isDcaMode()) {
+      logger.debug({ botId: this.bot._id.toString() }, 'trader: cbv2 skip — DCA mode (no panic-sell per design)');
+      return;
+    }
+    // Already cooldown active — skip (idempotent until expiry + manual unlock)
+    if (this.bot.cbv2LockedUntil && new Date(this.bot.cbv2LockedUntil).getTime() > Date.now()) {
+      logger.debug({ botId: this.bot._id.toString(), cbv2LockedUntil: this.bot.cbv2LockedUntil }, 'trader: cbv2 skip — cooldown active');
+      return;
+    }
+
+    // mutex กัน concurrent invocation
+    if (this.cbv2CheckInFlight) {
+      logger.debug({ botId: this.bot._id.toString() }, 'trader: cbv2 check already in flight, skip');
+      return;
+    }
+
+    logger.debug({
+      botId: this.bot._id.toString(),
+      symbol: this.bot.symbol,
+      tf: this.bot.timeframe,
+      candleCloseTime: candle.closeTime,
+      candleClose: candle.close,
+    }, 'trader: CBv2 check running');
+
+    this.cbv2CheckInFlight = true;
+    try {
+      // FIX-2026-08-09: Migrate to cbPatternEvaluator — single canonical REST window
+      //   eliminates kline window inconsistency between trader (WS cache, ~500) and
+      //   watchdog (REST limit=30). Both now use limit=500 REST snapshot.
+      const targetCloseTime = candle && candle.closeTime ? candle.closeTime : null;
+      const evaluation = await cbPatternEvaluator.fetchAndEvaluateCBv2({
+        bot: this.bot,
+        binanceRest,
+        targetCloseTime,
+        signalEngine,
+      });
+      if (!evaluation.ok) {
+        logger.debug({
+          botId: this.bot._id.toString(),
+          reason: evaluation.reason,
+          candlesCount: evaluation.candlesCount,
+        }, 'trader: cbv2 skip — evaluator not ok');
+        return;
+      }
+      if (!evaluation.matched) {
+        // FIX-2026-08-09: clear stale confirmations when pattern fails to match
+        if (targetCloseTime != null) {
+          cbPatternEvaluator.consumeConfirmation({
+            botId: this.bot._id.toString(),
+            version: 'v2',
+            candleCloseTime: targetCloseTime,
+          });
+        }
+        if (evaluation.isBorderline) {
+          logger.warn({
+            botId: this.bot._id.toString(),
+            symbol: this.bot.symbol,
+            timeframe: this.bot.timeframe,
+            cbVersion: 'v2',
+            source: evaluation.source,
+            requestedLimit: evaluation.requestedLimit,
+            targetCloseTime,
+            candlesCount: evaluation.candlesCount,
+            lastLower: evaluation.lastLower ? evaluation.lastLower.toFixed(8) : null,
+            consecutiveCount: evaluation.consecutiveCount,
+            reason: evaluation.reason,
+          }, 'trader: cbv2 borderline — 3 candles match (CB but not CBv2), no fire');
+        }
+        return;
+      }
+
+      const lastLower = evaluation.lastLower;
+      const fingerprint = evaluation.fingerprint;
+
+      // FIX-2026-08-09: 2-tick confirmation — require 2 independent observations
+      //   of the same closed candle with the same fingerprint before destructive action.
+      //   First tick records confirmation (count=1), second tick confirms (count=2) → fire.
+      const recorded = cbPatternEvaluator.recordConfirmation({
+        botId: this.bot._id.toString(),
+        version: 'v2',
+        candleCloseTime: evaluation.targetCloseTime,
+        fingerprint,
+      });
+      const confirmationCount = recorded.count;
+      if (confirmationCount < cbPatternEvaluator.REQUIRED_CONFIRMATIONS) {
+        logger.warn({
+          botId: this.bot._id.toString(),
+          symbol: this.bot.symbol,
+          timeframe: this.bot.timeframe,
+          cbVersion: 'v2',
+          source: evaluation.source,
+          requestedLimit: evaluation.requestedLimit,
+          targetCloseTime: evaluation.targetCloseTime,
+          candlesCount: evaluation.candlesCount,
+          lastLower: lastLower.toFixed(8),
+          confirmationCount,
+          required: cbPatternEvaluator.REQUIRED_CONFIRMATIONS,
+          fingerprint,
+          reason: 'confirmation_pending',
+        }, 'trader: cbv2 pattern matched but confirmation pending — skipping force-close');
+        return;
+      }
+
+      // FIX-2026-08-09: re-fetch canonical snapshot to verify candle + fingerprint stable
+      //   (prevents stale-trigger from a candle that got rewritten after first observation)
+      const recheck = await cbPatternEvaluator.fetchAndEvaluateCBv2({
+        bot: this.bot,
+        binanceRest,
+        targetCloseTime: evaluation.targetCloseTime,
+        signalEngine,
+      });
+      if (!recheck.ok || !recheck.matched || recheck.fingerprint !== fingerprint) {
+        logger.warn({
+          botId: this.bot._id.toString(),
+          symbol: this.bot.symbol,
+          targetCloseTime: evaluation.targetCloseTime,
+          firstFingerprint: fingerprint,
+          recheckMatched: recheck.matched,
+          recheckFingerprint: recheck.fingerprint,
+          reason: !recheck.ok ? recheck.reason : 'fingerprint_mismatch',
+        }, 'trader: cbv2 recheck mismatch — skipping force-close (fail-closed)');
+        cbPatternEvaluator.consumeConfirmation({
+          botId: this.bot._id.toString(),
+          version: 'v2',
+          candleCloseTime: evaluation.targetCloseTime,
+        });
+        return;
+      }
+
+      // include 'partial_sell_wait' (mirror CB pattern)
+      const OPEN_STATES = ['partial_wait', 'filled', 'retrying', 'holding', 'selling', 'partial_sell_wait'];
+      let targets;
+      try {
+        targets = await Trade.find({
+          botId: this.bot._id,
+          state: { $in: OPEN_STATES },
+        }).lean();
+      } catch (err) {
+        logger.warn({ err: err.message }, 'trader: cbv2 — Trade.find failed');
+        return;
+      }
+      if (!targets || targets.length === 0) {
+        // pattern matched but no open positions — still set cooldown (hybrid: ไม่ disable bot, แค่กัน BUY)
+        logger.warn({
+          botId: this.bot._id.toString(),
+          symbol: this.bot.symbol,
+          timeframe: this.bot.timeframe,
+          candleCloseTime: candle.closeTime,
+          lastLower: lastLower.toFixed(6),
+        }, 'trader: cbv2 — pattern matched but no open positions, setting cooldown anyway (hybrid mode)');
+        // fall through to set cooldown
+      } else {
+        logger.warn({
+          botId: this.bot._id.toString(),
+          symbol: this.bot.symbol,
+          timeframe: this.bot.timeframe,
+          candleCloseTime: candle.closeTime,
+          lastLower: lastLower.toFixed(6),
+          targets: targets.length,
+          tradeIds: targets.map((t) => t._id.toString()),
+        }, 'trader: cbv2 — sustained 4-candle lowerKC breach, force-closing ALL positions + setting BUY cooldown');
+
+        // loop ทีละ trade — mirror CB pattern but with cbv2_panic reason
+        for (const t of targets) {
+          if (!this.running) break;
+          try {
+            await this._forceCloseTradeNow(t, {
+              reason: 'cbv2_panic',
+              ctx: {
+                lastClose: parseFloat(candle.close),
+                lastLower: lastLower,
+                allowProfit: true, // CBv2 ไม่สนกำไร/ขาดทุน — ปิดทุก position เพื่อกันกราฟไหลต่อเนื่อง
+              },
+            });
+          } catch (err) {
+            logger.error({
+              err: err.message, stack: err.stack,
+              tradeId: t._id.toString(),
+            }, 'trader: cbv2_force_close — exception');
+          }
+        }
+      }
+
+      // ─── HYBRID COOLDOWN (FIX-2026-08-07) — ไม่ disable bot, แค่กัน S1 BUY ───
+      const lockHours = Math.max(0.5, Math.min(168, Number(this.bot.cbv2LockHours) || 8));
+      const lockedUntil = new Date(Date.now() + lockHours * 60 * 60 * 1000);
+      const lockedUntilIso = lockedUntil.toISOString();
+
+      // FIX-2026-08-10: Direction A — CBv2 fires while CBv5 cooldown active → cancel CBv5
+      //   - cbCrossCooldown.applyCrossCooldownOnFire('v2') handles the cancel + audit logic
+      //   - cbv5LastFiredAt is preserved as audit timestamp
+      let cbv5Canceled = false;
+      if (this.bot.cbv5LockedUntil && new Date(this.bot.cbv5LockedUntil).getTime() > Date.now()) {
+        const cbv5FireMs = new Date(this.bot.cbv5LastFiredAt || Date.now()).getTime();
+        cbCrossCooldown.applyCrossCooldownOnFire({
+          bot: this.bot,
+          firingVersion: 'v2',
+          lockHours,
+          nowMs: Date.now(),
+        });
+        this._cbv5FiredAt = 0;
+        cbv5Canceled = true;
+        logger.warn({
+          botId: this.bot._id.toString(),
+          symbol: this.bot.symbol,
+          cbv5LockedUntil: this.bot.cbv5LockedUntil,
+          cbv5FireMs,
+        }, 'trader: cbv2 fires — canceled active CBv5 cooldown (Direction A)');
+      }
+
+      // set suppression timestamp (in-memory BUY gate)
+      this._cbv2FiredAt = Date.now();
+
+      // persist cooldown fields to Bot (cross-restart continuity)
+      this.bot.cbv2LastFiredAt = new Date();
+      this.bot.cbv2LockedUntil = lockedUntil;
+      this.bot.cbv2LockReason = 'cbv2_panic';
+      // FIX-2026-08-10: also clear CBv5 fields on bot doc (in-mem + persistence)
+      if (cbv5Canceled) {
+        this.bot.cbv5LockedUntil = null;
+        this.bot.cbv5LockReason = null;
+        // cbv5LastFiredAt preserved as audit
+      }
+      // HYBRID: ไม่แตะ bot.enabled / bot.status / autoPauseReason — บอทยังรัน, Auto-pause ยังทำงานปกติ
+
+      Bot.updateOne(
+        { _id: this.bot._id },
+        {
+          $set: {
+            cbv2LastFiredAt: this.bot.cbv2LastFiredAt,
+            cbv2LockedUntil: this.bot.cbv2LockedUntil,
+            cbv2LockReason: this.bot.cbv2LockReason,
+            // FIX-2026-08-10: persist CBv5 cancel
+            cbv5LockedUntil: this.bot.cbv5LockedUntil,
+            cbv5LockReason: this.bot.cbv5LockReason,
+            // HYBRID: enabled/status/autoPauseReason unchanged
+          },
+        }
+      ).catch((err) => logger.warn({ err: err.message }, 'trader: persist cbv2 cooldown failed'));
+
+      // FIX-2026-08-09: consume confirmation entry after successful fire
+      cbPatternEvaluator.consumeConfirmation({
+        botId: this.bot._id.toString(),
+        version: 'v2',
+        candleCloseTime: evaluation.targetCloseTime,
+      });
+
+      // emit events — bot:cooldown (CBv2-specific BUY suppression), bot:updated (no bot:disabled, no bot:locked)
+      eventBus.emit('bot:cooldown', {
+        botId: this.bot._id,
+        reason: 'cbv2_panic',
+        lockedUntil: lockedUntilIso,
+        lockHours,
+      });
+      eventBus.emit('bot:updated', { botId: this.bot._id });
+
+      // แจ้งเตือนผ่าน Telegram
+      try {
+        const botName = this.bot.name || this.bot.symbol || this.bot._id.toString();
+        await telegramNotifier.sendNow('cbv2PanicClose', {
+          botName,
+          symbol: this.bot.symbol,
+          timeframe: this.bot.timeframe,
+          closedCount: targets ? targets.length : 0,
+          candleCloseTime: candle.closeTime,
+          lastLower: lastLower.toFixed(6),
+          lockedUntil: lockedUntilIso,
+          lockHours,
+        }).catch((err) => logger.warn({ err: err.message }, 'trader: cbv2 telegram sendNow failed'));
+      } catch (_) { /* non-fatal */ }
+    } finally {
+      this.cbv2CheckInFlight = false;
+    }
+  }
+
+  // ─── FIX-2026-08-08: Feature #2 — CBv3 panic-sell + cooldown (CBv2 + ST3 upper-TF) ─────
+  // เรียกจาก _cbv3KlineHandler (direct kline:closed subscription)
+  //   - CBv3 = CBv2 sustained pattern (4 red candles below lowerKC) + ST3 no-trade pattern
+  //     match on upper-TF (TREND_TF_MAP: 3m/5m→1h, 15m→4h, 1h→1d) SAME candle (lastCloseTime)
+  //   - mutually exclusive with CBv2: cbVersion='v2' → early return (CBv2 handler already fires)
+  //                        cbVersion='v3' → this handler fires (CBv2 handler returns early)
+  //   - per-bot opt-out: bot.cbv3Enabled === false → skip (mirrors cbv2Enabled)
+  //   - HYBRID mode: force-close + cooldown only — ไม่ disable บอท, ไม่ override Auto-pause
+  //     - bot stays enabled, BUY suppression = _cbv3FiredAt cooldown window (cbv3LockHours)
+  //     - manual unlock via POST /api/bots/:id/unlock-cbv2 (clears both cbv2+cbv3 fields)
+  //   - fields: bot.cbv3Enabled / cbv3LockHours / cbv3LockedUntil / cbv3LockReason /
+  //     cbv3LastFiredAt (mirror CBv2 schema — FIX-2026-08-09 added cbv3Enabled +
+  //     cbv3LockHours which were missing from schema before)
+  //   - mutex cbv3CheckInFlight กัน concurrent invocations
+  async _checkCBv3PanicClose(candle) {
+    if (!this.running) {
+      logger.debug({ botId: this.bot._id.toString() }, 'trader: cbv3 skip — not running');
+      return;
+    }
+    // FIX-2026-08-08: Feature #2 — version gate (mutually exclusive with CBv2)
+    const cbVer = await cbVersion.getActiveVersion();
+    if (cbVer !== 'v3') {
+      logger.debug({ botId: this.bot._id.toString(), cbVersion: cbVer }, 'trader: cbv3 skip — active version is v2');
+      return;
+    }
+    if (this.bot.cbv3Enabled === false) {
+      logger.debug({ botId: this.bot._id.toString() }, 'trader: cbv3 skip — disabled');
+      return;
+    }
+    if (this._isDcaMode()) {
+      logger.debug({ botId: this.bot._id.toString() }, 'trader: cbv3 skip — DCA mode');
+      return;
+    }
+    if (this.bot.cbv3LockedUntil && new Date(this.bot.cbv3LockedUntil).getTime() > Date.now()) {
+      logger.debug({ botId: this.bot._id.toString(), cbv3LockedUntil: this.bot.cbv3LockedUntil }, 'trader: cbv3 skip — cooldown active');
+      return;
+    }
+    if (this.cbv3CheckInFlight) {
+      logger.debug({ botId: this.bot._id.toString() }, 'trader: cbv3 check already in flight, skip');
+      return;
+    }
+
+    this.cbv3CheckInFlight = true;
+    try {
+      // FIX-2026-08-09: Migrate to cbPatternEvaluator — single canonical REST window
+      //   - same rationale as CBv2: trader (WS cache 500) vs watchdog (REST 30) mismatch
+      //   - TUT incident 2026-08-09 17:18 BKK: lastLower=0.145673 matches limit=500
+      //     but NOT limit=30 (≈0.14725) → false CBv3 from WS path
+      const targetCloseTime = candle && candle.closeTime ? candle.closeTime : null;
+      const evaluation = await cbPatternEvaluator.fetchAndEvaluateCBv2({
+        bot: this.bot,
+        binanceRest,
+        targetCloseTime,
+        signalEngine,
+      });
+      if (!evaluation.ok) {
+        logger.debug({
+          botId: this.bot._id.toString(),
+          reason: evaluation.reason,
+          candlesCount: evaluation.candlesCount,
+        }, 'trader: cbv3 skip — evaluator not ok');
+        return;
+      }
+      if (!evaluation.matched) {
+        // FIX-2026-08-09: clear stale confirmations when pattern fails to match
+        if (targetCloseTime != null) {
+          cbPatternEvaluator.consumeConfirmation({
+            botId: this.bot._id.toString(),
+            version: 'v3',
+            candleCloseTime: targetCloseTime,
+          });
+        }
+        if (evaluation.isBorderline) {
+          logger.warn({
+            botId: this.bot._id.toString(),
+            symbol: this.bot.symbol,
+            timeframe: this.bot.timeframe,
+            cbVersion: 'v3',
+            source: evaluation.source,
+            requestedLimit: evaluation.requestedLimit,
+            targetCloseTime,
+            candlesCount: evaluation.candlesCount,
+            lastLower: evaluation.lastLower ? evaluation.lastLower.toFixed(8) : null,
+            consecutiveCount: evaluation.consecutiveCount,
+            reason: evaluation.reason,
+          }, 'trader: cbv3 borderline — 3 candles match (CB but not CBv2), no fire');
+        }
+        return;
+      }
+
+      const lastLower = evaluation.lastLower;
+      const fingerprint = evaluation.fingerprint;
+
+      // FIX-2026-08-09: 2-tick confirmation — require 2 independent observations
+      //   of the same closed candle with the same fingerprint before destructive action.
+      const recorded = cbPatternEvaluator.recordConfirmation({
+        botId: this.bot._id.toString(),
+        version: 'v3',
+        candleCloseTime: evaluation.targetCloseTime,
+        fingerprint,
+      });
+      const confirmationCount = recorded.count;
+      if (confirmationCount < cbPatternEvaluator.REQUIRED_CONFIRMATIONS) {
+        logger.warn({
+          botId: this.bot._id.toString(),
+          symbol: this.bot.symbol,
+          timeframe: this.bot.timeframe,
+          cbVersion: 'v3',
+          source: evaluation.source,
+          requestedLimit: evaluation.requestedLimit,
+          targetCloseTime: evaluation.targetCloseTime,
+          candlesCount: evaluation.candlesCount,
+          lastLower: lastLower.toFixed(8),
+          confirmationCount,
+          required: cbPatternEvaluator.REQUIRED_CONFIRMATIONS,
+          fingerprint,
+          reason: 'confirmation_pending',
+        }, 'trader: cbv3 pattern matched but confirmation pending — skipping force-close');
+        return;
+      }
+
+      // FIX-2026-08-09: re-fetch canonical snapshot to verify candle + fingerprint stable
+      //   (prevents stale-trigger from a candle that got rewritten after first observation)
+      const recheck = await cbPatternEvaluator.fetchAndEvaluateCBv2({
+        bot: this.bot,
+        binanceRest,
+        targetCloseTime: evaluation.targetCloseTime,
+        signalEngine,
+      });
+      if (!recheck.ok || !recheck.matched || recheck.fingerprint !== fingerprint) {
+        logger.warn({
+          botId: this.bot._id.toString(),
+          symbol: this.bot.symbol,
+          targetCloseTime: evaluation.targetCloseTime,
+          firstFingerprint: fingerprint,
+          recheckMatched: recheck.matched,
+          recheckFingerprint: recheck.fingerprint,
+          reason: !recheck.ok ? recheck.reason : 'fingerprint_mismatch',
+        }, 'trader: cbv3 recheck mismatch — skipping force-close (fail-closed)');
+        cbPatternEvaluator.consumeConfirmation({
+          botId: this.bot._id.toString(),
+          version: 'v3',
+          candleCloseTime: evaluation.targetCloseTime,
+        });
+        return;
+      }
+
+      // FIX-2026-08-09: ST3 no-trade on upper-TF (SAME candle) — fail-CLOSED on error
+      //   - If we can't fetch upper-TF data → suppress CBv3 (safer than firing blind)
+      //   - Replaces previous FAIL-OPEN which was a false-positive risk vector
+      const trendTF = volatilityScanner.TREND_TF_MAP ? volatilityScanner.TREND_TF_MAP[this.bot.timeframe] : null;
+      if (trendTF) {
+        try {
+          const noTradeCheck = await signalEngine.checkNoTradeOnUpperTF(
+            this.bot, trendTF, binanceRest, { bypassOptIn: true },
+          );
+          if (noTradeCheck.skip === true) {
+            // ST3 pattern matched on upper-TF → CBv3 trigger
+            if (this.bot.safeTradeNoTradeEnabled !== true) {
+              logger.warn({
+                botId: this.bot._id.toString(),
+                symbol: this.bot.symbol,
+                timeframe: this.bot.timeframe,
+                trendTF,
+                lastKind: noTradeCheck.lastKind,
+                candleCloseTime: candle.closeTime,
+                lastLower: lastLower.toFixed(6),
+              }, 'trader: CBv3 — CBv2 + ST3 (decoupled mode: safeTradeNoTradeEnabled=false but CBv3 still uses ST3 internally)');
+            }
+            logger.warn({
+              botId: this.bot._id.toString(),
+              symbol: this.bot.symbol,
+              timeframe: this.bot.timeframe,
+              trendTF,
+              lastKind: noTradeCheck.lastKind,
+              candleCloseTime: candle.closeTime,
+              lastLower: lastLower.toFixed(6),
+            }, 'trader: CBv3 — CBv2 pattern + ST3 upper-TF no-trade, force-closing ALL positions');
+          } else {
+            // CBv2 pattern matched BUT ST3 didn't trigger → don't fire CBv3
+            // (user opted into v3 for stricter gating — pure CBv2 should NOT trigger)
+            logger.debug({
+              botId: this.bot._id.toString(),
+              symbol: this.bot.symbol,
+              timeframe: this.bot.timeframe,
+              trendTF,
+              reason: noTradeCheck.reason,
+            }, 'trader: cbv3 — CBv2 pattern matched but ST3 cleared, no fire (v3 strict gate)');
+            return;
+          }
+        } catch (stErr) {
+          // FIX-2026-08-09: FAIL-CLOSED — ST3 fetch error → suppress CBv3
+          //   (better to miss a panic than fire a false alarm)
+          logger.warn({
+            err: stErr.message,
+            botId: this.bot._id.toString(),
+            symbol: this.bot.symbol,
+            trendTF,
+            candleCloseTime: candle.closeTime,
+          }, 'trader: cbv3 — ST3 fetch failed, skipping (fail-closed)');
+          cbPatternEvaluator.consumeConfirmation({
+            botId: this.bot._id.toString(),
+            version: 'v3',
+            candleCloseTime: evaluation.targetCloseTime,
+          });
+          return;
+        }
+      } else {
+        // No trendTF for this TF — fall back to CBv2-equivalent fire
+        logger.warn({
+          botId: this.bot._id.toString(),
+          timeframe: this.bot.timeframe,
+          trendTF,
+        }, 'trader: cbv3 — no TREND_TF_MAP entry, firing CBv2-equivalent');
+      }
+
+      const OPEN_STATES = ['partial_wait', 'filled', 'retrying', 'holding', 'selling', 'partial_sell_wait'];
+      let targets;
+      try {
+        targets = await Trade.find({ botId: this.bot._id, state: { $in: OPEN_STATES } }).lean();
+      } catch (err) {
+        logger.warn({ err: err.message }, 'trader: cbv3 — Trade.find failed');
+        return;
+      }
+      if (!targets || targets.length === 0) {
+        logger.warn({
+          botId: this.bot._id.toString(),
+          symbol: this.bot.symbol,
+          timeframe: this.bot.timeframe,
+          candleCloseTime: candle.closeTime,
+          lastLower: lastLower.toFixed(6),
+        }, 'trader: cbv3 — pattern matched but no open positions, setting cooldown anyway (hybrid mode)');
+      } else {
+        logger.warn({
+          botId: this.bot._id.toString(),
+          symbol: this.bot.symbol,
+          timeframe: this.bot.timeframe,
+          candleCloseTime: candle.closeTime,
+          lastLower: lastLower.toFixed(6),
+          targets: targets.length,
+          tradeIds: targets.map((t) => t._id.toString()),
+        }, 'trader: cbv3 — CBv2+ST3 sustained breach, force-closing ALL positions');
+
+        for (const t of targets) {
+          if (!this.running) break;
+          try {
+            await this._forceCloseTradeNow(t, {
+              reason: 'cbv3_panic',
+              ctx: {
+                lastClose: parseFloat(candle.close),
+                lastLower: lastLower,
+                allowProfit: true,
+              },
+            });
+          } catch (err) {
+            logger.error({
+              err: err.message, stack: err.stack,
+              tradeId: t._id.toString(),
+            }, 'trader: cbv3_force_close — exception');
+          }
+        }
+      }
+
+      // HYBRID COOLDOWN
+      const lockHours = Math.max(0.5, Math.min(168, Number(this.bot.cbv3LockHours) || 8));
+      const lockedUntil = new Date(Date.now() + lockHours * 60 * 60 * 1000);
+      const lockedUntilIso = lockedUntil.toISOString();
+
+      // FIX-2026-08-10: Direction A — CBv3 fires while CBv5 cooldown active → cancel CBv5
+      //   - cbCrossCooldown.applyCrossCooldownOnFire('v3') handles the cancel + audit logic
+      //   - cbv5LastFiredAt is preserved as audit timestamp
+      let cbv5CanceledV3 = false;
+      if (this.bot.cbv5LockedUntil && new Date(this.bot.cbv5LockedUntil).getTime() > Date.now()) {
+        cbCrossCooldown.applyCrossCooldownOnFire({
+          bot: this.bot,
+          firingVersion: 'v3',
+          lockHours,
+          nowMs: Date.now(),
+        });
+        this._cbv5FiredAt = 0;
+        cbv5CanceledV3 = true;
+        logger.warn({
+          botId: this.bot._id.toString(),
+          symbol: this.bot.symbol,
+          cbv5LockedUntil: this.bot.cbv5LockedUntil,
+        }, 'trader: cbv3 fires — canceled active CBv5 cooldown (Direction A)');
+      }
+
+      this._cbv3FiredAt = Date.now();
+      this.bot.cbv3LastFiredAt = new Date();
+      this.bot.cbv3LockedUntil = lockedUntil;
+      this.bot.cbv3LockReason = 'cbv3_panic';
+      if (cbv5CanceledV3) {
+        this.bot.cbv5LockedUntil = null;
+        this.bot.cbv5LockReason = null;
+      }
+
+      Bot.updateOne(
+        { _id: this.bot._id },
+        {
+          $set: {
+            cbv3LastFiredAt: this.bot.cbv3LastFiredAt,
+            cbv3LockedUntil: this.bot.cbv3LockedUntil,
+            cbv3LockReason: this.bot.cbv3LockReason,
+            cbv5LockedUntil: this.bot.cbv5LockedUntil,
+            cbv5LockReason: this.bot.cbv5LockReason,
+          },
+        }
+      ).catch((err) => logger.warn({ err: err.message }, 'trader: persist cbv3 cooldown failed'));
+
+      // FIX-2026-08-09: consume confirmation entry after successful fire
+      cbPatternEvaluator.consumeConfirmation({
+        botId: this.bot._id.toString(),
+        version: 'v3',
+        candleCloseTime: evaluation.targetCloseTime,
+      });
+
+      eventBus.emit('bot:cooldown', {
+        botId: this.bot._id,
+        reason: 'cbv3_panic',
+        version: 'v3',
+        lockedUntil: lockedUntilIso,
+        lockHours,
+      });
+      eventBus.emit('bot:updated', { botId: this.bot._id });
+
+      try {
+        const botName = this.bot.name || this.bot.symbol || this.bot._id.toString();
+        await telegramNotifier.sendNow('cbv3PanicClose', {
+          botName,
+          symbol: this.bot.symbol,
+          timeframe: this.bot.timeframe,
+          closedCount: targets ? targets.length : 0,
+          candleCloseTime: candle.closeTime,
+          lastLower: lastLower.toFixed(6),
+          lockedUntil: lockedUntilIso,
+          lockHours,
+        }).catch((err) => logger.warn({ err: err.message }, 'trader: cbv3 telegram sendNow failed'));
+      } catch (_) { /* non-fatal */ }
+    } finally {
+      this.cbv3CheckInFlight = false;
+    }
+  }
+
+  // เรียกจาก _cbv5KlineHandler (direct kline:closed subscription)
+  //   - CBv5 (Support Zone + Deepest Low + Volume Filter) — independent of cbVersion
+  //   - 4-condition confirmation: close < lowerKC + close < deepest pivot low + bearish + volume spike
+  //   - debounce: pattern must NOT have matched in previous N candles (cbv5DebounceCandles)
+  //   - per-bot opt-out: bot.cbv5Enabled === false → skip
+  //   - HYBRID mode: force-close + cooldown only — ไม่ disable บอท, ไม่ override Auto-pause
+  //     - bot stays enabled, BUY suppression = _cbv5FiredAt cooldown window (cbv5LockHours)
+  //     - manual unlock via POST /api/bots/:id/unlock-cbv2 (clears cbv2+cbv3+cbv5 fields together)
+  //   - cbCrossCooldown handles Direction A (cancel CBv5 if CBv2/CBv3 fires) +
+  //     Direction B (absorb CBv5 into existing dominant cooldown)
+  //   - fields: bot.cbv5Enabled / cbv5LockHours / cbv5LockedUntil / cbv5LockReason /
+  //     cbv5LastFiredAt (mirror CBv2/CBv3 schema)
+  //   - mutex cbv5CheckInFlight กัน concurrent invocations
+  async _checkCBv5PanicClose(candle) {
+    if (!this.running) {
+      logger.debug({ botId: this.bot._id.toString() }, 'trader: cbv5 skip — not running');
+      return;
+    }
+    // FIX-2026-08-12 (audit Q9): master gate — AppConfig.cbv5MasterEnabled
+    //   - Audit found: per-bot cbv5Enabled was the only gate, no master switch
+    //   - User contract: master toggle should let user disable CBv5 globally
+    //   - Cheap DB call (30s cache) — falls back to true on error
+    if (!(await cbv5MasterToggle.isMasterCbv5Enabled())) {
+      logger.debug({ botId: this.bot._id.toString() }, 'trader: cbv5 skip — master toggle OFF');
+      return;
+    }
+    if (this.bot.cbv5Enabled === false) {
+      logger.debug({ botId: this.bot._id.toString() }, 'trader: cbv5 skip — disabled');
+      return;
+    }
+    if (this._isDcaMode()) {
+      logger.debug({ botId: this.bot._id.toString() }, 'trader: cbv5 skip — DCA mode');
+      return;
+    }
+    if (this.bot.cbv5LockedUntil && new Date(this.bot.cbv5LockedUntil).getTime() > Date.now()) {
+      logger.debug({ botId: this.bot._id.toString(), cbv5LockedUntil: this.bot.cbv5LockedUntil }, 'trader: cbv5 skip — cooldown active');
+      return;
+    }
+    if (this.cbv5CheckInFlight) {
+      logger.debug({ botId: this.bot._id.toString() }, 'trader: cbv5 check already in flight, skip');
+      return;
+    }
+
+    this.cbv5CheckInFlight = true;
+    try {
+      const targetCloseTime = candle && candle.closeTime ? candle.closeTime : null;
+      // CBv5 uses its own evaluator (cbPatternEvaluator.fetchAndEvaluateCBv5) — independent of CBv2/CBv3
+      // because CBv5 needs pivot-low history + volume MA which evaluateCBv2Snapshot doesn't compute.
+      const evaluation = await cbPatternEvaluator.fetchAndEvaluateCBv5({
+        bot: this.bot,
+        binanceRest,
+        targetCloseTime,
+      });
+      if (!evaluation.ok) {
+        logger.debug({
+          botId: this.bot._id.toString(),
+          reason: evaluation.reason,
+          candlesCount: evaluation.candlesCount,
+        }, 'trader: cbv5 skip — evaluator not ok');
+        return;
+      }
+      if (!evaluation.matched) {
+        // Clear stale confirmations when pattern fails to match
+        if (targetCloseTime != null) {
+          cbPatternEvaluator.consumeConfirmation({
+            botId: this.bot._id.toString(),
+            version: 'v5',
+            candleCloseTime: targetCloseTime,
+          });
+        }
+        if (evaluation.reason === 'debounce_active') {
+          logger.warn({
+            botId: this.bot._id.toString(),
+            symbol: this.bot.symbol,
+            timeframe: this.bot.timeframe,
+            reason: evaluation.reason,
+            candlesCount: evaluation.candlesCount,
+            lastLower: evaluation.lastLower ? evaluation.lastLower.toFixed(8) : null,
+            bypassedDebounce: evaluation.bypassedDebounce === true,
+            targetCloseTime: evaluation.targetCloseTime,
+          }, 'trader: cbv5 near-miss — single-tick match but debounce blocked (pattern matched recently)');
+        }
+        return;
+      }
+
+      const lastLower = evaluation.lastLower;
+      const deepestLow = evaluation.deepestLow;
+      const fingerprint = evaluation.fingerprint;
+
+      // 2-tick confirmation registry (reuse existing helpers — version key 'v5')
+      const recorded = cbPatternEvaluator.recordConfirmation({
+        botId: this.bot._id.toString(),
+        version: 'v5',
+        candleCloseTime: evaluation.targetCloseTime,
+        fingerprint,
+      });
+      const confirmationCount = recorded.count;
+      if (confirmationCount < cbPatternEvaluator.REQUIRED_CONFIRMATIONS) {
+        logger.warn({
+          botId: this.bot._id.toString(),
+          symbol: this.bot.symbol,
+          timeframe: this.bot.timeframe,
+          source: evaluation.source,
+          requestedLimit: evaluation.requestedLimit,
+          targetCloseTime: evaluation.targetCloseTime,
+          candlesCount: evaluation.candlesCount,
+          lastLower: lastLower.toFixed(8),
+          deepestLow: deepestLow != null ? deepestLow.toFixed(8) : null,
+          confirmationCount,
+          required: cbPatternEvaluator.REQUIRED_CONFIRMATIONS,
+          fingerprint,
+          reason: 'confirmation_pending',
+        }, 'trader: cbv5 pattern matched but confirmation pending — skipping force-close');
+        return;
+      }
+
+      // Re-fetch canonical snapshot to verify candle + fingerprint stable
+      // (prevents stale-trigger from a candle that got rewritten after first observation)
+      const recheck = await cbPatternEvaluator.fetchAndEvaluateCBv5({
+        bot: this.bot,
+        binanceRest,
+        targetCloseTime: evaluation.targetCloseTime,
+      });
+      if (!recheck.ok || !recheck.matched || recheck.fingerprint !== fingerprint) {
+        logger.warn({
+          botId: this.bot._id.toString(),
+          symbol: this.bot.symbol,
+          targetCloseTime: evaluation.targetCloseTime,
+          firstFingerprint: fingerprint,
+          recheckMatched: recheck.matched,
+          recheckFingerprint: recheck.fingerprint,
+          reason: !recheck.ok ? recheck.reason : 'fingerprint_mismatch',
+        }, 'trader: cbv5 recheck mismatch — skipping force-close (fail-closed)');
+        cbPatternEvaluator.consumeConfirmation({
+          botId: this.bot._id.toString(),
+          version: 'v5',
+          candleCloseTime: evaluation.targetCloseTime,
+        });
+        return;
+      }
+
+      const OPEN_STATES = ['partial_wait', 'filled', 'retrying', 'holding', 'selling', 'partial_sell_wait'];
+      let targets;
+      try {
+        targets = await Trade.find({ botId: this.bot._id, state: { $in: OPEN_STATES } }).lean();
+      } catch (err) {
+        logger.warn({ err: err.message }, 'trader: cbv5 — Trade.find failed');
+        return;
+      }
+      if (!targets || targets.length === 0) {
+        logger.warn({
+          botId: this.bot._id.toString(),
+          symbol: this.bot.symbol,
+          timeframe: this.bot.timeframe,
+          candleCloseTime: candle.closeTime,
+          lastLower: lastLower.toFixed(6),
+          deepestLow: deepestLow != null ? deepestLow.toFixed(6) : null,
+        }, 'trader: cbv5 — pattern matched but no open positions, setting cooldown anyway (hybrid mode)');
+      } else {
+        logger.warn({
+          botId: this.bot._id.toString(),
+          symbol: this.bot.symbol,
+          timeframe: this.bot.timeframe,
+          candleCloseTime: candle.closeTime,
+          lastLower: lastLower.toFixed(6),
+          deepestLow: deepestLow != null ? deepestLow.toFixed(6) : null,
+          targets: targets.length,
+          tradeIds: targets.map((t) => t._id.toString()),
+        }, 'trader: cbv5 — Support Zone broken + deepest pivot low breached, force-closing ALL positions');
+
+        for (const t of targets) {
+          if (!this.running) break;
+          try {
+            await this._forceCloseTradeNow(t, {
+              reason: 'cbv5_panic',
+              ctx: {
+                lastClose: parseFloat(candle.close),
+                lastLower,
+                deepestLow,
+                isBearish: evaluation.isBearish,
+                isHighVolume: evaluation.isHighVolume,
+                allowProfit: true,
+              },
+            });
+          } catch (err) {
+            logger.error({
+              err: err.message, stack: err.stack,
+              tradeId: t._id.toString(),
+            }, 'trader: cbv5_force_close — exception');
+          }
+        }
+      }
+
+      // HYBRID COOLDOWN + cross-version interaction
+      //   - cbCrossCooldown handles Direction A/B:
+      //     * if CBv2/CBv3 already active → CBv5 is absorbed into the dominant cooldown
+      //     * if no CBv2/CBv3 active → CBv5 takes its own lock (cbv5LockedUntil)
+      //   - returns updated lock fields + audit timestamp
+      const lockHours = Math.max(0.5, Math.min(168, Number(this.bot.cbv5LockHours) || 4));
+      const nowMs = Date.now();
+      const crossResult = cbCrossCooldown.applyCrossCooldownOnFire({
+        bot: this.bot,
+        firingVersion: 'v5',
+        lockHours,
+        nowMs,
+      });
+
+      // Only set in-memory gate if CBv5 took its OWN lock (Direction B "absorbed" → cbv5LockedUntil=null)
+      if (crossResult.cbv5LockedUntil && new Date(crossResult.cbv5LockedUntil).getTime() > nowMs) {
+        this._cbv5FiredAt = nowMs;
+      } else {
+        // Absorbed into CBv2/CBv3 → in-memory gate is null. Buy-gate via the extended CBv2/CBv3 field.
+        this._cbv5FiredAt = 0;
+      }
+
+      // Persist cooldown fields (idempotent — applies whatever crossResult decided)
+      Bot.updateOne(
+        { _id: this.bot._id },
+        {
+          $set: {
+            cbv2LockedUntil: crossResult.cbv2LockedUntil,
+            cbv3LockedUntil: crossResult.cbv3LockedUntil,
+            cbv5LockedUntil: crossResult.cbv5LockedUntil,
+            cbv5LastFiredAt: crossResult.cbv5LastFiredAt,
+            cbv5LockReason: crossResult.cbv5LockedUntil ? 'cbv5_panic' : null,
+          },
+        }
+      ).catch((err) => logger.warn({ err: err.message }, 'trader: persist cbv5 cooldown failed'));
+
+      // Consume confirmation entry after successful fire
+      cbPatternEvaluator.consumeConfirmation({
+        botId: this.bot._id.toString(),
+        version: 'v5',
+        candleCloseTime: evaluation.targetCloseTime,
+      });
+
+      // Emit events
+      const lockedUntilIso = crossResult.cbv5LockedUntil
+        ? new Date(crossResult.cbv5LockedUntil).toISOString()
+        : (crossResult.cbv3LockedUntil
+            ? new Date(crossResult.cbv3LockedUntil).toISOString()
+            : (crossResult.cbv2LockedUntil
+                ? new Date(crossResult.cbv2LockedUntil).toISOString()
+                : null));
+      eventBus.emit('bot:cooldown', {
+        botId: this.bot._id,
+        reason: 'cbv5_panic',
+        version: 'v5',
+        lockedUntil: lockedUntilIso,
+        lockHours,
+        absorbed: crossResult.appliedTo.startsWith('cbv5-absorbed') || crossResult.appliedTo.startsWith('cbv5-extended'),
+        appliedTo: crossResult.appliedTo,
+      });
+      eventBus.emit('bot:updated', { botId: this.bot._id });
+
+      // Telegram notification (mirror cbv3PanicClose format with deepestLow/isBearish/isHighVolume)
+      try {
+        const botName = this.bot.name || this.bot.symbol || this.bot._id.toString();
+        await telegramNotifier.sendNow('cbv5PanicClose', {
+          botName,
+          symbol: this.bot.symbol,
+          timeframe: this.bot.timeframe,
+          closedCount: targets ? targets.length : 0,
+          candleCloseTime: candle.closeTime,
+          lastLower: lastLower.toFixed(6),
+          deepestLow: deepestLow != null ? deepestLow.toFixed(6) : null,
+          isBearish: evaluation.isBearish,
+          isHighVolume: evaluation.isHighVolume,
+          lockedUntil: lockedUntilIso,
+          lockHours,
+          appliedTo: crossResult.appliedTo,
+        }).catch((err) => logger.warn({ err: err.message }, 'trader: cbv5 telegram sendNow failed'));
+      } catch (_) { /* non-fatal */ }
+    } finally {
+      this.cbv5CheckInFlight = false;
+    }
+  }
+
+  // ─── FIX-2026-08-08: Feature #3 — Auto Unlock Cooldown on candle close ─────
+  // เรียกจาก _cbAutoUnlockKlineHandler (direct kline:closed subscription)
+  //   - runs every candle close while bot is in CB cooldown (cbv2 OR cbv3)
+  //   - if cbAutoUnlockEnabled=false → skip
+  //   - if no cooldown active → skip
+  //   - mutex _cbAutoUnlockInFlight กัน concurrent invocations across candles
+  //   - on unlock: cbAutoUnlock.applyUnlock() clears cbv2* + cbv3* fields + resets in-memory _cbv2FiredAt/_cbv3FiredAt
+  //   - ไม่ override bot.enabled (HYBRID mode — manual unlock ไม่ disable บอท)
+  async _evaluateAutoUnlockOnCandle(_candle) {
+    if (!this.running) return;
+    if (this.bot.cbAutoUnlockEnabled !== true) return;
+    if (this._cbAutoUnlockInFlight) return;
+    this._cbAutoUnlockInFlight = true;
+    try {
+      const cbBot = await Bot.findById(this.bot._id).lean();
+      if (!cbBot) return;
+      // FIX-2026-08-08: master switch — stamp AppConfig.masterCbAutoUnlockEnabled
+      const masterToggles = await masterConfig.getMasterToggles();
+      cbBot._masterCbAutoUnlockEnabled = masterToggles.masterCbAutoUnlockEnabled;
+      const unlockResult = await cbAutoUnlock.evaluate(cbBot);
+      if (unlockResult.unlocked) {
+        await cbAutoUnlock.applyUnlock(cbBot, unlockResult);
+        // refresh in-memory snapshot
+        this.bot.cbv2LockedUntil = null;
+        this.bot.cbv2LockReason = null;
+        this.bot.cbv2LastFiredAt = null;
+        this.bot.cbv3LockedUntil = null;
+        this.bot.cbv3LockReason = null;
+        this.bot.cbv3LastFiredAt = null;
+        logger.info({
+          botId: this.bot._id.toString(),
+          signalsFound: unlockResult.signalsFound,
+          threshold: unlockResult.threshold,
+        }, 'trader: CB auto-unlock triggered (3+ profitable signals on candle close)');
+        try {
+          const botName = this.bot.name || this.bot.symbol || this.bot._id.toString();
+          await telegramNotifier.sendNow('botAutoUnlocked', {
+            botName,
+            symbol: this.bot.symbol,
+            timeframe: this.bot.timeframe,
+            signalsFound: unlockResult.signalsFound,
+            threshold: unlockResult.threshold,
+          }).catch((err) => logger.warn({ err: err.message }, 'trader: cbAutoUnlock telegram failed'));
+        } catch (_) { /* non-fatal */ }
+      } else if (unlockResult.signalsFound > 0) {
+        // partial progress — update counter for UI/debugging
+        await Bot.updateOne(
+          { _id: this.bot._id },
+          { $set: {
+            cbAutoUnlockSignalsFound: unlockResult.signalsFound,
+            cbAutoUnlockCheckedAt: new Date(),
+          } }
+        ).catch(() => {});
+      }
+    } catch (err) {
+      logger.warn({ err: err.message, botId: this.bot._id.toString() }, 'trader: cbAutoUnlock evaluate failed (non-fatal)');
+    } finally {
+      this._cbAutoUnlockInFlight = false;
+    }
+  }
+
+  // FIX-2026-07-30: shared force-close helper — ใช้ได้ทั้ง stop-loss (upperKC) และ CB (panic)
+  //   - atomic claim → cancel live SELL → MARKET SELL
+  //   - reason: 'stop_loss_upper_kc' | 'cb_panic'
+  //   - ctx: { upperKC, closePrice } หรือ { lastClose, lastLower, allowProfit }
+  // FIX-2026-08-02: _cancelAndReplaceSell — shared SELL cancel + replace helper
+  //   - ใช้ใน DCA stack flow (ทุก layer ใหม่ cancel SELL เก่า → place ใหม่ที่ BEP+TP ใหม่)
+  //   - race-safe: atomic state check + cancel orphan guard
+  //   - returns: { ok, mode, sellOrderId, sellPrice, error? }
+  //     mode ∈ 'placed' | 'race_sold' | 'race_stopping' | 'cancelled_first' | 'validation_fail' | 'binance_error'
+  async _cancelAndReplaceSell({ trade, reason, source, qty, newTarget, allowStates = ['filled', 'holding', 'selling', 'partial_sell_wait'] }) {
+    if (!trade || !trade._id) {
+      return { ok: false, mode: 'error', error: 'trade missing' };
+    }
+    const logCtx = { tradeId: trade._id.toString(), symbol: trade.symbol, reason, source, qty, newTarget };
+    let cancelOk = true;
+    let prevSellOrderId = trade.sellOrderId;
+
+    // 1. cancel existing SELL (if any)
+    if (prevSellOrderId) {
+      try {
+        await binanceRest.cancelOrder({ symbol: trade.symbol, orderId: prevSellOrderId });
+        logger.info({ ...logCtx, prevSellOrderId }, 'trader: _cancelAndReplaceSell — cancelled old SELL');
+      } catch (err) {
+        const ferr = binanceRest.formatBinanceError(err);
+        if (ferr && ferr.code === -2011) {
+          // -2011 = "Unknown order" — already gone (filled / cancelled / expired). Not a failure.
+          logger.info({ ...logCtx, prevSellOrderId, code: -2011 }, 'trader: _cancelAndReplaceSell — old SELL already gone (filled/cancelled)');
+        } else {
+          logger.warn({ ...logCtx, err: ferr || err.message }, 'trader: _cancelAndReplaceSell — cancel failed (will still attempt recheck + new place)');
+          cancelOk = false;
+        }
+      }
+    }
+
+    // 2. recheck trade state — if SELL already filled (race), abort + return 'race_sold'
+    let latest;
+    try {
+      latest = await Trade.findById(trade._id).lean();
+    } catch (err) {
+      logger.warn({ ...logCtx, err: err.message }, 'trader: _cancelAndReplaceSell — recheck failed');
+      return { ok: false, mode: 'binance_error', error: 'recheck failed: ' + err.message };
+    }
+    if (!latest) {
+      return { ok: false, mode: 'error', error: 'trade not found' };
+    }
+    if (latest.state === 'sold') {
+      logger.info({ ...logCtx, prevSellOrderId }, 'trader: _cancelAndReplaceSell — race: trade already sold, abort new SELL place');
+      return { ok: true, mode: 'race_sold' };
+    }
+    if (latest.state === 'stopping') {
+      logger.info({ ...logCtx, prevSellOrderId }, 'trader: _cancelAndReplaceSell — race: trade in stopping, abort new SELL place');
+      return { ok: true, mode: 'race_stopping' };
+    }
+    if (!allowStates.includes(latest.state)) {
+      return { ok: false, mode: 'error', error: `trade state=${latest.state} not in allowStates=${allowStates.join(',')}` };
+    }
+
+    if (!cancelOk) {
+      return { ok: false, mode: 'binance_error', error: 'cancel failed and not -2011' };
+    }
+
+    // 3. validate new SELL params (qty, price, tick, minNotional)
+    const info = symbolInfo.getCached(trade.symbol);
+    if (!info) {
+      return { ok: false, mode: 'error', error: 'symbolInfo missing' };
+    }
+    const validation = symbolInfo.validateOrder({ symbol: trade.symbol, price: newTarget.toString(), qty });
+    if (!validation.ok) {
+      logger.warn({ ...logCtx, reason: validation.reason }, 'trader: _cancelAndReplaceSell — validation failed (MARKET fallback deferred to caller)');
+      return { ok: false, mode: 'validation_fail', error: validation.reason };
+    }
+
+    // 4. place new aggregate SELL (LIMIT_MAKER post-only)
+    const sellClientOrderId = this.makeClientOrderId('sell', Date.now(), trade.retryCount || 0);
+    let sellResp;
+    try {
+      sellResp = await binanceRest.newOrder({
+        symbol: trade.symbol,
+        side: 'SELL',
+        type: 'LIMIT_MAKER',
+        quantity: qty.toString(),
+        price: newTarget.toString(),
+        newClientOrderId: sellClientOrderId,
+        recvWindow: config_recvWindow(),
+      });
+    } catch (err) {
+      const ferr = binanceRest.formatBinanceError(err);
+      logger.warn({ ...logCtx, err: ferr || err.message }, 'trader: _cancelAndReplaceSell — newOrder failed');
+      return { ok: false, mode: 'binance_error', error: (ferr ? `${ferr.code}: ${ferr.msg}` : err.message) };
+    }
+
+    // 5. atomic state update (state must still be in allowStates)
+    const upd = await Trade.updateOne(
+      { _id: trade._id, state: { $in: allowStates } },
+      {
+        sellOrderId: sellResp.orderId,
+        sellClientOrderId,
+        sellPrice: parseFloat(newTarget),
+        sellQty: qty,
+        sellStatus: sellResp.status,
+        sellPlacedAt: new Date(),
+        targetSellPrice: parseFloat(newTarget),
+        state: 'selling',
+      }
+    );
+    if (upd.modifiedCount === 0) {
+      // race lost — trade moved on between recheck and updateOne
+      logger.warn({ ...logCtx, sellOrderId: sellResp.orderId }, 'trader: _cancelAndReplaceSell — race lost after newOrder, cancelling orphan SELL');
+      try {
+        await binanceRest.cancelOrder({ symbol: trade.symbol, orderId: sellResp.orderId }).catch(() => null);
+      } catch (_) { /* best-effort */ }
+      return { ok: false, mode: 'binance_error', error: 'race lost after newOrder' };
+    }
+    logger.info({ ...logCtx, sellOrderId: sellResp.orderId, newTarget }, 'trader: _cancelAndReplaceSell — placed new SELL');
+    return {
+      ok: true,
+      mode: 'placed',
+      sellOrderId: sellResp.orderId,
+      sellPrice: parseFloat(newTarget),
+    };
+  }
+
+  async _forceCloseTradeNow(trade, { reason, ctx }) {
+    // FIX-2026-08-02: DCA stack branch — derive qty/buyPrice from stack; override reason
+    //   - trade.isDcaStack === true → ใช้ stackBep + stackTotalQty + sellReason='dca_stack_force_close'
+    //   - 1 stack = 1 bot counter entry (totalTrades, winTrades)
+    const isStack = trade.isDcaStack === true;
+    const stackReason = isStack ? 'dca_stack_force_close' : null;
+    const effectiveReason = isStack ? stackReason : reason;
+
+    // 1. atomic claim (state selling → stopping, หรือ filled/holding/... → stopping)
+    //   - ใช้ allowedFrom set เพื่อกัน race กับ paths อื่น ๆ
+    // FIX-2026-08-12 (audit Q14): use shared ATOMIC_FORCE_CLOSE_STATES from tradeStates.js
+    //   - Was hardcoded 6-element list; now uses the canonical set including 'stopping'
+    //   - 'stopping' was added so concurrent force-close paths race correctly (winner = claim first)
+    const { ATOMIC_FORCE_CLOSE_STATES } = require('./tradeStates');
+    const ALLOWED_FROM = ATOMIC_FORCE_CLOSE_STATES;
+    let errNote;
+    if (isStack) {
+      errNote = `dca_stack_force_close triggered (reason=${reason}, stackBep=${parseFloat(trade.stackBep || 0).toFixed(6)})`;
+    } else if (reason === 'cb_panic') {
+      errNote = `cb_panic_sell triggered (close=${ctx.lastClose} < lowerKC=${ctx.lastLower.toFixed(6)})`;
+    } else {
+      errNote = `stop_loss_upper_kc triggered (close=${ctx.closePrice} > upperKC=${ctx.upperKC.toFixed(6)})`;
+    }
+    const claim = await Trade.findOneAndUpdate(
+      { _id: trade._id, state: { $in: ALLOWED_FROM } },
+      { $set: { state: 'stopping', error: errNote } },
+      { new: true }
+    );
+    if (!claim) {
+      logger.debug({
+        tradeId: trade._id.toString(),
+        reason,
+      }, 'trader: _forceCloseTradeNow — state changed concurrently, abort');
+      return;
+    }
+    // 2. cancel live SELL (ถ้ามี) — re-use logic เดิม
+    if (trade.sellOrderId) {
+      try {
+        await binanceRest.cancelOrder({
+          symbol: this.bot.symbol,
+          orderId: trade.sellOrderId,
+        });
+        logger.info({
+          botId: this.bot._id.toString(),
+          tradeId: trade._id.toString(),
+          sellOrderId: trade.sellOrderId,
+          reason,
+        }, 'trader: _forceCloseTradeNow — cancelled live SELL');
+      } catch (err) {
+        const fe = binanceRest.formatBinanceError(err);
+        if (fe.code === -2011) {
+          // -2011 → อาจจะ fill ที่ TP แล้วก่อนหน้านี้ → ตรวจ order ก่อน
+          try {
+            const fresh = await binanceRest.getOrder({
+              symbol: this.bot.symbol,
+              orderId: trade.sellOrderId,
+            });
+            if (fresh && fresh.status === 'FILLED') {
+              const filledQty = parseFloat(fresh.executedQty);
+              const avgSell = parseFloat(fresh.price)
+                || parseFloat(fresh.avgPrice)
+                || (parseFloat(fresh.cummulativeQuoteQty) / filledQty);
+              const feeRate = fees.getMakerRate();
+              const pnl = fees.calcPnl({
+                buyPrice: parseFloat(trade.buyPrice),
+                sellPrice: avgSell,
+                qty: filledQty,
+                feeRate,
+              });
+              const upd = await Trade.updateOne(
+                { _id: claim._id, state: 'stopping' },
+                {
+                  state: 'sold',
+                  sellOrderId: fresh.orderId,
+                  sellPrice: avgSell,
+                  sellAvgPrice: avgSell, // P2-fix-2026-08-06: alias for query consistency
+                  sellFilledAt: new Date(),
+                  sellFilledQty: filledQty,
+                  // FIX-2026-07-31 (BUG-1): calcPnl returns {gross,fees,net,pnlPercent} — no realizedPnl key
+                  //   was silently writing `undefined` to DB. Use `pnl.net`.
+                  realizedPnl: pnl.net,
+                  pnlPercent: pnl.pnlPercent,
+                  error: `${reason}: SELL already FILLED at TP, recorded (no MARKET placed)`,
+                  // FIX-2026-07-31 (F1): reset SL-on-UKC auto-arm flag (trade ออกจาก selling แล้ว)
+                  useStopLossOnUKC: false,
+                  autoArmedAt: null,
+                  // FIX-2026-08-03: clear F1 threshold snapshots เมื่อ trade ออกจาก selling
+                  autoArmLossPct: null,
+                  autoArmAgeHours: null,
+                  // FIX-2026-08-01: reset SELL partial-fill latch on state-out-of-selling
+                  sellPartialDetectedAt: null,
+                  sellPartialLatchedAt: null,
+                  sellPartialLatchedReason: null,
+                  // FIX-2026-08-01: race recovery (cancel returned -2011 because SELL already filled at TP)
+                  sellReason: 'race_recovery_filled',
+                  sellReasonDetail: `${reason}: SELL already FILLED at TP before force-close cancelled`,
+                  sellReasonAt: new Date(),
+                  sellReasonSource: '_forceCloseTradeNow',
+                }
+              );
+              if (upd.modifiedCount === 1) {
+                // FIX-2026-08-06 (P4): slippage check for race-recovery path —
+                //   SELL fill ต่ำกว่า target > 1% (warn) / > 3% (telegram alert)
+                const raceTarget = parseFloat(trade.targetSellPrice || 0);
+                if (raceTarget > 0) {
+                  this._computeSlippage({
+                    sellPrice: avgSell,
+                    targetSellPrice: raceTarget,
+                    tradeId: claim._id,
+                    sellReason: 'race_recovery_filled',
+                    pnlPercent: pnl.pnlPercent,
+                  });
+                }
+                // FIX-2026-07-31 (BUG-1): previously this branch skipped Bot.$inc + unregisterTrade +
+                //   currentTrade cleanup + bot:status idle emit (mirror stop_loss_upper_kc L704-719 pattern)
+                await Bot.updateOne(
+                  { _id: this.bot._id },
+                  {
+                    $inc: {
+                      totalPnl: pnl.net,
+                      totalTrades: 1,
+                      winTrades: (pnl.net > 0 ? 1 : 0),
+                    },
+                    $set: { status: 'idle', lastError: '' },
+                  }
+                );
+                this._unregisterTrade(trade);
+                if (this.currentTrade && this.currentTrade._id.toString() === trade._id.toString()) {
+                  this.currentTrade = null;
+                }
+                eventBus.emit('bot:status', { botId: this.bot._id, status: 'idle' });
+                // FIX-2026-08-01: surface race-recovery reason to dashboardWS/telegram
+                eventBus.emit('trade:update', {
+                  tradeId: claim._id,
+                  botId: this.bot._id,
+                  state: 'sold',
+                  reason: trade.sellReason || 'race_recovery_filled',
+                  reasonDetail: trade.sellReasonDetail || `${reason}: SELL already FILLED at TP before force-close cancelled`,
+                });
+                return;
+              }
+            }
+          } catch (_) { /* fall through to MARKET */ }
+        }
+        // ไม่ใช่ -2011 ที่ fill แล้ว → MARKET place
+        logger.warn({
+          err: fe.message, code: fe.code,
+          tradeId: trade._id.toString(),
+        }, 'trader: _forceCloseTradeNow — cancel SELL failed, proceeding to MARKET anyway');
+      }
+    }
+
+    // 3. MARKET SELL
+    // FIX-2026-08-02: DCA stack — use stackBep + stackTotalQty
+    const qty = isStack
+      ? parseFloat(trade.stackTotalQty || 0)
+      : parseFloat(trade.buyFilledQty || trade.buyQty || 0);
+    const buyPrice = isStack
+      ? parseFloat(trade.stackBep || 0)
+      : parseFloat(trade.buyPrice || 0);
+    const targetSell = parseFloat(trade.targetSellPrice || 0);
+    if (!(qty > 0) || !(buyPrice > 0)) {
+      logger.error({
+        tradeId: claim._id.toString(),
+        isStack, qty, buyPrice,
+      }, 'trader: _forceCloseTradeNow — invalid qty/buyPrice, marking failed');
+      await Trade.updateOne(
+        { _id: claim._id, state: 'stopping' },
+        { state: 'failed', error: `${effectiveReason}: invalid qty/buyPrice, cannot MARKET SELL`,
+          // FIX-2026-07-31 (F1): reset SL-on-UKC auto-arm flag
+          useStopLossOnUKC: false,
+          autoArmedAt: null,
+          // FIX-2026-08-03: clear F1 threshold snapshots เมื่อ trade ออกจาก selling
+          autoArmLossPct: null,
+          autoArmAgeHours: null,
+          // FIX-2026-08-01: reset SELL partial-fill latch
+          sellPartialDetectedAt: null,
+          sellPartialLatchedAt: null,
+          sellPartialLatchedReason: null,
+        }
+      );
+      eventBus.emit('trade:update', {
+        tradeId: claim._id,
+        state: 'failed',
+        reason: null,
+        reasonDetail: null,
+      });
+      return;
+    }
+    // FIX-2026-07-31 (BUG-1): was calling `this._placeMarketSell` which doesn't exist → TypeError
+    //   stranded every CB panic-sell in 'stopping' forever. Use the existing `_emergencyMarketSell`
+    //   helper (defined L1891+) — signature is `(trade, qty, buyPrice, targetSellPrice, reasonNote)`.
+    // FIX-2026-08-01: pass opts.reason so _emergencyMarketSell can stamp sellReason enum on the trade doc.
+    // FIX-2026-08-02: use effectiveReason (for DCA stack, it's 'dca_stack_force_close')
+    const ok = await this._emergencyMarketSell(claim, qty, buyPrice, targetSell, errNote, { reason: effectiveReason });
+    if (!ok) {
+      logger.error({
+        tradeId: claim._id.toString(),
+        reason: effectiveReason,
+      }, 'trader: _forceCloseTradeNow — MARKET SELL failed, fallback to holding retry');
+      await Trade.updateOne(
+        { _id: claim._id },
+        { state: 'holding', error: `${effectiveReason}: MARKET SELL failed — will retry` }
+      );
+      await Bot.updateOne({ _id: this.bot._id }, { status: 'holding' });
+      eventBus.emit('bot:status', { botId: this.bot._id, status: 'holding' });
+      eventBus.emit('trade:update', {
+        tradeId: claim._id,
+        state: 'holding',
+        reason: null,
+        reasonDetail: null,
+      });
+      this.scheduleHoldingRetry(claim, qty, buyPrice, targetSell);
+      return;
+    }
+
+    // FIX-2026-08-02: DCA stack — stamp stackClosedAt + sellReasonSource
+    if (isStack) {
+      await Trade.updateOne(
+        { _id: claim._id },
+        {
+          stackClosedAt: new Date(),
+          sellReason: stackReason,
+          sellReasonDetail: errNote,
+          sellReasonAt: new Date(),
+          sellReasonSource: '_forceCloseTradeNow_dca',
+        }
+      );
+    }
+  }
+
   // FIX-2026-07-23: stop-loss force close — atomic claim → cancel live SELL → MARKET SELL
   async _stopLossForceClose(trade, ctx) {
+    // FIX-2026-08-02: DCA stack branch — use stack BEP + totalQty + per-stack pnl
+    //   - ctx.isStack, ctx.stackBep, ctx.stackTotalQty, ctx.reason
+    //   - 1 stack = 1 bot counter entry (totalTrades, winTrades)
+    //   - sellReason = 'dca_stack_stop_loss'
+    const isStack = ctx.isStack === true;
+    const stackBep = isStack ? parseFloat(ctx.stackBep || trade.stackBep) : null;
+    const stackTotalQty = isStack ? parseFloat(ctx.stackTotalQty || trade.stackTotalQty) : null;
+    const stackReason = isStack ? (ctx.reason || 'dca_stack_stop_loss') : null;
+
     // FIX E1: atomic claim (state='selling' → 'stopping') กัน 2 trigger พร้อมกัน
     //   - onSellOrderUpdate (WS) จะเห็น state='stopping' และ skip (FILLED → handleSellFilled guard)
     //   - onCandleClosed รอบถัดไปจะเห็น state != 'selling' ไม่ trigger ซ้ำ
+    // FIX-2026-08-03 (B6): for DCA stacks, also accept state='filled' (SELL placed path post-mirror,
+    //   pre-cancel/replace) so SL-UKC can still trigger against stacks that have BUY but no SELL yet
+    const claimPredicate = isStack
+      ? { _id: trade._id, state: { $in: ['selling', 'filled', 'partial_sell_wait'] } }
+      : { _id: trade._id, state: 'selling' };
     const claim = await Trade.findOneAndUpdate(
-      { _id: trade._id, state: 'selling' },
+      claimPredicate,
       {
         $set: {
           state: 'stopping',
-          error: `stop_loss_upper_kc triggered (close=${ctx.closePrice} > upperKC=${ctx.upperKC.toFixed(6)})`,
+          error: isStack
+            ? `dca_stack_stop_loss triggered (close=${ctx.closePrice} > upperKC=${ctx.upperKC.toFixed(6)}, stackBep=${stackBep?.toFixed(6)})`
+            : `stop_loss_upper_kc triggered (close=${ctx.closePrice} > upperKC=${ctx.upperKC.toFixed(6)})`,
         },
       },
       { new: true }
@@ -406,7 +2873,8 @@ class Trader {
       // someone else handled (WS SELL fill, or concurrent stop-loss path)
       logger.debug({
         tradeId: trade._id.toString(),
-      }, 'trader: stop_loss_force_close — state no longer selling, abort');
+        isStack,
+      }, 'trader: stop_loss_force_close — state no longer selling/filled, abort');
       return;
     }
 
@@ -460,6 +2928,16 @@ class Trader {
                   realizedPnl: pnl.net,
                   pnlPercent: pnl.pnlPercent,
                   error: `stop_loss_upper_kc — SELL already filled at TP before stop-loss cancelled (close=${ctx.closePrice} > upperKC=${ctx.upperKC.toFixed(6)})`,
+                  // FIX-2026-07-31 (F1): reset SL-on-UKC auto-arm flag
+                  useStopLossOnUKC: false,
+                  autoArmedAt: null,
+                  // FIX-2026-08-03: clear F1 threshold snapshots เมื่อ trade ออกจาก selling
+                  autoArmLossPct: null,
+                  autoArmAgeHours: null,
+                  // FIX-2026-08-01: reset SELL partial-fill latch on state-out-of-selling
+                  sellPartialDetectedAt: null,
+                  sellPartialLatchedAt: null,
+                  sellPartialLatchedReason: null,
                 }
               );
               if (upd.modifiedCount === 1) {
@@ -479,7 +2957,14 @@ class Trader {
                   this.currentTrade = null;
                 }
                 eventBus.emit('bot:status', { botId: this.bot._id, status: 'idle' });
-                eventBus.emit('trade:update', { tradeId: claim._id, state: 'sold' });
+                // FIX-2026-08-01: stop-loss race recovery — SELL filled at TP before stop-loss cancellation
+                eventBus.emit('trade:update', {
+                  tradeId: claim._id,
+                  botId: this.bot._id,
+                  state: 'sold',
+                  reason: trade.sellReason || 'race_recovery_filled',
+                  reasonDetail: trade.sellReasonDetail || `stop_loss_upper_kc: SELL already FILLED at TP (close=${ctx.closePrice} > upperKC=${ctx.upperKC.toFixed(6)})`,
+                });
                 logger.warn({
                   botId: this.bot._id.toString(),
                   tradeId: claim._id.toString(),
@@ -518,33 +3003,65 @@ class Trader {
     }
 
     // 2. MARKET SELL (re-use _emergencyMarketSell — guard ตอนนี้รวม 'stopping' แล้ว)
-    const qty = parseFloat(trade.sellQty) || parseFloat(trade.buyQty) || 0;
-    const buyPrice = parseFloat(trade.buyPrice) || 0;
+    // FIX-2026-08-02: DCA stack — use stackBep + stackTotalQty
+    const qty = isStack
+      ? stackTotalQty
+      : (parseFloat(trade.sellQty) || parseFloat(trade.buyQty) || 0);
+    const buyPrice = isStack
+      ? stackBep
+      : (parseFloat(trade.buyPrice) || 0);
     const targetSell = parseFloat(trade.targetSellPrice) || 0;
     if (qty <= 0 || buyPrice <= 0) {
       logger.error({
         tradeId: claim._id.toString(),
-        qty, buyPrice,
+        isStack, qty, buyPrice,
       }, 'trader: stop_loss_force_close — invalid qty/buyPrice, marking failed');
       await Trade.updateOne(
         { _id: claim._id, state: 'stopping' },
-        { state: 'failed', error: 'stop_loss: invalid qty/buyPrice' }
+        { state: 'failed', error: 'stop_loss: invalid qty/buyPrice',
+          // FIX-2026-07-31 (F1): reset SL-on-UKC auto-arm flag
+          useStopLossOnUKC: false,
+          autoArmedAt: null,
+          // FIX-2026-08-03: clear F1 threshold snapshots เมื่อ trade ออกจาก selling
+          autoArmLossPct: null,
+          autoArmAgeHours: null,
+          // FIX-2026-08-01: reset SELL partial-fill latch
+          sellPartialDetectedAt: null,
+          sellPartialLatchedAt: null,
+          sellPartialLatchedReason: null,
+        }
       );
       return;
     }
 
+    // FIX-2026-08-09: แยก SL-UKC F1-armed (auto-armed by F1) vs manual (bot.stopLossOnUpperKC=true)
+    //   - F1 auto-arms useStopLossOnUKC=true + autoArmedAt เมื่อ loss>10% + age>4h
+    //   - manual = bot.stopLossOnUpperKC=true (admin enabled in bot config)
+    //   - DCA stack branch ใช้ dca_stack_stop_loss เหมือนเดิม (เป็น category แยก)
+    const wasF1Armed = !isStack
+      && trade.useStopLossOnUKC === true
+      && trade.autoArmedAt != null;
+    const slUkcReason = wasF1Armed ? 'sl_ukc_f1_armed' : 'sl_ukc_manual';
+    const reasonText = isStack
+      ? `${stackReason} (stackBep=${stackBep?.toFixed(6)}, close=${ctx.closePrice} > upperKC=${ctx.upperKC.toFixed(6)}, f1Armed=${wasF1Armed})`
+      : `stop_loss_upper_kc (close=${ctx.closePrice} > upperKC=${ctx.upperKC.toFixed(6)}, f1Armed=${wasF1Armed})`;
     const ok = await this._emergencyMarketSell(
       claim,
       qty,
       buyPrice,
       targetSell,
-      `stop_loss_upper_kc (close=${ctx.closePrice} > upperKC=${ctx.upperKC.toFixed(6)})`,
+      reasonText,
+      // FIX-2026-08-09: pass explicit sellReason (sl_ukc_f1_armed vs sl_ukc_manual)
+      //   - เดิมใช้ default 'stop_loss_upper_kc' แต่ไม่บอกว่าเป็น auto-armed หรือ manual
+      //   - DCA stack path ยังคงใช้ 'dca_stack_stop_loss' (override ใน post-sell block ด้านล่าง)
+      { reason: isStack ? 'dca_stack_stop_loss' : slUkcReason },
     );
 
     if (!ok) {
       // FIX E4: MARKET fail → fallback ไป holding + scheduleHoldingRetry
       logger.error({
         tradeId: claim._id.toString(),
+        isStack,
       }, 'trader: stop_loss_force_close — MARKET SELL failed, fallback to holding retry');
       await Trade.updateOne(
         { _id: claim._id },
@@ -552,8 +3069,29 @@ class Trader {
       );
       await Bot.updateOne({ _id: this.bot._id }, { status: 'holding' });
       eventBus.emit('bot:status', { botId: this.bot._id, status: 'holding' });
-      eventBus.emit('trade:update', { tradeId: claim._id, state: 'holding' });
+      eventBus.emit('trade:update', {
+        tradeId: claim._id,
+        state: 'holding',
+        reason: null,
+        reasonDetail: null,
+      });
       this.scheduleHoldingRetry(claim, qty, buyPrice, targetSell);
+      return;
+    }
+
+    // FIX-2026-08-02: DCA stack — stamp stackClosedAt + override sellReason
+    //   - _emergencyMarketSell ตั้ง sellReason='stop_loss_upper_kc' default → เปลี่ยนเป็น 'dca_stack_stop_loss'
+    if (isStack) {
+      await Trade.updateOne(
+        { _id: claim._id },
+        {
+          stackClosedAt: new Date(),
+          sellReason: stackReason,
+          sellReasonDetail: reasonText,
+          sellReasonAt: new Date(),
+          sellReasonSource: '_stopLossForceClose_dca',
+        }
+      );
     }
   }
 
@@ -561,6 +3099,19 @@ class Trader {
   async onCandleClosed(candle, opts = {}) {
     if (!this.running) return;
     if (!this.bot.enabled) return;
+    // FIX-2026-08-22 (zombie): guard against in-memory stale state where a trader is
+    //   still running but the Bot doc has been soft-deleted (deletedAt set).
+    //   - scenario: kaito/gps — auto-RESUME spawned trader for soft-deleted bot → BUY ต่อ
+    //   - bot.deletedAt captured at construction; refresh on the rare path where _botUpdatedHandler
+    //     reloads from DB. Cheap defense-in-depth — if trader is somehow alive on a deleted bot, no BUY.
+    if (this.bot.deletedAt) {
+      logger.warn({
+        botId: this.bot._id.toString(),
+        symbol: this.bot.symbol,
+        deletedAt: this.bot.deletedAt,
+      }, 'trader: onCandleClosed refused — bot is soft-deleted');
+      return;
+    }
 
     // ต้อง warm-up ก่อน
     if (!signalEngine.isWarmedUp(klineCache.size(this.bot.symbol, this.bot.timeframe))) {
@@ -625,6 +3176,22 @@ class Trader {
     } else {
       if (latestIdx <= this.lastSignalIndex) return; // signal เก่าแล้ว
     }
+
+    // FIX-2026-07-31 (F1): auto-arm SL-on-UKC for stuck losing positions
+    //   - trigger: position loss > bot.autoArmLossPct (default 10%) AND age > bot.autoArmAgeHours (default 4h) AND state='selling'
+    //   - sets trade.useStopLossOnUKC=true → _checkStopLossOnUpperKC จะยอม trigger
+    //   - run ทุก candle (mirror CB pattern) — early return ภายใน helper ถ้า pattern ไม่ match
+    //   - ต้อง call ก่อน S1 logic เพราะ arm ต้องเสร็จก่อน candle ถัดไป (sync เป็น async)
+    // FIX-2026-08-01 (audit M1/R3): AWAIT F1 ก่อน — กัน race กับ _checkStopLossOnUpperKC ที่ query ใน candle เดียวกัน
+    await this._autoArmStopLossOnUKC(candle);
+
+    // FIX-2026-08-01: CB panic-sell moved to direct kline:closed subscription
+    //   (see start() _cbKlineHandler). Reason: onCandleClosed() is gated by
+    //   lastSignalIndex (line 1105) which only advances on S1 signals — dump candles
+    //   with no S1 trigger bypass CB entirely. Direct subscription runs the
+    //   pattern check on every candle close regardless of S1 state.
+    //   reconcileKlines also force-calls CB on the last missed candle to cover
+    //   WS-outage replays (see end of for-loop below).
 
     // FIX-2026-07-15: ในโหมด replay ต้องตรวจ S1 ที่ candle ที่กำลัง replay (อาจจะอยู่ก่อน cache tail)
     //   ปัญหาเดิม: checkS1OnLatestCandle ตรวจแค่ klines[klines.length-1] (cache tail)
@@ -760,6 +3327,8 @@ class Trader {
     //   - ถ้าไม่มี stop-loss path → ไม่กระทบ S1 signal ปกติ
     this._checkStopLossOnUpperKC(candle).catch((err) =>
       logger.error({ err: err.message, stack: err.stack }, 'trader: stop_loss check threw'));
+    // FIX BUG-2026-07-31: CB panic-sell ถูกย้ายไป entry-point ของ onCandleClosed (ก่อน S1 logic)
+    //   เพื่อให้ trigger ทุก candle ไม่ใช่เฉพาะตอนมี S1 signal
 
     // กันยิงซ้ำ
     this.lastSignalIndex = latestIdx;
@@ -829,12 +3398,294 @@ class Trader {
       return;
     }
 
+    // FIX-2026-08-01: Safe-trade filter (default ON)
+    //   - ก่อนวาง BUY ให้เช็ค super-upper TF (3m/5m→4h, 15m→1d, 1h→1w)
+    //   - PASS = lastClose > open (green ONLY — strict, FIX-2026-08-19) — แดง block ทันทีไม่สน EMA
+    //   - FAIL-OPEN on Binance error (API outage ไม่ block การเทรด)
+    //   - skip BUY ทันทีถ้า fail (don't waste signal slot)
+    if (this.bot.safeTradeEnabled !== false) {
+      try {
+        const st = await signalEngine.checkSafeTrade(this.bot, binanceRest, indicators);
+        if (st.skip) {
+          logger.info({
+            botId: this.bot._id.toString(),
+            symbol: this.bot.symbol,
+            tf: this.bot.timeframe,
+            superTF: st.superTF,
+            greenCandle: st.greenCandle,
+            aboveEma: st.aboveEma,
+            lastClose: st.lastClose,
+            lastEma: st.lastEma,
+          }, 'trader: safe-trade blocked BUY');
+          await Signal.updateOne({ _id: signalDoc._id }, { outcome: 'skipped', note: 'safe_trade_block' });
+          try {
+            eventBus.emit('safe_trade:blocked', {
+              botId: String(this.bot._id),
+              symbol: this.bot.symbol,
+              timeframe: this.bot.timeframe,
+              superTF: st.superTF,
+            });
+          } catch (_) {}
+          return; // do NOT place buy
+        }
+        // safe-trade PASS or fail-open — log only at debug (no spam on every signal)
+        if (st.reason === 'pass') {
+          logger.debug({ botId: this.bot._id.toString(), superTF: st.superTF, greenCandle: st.greenCandle, aboveEma: st.aboveEma }, 'trader: safe-trade PASS');
+        } else if (st.reason !== 'disabled' && st.reason !== 'no_super_tf') {
+          // fail-open reason (insufficient_data_open, api_error_open) — log warning
+          logger.warn({ botId: this.bot._id.toString(), reason: st.reason, error: st.error }, 'trader: safe-trade fail-open — allowing BUY');
+        }
+      } catch (err) {
+        // fail-open on unexpected exception (defensive)
+        logger.warn({ err: err.message, botId: this.bot._id.toString() }, 'trader: safe-trade check threw — allowing BUY');
+      }
+    }
+
+    // FIX-2026-08-03: Safe-trade filter #2 — LuxAlgo red pivot-low trendline support (opt-in, default OFF)
+    //   - หลัง ST#1 ผ่าน: ตรวจ upper-TF (TREND_TF_MAP) — current price > trendline?
+    //   - PASS = lastClose > trendline value at current bar → BUY
+    //   - FAIL-OPEN on Binance error / warmup / insufficient data (mirror ST#1)
+    //   - **ไม่แนะนำสำหรับ DCA bots** (DCA ซื้อ dip — filter นี้ block dip-buy → ขัดกับ DCA intent)
+    //   - ทำงานคู่กับ ST#1: ST#1 = "ขาขึ้นบน super-upper TF" + ST#2 = "ราคายังอยู่เหนือ support บน upper-TF"
+    if (this.bot.safeTradeTrendlineEnabled === true) {
+      try {
+        const trendTF = volatilityScanner.TREND_TF_MAP && volatilityScanner.TREND_TF_MAP[this.bot.timeframe];
+        const st2 = await signalEngine.checkSafeTradeTrendline(this.bot, trendTF, binanceRest);
+        if (st2.skip) {
+          logger.info({
+            botId: this.bot._id.toString(),
+            symbol: this.bot.symbol,
+            tf: this.bot.timeframe,
+            trendTF: st2.trendTF,
+            lastClose: st2.lastClose,
+            trendlineValue: st2.trendlineValue,
+            gapPct: st2.gapPct != null ? Number(st2.gapPct.toFixed(3)) : null,
+            pivotCount: st2.pivotCount,
+          }, 'trader: safe-trade trendline blocked BUY');
+          await Signal.updateOne({ _id: signalDoc._id }, { outcome: 'skipped', note: 'safe_trade_trendline_block' });
+          try {
+            eventBus.emit('safe_trade_trendline:blocked', {
+              botId: String(this.bot._id),
+              symbol: this.bot.symbol,
+              timeframe: this.bot.timeframe,
+              trendTF: st2.trendTF,
+              lastClose: st2.lastClose,
+              trendlineValue: st2.trendlineValue,
+              gapPct: st2.gapPct,
+            });
+          } catch (_) {}
+          return; // do NOT place buy
+        }
+        // trendline PASS or fail-open — log at debug for PASS, warn for fail-open
+        if (st2.reason === 'pass') {
+          logger.debug({
+            botId: this.bot._id.toString(),
+            trendTF: st2.trendTF,
+            gapPct: st2.gapPct,
+          }, 'trader: safe-trade trendline PASS');
+        } else if (st2.reason !== 'disabled' && st2.reason !== 'no_trend_tf') {
+          // fail-open reason (warmup, insufficient_data_open, api_error_open) — log warning
+          logger.warn({
+            botId: this.bot._id.toString(),
+            reason: st2.reason,
+            error: st2.error,
+          }, 'trader: safe-trade trendline fail-open — allowing BUY');
+        }
+      } catch (err) {
+        // fail-open on unexpected exception (defensive)
+        logger.warn({ err: err.message, botId: this.bot._id.toString() }, 'trader: safe-trade trendline check threw — allowing BUY');
+      }
+    }
+
+    // FIX-2026-08-05: Safe-trade filter #3 — Pine "No-Trade Signal Engine" (engulfing + shooting star)
+    //   - หลัง ST#1 + ST#2 ผ่าน: ตรวจ upper-TF (TREND_TF_MAP) — แท่งล่าสุดมี nt/nt1 pattern หรือไม่
+    //   - PASS = lastKind === 'none' → BUY
+    //   - FAIL-OPEN on Binance error / insufficient data / no_trend_tf (mirror ST#1/ST#2)
+    //   - **ไม่แนะนำสำหรับ DCA bots** (DCA ซื้อ dip — filter นี้ block dip-buy → �ัดกับ DCA intent)
+    //   - **Real-time**: Binance REST returns last candle ที่ยังไม่ close (close = live price) → check ทันที (ไม่รอ kline:closed)
+    //   - ใช้ bot.kcMult (per-bot) ผ่าน checkNoTradeOnUpperTF (FIX: ให้ consistent กับ S1 detection)
+    // FIX-2026-08-05: ST#3 disabled for DCA bots (UI warns "not recommended for DCA")
+    //   - DCA intent = buy dips — filter = block dip-buys → ขัดกัน
+    //   - Wizard layer-add ของ DCA ใช้ placeBuy path เดียวกัน → ต้อง bypass filter
+    if (this.bot.safeTradeNoTradeEnabled === true && !this._isDcaMode()) {
+      try {
+        const trendTF = volatilityScanner.TREND_TF_MAP && volatilityScanner.TREND_TF_MAP[this.bot.timeframe];
+        const st3 = await signalEngine.checkNoTradeOnUpperTF(this.bot, trendTF, binanceRest);
+        if (st3.skip) {
+          logger.info({
+            botId: this.bot._id.toString(),
+            symbol: this.bot.symbol,
+            tf: this.bot.timeframe,
+            trendTF: st3.trendTF,
+            lastKind: st3.lastKind,
+            lastClose: st3.lastClose,
+            kcMult: st3.kcMult,
+          }, 'trader: safe-trade no-trade blocked BUY');
+          await Signal.updateOne({ _id: signalDoc._id }, { outcome: 'skipped', note: 'safe_trade_no_trade_block' });
+          try {
+            eventBus.emit('safe_trade_no_trade:blocked', {
+              botId: String(this.bot._id),
+              symbol: this.bot.symbol,
+              timeframe: this.bot.timeframe,
+              trendTF: st3.trendTF,
+              lastKind: st3.lastKind,
+              lastClose: st3.lastClose,
+              kcMult: st3.kcMult,
+            });
+          } catch (_) {}
+          return; // do NOT place buy
+        }
+        // PASS or fail-open — log only when meaningful
+        if (st3.reason === 'pass') {
+          logger.debug({
+            botId: this.bot._id.toString(),
+            trendTF: st3.trendTF,
+            lastKind: st3.lastKind,
+          }, 'trader: safe-trade no-trade PASS');
+        } else if (st3.reason !== 'disabled' && st3.reason !== 'no_trend_tf') {
+          logger.warn({
+            botId: this.bot._id.toString(),
+            reason: st3.reason,
+            error: st3.error,
+          }, 'trader: safe-trade no-trade fail-open — allowing BUY');
+        }
+      } catch (err) {
+        // fail-open on unexpected exception (defensive)
+        logger.warn({ err: err.message, botId: this.bot._id.toString() }, 'trader: safe-trade no-trade check threw — allowing BUY');
+      }
+    }
+
+    // FIX-2026-08-11: CBv5 pre-BUY check (race: S1 + CBv5 on same candle)
+    //   - CBv5 only blocks BUY AFTER it fires (cbv5LockHours cooldown).
+    //   - When S1 fires on the same candle that CBv5 matches, BUY is placed
+    //     before the WS handler persists cbv5LockedUntil.
+    //   - Fix: pre-check the same candle against CBv5 here, alongside ST#3.
+    //   - Per-bot opt-out: bot.cbv5Enabled === false → skip
+    //   - DCA mode: skip (mirror ST#3 behavior)
+    //   - Mutual: if CBv2/CBv3 already locked → skip pre-check (cooldown gate blocks anyway)
+    //   - FIX-2026-08-12 (audit Q9): master gate — AppConfig.cbv5MasterEnabled
+    //   - FIX-2026-08-12 (audit Q11): use evaluateCbCooldown (DB + in-mem) to handle
+    //     stale in-memory bot.cbv5LockedUntil if watchdog just wrote it.
+    //     cbCooldownGate reads DB + backfills in-mem — same as placeBuy gate.
+    const cbv5PreGate = await cbCooldownGate.evaluateCbCooldown(this, this.bot, 'v5', Date.now());
+    if (this.bot.cbv5Enabled !== false && !this._isDcaMode() && !cbv5PreGate.active && !this._hasActiveCbCooldownExceptV5() && await cbv5MasterToggle.isMasterCbv5Enabled()) {
+      try {
+        const evalResult = await cbPatternEvaluator.fetchAndEvaluateCBv5({
+          bot: this.bot,
+          binanceRest,
+          targetCloseTime: candle.closeTime,
+        });
+        if (evalResult.ok && evalResult.matched) {
+          logger.warn({
+            botId: this.bot._id.toString(),
+            signalId: signalDoc._id.toString(),
+            symbol: this.bot.symbol,
+            targetCloseTime: candle.closeTime,
+            lastLower: evalResult.lastLower ? evalResult.lastLower.toFixed(8) : null,
+            deepestLow: evalResult.deepestLow ? evalResult.deepestLow.toFixed(8) : null,
+            fingerprint: evalResult.fingerprint,
+            reason: 'cbv5_pre_buy_block',
+          }, 'trader: CBv5 pre-BUY block — CBv5 matched on S1 candle, defer to WS handler for force-close');
+          await Signal.updateOne({ _id: signalDoc._id }, { outcome: 'skipped', note: 'cbv5_pre_buy_block' });
+          try {
+            eventBus.emit('cbv5:pre_buy_block', {
+              botId: this.bot._id.toString(),
+              signalId: signalDoc._id.toString(),
+              targetCloseTime: candle.closeTime,
+              fingerprint: evalResult.fingerprint,
+            });
+          } catch (_) { /* non-fatal */ }
+          return;
+        }
+      } catch (err) {
+        logger.warn({ err: err.message, botId: this.bot._id.toString() }, 'trader: CBv5 pre-BUY check threw — allowing BUY (fail-OPEN)');
+      }
+    }
+
     await this.placeBuy(signalDoc, candle);
   }
 
   // ─── BUY logic ─────────────────────────────────────
   async placeBuy(signalDoc, candle) {
     try {
+      // FIX-2026-08-01 (audit H1/R4): CB fire-suppression gate
+      //   - ถ้า CB เพิ่ง panic-close ภายใน CB_SUPPRESS_MS → skip BUY ทันที
+      //   - กัน S1 BUY วางบน candle ที่เพิ่ง trigger panic-close (race เดิม: CB fire-and-forget
+      //     + S1 detect sync → ทั้งคู่ run ใน onCandleClosed เดียวกัน)
+      //   - ตั้ง suppress ใน _checkCBPanicClose หลัง force-close loop สำเร็จ
+      if (this._cbFiredAt > 0 && (Date.now() - this._cbFiredAt) < CB_SUPPRESS_MS) {
+        const remainingMs = CB_SUPPRESS_MS - (Date.now() - this._cbFiredAt);
+        logger.warn({
+          botId: this.bot._id.toString(),
+          signalId: signalDoc._id.toString(),
+          sinceCbMs: Date.now() - this._cbFiredAt,
+          remainingMs,
+        }, 'trader: skip BUY — CB panic-close suppression active');
+        await Signal.updateOne({ _id: signalDoc._id }, { outcome: 'skipped', note: 'cb_suppress' });
+        return;
+      }
+
+      // FIX-2026-08-07: CBv2 cooldown gate (HYBRID mode — replaces short 30s suppression)
+      //   - HYBRID: CBv2 force-closes positions + sets BUY cooldown cbv2LockHours hours
+      //   - บอทยัง enabled + Auto-pause ยังทำงาน — gate นี้แค่กั้น S1 BUY ในช่วง cooldown
+      //   - dynamic duration: cbv2LockHours (user-configurable per bot, default 8)
+      //   - ถ้า user เปลี่ยน cbv2LockHours ระหว่าง cooldown → window ปรับตามทันที (computed on-the-fly)
+      //   - ผู้ใช้ปลด cooldown manual ผ่าน POST /api/bots/:id/unlock-cbv2 ได้ (reset _cbv2FiredAt)
+      // FIX-2026-08-08: Feature #2 — CBv3 cooldown gate (mirror CBv2 schema)
+      //   - mutually exclusive: cbVersion='v2' → CBv2 gate fires, 'v3' → CBv3 gate fires
+      //   - both gates share the same unlock endpoint (POST /api/bots/:id/unlock-cbv2)
+      const cbv2Gate = cbCooldownGate.evaluateCbCooldown(this, this.bot, 'v2', Date.now());
+      if (cbv2Gate.active) {
+        logger.warn({
+          botId: this.bot._id.toString(),
+          signalId: signalDoc._id.toString(),
+          sinceCbv2Ms: this._cbv2FiredAt > 0 ? Date.now() - this._cbv2FiredAt : null,
+          cooldownMs: (Math.max(0.5, Math.min(168, Number(this.bot.cbv2LockHours) || 8))) * 3600 * 1000,
+          remainingMs: cbv2Gate.remainingMs,
+          cbv2LockedUntil: this.bot.cbv2LockedUntil,
+          source: cbv2Gate.source,
+        }, 'trader: skip BUY — CBv2 cooldown active (hybrid mode)');
+        await Signal.updateOne({ _id: signalDoc._id }, { outcome: 'skipped', note: 'cbv2_cooldown' });
+        return;
+      }
+      // FIX-2026-08-09: ACEUSDT cooldown-bypass incident — CBv3 fired externally (positionWatchdog
+      //   Phase 4) writes DB `cbv3LastFiredAt` + `cbv3LockedUntil` but never sets `this._cbv3FiredAt`
+      //   in memory. Pre-fix gate only consulted in-memory flag → trader opened 5 BUYs in 2.5h.
+      //   Fix: ALSO consult DB `bot.cbv3LockedUntil` (authoritative across restart + external writers)
+      //   via cbCooldownGate.evaluateCbCooldown().
+      const cbv3Gate = cbCooldownGate.evaluateCbCooldown(this, this.bot, 'v3', Date.now());
+      if (cbv3Gate.active) {
+        logger.warn({
+          botId: this.bot._id.toString(),
+          signalId: signalDoc._id.toString(),
+          sinceCbv3Ms: this._cbv3FiredAt > 0 ? Date.now() - this._cbv3FiredAt : null,
+          cooldownMs: (Math.max(0.5, Math.min(168, Number(this.bot.cbv3LockHours) || 8))) * 3600 * 1000,
+          remainingMs: cbv3Gate.remainingMs,
+          cbv3LockedUntil: this.bot.cbv3LockedUntil,
+          source: cbv3Gate.source,
+        }, 'trader: skip BUY — CBv3 cooldown active (hybrid mode)');
+        await Signal.updateOne({ _id: signalDoc._id }, { outcome: 'skipped', note: 'cbv3_cooldown' });
+        return;
+      }
+      // FIX-2026-08-10: CBv5 cooldown gate (Support Zone + Deepest Low + Volume Filter)
+      //   - INDEPENDENT of cbVersion — fires in parallel with CBv2 or CBv3 (no mutual exclusion)
+      //   - same shape as CBv2/CBv3 gates; cbCooldownGate.evaluateCbCooldown handles v5 via dynamic key
+      //   - dynamic duration: cbv5LockHours (per-bot, default 4)
+      const cbv5Gate = cbCooldownGate.evaluateCbCooldown(this, this.bot, 'v5', Date.now());
+      if (cbv5Gate.active) {
+        logger.warn({
+          botId: this.bot._id.toString(),
+          signalId: signalDoc._id.toString(),
+          sinceCbv5Ms: this._cbv5FiredAt > 0 ? Date.now() - this._cbv5FiredAt : null,
+          cooldownMs: (Math.max(0.5, Math.min(168, Number(this.bot.cbv5LockHours) || 4))) * 3600 * 1000,
+          remainingMs: cbv5Gate.remainingMs,
+          cbv5LockedUntil: this.bot.cbv5LockedUntil,
+          source: cbv5Gate.source,
+        }, 'trader: skip BUY — CBv5 cooldown active (hybrid mode)');
+        await Signal.updateOne({ _id: signalDoc._id }, { outcome: 'skipped', note: 'cbv5_cooldown' });
+        return;
+      }
+
       // FIX-2026-07-21: กัน placeBuy รัวจากหลายเส้นทาง (WS kline:closed + reconcileKlines sweep
       //   หรือ 2 sweep ที่มาชนกัน). ถ้ามี BUY กำลังวางอยู่ → skip signal นี้ทันที
       //   (จะถูก process รอบหน้าเมื่อ BUY ก่อนหน้าเสร็จ)
@@ -860,18 +3711,158 @@ class Trader {
         }, 'trader: skip BUY — cooldown active');
         await Signal.updateOne({ _id: signalDoc._id }, { outcome: 'skipped', note: `cooldown_${waitMs}ms` });
         // schedule retry ตอน cooldown หมด (กัน drop signal ที่อาจ valid)
-        setTimeout(() => {
+        // FIX-2026-07-31 (BUG-14): track handle (T5) + clear ใน stop() — fixed candle stale (placeBuy
+        //   ใช้ candle จาก outer scope → หลัง cooldown อาจเป็น candle เก่า → re-evaluate ด้วย fresh kline)
+        clearTimeout(this.buyCooldownTimer);
+        this.buyCooldownTimer = setTimeout(() => {
+          this.buyCooldownTimer = null;
           if (this.running && this.bot.enabled && !this.buyInFlight) {
             logger.info({ botId: this.bot._id.toString() }, 'trader: cooldown expired — re-evaluating placeBuy');
             // re-enter placeBuy — internal guards จะเช็คอีกครั้ง
             this.placeBuy(signalDoc, candle).catch((err) =>
               logger.warn({ err: err.message }, 'trader: cooldown retry failed'));
           }
-        }, waitMs).unref();
+        }, waitMs);
+        if (typeof this.buyCooldownTimer.unref === 'function') this.buyCooldownTimer.unref();
         return;
       }
 
+      // FIX-2026-08-06: delist pre-flight — กัน BUY บน symbol ที่กำลังจะถูก delist
+      //   - ถ้า symbol อยู่ใน /sapi/v1/spot/delist-schedule และ delistTime - now <= 7 วัน → skip
+      //   - ตรวจก่อน buyInFlight flag �ั้ง (กัน flag ค้างถ้า reject)
+      //   - defense-in-depth: ซ้ำกับ symbolInfo.validateOrder ในขั้นตอนถัดไป แต่ที่นี่ fail-fast
+      //     ก่อนทำ DCA stack creation / symbolInfo load / bookTicker fetch — ประหยัด work
+      try {
+        const delistMonitor = require('../services/binanceDelistMonitor');
+        if (delistMonitor.isDelisted(this.bot.symbol)) {
+          logger.warn({ botId: this.bot._id.toString(), symbol: this.bot.symbol }, 'trader: symbol already delisted on Binance — skipping BUY');
+          await Signal.updateOne({ _id: signalDoc._id }, { outcome: 'skipped', note: 'symbol_delisted' });
+          return;
+        }
+        if (delistMonitor.willDelistWithin(this.bot.symbol, 7)) {
+          const dt = delistMonitor.getDelistTime(this.bot.symbol);
+          const daysUntil = ((dt - Date.now()) / (24 * 60 * 60 * 1000)).toFixed(2);
+          logger.warn({
+            botId: this.bot._id.toString(),
+            symbol: this.bot.symbol,
+            delistTime: new Date(dt).toISOString(),
+            daysUntil,
+          }, 'trader: delist pre-flight skip');
+          await Signal.updateOne({ _id: signalDoc._id }, { outcome: 'skipped', note: `delist_in_${daysUntil}d` });
+          return;
+        }
+      } catch (_) { /* delistMonitor not yet started — fail-open (validateOrder catches it later) */ }
+
       this.buyInFlight = true;
+
+      // FIX-2026-08-02: DCA mode — find or create the stack BEFORE symbol info + price calc
+      //   - 1 Bot = 1 open DCA stack at a time
+      //   - first S1 → create stack (stackId = own _id, dcaLayerIndex=1, dcaLayerCount=0)
+      //   - subsequent S1 → atomic claim to bump dcaLayerIndex + dcaAdding=true
+      //   - เมื่อ layer count >= dcaMaxLayers → skip signal (emit dcaMaxLayersHit)
+      //   - เมื่อ previous BUY in flight (state in placed/partial_wait/retrying) → skip
+      //   - atomic claim guards against 2 S1 signals racing เข้าพร้อมกัน
+      if (this._isDcaMode()) {
+        const OPEN_STACK_STATES = ['placed', 'partial_wait', 'filled', 'retrying', 'holding', 'selling', 'partial_sell_wait', 'stopping'];
+        const BUY_IN_FLIGHT = ['placed', 'partial_wait', 'retrying'];
+        let stack = await Trade.findOne({ botId: this.bot._id, isDcaStack: true, state: { $in: OPEN_STACK_STATES } });
+        if (!stack) {
+          // Create new stack — stackId = own _id (self-ref)
+          const newId = new mongoose.Types.ObjectId();
+          stack = await Trade.create({
+            _id: newId,
+            botId: this.bot._id,
+            signalId: signalDoc._id,
+            symbol: this.bot.symbol,
+            timeframe: this.bot.timeframe,
+            isDcaStack: true,
+            stackId: newId,
+            dcaLayerIndex: 1,
+            dcaLayerCount: 0,
+            dcaAdding: false,
+            buyLayers: [],
+            stackTotalQty: 0,
+            stackTotalSpent: 0,
+            stackBep: null,
+            stackTargetSellPrice: null,
+            buyPrice: null,
+            buyQty: null,
+            buyQuoteQty: null,
+            targetSellPrice: null,
+            state: 'placed',
+          });
+          logger.info({
+            botId: this.bot._id.toString(),
+            symbol: this.bot.symbol,
+            stackId: newId.toString(),
+            dcaLayerIndex: 1,
+          }, 'trader: DCA stack created — first layer');
+        } else {
+          // Stack exists — check max layers
+          if ((stack.dcaLayerCount || 0) >= this.bot.dcaMaxLayers) {
+            logger.info({
+              botId: this.bot._id.toString(),
+              symbol: this.bot.symbol,
+              stackId: stack.stackId?.toString(),
+              layerCount: stack.dcaLayerCount,
+              maxLayers: this.bot.dcaMaxLayers,
+            }, 'trader: DCA stack at max layers — skipping BUY');
+            await Signal.updateOne({ _id: signalDoc._id }, { outcome: 'skipped', note: 'dca_max_layers' });
+            this.buyInFlight = false;
+            eventBus.emit('dcaMaxLayersHit', {
+              botId: this.bot._id,
+              symbol: this.bot.symbol,
+              stackId: stack.stackId,
+              layerCount: stack.dcaLayerCount,
+              maxLayers: this.bot.dcaMaxLayers,
+            });
+            return;
+          }
+          // Previous BUY still in flight → skip
+          if (BUY_IN_FLIGHT.includes(stack.state)) {
+            logger.info({
+              botId: this.bot._id.toString(),
+              symbol: this.bot.symbol,
+              stackId: stack.stackId?.toString(),
+              state: stack.state,
+            }, 'trader: DCA stack previous BUY in flight — skipping signal');
+            await Signal.updateOne({ _id: signalDoc._id }, { outcome: 'skipped', note: 'dca_buy_in_flight' });
+            this.buyInFlight = false;
+            return;
+          }
+          // Atomic claim — bump dcaLayerIndex + dcaAdding=true
+          //   - กัน 2 S1 signals พร้อมกัน: ใคร claim ก่อนชนะ → layer index ขยับ
+          //   - state='selling' guard: เฉพาะตอน SELL placed พร้อม add layer ใหม่
+          const nextIdx = (stack.dcaLayerIndex || 0) + 1;
+          const claim = await Trade.updateOne(
+            { _id: stack._id, dcaLayerIndex: stack.dcaLayerIndex, state: 'selling' },
+            { $set: { dcaLayerIndex: nextIdx, dcaAdding: true, state: 'placed' } }
+          );
+          if (claim.modifiedCount !== 1) {
+            logger.info({
+              botId: this.bot._id.toString(),
+              symbol: this.bot.symbol,
+              stackId: stack.stackId?.toString(),
+              expectedLayerIndex: stack.dcaLayerIndex,
+              state: stack.state,
+            }, 'trader: DCA stack claim lost — skipping signal');
+            await Signal.updateOne({ _id: signalDoc._id }, { outcome: 'skipped', note: 'dca_claim_lost' });
+            this.buyInFlight = false;
+            return;
+          }
+          stack = await Trade.findById(stack._id);
+          logger.info({
+            botId: this.bot._id.toString(),
+            symbol: this.bot.symbol,
+            stackId: stack.stackId?.toString(),
+            dcaLayerIndex: stack.dcaLayerIndex,
+            dcaLayerCount: stack.dcaLayerCount,
+          }, 'trader: DCA stack claim won — adding layer');
+        }
+        // Set currentTrade so the rest of placeBuy uses the stack
+        this.currentTrade = stack;
+        this._registerTrade(stack);
+      }
 
       // 1. ตรวจว่ามี symbol info
       if (!symbolInfo.getCached(this.bot.symbol)) {
@@ -934,10 +3925,112 @@ class Trader {
         }, 'trader: no bookTicker for BUY price selection, falling back to candle.close');
       }
 
+      // FIX-2026-08-05 (HFT -2010 hardening): pre-flight fresh bookTicker
+      //   - HFT incident (low-cap + 1m TF): WS snapshot จาก @bookTicker stream อาจเก่า 200-500ms
+      //     เพราะ order book เปลี่ยนทุก 100-200ms → ask ขยับลงก่อน LIMIT_MAKER ไปถึง matching engine
+      //     → -2010 "Order would immediately match and take"
+      //   - fix: ถ้า WS snapshot เก่าเกิน 200ms → refetch ผ่าน /api/v3/ticker/bookTicker (REST, weight=2)
+      //     แล้ว recompute bid/ask/refPrice ด้วยค่าใหม่ → race window ลดจาก ~300-500ms เหลือ ~50-100ms
+      //   - ถ้า refetch fail (network/429) → fall through ใช้ snapshot เดิม (retry path ที่ step 8 ยังกัน -2010 อยู่)
+      //   - 200ms threshold: มากกว่า WS tick ปกติ (~50ms สำหรับ active symbols) แต่น้อยกว่า Binance HTTP RTT (~100-150ms)
+      const STALE_THRESHOLD_MS = 200;
+      const wsAgeMs = ticker && ticker.ts ? Date.now() - ticker.ts : Infinity;
+      if (ticker && ticker.bid && ticker.ask && Number.isFinite(wsAgeMs) && wsAgeMs > STALE_THRESHOLD_MS) {
+        try {
+          const fresh = await binanceRest.getBookTicker(this.bot.symbol);
+          if (fresh && fresh.bidPrice && fresh.askPrice) {
+            const oldBid = bid;
+            const oldAsk = ask;
+            const fBid = parseFloat(fresh.bidPrice);
+            const fAsk = parseFloat(fresh.askPrice);
+            logger.info({
+              botId: this.bot._id.toString(),
+              symbol: this.bot.symbol,
+              wsAgeMs,
+              oldBid, oldAsk,
+              newBid: fBid, newAsk: fAsk,
+            }, 'trader: pre-flight bookTicker refresh (WS snapshot stale > 200ms)');
+            // recompute bid/ask/refPrice ด้วยค่าใหม่ — ใช้ logic เดียวกับ block ด้านบน
+            bid = fBid;
+            ask = fAsk;
+            const freshSpread = new Decimal(fAsk).minus(fBid);
+            if (bid >= ask) {
+              refPrice = new Decimal(fAsk).minus(tickSize);
+            } else if (freshSpread.lessThan(tickDec.times(minSpreadTicks))) {
+              refPrice = new Decimal(fBid);
+            } else {
+              refPrice = new Decimal(fBid).minus(tickSize);
+            }
+          } else {
+            logger.warn({ botId: this.bot._id.toString(), symbol: this.bot.symbol }, 'trader: pre-flight bookTicker returned empty — using WS snapshot');
+          }
+        } catch (refreshErr) {
+          logger.warn({
+            botId: this.bot._id.toString(),
+            symbol: this.bot.symbol,
+            err: refreshErr.message,
+          }, 'trader: pre-flight bookTicker refresh failed — using WS snapshot (retry path will catch -2010)');
+        }
+      }
+
       // 3. คำนวณ qty
+      // FIX-2026-08-03: DCA + Martingale scaling — when DCA mode + martingaleEnabled,
+      //   per-layer notional scales by multiplier^(layerIndex-1), capped by martingaleMaxLayerNotional.
+      //   When martingaleEnabled=false (default) OR non-DCA → uses capitalPerTrade (unchanged).
+      let buyNotionalUSDT = this.bot.capitalPerTrade;
+      if (this._isDcaMode() && this.currentTrade) {
+        const layerInfo = this._computeDcaLayerNotional(this.currentTrade);
+        buyNotionalUSDT = layerInfo.notional;
+        if (layerInfo.isMartingale) {
+          logger.info({
+            botId: this.bot._id.toString(),
+            symbol: this.bot.symbol,
+            stackId: String(this.currentTrade.stackId || this.currentTrade._id),
+            layerIndex: layerInfo.layerIndex,
+            multiplier: layerInfo.multiplier,
+            layerNotionalUSDT: layerInfo.notional.toFixed(4),
+            capped: layerInfo.capped,
+          }, 'trader: DCA Martingale layer sizing');
+        }
+      }
+      // FIX-2026-08-08: Feature #1 — Dynamic Position Sizing (non-DCA path)
+      //   - mutually exclusive กับ DCA (validated in routes) — only fires when NOT in DCA mode
+      //   - effective size = dynamicSizeCurrent if set, else capitalPerTrade
+      //   - persisted via dynamicPositionSizing service on every SELL fill
+      // FIX-2026-08-08 (rev2): minNotional floor — บั๊ก A5
+      //   เดิม: ถ้า DPS ลด size ต่ำกว่า minNotional ของเหรียญ → validateOrder fail
+      //         → BUY ตายเงียบทุกสัญญาณของบอทตัวนั้น (กระทบระบบเทรดหลัก)
+      //   ใหม่: fail-safe — ถ้า size ที่ DPS เสนอต่ำกว่า minNotional × margin
+      //         → fallback ไปใช้ capitalPerTrade เดิม (ไม่ยกเลิก BUY)
+      if (!this._isDcaMode() && this.bot.dynamicSizeEnabled !== false) {
+        const effective = dps.getEffective(this.bot);
+        if (Number.isFinite(effective.size) && effective.size > 0) {
+          const DPS_MIN_NOTIONAL_MARGIN = 1.02; // กัน edge case ราคาขยับ/ปัดเศษ qty
+          let minNotionalUSDT = 0;
+          try {
+            const info = symbolInfo.getCached(this.bot.symbol);
+            if (info && info.notional && info.notional.minNotional) {
+              minNotionalUSDT = parseFloat(info.notional.minNotional.toString()) || 0;
+            }
+          } catch (_) { minNotionalUSDT = 0; /* non-fatal — treat as no floor */ }
+
+          if (effective.size >= minNotionalUSDT * DPS_MIN_NOTIONAL_MARGIN) {
+            buyNotionalUSDT = effective.size;
+          } else {
+            logger.warn({
+              botId: this.bot._id.toString(),
+              symbol: this.bot.symbol,
+              dpsSize: effective.size,
+              minNotional: minNotionalUSDT,
+              fallback: this.bot.capitalPerTrade,
+            }, 'trader: DPS size below minNotional — falling back to capitalPerTrade');
+          }
+        }
+      }
+
       const { qty } = symbolInfo.calcQtyFromCapital({
         symbol: this.bot.symbol,
-        capitalUSDT: this.bot.capitalPerTrade,
+        capitalUSDT: buyNotionalUSDT,
         price: parseFloat(refPrice.toString()),
       });
 
@@ -954,57 +4047,119 @@ class Trader {
         return;
       }
 
-      // 6. ── Pre-flight USDT balance check (FIX-2026-07-21: ใช้ free + locked) ──
-      // ตรวจว่ามี USDT พอจ่าย notional + fee buffer
-      //   - ก่อนหน้านี้ใช้แค่ free — ทำให้ locked USDT (BUY order ที่ match แล้วแต่ยังไม่ settled)
-      //     ถูกนับซ้ำ → บอทคิดว่ามีเงินพอ แต่จริงๆ committed ไปแล้วใน BUY ก่อนหน้า
-      //   - fix: ใช้ (free + locked) — accurate committed balance
+      // 6. ── Pre-flight USDT balance check (FIX-2026-08-21: race-safe reserve) ──
+      //   - ก่อนหน้านี้ใช้ (free + locked) - reserve → "total USDT I have" - reserve
+      //     ปัญหา: locked = USDT ที่ commit ไปแล้วใน LIMIT_MAKER BUY ของบอทอื่น
+      //     เมื่อ 2 �อท check พร้อมกัน → ทั้งคู่เห็น USDT เต็ม → ทั้งคู่ผ่าน
+      //     → over-spend เกิน reserve (อาการ "กั๊กเงินหลุด" ที่ user รายงาน)
+      //   - fix: ใช้ free - reserve - committed (USDT ที่ยังไม่ถูก commit) + atomic claim
+      //     - buyCommitment.claimBuy(notional) → synchronous atomic increment
+      //     - ถ้า over-commit → fail signal, return (no order placed)
+      //     - on order fail/cancel → releaseBuy(notional) ใน finally-style cleanup
       const requiredNotional = parseFloat(buyPrice) * parseFloat(qty);
       const feeBufferRate = fees.getMakerRate();
       const requiredWithBuffer = requiredNotional * (1 + feeBufferRate);
+      let claimedBuy = false; // FIX-2026-08-21: track for release on early-return
 
       try {
         const account = await binanceRest.getAccount();
         const usdtBal = (account.balances || []).find((b) => b.asset === 'USDT');
         const freeUsdt = usdtBal ? parseFloat(usdtBal.free) : 0;
-        const lockedUsdt = usdtBal ? parseFloat(usdtBal.locked) : 0;
-        const availableUsdt = freeUsdt + lockedUsdt; // FIX-2026-07-21
-        if (availableUsdt < requiredWithBuffer) {
-          const reason = `insufficient USDT balance: have ${availableUsdt.toFixed(4)} (free ${freeUsdt.toFixed(4)} + locked ${lockedUsdt.toFixed(4)}), need ${requiredWithBuffer.toFixed(4)} (notional ${requiredNotional.toFixed(4)} + fee buffer)`;
-          logger.warn({ botId: this.bot._id.toString(), freeUsdt, lockedUsdt, requiredWithBuffer }, 'trader: balance check failed');
+        // FIX-2026-08-21: ไม่นับ locked เ�็น available (locked = USDT ที่ commit ไปแล้ว)
+        let reserveUsdt = 0;
+        try {
+          reserveUsdt = await walletReserve.getReserveUsdt();
+        } catch (_) {
+          reserveUsdt = 0;
+        }
+        const committed = buyCommitment.getCommitted();
+        const availableForNewBuy = Math.max(0, freeUsdt - reserveUsdt - committed);
+        if (availableForNewBuy < requiredWithBuffer) {
+          const reason = `insufficient USDT balance: free ${freeUsdt.toFixed(4)}, reserve ${reserveUsdt.toFixed(4)}, in-flight committed ${committed.toFixed(4)} → available ${availableForNewBuy.toFixed(4)}, need ${requiredWithBuffer.toFixed(4)} (notional ${requiredNotional.toFixed(4)} + fee buffer)`;
+          logger.warn({ botId: this.bot._id.toString(), freeUsdt, reserveUsdt, committed, requiredWithBuffer }, 'trader: balance check failed');
           await Signal.updateOne({ _id: signalDoc._id }, { outcome: 'skipped', note: reason });
           this.buyInFlight = false; // FIX-2026-07-21: release on early-return
           await this.failSignal(signalDoc, reason);
           return;
         }
-        logger.debug({ botId: this.bot._id.toString(), freeUsdt, lockedUsdt, requiredWithBuffer }, 'trader: balance check ok');
+        // Atomic claim — sync increment prevents concurrent bot from over-spending
+        buyCommitment.claimBuy(requiredWithBuffer);
+        claimedBuy = true;
+        logger.debug({ botId: this.bot._id.toString(), freeUsdt, reserveUsdt, committed, requiredWithBuffer }, 'trader: balance check ok (claim acquired)');
       } catch (balErr) {
-        // ถ้า fetch balance fail (เช่น API key ไม่มี permission) — log warning แต่ไม่ block
-        logger.warn({ err: balErr.message }, 'trader: balance pre-check failed (continuing)');
+        // FIX-2026-08-21: เปลี่ยนจาก fail-open → fail-closed ตอน check fail
+        //   - เดิม log warning แล้ว proceed (ไม่ claim → เสี่ยง race ระหว่างบอท)
+        //   - ใหม่ fail signal เพื่อกัน race (Binance API hiccup ไม่ควรทำให้ reserve �ลุด)
+        const reason = `balance pre-check failed (fail-closed): ${balErr.message}`;
+        logger.warn({ err: balErr.message, botId: this.bot._id.toString() }, 'trader: balance pre-check failed — aborting BUY to protect reserve');
+        await Signal.updateOne({ _id: signalDoc._id }, { outcome: 'skipped', note: reason });
+        this.buyInFlight = false;
+        await this.failSignal(signalDoc, reason);
+        return;
       }
 
-      // 7. สร้าง Trade document
+      // 7. สร้าง Trade document (หรือ update stack ถ้า DCA mode)
       const clientOrderId = this.makeClientOrderId('buy', candle.closeTime, 0);
-      const trade = await Trade.create({
-        botId: this.bot._id,
-        signalId: signalDoc._id,
-        symbol: this.bot.symbol,
-        timeframe: this.bot.timeframe,
-        buyClientOrderId: clientOrderId,
-        buyPrice: parseFloat(buyPrice),
-        buyQty: parseFloat(qty),
-        buyPlacedAt: new Date(),
-        buyStatus: 'NEW',
-        state: 'placed',
-        targetSellPrice: null,
-      });
-      this.currentTrade = trade;
-      this._registerTrade(trade); // FIX 3
+      let trade;
+      if (this._isDcaMode()) {
+        // FIX-2026-08-02: DCA mode — update existing stack with new layer BUY fields
+        //   (stack ถูก set จาก DCA branch ด้านบน — this.currentTrade ชี้ไปที่ stack)
+        const stack = this.currentTrade;
+        await Trade.updateOne(
+          { _id: stack._id },
+          {
+            $set: {
+              signalId: signalDoc._id,
+              buyClientOrderId: clientOrderId,
+              buyPrice: parseFloat(buyPrice),
+              buyQty: parseFloat(qty),
+              buyPlacedAt: new Date(),
+              buyStatus: 'NEW',
+              targetSellPrice: null,
+              state: 'placed',
+            },
+          }
+        );
+        // Refresh in-memory stack with new BUY fields
+        stack.signalId = signalDoc._id;
+        stack.buyClientOrderId = clientOrderId;
+        stack.buyPrice = parseFloat(buyPrice);
+        stack.buyQty = parseFloat(qty);
+        stack.buyPlacedAt = new Date();
+        stack.buyStatus = 'NEW';
+        stack.targetSellPrice = null;
+        stack.state = 'placed';
+        trade = stack;
+      } else {
+        trade = await Trade.create({
+          botId: this.bot._id,
+          signalId: signalDoc._id,
+          symbol: this.bot.symbol,
+          timeframe: this.bot.timeframe,
+          buyClientOrderId: clientOrderId,
+          buyPrice: parseFloat(buyPrice),
+          buyQty: parseFloat(qty),
+          buyPlacedAt: new Date(),
+          buyStatus: 'NEW',
+          state: 'placed',
+          targetSellPrice: null,
+        });
+        this.currentTrade = trade;
+        this._registerTrade(trade); // FIX 3
+      }
 
       // 8. วาง LIMIT_MAKER BUY (post-only) — ถ้า price จะ match ทันที = reject ทันที
-      //    FIX-2026-07-24 (v2): ถ้า -2010 post-only rejected → retry 1 ครั้ง ด้วย ask - tickSize
+      //    FIX-2026-07-24 (v2): ถ้า -2010 post-only rejected → retry ด้วย ask - tickSize
       //      - bookTicker อาจ stale 200-500ms (ask ขยับลง) → ใช้ fresh ask จากอีก call ก่อน retry
-      //      - ถ้า retry ก็ -2010 อีก → fail ตามเดิม (ไม่ infinite loop)
+      //    FIX-2026-08-09 (rev2): เพิ่มเป็น retry สูงสุด 2 ครั้ง (3 attempts รวม) พร้อม backoff
+      //      - backoff: [50ms, 200ms] + jitter ±20% — รอให้ ask settle ก่อนลองใหม่
+      //      - ถ้า retry ครบ 2 ครั้งแล้วยัง -2010 → fail ตามเดิม (ไม่ infinite loop)
+      //      - rationale: log 30 วัน → recovery rate attempt 2 = 44%, attempt 3 expected +5-10%
+      //        แต่ latency รวม ~250-400ms ยังอยู่ในกรอบที่ spread ไม่วิ่งหนี
+      const MAX_BUY_RETRIES = 2;
+      const RETRY_BACKOFFS_MS = [50, 200]; // backoff ก่อน retry แต่ละครั้ง
+      const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
       let orderResp = await binanceRest.newOrder({
         symbol: this.bot.symbol,
         side: 'BUY',
@@ -1015,14 +4170,28 @@ class Trader {
         recvWindow: config_recvWindow(),
       }).catch((err) => ({ error: binanceRest.formatBinanceError(err) }));
 
-      // FIX-2026-07-24 (v2): retry path — refetch fresh bookTicker แล้วลองด้วย ask - tickSize
-      if (orderResp.error && orderResp.error.code === -2010) {
+      // FIX-2026-08-09 (rev2): retry path — loop สูงสุด 2 ครั้ง
+      //   - แต่ละรอบ: backoff (jitter ±20%) → refetch bookTicker → ลองด้วย ask - tickSize
+      //   - ถ้า retry สำเร็จ: update trade.buyPrice + sync Map<clientOrderId> ทันที (P3.2)
+      //   - ถ้า retry ครบ 2 ครั้งแล้ว -2010 อีก → ออก loop ไป fail signal block
+      for (let attempt = 1; attempt <= MAX_BUY_RETRIES; attempt++) {
+        if (!(orderResp.error && orderResp.error.code === -2010)) break;
+
+        const backoffBase = RETRY_BACKOFFS_MS[attempt - 1] || 200;
+        const jitter = backoffBase * 0.2 * (Math.random() * 2 - 1); // ±20%
+        const backoffMs = Math.max(10, Math.round(backoffBase + jitter));
+
         logger.warn({
           botId: this.bot._id.toString(),
           symbol: this.bot.symbol,
+          attempt,
+          maxRetries: MAX_BUY_RETRIES,
+          backoffMs,
           placedPrice: buyPrice,
           binanceMsg: orderResp.error.msg,
-        }, 'trader: -2010 on first attempt — refetching bookTicker and retrying with ask - tickSize');
+        }, `trader: -2010 on attempt ${attempt} — sleeping ${backoffMs}ms then refetching bookTicker and retrying`);
+
+        await sleep(backoffMs);
 
         // refetch bookTicker (refresh stale data)
         try {
@@ -1030,13 +4199,15 @@ class Trader {
           if (fresh && fresh.bidPrice && fresh.askPrice) {
             const freshAsk = fresh.askPrice;
             const retryPrice = symbolInfo.floorPrice(new Decimal(freshAsk).minus(tickSize), tickSize).toString();
-            const retryClientOrderId = this.makeClientOrderId('buy', candle.closeTime, 1);
+            const retryClientOrderId = this.makeClientOrderId('buy', candle.closeTime, attempt);
             logger.info({
               botId: this.bot._id.toString(),
               symbol: this.bot.symbol,
+              attempt,
               freshAsk,
               retryPrice,
-            }, 'trader: retrying BUY with ask - tickSize (fresh bookTicker)');
+              retryClientOrderId,
+            }, `trader: retrying BUY attempt ${attempt} with ask - tickSize (fresh bookTicker)`);
             orderResp = await binanceRest.newOrder({
               symbol: this.bot.symbol,
               side: 'BUY',
@@ -1073,15 +4244,22 @@ class Trader {
               logger.info({
                 botId: this.bot._id.toString(),
                 symbol: this.bot.symbol,
+                attempt,
                 buyPrice: retryPrice,
                 oldClientOrderId,
                 newClientOrderId: retryClientOrderId,
               }, 'trader: retry succeeded — updated trade buyPrice + re-registered clientOrderId in Map');
+              break; // success — exit retry loop
             }
           }
         } catch (retryErr) {
-          logger.warn({ err: retryErr.message }, 'trader: retry refetch/place failed');
-          // fall through — orderResp.error ยังคงอยู่ → fail ตามปกติ
+          logger.warn({
+            botId: this.bot._id.toString(),
+            symbol: this.bot.symbol,
+            attempt,
+            err: retryErr.message,
+          }, `trader: retry refetch/place failed on attempt ${attempt}`);
+          // fall through — orderResp.error ยังคงอยู่ → loop รอบถัดไป (ถ้ามี) หรือ fail
         }
       }
 
@@ -1096,6 +4274,14 @@ class Trader {
         const detail = isPostOnly
           ? `BUY -2010 post-only rejected (snapshot bid=${bid} ask=${ask}, placed=${buyPrice}) — Binance: ${binanceMsg}. bookTicker อาจ stale ตอน place order; ลอง retry ด้วย price ที่ต่ำกว่า ask มากขึ้น`
           : `BUY ${orderResp.error.code}: ${binanceMsg}`;
+        // FIX-2026-08-21: release buy commitment on order failure (กัน counter ไม่ inflate)
+        //   - claimedBuy = true หลังจาก balance check → ถ้า order fail ต้อง release
+        //   - ถ้าไม่ release → committed ค้าง → บอทอื่นโดน block ผิดพลาด
+        if (claimedBuy) {
+          buyCommitment.releaseBuy(requiredWithBuffer);
+          claimedBuy = false;
+          logger.info({ botId: this.bot._id.toString(), releasedUsdt: requiredWithBuffer.toFixed(4) }, 'trader: BUY rejected — buy commitment released');
+        }
         logger.warn({
           botId: this.bot._id.toString(),
           err: orderResp.error,
@@ -1108,14 +4294,39 @@ class Trader {
         await Signal.updateOne({ _id: signalDoc._id }, {
           outcome: 'failed',
           note: isPostOnly
-            ? `BUY -2010 (placed ${buyPrice} ≥ ask ${ask} ตอนส่ง order) · snapshot bid=${bid} · Binance: ${binanceMsg}`
+            ? `BUY -2010 (placed ${buyPrice} ≥ ask ${ask} ตอนส่ง order) · snapshot bid=${bid} · retried ${MAX_BUY_RETRIES}× with backoff → Binance: ${binanceMsg}`
             : `BUY ${orderResp.error.code}: ${binanceMsg}`,
         });
+        // FIX-2026-08-02: cancel any SELL orphaned by partial fill before resetting trade
+        await this._cancelOrphanedSells(trade, { reason: 'placeBuy_rejected', ctx: 'state=placed' });
         this._unregisterTrade(trade); // FIX 3
         this.currentTrade = null;
         this.buyInFlight = false; // FIX-2026-07-21: release on early-return
-        eventBus.emit('trade:update', { tradeId: trade._id, state: 'failed' });
+        eventBus.emit('trade:update', {
+        tradeId: trade._id,
+        state: 'failed',
+        reason: null,
+        reasonDetail: null,
+      });
         return;
+      }
+
+      // FIX-2026-08-21 (rev2): release buy commitment on order acceptance
+      //   - เดิม release เฉพาะตอน reject (line 4208) → committed สะสมทุก BUY ที่สำเร็จ
+      //     → counter โตเรื่อยจน block บอทอื่น (อาการ "in-flight committed 54.5057"
+      //     ทั้งที่ free 59.7 USDT และ reserve=0)
+      //   - fix: release ทันทีหลัง Binance accept order
+      //     - LIMIT_MAKER pending → USDT ถูก Binance lock (freeUsdt จาก next getAccount
+      //       จะ exclude ส่วนนี้เอง) → counter ไม่ต้อง track ซ้ำ
+      //     - ถ้า fill ทันที → USDT ถูกใช้ไปแล้ว → counter ไม่ต้อง track
+      //   - defense-in-depth: handleBuyFilled ก็ release อีกครั้ง (no-op ถ้า release แล้ว)
+      if (claimedBuy) {
+        buyCommitment.releaseBuy(requiredWithBuffer);
+        claimedBuy = false;
+        logger.debug({
+          botId: this.bot._id.toString(),
+          releasedUsdt: requiredWithBuffer.toFixed(4),
+        }, 'trader: BUY order accepted — buy commitment released');
       }
 
       await Trade.updateOne(
@@ -1143,7 +4354,12 @@ class Trader {
 
       // FIX P2.1+P3.4: ใช้ _setBotStatus serialized — กัน race กับ error/idle
       this._setBotStatus('waiting_fill', { lastError: '', extra: { lastSignalAt: new Date() } });
-      eventBus.emit('trade:update', { tradeId: trade._id, state: 'placed' });
+      eventBus.emit('trade:update', {
+        tradeId: trade._id,
+        state: 'placed',
+        reason: null,
+        reasonDetail: null,
+      });
 
       // 9. Schedule retry check (เช็คสถานะทุก retryTimeMin นาที)
       await Signal.updateOne({ _id: signalDoc._id }, { outcome: 'order_placed' });
@@ -1292,10 +4508,20 @@ class Trader {
 
         // Case E: confirmed CANCELLED / EXPIRED → ปลอดภัย re-place
         if (reCheck && (reCheck.status === 'CANCELED' || reCheck.status === 'EXPIRED')) {
-          await Trade.updateOne(
-            { _id: trade._id },
+          // FIX-2026-07-31 (BUG-5): add state filter to prevent overwriting 'selling'/'filled' that
+          //   a WS path may have set during the await window (L1447 / L1497-1563). Without guard,
+          //   a WS PARTIALLY_FILLED→'selling' transition landing inside that window would be
+          //   silently overwritten to 'cancelled' with a live SELL on the book → orphan SELL.
+          const cancelUpd = await Trade.updateOne(
+            { _id: trade._id, state: 'placed' },
             { state: 'cancelled', buyStatus: reCheck.status }
           );
+          if (cancelUpd.modifiedCount === 0) {
+            logger.info({
+              tradeId: trade._id.toString(),
+            }, 'checkBuyOrder Case E — state changed during cancel, skip re-place');
+            return;
+          }
           await this.rePlaceBuy(trade, signalDoc, candle, newBid);
           return;
         }
@@ -1338,12 +4564,21 @@ class Trader {
 
         // ยืนยัน cancelled แล้วเท่านั้น → expire
         if (reCheck && (reCheck.status === 'CANCELED' || reCheck.status === 'EXPIRED')) {
-          await Trade.updateOne(
-            { _id: trade._id },
+          // FIX-2026-07-31 (BUG-5): add state filter — same race protection as Case E above.
+          const expireUpd = await Trade.updateOne(
+            { _id: trade._id, state: 'placed' },
             { state: 'cancelled', buyStatus: reCheck.status, error: `retryMax (${retryMax}) reached` }
           );
+          if (expireUpd.modifiedCount === 0) {
+            logger.info({
+              tradeId: trade._id.toString(),
+            }, 'checkBuyOrder retryMax path — state changed during cancel, skip expire');
+            return;
+          }
           await Signal.updateOne({ _id: signalDoc._id }, { outcome: 'expired', note: `retryMax ${retryMax} reached, bid moved` });
           await Bot.updateOne({ _id: this.bot._id }, { status: 'idle', lastError: `signal expired: retryMax ${retryMax} reached` });
+          // FIX-2026-08-02: cancel any SELL orphaned by partial fill before resetting trade
+          await this._cancelOrphanedSells(trade, { reason: 'retryMax_expired', ctx: 'state=placed' });
           this._unregisterTrade(trade); // FIX 3
           this.currentTrade = null;
           eventBus.emit('bot:status', { botId: this.bot._id, status: 'idle' });
@@ -1430,6 +4665,8 @@ class Trader {
         }, 'trader: rePlaceBuy clamped price still >= ask, aborting');
         await Signal.updateOne({ _id: signalDoc._id }, { outcome: 'expired', note: 'spread too tight to re-place' });
         await Bot.updateOne({ _id: this.bot._id }, { status: 'idle' });
+        // FIX-2026-08-02: cancel any SELL orphaned by partial fill before resetting trade
+        await this._cancelOrphanedSells(prevTrade, { reason: 'rePlace_spread_too_tight', ctx: 'state=placed' });
         this._unregisterTrade(prevTrade); // FIX 3
         this.currentTrade = null;
         eventBus.emit('bot:status', { botId: this.bot._id, status: 'idle' });
@@ -1441,6 +4678,8 @@ class Trader {
         logger.warn({ botId: this.bot._id.toString(), reason: validation.reason }, 'trader: rePlace validation failed');
         await Signal.updateOne({ _id: signalDoc._id }, { outcome: 'expired', note: validation.reason });
         await Bot.updateOne({ _id: this.bot._id }, { status: 'idle' });
+        // FIX-2026-08-02: cancel any SELL orphaned by partial fill before resetting trade
+        await this._cancelOrphanedSells(prevTrade, { reason: 'rePlace_validation_failed', ctx: 'state=placed' });
         this._unregisterTrade(prevTrade); // FIX 3
         this.currentTrade = null;
         eventBus.emit('bot:status', { botId: this.bot._id, status: 'idle' });
@@ -1466,6 +4705,8 @@ class Trader {
         }, 'trader: rePlace rejected');
         await Signal.updateOne({ _id: signalDoc._id }, { outcome: 'expired', note: 'rePlace rejected' });
         await Bot.updateOne({ _id: this.bot._id }, { status: 'idle' });
+        // FIX-2026-08-02: cancel any SELL orphaned by partial fill before resetting trade
+        await this._cancelOrphanedSells(prevTrade, { reason: 'rePlace_rejected', ctx: 'state=placed' });
         this._unregisterTrade(prevTrade); // FIX 3
         this.currentTrade = null;
         eventBus.emit('bot:status', { botId: this.bot._id, status: 'idle' });
@@ -1493,7 +4734,12 @@ class Trader {
       this.currentTrade = newTrade;
       this._registerTrade(newTrade); // FIX 3
 
-      eventBus.emit('trade:update', { tradeId: newTrade._id, state: 'placed' });
+      eventBus.emit('trade:update', {
+        tradeId: newTrade._id,
+        state: 'placed',
+        reason: null,
+        reasonDetail: null,
+      });
       this.scheduleRetryCheck(candle, signalDoc);
     } catch (err) {
       logger.error({ err: err.message }, 'trader: rePlaceBuy error');
@@ -1502,6 +4748,8 @@ class Trader {
 
   // FIX 4: handleBuyFilled mutex ป้องกัน double-SELL จาก WS+retryTimer race
   async handleBuyFilled(trade, order, signalDoc) {
+    // FIX-2026-07-31 (BUG-16): running check — guard against WS events after stop()
+    if (!this.running) return;
     const tradeId = trade._id.toString();
     if (this.handleBuyFilledLocks.has(tradeId)) {
       logger.debug({ tradeId }, 'trader: handleBuyFilled already running, skip duplicate');
@@ -1516,13 +4764,279 @@ class Trader {
     }
   }
 
+  // FIX-2026-08-02: DCA stack BUY filled handler
+  //   - append layer to buyLayers (atomic $push with orderId-not-in guard)
+  //   - recompute BEP from buyLayers (weighted-avg by qty)
+  //   - compute new TP at BEP
+  //   - mirror scalars (buyPrice=stackBep, buyQty=totalQty, buyQuoteQty=totalSpent)
+  //   - reset dcaAdding flag
+  //   - replace aggregate SELL via _cancelAndReplaceSell (cancel old at old TP, place new at BEP+TP)
+  //   - emit dcaLayerAdded + trade:update + buyFilled event with stack context
+  //   - 1 stack = 1 bot counter entry (dcaLayerCount != count for totalTrades)
+  async _handleDcaBuyFilled(trade, order, signalDoc, { filledQty, avgPrice }) {
+    const layerIndex = trade.dcaLayerIndex;
+    const orderId = order.orderId;
+    const stackId = trade.stackId || trade._id;
+    const tradeFee = parseFloat(order.fee || 0);
+    const tradeFeeAsset = (order.fills && order.fills[0] && order.fills[0].commissionAsset) || '';
+
+    // 1. atomic claim: append layer (with orderId uniqueness guard)
+    //   - race protection: 2 เส้นทาง (WS + retry) อาจ call handleBuyFilled พร้อมกัน
+    //   - duplicate event → ไม่ $push ซ้ำ (return null → skip)
+    const layer = {
+      layerIndex,
+      orderId,
+      clientOrderId: trade.buyClientOrderId,
+      price: avgPrice,
+      qty: filledQty,
+      quoteQty: parseFloat(order.cummulativeQuoteQty),
+      fee: tradeFee,
+      feeAsset: tradeFeeAsset,
+      status: 'FILLED',
+      filledAt: new Date(order.updateTime || Date.now()),
+      placedAt: trade.buyPlacedAt || new Date(),
+    };
+    const updated = await Trade.findOneAndUpdate(
+      { _id: trade._id, 'buyLayers.orderId': { $ne: orderId } },
+      { $push: { buyLayers: layer }, $inc: { dcaLayerCount: 1 } },
+      { new: true }
+    );
+    if (!updated) {
+      logger.info({
+        tradeId: trade._id.toString(),
+        stackId: stackId.toString(),
+        orderId,
+      }, 'trader: _handleDcaBuyFilled — duplicate event (layer already appended), skip');
+      return;
+    }
+
+    // 2. recompute BEP from updated buyLayers
+    const { totalQty, totalSpent, bep } = this._computeStackBEP(updated);
+    if (!bep || totalQty <= 0) {
+      logger.warn({
+        tradeId: trade._id.toString(),
+        stackId: stackId.toString(),
+        buyLayers: updated.buyLayers,
+      }, 'trader: _handleDcaBuyFilled — invalid BEP after layer append, abort');
+      return;
+    }
+
+    // 3. compute new TP from BEP
+    let dcaTp;
+    try {
+      dcaTp = await this._computeDcaTp({ stackBep: bep, totalQty });
+    } catch (err) {
+      // FIX-2026-08-03 (B4): reset dcaAdding=false on failure so bot isn't stuck
+      //   - otherwise next S1 sees state='placed' + dcaAdding=true → claim predicate fails (no-op)
+      //   - leave state='placed' so layer BUY still pending; holding-retry will recover
+      await Trade.updateOne({ _id: trade._id }, { dcaAdding: false, error: `dca_tp_compute: ${err.message}` });
+      logger.warn({
+        tradeId: trade._id.toString(),
+        bep, err: err.message,
+      }, 'trader: _handleDcaBuyFilled — TP compute failed, abort (dcaAdding reset)');
+      return;
+    }
+    const newTarget = dcaTp.sellPrice;
+
+    // 4. mirror scalars + reset dcaAdding + transition state to 'filled' (so _cancelAndReplaceSell sees 'filled' state)
+    //   - targetSellPrice จะถูก _cancelAndReplaceSell override อีกที (sellPrice = newTarget)
+    const mirrorUpd = await Trade.updateOne(
+      { _id: trade._id, state: 'placed' },
+      {
+        $set: {
+          buyStatus: 'FILLED',
+          buyPrice: bep,
+          buyQty: totalQty,
+          buyQuoteQty: totalSpent,
+          buyFilledAt: new Date(order.updateTime || Date.now()),
+          targetSellPrice: newTarget,
+          stackBep: bep,
+          stackTotalQty: totalQty,
+          stackTotalSpent: totalSpent,
+          stackTargetSellPrice: newTarget,
+          stackClosedAt: null,
+          dcaAdding: false,
+          state: 'filled',
+        },
+      }
+    );
+    if (mirrorUpd.modifiedCount === 0) {
+      // state moved on (race with another path) — skip SELL replace
+      logger.info({
+        tradeId: trade._id.toString(),
+        stackId: stackId.toString(),
+      }, 'trader: _handleDcaBuyFilled — state changed during mirror, skip SELL replace');
+      return;
+    }
+
+    // 5. cancel old SELL + place new aggregate SELL at BEP+TP
+    //   - This will handle cancel(-2011=already gone), validate, newOrder, atomic state update
+    //   - If SELL already filled during this path → mode='race_sold' (orphan SELL avoided)
+    const replaceResult = await this._cancelAndReplaceSell({
+      trade: { ...updated.toObject(), _id: trade._id, symbol: trade.symbol },
+      reason: 'dca_layer_added',
+      source: 'dca_buy_filled',
+      qty: totalQty,
+      newTarget,
+    });
+
+    if (!replaceResult.ok) {
+      if (replaceResult.mode === 'race_sold' || replaceResult.mode === 'race_stopping') {
+        // SELL already filled/stopping — stack is closed
+        logger.info({
+          tradeId: trade._id.toString(),
+          stackId: stackId.toString(),
+          mode: replaceResult.mode,
+        }, 'trader: _handleDcaBuyFilled — SELL already closed during layer add, stack closed');
+      } else if (replaceResult.mode === 'validation_fail') {
+        // validation fail → MARKET fallback via _emergencyMarketSell
+        logger.warn({
+          tradeId: trade._id.toString(),
+          stackId: stackId.toString(),
+          error: replaceResult.error,
+          totalQty, newTarget,
+        }, 'trader: _handleDcaBuyFilled — SELL validation failed, MARKET fallback');
+        await this._emergencyMarketSell(
+          { ...updated.toObject(), _id: trade._id, symbol: trade.symbol },
+          totalQty,
+          bep,
+          newTarget,
+          `dca_layer_validation: ${replaceResult.error}`,
+        );
+      } else {
+        // binance_error or other → put into 'holding' + schedule retry
+        logger.warn({
+          tradeId: trade._id.toString(),
+          stackId: stackId.toString(),
+          mode: replaceResult.mode,
+          error: replaceResult.error,
+        }, 'trader: _handleDcaBuyFilled — SELL place failed, scheduling holding retry');
+        await Trade.updateOne(
+          { _id: trade._id },
+          { state: 'holding', error: `dca_sell: ${replaceResult.error}` }
+        );
+        await Bot.updateOne({ _id: this.bot._id }, { status: 'holding' });
+        eventBus.emit('bot:status', { botId: this.bot._id, status: 'holding' });
+        this.scheduleHoldingRetry(
+          { ...updated.toObject(), _id: trade._id, symbol: trade.symbol },
+          totalQty,
+          bep,
+          newTarget,
+        );
+      }
+    }
+
+    // 6. emit events (always — even on failure paths)
+    eventBus.emit('dcaLayerAdded', {
+      botId: this.bot._id,
+      symbol: this.bot.symbol,
+      stackId,
+      layerIndex,
+      layerCount: updated.dcaLayerCount,
+      maxLayers: this.bot.dcaMaxLayers,
+      layerPrice: avgPrice,
+      layerQty: filledQty,
+      layerQuoteQty: parseFloat(order.cummulativeQuoteQty),
+      stackBep: bep,
+      stackTotalQty: totalQty,
+      stackTotalSpent: totalSpent,
+      targetSellPrice: newTarget,
+      tpTrendEnabled: !!dcaTp.tpTrendEnabled,
+      tpTrendMultiplier: parseFloat(dcaTp.tpTrendMultiplier),
+      tpBase: parseFloat(dcaTp.tpBase),
+      tpEffective: parseFloat(dcaTp.tpEffective),
+      feeRate: parseFloat(dcaTp.feeRate),
+      sellOrderId: replaceResult.sellOrderId || null,
+      sellPlaced: !!replaceResult.ok && replaceResult.mode === 'placed',
+    });
+    eventBus.emit('trade:update', {
+      tradeId: trade._id,
+      state: replaceResult.ok && replaceResult.mode === 'placed' ? 'selling' : (replaceResult.mode === 'race_sold' ? 'sold' : 'filled'),
+      targetSellPrice: newTarget,
+      tpBase: parseFloat(dcaTp.tpBase),
+      tpEffective: parseFloat(dcaTp.tpEffective),
+      tpTrendMultiplier: parseFloat(dcaTp.tpTrendMultiplier),
+      tpTrendEnabled: !!dcaTp.tpTrendEnabled,
+      feeRate: parseFloat(dcaTp.feeRate),
+      stackId,
+      dcaLayerCount: updated.dcaLayerCount,
+      stackBep: bep,
+      stackTotalQty: totalQty,
+      reason: null,
+      reasonDetail: null,
+    });
+
+    // 7. also emit 'filled' style event for telegramNotifier (mirror buyFilled)
+    //   - telegramNotifier subscribes to 'trade:update' state='filled' OR 'holding'
+    //   - ใน DCA mode: ทุก layer BUY ต้องส่ง notification
+    eventBus.emit('trade:update', {
+      tradeId: trade._id,
+      state: 'filled',
+      targetSellPrice: newTarget,
+      tpBase: parseFloat(dcaTp.tpBase),
+      tpEffective: parseFloat(dcaTp.tpEffective),
+      tpTrendMultiplier: parseFloat(dcaTp.tpTrendMultiplier),
+      tpTrendEnabled: !!dcaTp.tpTrendEnabled,
+      feeRate: parseFloat(dcaTp.feeRate),
+      stackId,
+      dcaLayerCount: updated.dcaLayerCount,
+      stackBep: bep,
+      stackTotalQty: totalQty,
+      isDcaLayer: true,
+      layerIndex,
+      layerPrice: avgPrice,
+      layerQty: filledQty,
+      reason: null,
+      reasonDetail: null,
+    });
+
+    // 8. update bot status
+    if (replaceResult.ok && replaceResult.mode === 'placed') {
+      await Bot.updateOne({ _id: this.bot._id }, { status: 'selling', lastError: '' });
+      eventBus.emit('bot:status', { botId: this.bot._id, status: 'selling' });
+    }
+
+    // 9. update signal outcome
+    await Signal.updateOne({ _id: signalDoc._id }, { outcome: 'filled' });
+  }
+
   async _handleBuyFilledImpl(trade, order, signalDoc) {
     try {
       const filledQty = parseFloat(order.executedQty);
       const avgPrice = parseFloat(order.price) || parseFloat(order.cummulativeQuoteQty) / filledQty;
 
+      // FIX-2026-08-02: DCA mode branch — append layer + recompute BEP + replace aggregate SELL
+      if (trade.isDcaStack) {
+        return await this._handleDcaBuyFilled(trade, order, signalDoc, { filledQty, avgPrice });
+      }
+
+      // FIX-2026-07-31 (F2): TP ×N multiplier when upper-TF trend above EMA20
+      //   - apply เฉพาะ position ใหม่ (call site เดียว — partial-fill sites ใช้ targetSellPrice ที่ persist แล้ว)
+      //   - cache 60s in-process (mirror volatilityForBot CACHE_TTL_MS pattern)
+      //   - 'warmup' หรือ 'lower' → ไม่คูณ (ใช้ tpPercent เดิม)
+      // FIX-2026-08-01: tpTrendEnabled gate (per-bot toggle, default true)
+      //   - ถ้า false → ใช้ tpPercent ตรงๆ (ข้าม trend logic ทั้งหมด, ไม่ call _getTrendState)
+      //   - ลด Binance API call ด้วย (early-return ก่อน await)
+      // FIX-2026-08-02: use _computeTp() helper (single source of truth)
+      // FIX-2026-08-02: compute TP ก่อน update trade + emit 'filled' — telegramNotifier จะได้ targetSellPrice ทันที
+      //   - ก่อนหน้านี้: emit 'filled' ก่อนคำนวณ TP → telegramNotifier อ่าน DB เจอ targetSellPrice=null
+      //   - BUY notification ไม่มี 🎯 Target Sell line (ใน telegramNotifier render)
+      const tp = await this._computeTp({ buyPrice: avgPrice });
+      const sellPrice = tp.sellPrice;
+      logger.info({
+        tradeId: trade._id.toString(),
+        tpTrendEnabled: tp.tpTrendEnabled,
+        trendState: tp.trendState,
+        trendTF: tp.trendTF,
+        multiplier: tp.tpTrendMultiplier,
+        tpBase: tp.tpBase,
+        tpEffective: tp.tpEffective,
+        avgPrice, sellPrice,
+      }, 'trader: TP applied with trend multiplier');
+
       // FIX 1: idempotent state update — ใช้ guard { state: 'placed' | 'filled' | 'retrying' }
       // กัน double-update ถ้า 2 path (WS + retry) มาถึงพร้อมกัน
+      // FIX-2026-08-02: persist targetSellPrice ใน update เดียวกับ state='filled' เพื่อให้ telegramNotifier อ่าน DB เจอทันที
       const upd = await Trade.updateOne(
         {
           _id: trade._id,
@@ -1535,6 +5049,7 @@ class Trader {
           buyQty: filledQty,
           buyQuoteQty: parseFloat(order.cummulativeQuoteQty),
           buyFilledAt: new Date(order.updateTime || Date.now()),
+          targetSellPrice: parseFloat(sellPrice),
         }
       );
       if (upd.modifiedCount === 0) {
@@ -1547,17 +5062,22 @@ class Trader {
       //   - ก่อนหน้านี้ state กระโดด placed -> filled -> selling โดยไม่ emit 'filled'
       //   - telegramNotifier filter เฉพาะ 'holding' / 'sold' → skip 'filled' และ 'selling'
       //   - ผลคือ BUY filled ไม่เคยถูกแจ้งเตือน
-      eventBus.emit('trade:update', { tradeId: trade._id, state: 'filled' });
-
-      // คำนวณ sell price
-      const feeRate = fees.getMakerRate();
-      const sellPriceRaw = fees.calcSellPrice({
-        buyPrice: avgPrice,
-        tpPercent: this.bot.tpPercent,
-        feeRate,
+      // FIX-2026-08-02: include targetSellPrice in event payload → telegramNotifier ใช้ event target ก่อน DB read
+      // FIX-2026-08-02 (TP-NET clarity): include tpBase/tpEffective/tpTrendMultiplier so telegram can show
+      //   both "Gross +X%" markup and "NET +Y%" profit (NET = bot.tpPercent × tpTrendMultiplier if trend=upper).
+      //   Previously telegram only showed gross markup which user mis-read as NET profit.
+      eventBus.emit('trade:update', {
+        tradeId: trade._id,
+        state: 'filled',
+        targetSellPrice: parseFloat(sellPrice),
+        tpBase: parseFloat(tp.tpBase),
+        tpEffective: parseFloat(tp.tpEffective),
+        tpTrendMultiplier: parseFloat(tp.tpTrendMultiplier),
+        tpTrendEnabled: !!tp.tpTrendEnabled,
+        feeRate: parseFloat(tp.feeRate),
+        reason: null,
+        reasonDetail: null,
       });
-      const info = symbolInfo.getCached(this.bot.symbol);
-      const sellPrice = symbolInfo.roundPrice(sellPriceRaw, info.priceFilter.tickSize).toString();
 
       // FIX 1: ถ้า validation fail (เช่น tick size / min notional) → MARKET fallback
       const validation = symbolInfo.validateOrder({ symbol: this.bot.symbol, price: sellPrice, qty: filledQty });
@@ -1569,7 +5089,12 @@ class Trader {
           await Trade.updateOne({ _id: trade._id }, { state: 'holding', targetSellPrice: parseFloat(sellPrice), error: validation.reason });
           await Bot.updateOne({ _id: this.bot._id }, { status: 'holding' });
           eventBus.emit('bot:status', { botId: this.bot._id, status: 'holding' });
-          eventBus.emit('trade:update', { tradeId: trade._id, state: 'holding' });
+          eventBus.emit('trade:update', {
+        tradeId: trade._id,
+        state: 'holding',
+        reason: null,
+        reasonDetail: null,
+      });
           this.scheduleHoldingRetry(trade, filledQty, avgPrice, sellPrice);
         }
         return;
@@ -1577,8 +5102,8 @@ class Trader {
 
       // FIX 1: ลอง LIMIT_MAKER ก่อน — ถ้า reject (-2010 Duplicate, MIN_NOTIONAL ฯลฯ)
       // → fallback เป็น MARKET ทันที (emergency exit)
-      const sellClientOrderId = this.makeClientOrderId('sell', order.updateTime || Date.now(), trade.retryCount || 0);
-      const sellResp = await binanceRest.newOrder({
+      let sellClientOrderId = this.makeClientOrderId('sell', order.updateTime || Date.now(), trade.retryCount || 0);
+      let sellResp = await binanceRest.newOrder({
         symbol: this.bot.symbol,
         side: 'SELL',
         type: 'LIMIT_MAKER',
@@ -1587,6 +5112,48 @@ class Trader {
         newClientOrderId: sellClientOrderId,
         recvWindow: config_recvWindow(),
       }).catch((err) => ({ error: binanceRest.formatBinanceError(err) }));
+
+      // FIX-2026-08-07 (ZBT 17:27 incident): retry once on -2010 "insufficient balance"
+      //   - เคสก่อนหน้า: BUY fill ตอนที่ ZBT free=0 (อีก position ของบอท lock ZBT อยู่) → Binance ยัง
+      //     ไม่ settle base asset เข้า free balance → LIMIT_MAKER SELL โดน -2010 "Account has
+      //     insufficient balance for requested action." ทันทีที่ place order
+      //   - ก่อนหน้า fix: fall through ไป _emergencyMarketSell (ตัดขาดทุนทันทีที่ราคา spot)
+      //     ทั้งที่ SELL น่าจะสำเร็จถ้ารอ Binance settle ~500ms-1s
+      //   - fix: detect -2010 + msg="insufficient balance" → รอ 750ms แล้ว retry LIMIT_MAKER
+      //     1 ครั้ง (Binance settle time ปกติ < 1s). ถ้าสำเร็จ → continue ปกติ
+      //     ถ้ายัง fail → fall through ไป _emergencyMarketSell เดิม (safe side)
+      //   - post-only rejected (-2010 "would immediately match") ไม่เข้าเงื่อนไขนี้
+      //     → fall through _emergencyMarketSell ทันที (behavior เดิม)
+      if (sellResp.error && sellResp.error.code === -2010
+          && typeof sellResp.error.msg === 'string'
+          && sellResp.error.msg.toLowerCase().includes('insufficient balance')) {
+        logger.warn({
+          tradeId: trade._id.toString(),
+          symbol: this.bot.symbol,
+          err: sellResp.error,
+        }, 'trader: SELL -2010 insufficient balance — likely Binance settlement race; waiting 750ms and retrying');
+        await new Promise((r) => setTimeout(r, 750));
+        // newClientOrderId must be unique per request — generate fresh for retry
+        const retryClientOrderId = this.makeClientOrderId('sell', Date.now(), (trade.retryCount || 0) + 0.5);
+        sellResp = await binanceRest.newOrder({
+          symbol: this.bot.symbol,
+          side: 'SELL',
+          type: 'LIMIT_MAKER',
+          quantity: filledQty.toString(),
+          price: sellPrice,
+          newClientOrderId: retryClientOrderId,
+          recvWindow: config_recvWindow(),
+        }).catch((err) => ({ error: binanceRest.formatBinanceError(err) }));
+        if (!sellResp.error) {
+          // อัพเดท sellClientOrderId เป็นตัวที่ retry สำเร็จ เพื่อใช้ใน Trade.updateOne/_registerTrade
+          sellClientOrderId = retryClientOrderId;
+          logger.info({
+            tradeId: trade._id.toString(),
+            symbol: this.bot.symbol,
+            orderId: sellResp.orderId,
+          }, 'trader: SELL LIMIT_MAKER retry succeeded after settlement race');
+        }
+      }
 
       if (sellResp.error) {
         logger.warn({
@@ -1604,14 +5171,48 @@ class Trader {
           }, { state: 'holding', targetSellPrice: parseFloat(sellPrice), error: `${sellResp.error.code}: ${sellResp.error.msg}` });
           await Bot.updateOne({ _id: this.bot._id }, { status: 'holding' });
           eventBus.emit('bot:status', { botId: this.bot._id, status: 'holding' });
-          eventBus.emit('trade:update', { tradeId: trade._id, state: 'holding' });
+          eventBus.emit('trade:update', {
+        tradeId: trade._id,
+        state: 'holding',
+        reason: null,
+        reasonDetail: null,
+      });
           this.scheduleHoldingRetry(trade, filledQty, avgPrice, sellPrice);
         }
         return;
       }
 
-      await Trade.updateOne(
-        { _id: trade._id },
+      // FIX-2026-07-31 (BUG-4): add state filter to prevent overwriting a 'sold' state set by WS path.
+      //   Race: WS SELL FILLED from handleSellFilled (L3338) sets state='sold' between atomic claim at
+      //   L1767 and this write. Without guard, this would write state='selling' over 'sold', leaving
+      //   DB=Selling while Binance has FILLED — second FILLED event never arrives, trade stuck.
+      // FIX-2026-08-01 (audit R1): explicit pre-check state to catch 'sold'/'stopping' that BUG-4 missed
+      //   - BUG-4 แก้ race กับ handleSellFilled (WS path) เท่านั้น — ไม่ครอบคลุม CB panic-close
+      //   - Race: ระหว่าง F2 _getTrendState() (500ms-60s wait) + CB panic-close
+      //     → CB claim state='stopping' → place MARKET SELL → state='sold'
+      //     → F2 SELL placed → updateOne เดิม match (state='filled' ยังไม่ถูก update) → write 'selling'
+      //     → orphan: state='selling' แต่ Binance มี MARKET SELL FILLED แล้ว
+      //   - fix: re-read state from DB ก่อน update — ถ้า 'sold'/'stopping' แล้ว cancel SELL + abort
+      const latestTrade = await Trade.findById(trade._id).lean();
+      if (latestTrade && (latestTrade.state === 'sold' || latestTrade.state === 'stopping')) {
+        logger.warn({
+          tradeId: trade._id.toString(),
+          currentState: latestTrade.state,
+          sellOrderId: sellResp.orderId,
+        }, 'trader: _handleBuyFilledImpl — state changed to sold/stopping during trend fetch, cancelling orphan SELL');
+        try {
+          await binanceRest.cancelOrder({
+            symbol: this.bot.symbol,
+            orderId: sellResp.orderId,
+          }).catch(() => null);
+        } catch (_) { /* best-effort cancel */ }
+        return;
+      }
+      const sellUpd = await Trade.updateOne(
+        {
+          _id: trade._id,
+          state: { $in: ['filled', 'holding'] },
+        },
         {
           sellOrderId: sellResp.orderId,
           sellClientOrderId,
@@ -1623,6 +5224,21 @@ class Trader {
           state: 'selling',
         }
       );
+      if (sellUpd.modifiedCount === 0) {
+        // race lost — WS or other path already moved past 'filled'/'holding'
+        // Cancel the SELL we just placed to avoid orphan
+        logger.warn({
+          tradeId: trade._id.toString(),
+          sellOrderId: sellResp.orderId,
+        }, 'trader: _handleBuyFilledImpl — state changed before SELL placement, cancelling orphan SELL');
+        try {
+          await binanceRest.cancelOrder({
+            symbol: this.bot.symbol,
+            orderId: sellResp.orderId,
+          }).catch(() => null);
+        } catch (_) { /* best-effort cancel */ }
+        return;
+      }
       this.currentTrade.sellOrderId = sellResp.orderId;
       this.currentTrade.sellClientOrderId = sellClientOrderId;
       this.currentTrade.state = 'selling';
@@ -1639,7 +5255,12 @@ class Trader {
       await Bot.updateOne({ _id: this.bot._id }, { status: 'selling', lastError: '' });
       await Signal.updateOne({ _id: signalDoc._id }, { outcome: 'filled' });
       eventBus.emit('bot:status', { botId: this.bot._id, status: 'selling' });
-      eventBus.emit('trade:update', { tradeId: trade._id, state: 'selling' });
+      eventBus.emit('trade:update', {
+        tradeId: trade._id,
+        state: 'selling',
+        reason: null,
+        reasonDetail: null,
+      });
     } catch (err) {
       logger.error({ err: err.message, stack: err.stack }, 'trader: handleBuyFilled error');
     }
@@ -1647,14 +5268,85 @@ class Trader {
 
   // FIX 1: emergency MARKET SELL — ป้องกัน asset stranded
   // return true ถ้าสำเร็จ (state → selling), false ถ้า fail (ต้อง schedule retry)
-  async _emergencyMarketSell(trade, qty, buyPrice, targetSellPrice, reasonNote) {
+  async _emergencyMarketSell(trade, qty, buyPrice, targetSellPrice, reasonNote, opts = {}) {
     try {
+      // FIX-2026-07-30: รองรับ partial-fill context — เมื่อ SELL fill ที่ TP บางส่วนแล้วและจะ MARKET ที่เหลือ
+      //   - opts.alreadyFilledQty: qty ที่ fill แล้วที่ TP (default 0 = legacy path)
+      //   - opts.alreadyAvgSellPrice: avg price ของส่วนที่ fill แล้ว (default targetSellPrice)
+      //   - opts.alreadyCumQuote: cumulative quote ของส่วนที่ fill แล้ว (default = qty*price)
+      //   - opts.allowStates: array ของ state ที่ยอมให้ claim (default = ['filled','holding','stopping'])
+      //   - ถ้า alreadyFilledQty=0 → behavior identical เดิม (CB/stop-loss path)
+      const alreadyFilledQty = parseFloat(opts.alreadyFilledQty) || 0;
+      const alreadyAvgSellPrice = parseFloat(opts.alreadyAvgSellPrice) || parseFloat(targetSellPrice) || 0;
+      const alreadyCumQuote = parseFloat(opts.alreadyCumQuote) || (alreadyFilledQty * alreadyAvgSellPrice);
+      const allowStates = opts.allowStates || ['filled', 'holding', 'stopping'];
+
+      // FIX-2026-08-05: atomic claim BEFORE placing MARKET order — กัน DUPLICATE SELL
+      //   - HOMEUSDT incident 2026-08-05T00:20:04: _emergencyMarketSell ถูกเรียก 2 ครั้งจากคนละ path
+      //     (handleBuyFilled → -2010 → emergencyMarketSell + reconcile ORPHAN → emergencyMarketSell)
+      //     → ทั้ง 2 วาง MARKET ก่อนที่ DB update จะ race-safe
+      //   - filter `sellInFlight: {$ne:true}` + state in allowStates → ถ้า claim fail = path อื่นกำลัง place SELL → abort
+      const placeClaim = await Trade.findOneAndUpdate(
+        {
+          _id: trade._id,
+          state: { $in: allowStates },
+          sellInFlight: { $ne: true },
+        },
+        {
+          $set: {
+            sellInFlight: true,
+            sellInFlightAt: new Date(),
+            sellStatus: 'PLACING',
+          },
+        },
+        { new: true }
+      );
+      if (!placeClaim) {
+        logger.warn({
+          tradeId: trade._id.toString(),
+          allowStates,
+          qty,
+        }, 'trader: _emergencyMarketSell — another path already placing SELL (sellInFlight claim failed), abort');
+        return false;
+      }
+
       const marketSellId = this.makeClientOrderId('em-sell', Date.now(), 0);
+
+      // FIX-2026-08-06 (HOME stuck SL-UKC loop): round qty to LOT_SIZE stepSize before MARKET
+      //   - forceClose.js + scheduleHoldingRetry already round, but defense-in-depth here
+      //   - targets all callers: handleBuyFilled validation-fail, LIMIT_MAKER reject, partial-fill
+      //     finalize, CB panic-sell, stop-loss-on-UKC, D.C.A. unsold stack, etc.
+      //   - สำหรับ HOME/USDT stepSize=1: ถ้า qty=945.5 → 945
+      //   - ถ้า rounded qty < minQty → keep but warn (caller may want to retry with smaller)
+      let marketQty = qty;
+      try {
+        const info = await symbolInfo.loadSymbol(this.bot.symbol);
+        const stepSize = info.lotSize.stepSize;
+        const minQty = info.lotSize.minQty;
+        marketQty = symbolInfo.roundQty(qty, stepSize);
+        if (minQty && marketQty < parseFloat(String(minQty))) {
+          logger.warn({
+            tradeId: trade._id.toString(),
+            symbol: this.bot.symbol,
+            requestedQty: qty,
+            roundedQty: marketQty,
+            minQty: String(minQty),
+            stepSize: String(stepSize),
+          }, 'trader: _emergencyMarketSell — rounded qty below minQty, attempting anyway (Binance may reject)');
+        }
+      } catch (e) {
+        logger.warn({
+          tradeId: trade._id.toString(),
+          symbol: this.bot.symbol,
+          err: e.message,
+        }, 'trader: _emergencyMarketSell — symbolInfo load failed, using raw qty');
+      }
+
       const resp = await binanceRest.newOrder({
         symbol: this.bot.symbol,
         side: 'SELL',
         type: 'MARKET',
-        quantity: qty.toString(),
+        quantity: marketQty.toString(),
         newClientOrderId: marketSellId,
         recvWindow: config_recvWindow(),
       }).catch((err) => ({ error: binanceRest.formatBinanceError(err) }));
@@ -1664,6 +5356,11 @@ class Trader {
           err: resp.error,
           tradeId: trade._id.toString(),
         }, 'trader: EMERGENCY MARKET SELL also failed');
+        // FIX-2026-08-05: clear sellInFlight on place failure so caller can retry
+        await Trade.updateOne(
+          { _id: trade._id, sellInFlight: true },
+          { $set: { sellInFlight: false, sellInFlightAt: null, sellStatus: '' } }
+        ).catch(() => null);
         return false;
       }
 
@@ -1672,60 +5369,161 @@ class Trader {
         || parseFloat(resp.avgPrice)
         || (parseFloat(resp.cummulativeQuoteQty) / parseFloat(resp.executedQty));
       const executed = parseFloat(resp.executedQty);
+      const marketCumQuote = parseFloat(resp.cummulativeQuoteQty);
 
-      // คำนวณ PnL ทันที (เพราะ market fill)
+      // FIX-2026-07-30: cumulative PnL — รวมทั้ง 2 legs (TP-fill + MARKET-fill) เมื่อ alreadyFilledQty > 0
+      const totalQty = alreadyFilledQty + executed;
+      const totalCumQuote = alreadyCumQuote + marketCumQuote;
+      const avgSellCombined = totalQty > 0 ? totalCumQuote / totalQty : 0;
+
       const feeRate = fees.getMakerRate();
-      const pnl = fees.calcPnl({
-        buyPrice,
-        sellPrice: avgSell,
-        qty: executed,
-        feeRate,
-      });
+      let net, pnlPct, buyQuoteQtyForPct;
+      if (alreadyFilledQty > 0) {
+        // Partial-fill path — คำนวณ PnL จาก 2 legs
+        const tpGross = alreadyFilledQty * (alreadyAvgSellPrice - buyPrice);
+        const marketGross = executed * (avgSell - buyPrice);
+        const tpFees = (buyPrice + alreadyAvgSellPrice) * alreadyFilledQty * feeRate;
+        const marketFees = (buyPrice + avgSell) * executed * feeRate;
+        net = tpGross + marketGross - tpFees - marketFees;
+        buyQuoteQtyForPct = parseFloat(trade.buyQuoteQty) || (buyPrice * (alreadyFilledQty + executed));
+        pnlPct = buyQuoteQtyForPct > 0 ? (net / buyQuoteQtyForPct) * 100 : 0;
+      } else {
+        // Legacy path (CB/stop-loss) — single-leg PnL via fees.calcPnl
+        const pnl = fees.calcPnl({ buyPrice, sellPrice: avgSell, qty: executed, feeRate });
+        net = pnl.net;
+        pnlPct = pnl.pnlPercent;
+      }
 
-      await Trade.updateOne(
+      // FIX-2026-07-31 (BUG-18): check modifiedCount — race losers (e.g., WS handleSellFilled already
+      //   transitioned to 'sold') would otherwise double-count totalPnl/totalTrades.
+      //   Mirror forceClose.js:138 pattern — gate Bot.$inc on modifiedCount===1.
+      const marketSellUpd = await Trade.updateOne(
         {
           _id: trade._id,
-          // FIX-2026-07-23: เพิ่ม 'stopping' เพื่อให้ stop-loss path (atomic claim → 'stopping') ใช้ฟังก์ชันนี้ได้
-          state: { $in: ['filled', 'holding', 'stopping'] },
+          state: { $in: allowStates },
+          sellInFlight: true,
         },
         {
           state: 'sold',
           sellOrderId: resp.orderId,
           sellClientOrderId: marketSellId,
-          sellPrice: avgSell,
-          sellQty: executed,
-          sellQuoteQty: parseFloat(resp.cummulativeQuoteQty),
+          sellPrice: avgSellCombined || avgSell,
+          sellFilledQty: totalQty,
+          sellAvgPrice: avgSellCombined || avgSell,
+          sellCumulativeQuoteQty: totalCumQuote,
+          sellQty: totalQty,
+          sellQuoteQty: totalCumQuote,
           sellStatus: resp.status,
           sellFilledAt: new Date(resp.updateTime || Date.now()),
           sellPlacedAt: new Date(),
           targetSellPrice: parseFloat(targetSellPrice),
-          realizedPnl: pnl.net,
-          pnlPercent: pnl.pnlPercent,
-          error: `${reasonNote} → MARKET fallback used`,
+          realizedPnl: net,
+          pnlPercent: pnlPct,
+          error: alreadyFilledQty > 0
+            ? `${reasonNote} → MARKET fallback used (partial-fill: ${alreadyFilledQty}@${alreadyAvgSellPrice} + ${executed}@${avgSell})`
+            : `${reasonNote} → MARKET fallback used`,
+          // FIX-2026-07-31 (F1): reset SL-on-UKC auto-arm flag
+          useStopLossOnUKC: false,
+          autoArmedAt: null,
+          // FIX-2026-08-03: clear F1 threshold snapshots เมื่อ trade ออกจาก selling
+          autoArmLossPct: null,
+          autoArmAgeHours: null,
+          // FIX-2026-08-01: reset SELL partial-fill latch
+          sellPartialDetectedAt: null,
+          sellPartialLatchedAt: null,
+          sellPartialLatchedReason: null,
+          // FIX-2026-08-05: clear SELL placement in-flight flag (success path)
+          sellInFlight: false,
+          sellInFlightAt: null,
+          // FIX-2026-08-01: structured sellReason — caller passes opts.reason (e.g. 'cb_panic',
+          //   'stop_loss_upper_kc'); default 'market_fallback' for validation/LIMIT reject paths.
+          sellReason: opts.reason || 'market_fallback',
+          sellReasonDetail: reasonNote || `MARKET emergency qty=${qty} avgSell=${(avgSellCombined || avgSell).toFixed(6)}`,
+          sellReasonAt: new Date(),
+          sellReasonSource: '_emergencyMarketSell',
         }
       );
+
+      if (marketSellUpd.modifiedCount === 0) {
+        // Race lost — another path (WS handleSellFilled) already moved state to 'sold'.
+        // Don't double-count bot stats. The MARKET order was placed on Binance and filled —
+        // record as orphanDetected so reconciler can audit, but don't $inc totals.
+        logger.warn({
+          tradeId: trade._id.toString(),
+          marketOrderId: resp.orderId,
+          alreadyFilledQty, executed,
+        }, '_emergencyMarketSell — claim failed (race lost), skip Bot.$inc to avoid double-count');
+        // FIX-2026-08-05: clear sellInFlight since we lost the race (state already moved on by another path)
+        await Trade.updateOne(
+          { _id: trade._id, sellInFlight: true },
+          { $set: { sellInFlight: false, sellInFlightAt: null } }
+        ).catch(() => null);
+        // Try to record audit flag — state may already be 'sold' so this may not match
+        Trade.updateOne(
+          { _id: trade._id },
+          { $set: { orphanDetected: true, orphanReason: `_emergencyMarketSell claim lost race — MARKET ${resp.orderId} placed but state already 'sold'` } }
+        ).catch(() => null);
+        return false;
+      }
 
       // update bot stats — ใช้ $inc (atomic) กัน lost update
       await Bot.updateOne(
         { _id: this.bot._id },
         {
           $inc: {
-            totalPnl: pnl.net,
+            totalPnl: net,
             totalTrades: 1,
-            winTrades: (pnl.net > 0 ? 1 : 0),
+            winTrades: (net > 0 ? 1 : 0),
           },
           $set: { status: 'idle', lastError: '' },
         }
       );
 
+      // FIX-2026-08-09: DPS loss-path coverage — _emergencyMarketSell is the exit for
+      //   cb_panic / cbv2_panic(v1) / sl_ukc_manual / market_fallback / LIMIT reject paths.
+      //   before this hook, all those paths left DPS state untouched → Rule 3 (loss-streak)
+      //   never fired in production. Now routed through the same helper as forceClose + handleSellFilled.
+      try {
+        const dpsAfterClose = require('./dpsAfterClose');
+        await dpsAfterClose.evaluateDpsAfterClose({
+          bot: this.bot,
+          pnl: net,
+          pnlPct,
+          source: `trader:_emergencyMarketSell:${opts.reason || 'market_fallback'}`,
+        });
+      } catch (dpsErr) {
+        logger.warn({ err: dpsErr.message, tradeId: trade._id.toString() }, 'trader: _emergencyMarketSell DPS failed (non-fatal)');
+      }
+
       this._unregisterTrade(trade);
       this.currentTrade = null;
       eventBus.emit('bot:status', { botId: this.bot._id, status: 'idle' });
-      eventBus.emit('trade:update', { tradeId: trade._id, state: 'sold' });
+      // FIX-2026-08-01: include reason + reasonDetail so dashboardWs/telegramNotifier pick it up
+      eventBus.emit('trade:update', {
+        tradeId: trade._id,
+        botId: this.bot._id,
+        state: 'sold',
+        reason: opts.reason || 'market_fallback',
+        reasonDetail: reasonNote || null,
+      });
+      // FIX-2026-08-06 (P4): slippage check for MARKET emergency SELL
+      //   - MARKET SELL = bottom-of-book fill, almost always < LIMIT_MAKER target
+      //   - warn on slip > 1%, telegram alert on slip > 3%
+      const emergencyTarget = parseFloat(targetSellPrice || 0);
+      if (emergencyTarget > 0) {
+        this._computeSlippage({
+          sellPrice: avgSellCombined || avgSell,
+          targetSellPrice: emergencyTarget,
+          tradeId: trade._id,
+          sellReason: opts.reason || 'market_fallback',
+          pnlPercent: pnlPct,
+        });
+      }
       logger.warn({
         tradeId: trade._id.toString(),
-        pnl: pnl.net,
-        avgSell,
+        pnl: net,
+        avgSell: avgSellCombined || avgSell,
+        partialFill: alreadyFilledQty > 0 ? `${alreadyFilledQty}@${alreadyAvgSellPrice} + ${executed}@${avgSell}` : null,
       }, 'trader: EMERGENCY MARKET SELL succeeded');
       return true;
     } catch (err) {
@@ -1736,6 +5534,9 @@ class Trader {
 
   // FIX 1: schedule holding retry — พยายาม SELL ใหม่ทุก 30s สำหรับ stranded positions
   // FIX P1.5: เปลี่ยนเป็น async เพื่อรองรับ counter guard ที่มี await
+  // FIX-2026-07-31 (BUG-12): per-trade persisted counter (trade.holdingRetryCount) — แต่ละ stranded
+  //   position มี budget แยก 10 retries แทนที่จะแชร์ global this.holdingRetryCount เดียว
+  //   กัน multi-trade bots ที่ trade แรกหมด budget แล้ว trade อื่นถูกปล่อยทิ้ง
   async scheduleHoldingRetry(trade, qty, buyPrice, targetSellPrice) {
     if (this.holdingRetryTimer) clearTimeout(this.holdingRetryTimer);
     if (!this.running) return;
@@ -1744,13 +5545,23 @@ class Trader {
     //   เดิม: schedule 60s เรื่อยๆ ไม่จำกัด → ถ้า MARKET SELL fail ตลอด (เช่น API key หมดสิทธิ์) → ค้างเป็นชั่วโมง
     //   fix: นับ counter, ถ้าเกิน 10 ครั้ง → mark stuck + alert telegram แทนการ retry
     const MAX_HOLDING_RETRIES = 10;
-    this.holdingRetryCount += 1;
-    if (this.holdingRetryCount > MAX_HOLDING_RETRIES) {
+    // FIX-2026-07-31 (BUG-12): atomic $inc on per-trade counter (returns updated doc)
+    const incRes = await Trade.findOneAndUpdate(
+      { _id: trade._id, state: 'holding' },
+      { $inc: { holdingRetryCount: 1 } },
+      { new: true }
+    );
+    if (!incRes) {
+      // trade ไม่ได้อยู่ใน holding แล้ว — abort
+      return;
+    }
+    const retryCount = incRes.holdingRetryCount;
+    if (retryCount > MAX_HOLDING_RETRIES) {
       logger.error({
         tradeId: trade._id.toString(),
         botId: this.bot._id.toString(),
         symbol: this.bot.symbol,
-        retryCount: this.holdingRetryCount - 1,
+        retryCount: retryCount - 1,
         maxRetries: MAX_HOLDING_RETRIES,
       }, 'trader: holding retry exhausted — MANUAL INTERVENTION REQUIRED');
       // alert telegram — ใช้ eventBus เพื่อไม่ couple กับ telegramNotifier
@@ -1759,13 +5570,11 @@ class Trader {
         symbol: this.bot.symbol,
         note: `⚠️ Holding retry exhausted after ${MAX_HOLDING_RETRIES} attempts — manual intervention required (trade ${trade._id})`,
       });
-      // mark stuck ใน trade เพื่อให้เห็นใน UI
+      // mark stuck ใน trade เพื่อให้เห็นใน UI + reset counter
       await Trade.updateOne(
         { _id: trade._id, state: 'holding' },
-        { state: 'holding', error: `stuck: holding_retry_exhausted_${MAX_HOLDING_RETRIES}` }
+        { $set: { state: 'holding', error: `stuck: holding_retry_exhausted_${MAX_HOLDING_RETRIES}`, holdingRetryCount: 0 } }
       ).catch(() => null);
-      // reset counter เพื่อไม่ให้ค้าง
-      this.holdingRetryCount = 0;
       return;
     }
 
@@ -1776,8 +5585,8 @@ class Trader {
         const fresh = await Trade.findById(trade._id);
         if (!fresh || fresh.state !== 'holding') {
           logger.info({ tradeId: trade._id.toString(), state: fresh?.state }, 'trader: holding retry — trade no longer holding, abort');
-          // FIX P1.5: reset counter เมื่อ state เปลี่ยน (success path)
-          this.holdingRetryCount = 0;
+          // FIX-2026-07-31 (BUG-12): reset per-trade counter เมื่อ state เปลี่ยน (success path)
+          await Trade.updateOne({ _id: trade._id }, { $set: { holdingRetryCount: 0 } }).catch(() => null);
           return;
         }
 
@@ -1796,7 +5605,7 @@ class Trader {
           logger.warn({
             tradeId: trade._id.toString(),
             freeQty, lockedQty, totalQty, expected: qty, baseAsset,
-            retryCount: this.holdingRetryCount,
+            retryCount: fresh.holdingRetryCount,
           }, 'trader: holding retry — asset balance too low (free+locked < expected), will retry in 60s');
           this.scheduleHoldingRetry(trade, qty, buyPrice, targetSellPrice);
           return;
@@ -1817,12 +5626,27 @@ class Trader {
                 orderStatus: order.status,
                 lockedQty,
               }, 'trader: holding retry — asset locked in live SELL, syncing DB to selling');
+              // FIX-2026-08-07 (ZBT 17:27 incident): clear stale error field
+              //   - เคสก่อนหน้า: placeSell flow โดน -2010 "insufficient balance" จาก Binance settlement race
+              //     → set state='holding' + error="-2010: ..." → holding retry path sync state='selling'
+              //     แต่ไม่ clear error → UI แสดง "⚠️ -2010" ต่อแม้ SELL วางสำเร็จแล้ว
+              //   - เมื่อ SELL live on book (status NEW/PARTIALLY_FILLED) แปลว่า placeSell สำเร็จจริง
+              //     → error เก่าเป็น stale เคลียร์ทิ้ง + audit timestamp
               await Trade.updateOne(
                 { _id: trade._id, state: 'holding' },
-                { state: 'selling', sellStatus: order.status }
+                {
+                  $set: {
+                    state: 'selling',
+                    sellStatus: order.status,
+                    error: '',
+                    errorClearedAt: new Date(),
+                    errorClearedReason: 'holding_retry_sell_synced_live',
+                  },
+                  $inc: { holdingRetryCount: 0 },
+                }
               );
-              // FIX P1.5: reset counter เมื่อเจอ live SELL
-              this.holdingRetryCount = 0;
+              // FIX-2026-07-31 (BUG-12): reset per-trade counter เมื่อเจอ live SELL
+              await Trade.updateOne({ _id: trade._id }, { $set: { holdingRetryCount: 0 } }).catch(() => null);
               return; // SELL ยังมีชีวิต → ปล่อยให้ order:update handler จัดการต่อ
             }
             if (order.status === 'FILLED') {
@@ -1843,8 +5667,8 @@ class Trader {
                 cumulativeQuoteQty: order.cummulativeQuoteQty,
                 ts: order.updateTime,
               }, fresh);
-              // FIX P1.5: reset counter หลัง success
-              this.holdingRetryCount = 0;
+              // FIX-2026-07-31 (BUG-12): reset per-trade counter หลัง success
+              await Trade.updateOne({ _id: trade._id }, { $set: { holdingRetryCount: 0 } }).catch(() => null);
               return;
             }
             if (order.status === 'CANCELED' || order.status === 'EXPIRED') {
@@ -1864,11 +5688,87 @@ class Trader {
           }
         }
 
+        // FIX-2026-07-31 (BUG-3): cap sell qty at this trade's qty — never sell the entire free balance
+        //   which could include other positions' inventory on the same symbol (multi-trade bots
+        //   or 2 bots on same symbol). Use buyFilledQty (post-top-up) or buyQty (initial).
+        const tradeMaxQty = parseFloat(trade.buyFilledQty || trade.buyQty) || qty;
+        let sellQty = Math.min(freeQty, tradeMaxQty);
+
+        // FIX-2026-08-06 (HOME stuck SL-UKC loop): round sellQty to LOT_SIZE stepSize
+        //   - defense-in-depth: forceClose.js also rounds, but if this path is taken first
+        //     (scheduleHoldingRetry before SL-UKC) → prevent -1013 LOT_SIZE repeat
+        //   - HOME/USDT stepSize=1: freeQty=947.095 → min(947.095, 945) = 945 (in whole units)
+        //     but Math.min keeps fractional and 945 is integer so passes here. The trap is
+        //     when other symbols have fractional freeQty that exceeds buyQty (e.g. orphan).
+        //   - floor to stepSize always to avoid any leftover fractional pass-through
+        try {
+          const info = await symbolInfo.loadSymbol(this.bot.symbol);
+          const stepSize = info.lotSize.stepSize;
+          const minQty = info.lotSize.minQty;
+          sellQty = symbolInfo.roundQty(sellQty, stepSize);
+          if (minQty && sellQty < parseFloat(String(minQty))) {
+            // rounded below minQty (orphan portion) → fall back to stepSize×1 or skip
+            const stepSizeNum = parseFloat(String(stepSize));
+            if (stepSizeNum > 0 && stepSizeNum <= parseFloat(String(minQty))) {
+              // stepSize itself >= minQty → use 1 step
+              sellQty = stepSizeNum;
+            } else {
+              // too small → skip retry, hope partial-fill finalize or other path handles
+              logger.warn({
+                tradeId: trade._id.toString(),
+                symbol: this.bot.symbol,
+                sellQty, minQty: String(minQty), stepSize: String(stepSize),
+              }, 'trader: holding retry — sellQty below minQty after stepSize rounding, skip');
+              return;
+            }
+          }
+        } catch (e) {
+          // symbolInfo load failed → continue with unrounded qty (Binance will reject if wrong)
+          logger.warn({
+            tradeId: trade._id.toString(),
+            symbol: this.bot.symbol,
+            err: e.message,
+          }, 'trader: holding retry — symbolInfo round failed, continuing with raw sellQty');
+        }
+
+        // FIX-2026-08-05: atomic claim BEFORE placing MARKET order — กัน DUPLICATE SELL
+        //   - ป้องกัน async race: scheduleHoldingRetry มี async gap ระหว่าง clearTimeout/setTimeout
+        //     → 2 timers เกิดพร้อมกัน, ทั้ง 2 วาง MARKET SELL, ทั้ง 2 fill → orphan SELL
+        //   - HOMEUSDT incident 2026-08-05T00:20:04: 2 timers placed SELL 283049653 + 283049654
+        //     (qty=878 each), ทั้งคู่ fill → 882 HOME ของ stuck trade ถูกกินโดย orphan 283049654
+        //   - atomic filter `sellInFlight: {$ne: true}` + state='holding' → ถ้า claim fail = path อื่นกำลัง place SELL อยู่ → abort
+        const placeClaim = await Trade.findOneAndUpdate(
+          {
+            _id: trade._id,
+            state: 'holding',
+            sellInFlight: { $ne: true },
+          },
+          {
+            $set: {
+              sellInFlight: true,
+              sellInFlightAt: new Date(),
+              // FIX-2026-08-05: transition to 'selling' so other paths skip this trade
+              state: 'selling',
+              sellStatus: 'PLACING',
+            },
+          },
+          { new: true }
+        );
+        if (!placeClaim) {
+          logger.warn({
+            tradeId: trade._id.toString(),
+            retryCount: fresh.holdingRetryCount,
+            sellQty,
+          }, 'trader: holding retry — another path already placing SELL (sellInFlight claim failed), abort');
+          // ไม่ schedule retry ใหม่ — ปล่อยให้ path ที่ claim สำเร็จจัดการ
+          return;
+        }
+
         logger.warn({
           tradeId: trade._id.toString(),
-          freeQty, qty,
-          retryCount: this.holdingRetryCount,
-        }, 'trader: holding retry — found asset, attempting MARKET SELL');
+          freeQty, qty, tradeMaxQty, sellQty,
+          retryCount: fresh.holdingRetryCount,
+        }, 'trader: holding retry — found asset, attempting MARKET SELL (capped at trade qty)');
 
         // ลอง MARKET ก่อน (LIMIT_MAKER มัก reject ซ้ำด้วยสาเหตุเดิม)
         const retrySellId = this.makeClientOrderId('retry-sell', Date.now(), 0);
@@ -1876,13 +5776,18 @@ class Trader {
           symbol: this.bot.symbol,
           side: 'SELL',
           type: 'MARKET',
-          quantity: freeQty.toString(),
+          quantity: sellQty.toString(),
           newClientOrderId: retrySellId,
           recvWindow: config_recvWindow(),
         }).catch((err) => ({ error: binanceRest.formatBinanceError(err) }));
 
         if (resp.error) {
-          logger.error({ err: resp.error, tradeId: trade._id.toString(), retryCount: this.holdingRetryCount }, 'trader: holding retry MARKET SELL failed');
+          logger.error({ err: resp.error, tradeId: trade._id.toString(), retryCount: fresh.holdingRetryCount }, 'trader: holding retry MARKET SELL failed');
+          // FIX-2026-08-05: clear sellInFlight + revert state to holding so next retry can claim
+          await Trade.updateOne(
+            { _id: trade._id, sellInFlight: true },
+            { $set: { state: 'holding', sellStatus: 'CANCELED', sellInFlight: false, sellInFlightAt: null }, $unset: { sellOrderId: '', sellClientOrderId: '' } }
+          ).catch(() => null);
           // FIX P1.5: counter จะถูก increment ใน scheduleHoldingRetry call ถัดไป
           //   ถ้าเกิน MAX_HOLDING_RETRIES จะ alert + abort
           if (this.running) {
@@ -1904,22 +5809,57 @@ class Trader {
         });
 
         await Trade.updateOne(
-          { _id: trade._id, state: 'holding' },
+          { _id: trade._id, state: 'selling', sellInFlight: true },
           {
-            state: 'sold',
-            sellOrderId: resp.orderId,
-            sellClientOrderId: retrySellId,
-            sellPrice: avgSell,
-            sellQty: executed,
-            sellQuoteQty: parseFloat(resp.cummulativeQuoteQty),
-            sellStatus: resp.status,
-            sellFilledAt: new Date(resp.updateTime || Date.now()),
-            sellPlacedAt: new Date(),
-            realizedPnl: pnl.net,
-            pnlPercent: pnl.pnlPercent,
-            targetSellPrice: parseFloat(targetSellPrice),
+            $set: {
+              state: 'sold',
+              sellOrderId: resp.orderId,
+              sellClientOrderId: retrySellId,
+              sellPrice: avgSell,
+              // FIX-2026-08-06: P2 — persist sellAvgPrice alias (same as handleSellFilled)
+              sellAvgPrice: avgSell,
+              sellQty: executed,
+              sellQuoteQty: parseFloat(resp.cummulativeQuoteQty),
+              sellStatus: resp.status,
+              sellFilledAt: new Date(resp.updateTime || Date.now()),
+              sellPlacedAt: new Date(),
+              realizedPnl: pnl.net,
+              pnlPercent: pnl.pnlPercent,
+              targetSellPrice: parseFloat(targetSellPrice),
+              // FIX-2026-08-06: derive sellReason — holding retry MARKET path = 'holding_retry_recovered'
+              //   - ก่อนหน้านี้ path นี้ไม่ตั้ง sellReason → DB sellReason=null → dashboard/audit miss
+              //   - fix: ตั้ง 'holding_retry_recovered' ทันทีที่ MARKET fill (เป็น source of truth)
+              sellReason: 'holding_retry_recovered',
+              sellReasonAt: new Date(),
+              sellReasonSource: 'scheduleHoldingRetry',
+              holdingRetryCount: 0, // FIX-2026-07-31 (BUG-12): reset on success
+              // FIX-2026-07-31 (F1): reset SL-on-UKC auto-arm flag
+              useStopLossOnUKC: false,
+              autoArmedAt: null,
+              // FIX-2026-08-03: clear F1 threshold snapshots เมื่อ trade ออกจาก selling
+              autoArmLossPct: null,
+              autoArmAgeHours: null,
+              // FIX-2026-08-01: reset SELL partial-fill latch
+              sellPartialDetectedAt: null,
+              sellPartialLatchedAt: null,
+              sellPartialLatchedReason: null,
+              // FIX-2026-08-05: clear SELL placement in-flight flag
+              sellInFlight: false,
+              sellInFlightAt: null,
+            },
           }
         );
+
+        // FIX-2026-08-06: P4 — slippage detection (holding retry MARKET fallback path)
+        //   - เคสนี้แหละคือ slippage หนักสุด — MARKET fill ตอน TP ไม่ถึง
+        //   - alert telegram เมื่อ slip < -3% (ผู้ใช้จะได้เห็นทันที)
+        this._computeSlippage({
+          sellPrice: avgSell,
+          targetSellPrice: parseFloat(targetSellPrice) || 0,
+          tradeId: trade._id,
+          sellReason: 'holding_retry_recovered',
+          pnlPercent: pnl.pnlPercent,
+        });
 
         await Bot.updateOne(
           { _id: this.bot._id },
@@ -1938,9 +5878,14 @@ class Trader {
           this.currentTrade = null;
         }
         eventBus.emit('bot:status', { botId: this.bot._id, status: 'idle' });
-        eventBus.emit('trade:update', { tradeId: trade._id, state: 'sold' });
-        // FIX P1.5: reset counter เมื่อ recover สำเร็จ
-        this.holdingRetryCount = 0;
+        // FIX-2026-08-01: holding retry recovered via MARKET
+        eventBus.emit('trade:update', {
+          tradeId: trade._id,
+          botId: this.bot._id,
+          state: 'sold',
+          reason: trade.sellReason || 'holding_retry_recovered',
+          reasonDetail: trade.sellReasonDetail || `recovered via MARKET SELL after ${trade.holdingRetryCount || 0} retries`,
+        });
         logger.warn({
           tradeId: trade._id.toString(),
           pnl: pnl.net,
@@ -1948,6 +5893,11 @@ class Trader {
         }, 'trader: holding retry — RECOVERED stranded position via MARKET SELL');
       } catch (err) {
         logger.error({ err: err.message, tradeId: trade._id.toString() }, 'trader: holding retry failed');
+        // FIX-2026-08-05: clear sellInFlight + revert state to holding so next retry can claim
+        await Trade.updateOne(
+          { _id: trade._id, sellInFlight: true },
+          { $set: { state: 'holding', sellInFlight: false, sellInFlightAt: null } }
+        ).catch(() => null);
         // schedule อีก 60s
         if (this.running) {
           this.holdingRetryTimer = setTimeout(() => this.scheduleHoldingRetry(trade, qty, buyPrice, targetSellPrice), 60 * 1000);
@@ -1957,6 +5907,8 @@ class Trader {
   }
 
   async handlePartialBuyFill(trade, order, signalDoc, candle) {
+    // FIX-2026-07-31 (BUG-16): running check — guard against WS events after stop()
+    if (!this.running) return;
     // วาง SELL เฉพาะส่วนที่ fill แล้ว + cancel ที่เหลือ
     try {
       const filledQty = parseFloat(order.executedQty);
@@ -1995,6 +5947,20 @@ class Trader {
         return;
       }
 
+      // FIX-2026-08-02: emit 'filled' (BUY filled) สำหรับ partial-fill path
+      //   - ก่อนหน้านี้ handlePartialBuyFill เปลี่ยน placed → filled แบบ silent (ไม่ emit)
+      //     ทำให้ telegramNotifier ไม่เห็น state='filled' event → BUY notification ไม่เด้ง
+      //   - AEVO incident 13:28 +07 (2026-08-02): PARTIALLY_FILLED BUY ที่ buyFilledAt=06:27:39Z
+      //     state='filled' แล้ว แต่ telegramNotifier ไม่ได้รับ event เลย → ไม่มี 🟢 BUY notification
+      //   - emit targetSellPrice=null เพราะยังไม่ได้คำนวณ TP (จะคำนวณตอน place SELL ด้านล่าง)
+      eventBus.emit('trade:update', {
+        tradeId: trade._id,
+        state: 'filled',
+        targetSellPrice: null,
+        reason: null,
+        reasonDetail: null,
+      });
+
       // ─── FIX-2026-07-23 #2: NOTIONAL pre-check ──────────────────────────
       // ถ้า filled qty × price < MIN_NOTIONAL → อย่า cancel remaining BUY
       //   ปล่อยให้ fill เพิ่มจนกว่าจะผ่าน (กัน SELL rejection loop)
@@ -2023,14 +5989,9 @@ class Trader {
         orderId: trade.buyOrderId,
       }).catch(() => null);
 
-      const feeRate = fees.getMakerRate();
-      const sellPriceRaw = fees.calcSellPrice({
-        buyPrice: avgPrice,
-        tpPercent: this.bot.tpPercent,
-        feeRate,
-      });
-      const info = symbolInfo.getCached(this.bot.symbol);
-      const sellPrice = symbolInfo.roundPrice(sellPriceRaw, info.priceFilter.tickSize).toString();
+      // FIX-2026-08-02: use _computeTp() helper (was: this.bot.tpPercent only — no mult, no fee buffer)
+      const tp = await this._computeTp({ buyPrice: avgPrice });
+      const sellPrice = tp.sellPrice;
 
       const sellClientOrderId = this.makeClientOrderId('sell', Date.now(), trade.retryCount || 0);
       const sellResp = await binanceRest.newOrder({
@@ -2082,7 +6043,12 @@ class Trader {
 
       await Bot.updateOne({ _id: this.bot._id }, { status: 'selling', lastError: '' });
       eventBus.emit('bot:status', { botId: this.bot._id, status: 'selling' });
-      eventBus.emit('trade:update', { tradeId: trade._id, state: 'selling' });
+      eventBus.emit('trade:update', {
+        tradeId: trade._id,
+        state: 'selling',
+        reason: null,
+        reasonDetail: null,
+      });
     } catch (err) {
       logger.error({ err: err.message }, 'trader: handlePartialBuyFill error');
     }
@@ -2092,9 +6058,51 @@ class Trader {
   // - poll สถานะ BUY order ที่ถูกทิ้งไว้ (filledQty × price < MIN_NOTIONAL)
   // - เมื่อ fill เพิ่มจนพอ → ยกเลิก BUY, วาง SELL ตามปกติ
   // - เมื่อ BUY ถูก CANCELED/EXPIRED ภายนอก → สร้าง recovery record
-  // - FIX-2026-07-23: deadline tracking — เก็บ partialFillDeadlineAt = buyPlacedAt + retryTimeMin×retryMax
+  // - FIX-2026-07-23: deadline tracking — เก็ม partialFillDeadlineAt = buyPlacedAt + retryTimeMin×retryMax
   //   เมื่อครบ deadline → checkPartialFill เรียก _finalizePartialAfterDeadline ตาม notional
   // FIX P3.1: persist deadline ใน DB → restore ได้หลัง bot restart (เดิม instance-only)
+  // FIX-2026-07-31 (BUG-19): deadline restore in start() — re-arm ตัว watcher ใหม่ หลัง restart
+  //   เดิม: trade ที่ persisted deadline อยู่ในอนาคต แต่ timer ไม่ได้รัน → deadline ตาย
+  async _rearmPersistedPartialFillWatchers() {
+    if (!this.running) return;
+    const now = new Date();
+    // BUY side — state='filled' (after handlePartialBuyFill claim) + deadline > now
+    const buyTrades = await Trade.find({
+      botId: this.bot._id,
+      state: 'filled',
+      buyStatus: 'PARTIALLY_FILLED',
+      partialFillDeadlineAt: { $gt: now },
+      buyOrderId: { $exists: true, $ne: null },
+    }).limit(20).lean();
+
+    for (const t of buyTrades) {
+      this.schedulePartialFillWatch(t);
+      logger.info({
+        tradeId: t._id.toString(),
+        deadlineAt: t.partialFillDeadlineAt,
+        executedQty: t.buyQty,
+      }, 'trader: re-armed BUY partial-fill watcher after restart (FIX BUG-19)');
+    }
+
+    // SELL side — state='selling' + sellPartialDeadlineAt > now + SELL still PARTIALLY_FILLED
+    const sellTrades = await Trade.find({
+      botId: this.bot._id,
+      state: 'selling',
+      sellStatus: 'PARTIALLY_FILLED',
+      sellPartialDeadlineAt: { $gt: now },
+      sellOrderId: { $exists: true, $ne: null },
+    }).limit(20).lean();
+
+    for (const t of sellTrades) {
+      this.scheduleSellPartialFillWatch(t);
+      logger.info({
+        tradeId: t._id.toString(),
+        deadlineAt: t.sellPartialDeadlineAt,
+        sellFilledQty: t.sellFilledQty,
+      }, 'trader: re-armed SELL partial-fill watcher after restart (FIX BUG-19)');
+    }
+  }
+
   schedulePartialFillWatch(trade) {
     if (this.partialFillTimer) {
       clearTimeout(this.partialFillTimer);
@@ -2135,6 +6143,8 @@ class Trader {
   }
 
   async checkPartialFill(tradeIdStr) {
+    // FIX-2026-07-31 (BUG-6): abort if bot stopped — prevents placing real orders after stop()
+    if (!this.running) return;
     const fresh = await Trade.findById(tradeIdStr);
     if (!fresh) return;
     if (this.bot._id.toString() !== fresh.botId.toString()) return;
@@ -2281,7 +6291,12 @@ class Trader {
             error: `dust_orphan ${notional.toFixed(4)} < ${minNotional} (BUY cancelled externally, manual recovery needed)`,
           }
         );
-        eventBus.emit('trade:update', { tradeId: fresh._id, state: 'failed' });
+        eventBus.emit('trade:update', {
+        tradeId: fresh._id,
+        state: 'failed',
+        reason: null,
+        reasonDetail: null,
+      });
         return;
       }
       // ไม่มี fill เลย → cancel ตามปกติ
@@ -2289,7 +6304,12 @@ class Trader {
         { _id: fresh._id, state: 'filled' },
         { state: 'cancelled', buyStatus: order.status }
       );
-      eventBus.emit('trade:update', { tradeId: fresh._id, state: 'cancelled' });
+      eventBus.emit('trade:update', {
+        tradeId: fresh._id,
+        state: 'cancelled',
+        reason: null,
+        reasonDetail: null,
+      });
       return;
     }
   }
@@ -2301,8 +6321,14 @@ class Trader {
   // ใช้ atomic claim (state='placed') เพื่อกัน race กับ handlePartialBuyFill (WS path)
   async _finalizePartialAfterDeadline(trade, order, signalDoc, { mode }) {
     // FIX V1: atomic claim — ตั้ง state='partial_wait' ก่อน helper อื่นเข้ามา claim 'placed'
+    // FIX-2026-07-31 (BUG-7): change claim predicate from state='placed' → state='filled'.
+    //   handlePartialBuyFill at L2246 claims placed→filled BEFORE schedulePartialFillWatch runs,
+    //   so by the time the deadline fires, state is already 'filled'. The old predicate
+    //   {state:'placed'} never matched → finalizer always logged "already moved on" and returned
+    //   without scheduling → sub-MIN_NOTIONAL partial positions abandoned with live BUY order.
+    //   Per user choice 2026-07-31: claim 'filled' instead.
     const claim = await Trade.findOneAndUpdate(
-      { _id: trade._id, state: 'placed' },
+      { _id: trade._id, state: 'filled' },
       {
         $set: {
           state: 'partial_wait',
@@ -2345,8 +6371,11 @@ class Trader {
         tradeId: claim._id.toString(), mode,
       }, 'trader: deadline handler failed — marking trade as failed');
       try {
+        // FIX-2026-07-31 (BUG-15): add state filter — without guard, the helper's race-loser path
+        //   could legitimately advance state past 'partial_wait' before crash, and this fail-safe
+        //   would clobber it. Only write 'failed' if state is still 'partial_wait' (atomic claim state).
         await Trade.updateOne(
-          { _id: claim._id },
+          { _id: claim._id, state: 'partial_wait' },
           { state: 'failed', error: `deadline handler (${mode}): ${err.message}` }
         );
         await Bot.updateOne(
@@ -2354,11 +6383,18 @@ class Trader {
           { status: 'error', lastError: `deadline handler failed: ${err.message}` }
         );
         this._unregisterTrade(claim);
+        // FIX-2026-08-02: cancel any SELL orphaned by partial fill before resetting trade
+        await this._cancelOrphanedSells(claim, { reason: 'deadline_handler_failed', ctx: 'state=partial_wait' });
         if (this.currentTrade && this.currentTrade._id.toString() === claim._id.toString()) {
           this.currentTrade = null;
         }
         eventBus.emit('bot:status', { botId: this.bot._id, status: 'error' });
-        eventBus.emit('trade:update', { tradeId: claim._id, state: 'failed' });
+        eventBus.emit('trade:update', {
+        tradeId: claim._id,
+        state: 'failed',
+        reason: null,
+        reasonDetail: null,
+      });
       } catch (cleanupErr) {
         logger.error({ err: cleanupErr.message }, 'trader: deadline handler cleanup failed');
       }
@@ -2400,6 +6436,13 @@ class Trader {
     }
 
     // FIX V7: update trade ด้วย avg BUY price จริง (อาจต่างจาก buyPrice แรก)
+    // FIX-2026-08-02: ดึง targetSellPrice ที่ persist ไว้ก่อนหน้า (ถ้ามี — handlePartialBuyFill หรือ top-up เคยตั้งไว้แล้ว)
+    //   - ไม่คำนวณ TP ใหม่ที่นี่ — เพราะ TP ต้องคำนวณจาก buyPrice ใหม่, และ BUY ใกล้ deadline แล้ว
+    //     ใช้ targetSellPrice เดิมที่คำนวณจากรอบแรก (หรือ top-up รอบก่อน) ก็พอ — SELL จะถูก place ใน _placeSellForPartialFill ด้านล่าง
+    const existing = await Trade.findById(trade._id).select('targetSellPrice').lean();
+    const preservedTargetSellPrice = existing && existing.targetSellPrice != null
+      ? parseFloat(existing.targetSellPrice)
+      : null;
     await Trade.updateOne(
       { _id: trade._id, state: 'partial_wait' },
       {
@@ -2409,6 +6452,7 @@ class Trader {
         buyStatus: fresh.status,
         buyFilledAt: new Date(fresh.updateTime || Date.now()),
         state: 'filled',
+        ...(preservedTargetSellPrice != null ? { targetSellPrice: preservedTargetSellPrice } : {}),
       }
     );
 
@@ -2436,22 +6480,21 @@ class Trader {
         );
         await Bot.updateOne({ _id: this.bot._id }, { status: 'holding' });
         eventBus.emit('bot:status', { botId: this.bot._id, status: 'holding' });
-        eventBus.emit('trade:update', { tradeId: trade._id, state: 'holding' });
+        eventBus.emit('trade:update', {
+        tradeId: trade._id,
+        state: 'holding',
+        reason: null,
+        reasonDetail: null,
+      });
         this.scheduleHoldingRetry(trade, filledQty, avgPrice, 0);
       }
       return;
     }
 
     // Place SELL ตาม TP — extract logic จาก handlePartialBuyFill
-    const feeRate = fees.getMakerRate();
-    const sellPriceRaw = fees.calcSellPrice({
-      buyPrice: avgPrice,
-      tpPercent: this.bot.tpPercent,
-      feeRate,
-    });
-    const info = symbolInfo.getCached(this.bot.symbol);
-    const tickSize = info.priceFilter.tickSize;
-    const sellPrice = symbolInfo.roundPrice(sellPriceRaw, tickSize).toString();
+    // FIX-2026-08-02: use _computeTp() helper (was: this.bot.tpPercent only — no mult, no fee buffer)
+    const tp = await this._computeTp({ buyPrice: avgPrice });
+    const sellPrice = tp.sellPrice;
 
     const validation = symbolInfo.validateOrder({ symbol: this.bot.symbol, price: sellPrice, qty: filledQty });
     if (!validation.ok) {
@@ -2467,18 +6510,50 @@ class Trader {
         );
         await Bot.updateOne({ _id: this.bot._id }, { status: 'holding' });
         eventBus.emit('bot:status', { botId: this.bot._id, status: 'holding' });
-        eventBus.emit('trade:update', { tradeId: trade._id, state: 'holding' });
+        eventBus.emit('trade:update', {
+        tradeId: trade._id,
+        state: 'holding',
+        reason: null,
+        reasonDetail: null,
+      });
         this.scheduleHoldingRetry(trade, filledQty, avgPrice, sellPrice);
       }
       return;
     }
 
     const sellClientOrderId = this.makeClientOrderId('sell', Date.now(), trade.retryCount || 0);
+
+    // FIX-2026-08-06 (HOME stuck SL-UKC loop): round filledQty to stepSize before SELL LIMIT_MAKER
+    //   - filledQty มาจาก BUY fills (cumulative) — Binance fills may have fractional leftovers
+    //   - e.g. ZIL/USDT stepSize=1: BUY filled 1234.7 → round → 1234
+    //   - defense-in-depth: validateOrder above may pass but Binance strict-mode rejects
+    let sellFilledQty = filledQty;
+    try {
+      const stepSize = symCached.lotSize.stepSize;
+      const minQty = symCached.lotSize.minQty;
+      sellFilledQty = symbolInfo.roundQty(filledQty, stepSize);
+      if (minQty && sellFilledQty < parseFloat(String(minQty))) {
+        logger.warn({
+          tradeId: trade._id.toString(),
+          symbol: this.bot.symbol,
+          filledQty, sellFilledQty,
+          minQty: String(minQty), stepSize: String(stepSize),
+        }, 'trader: accept_partial — rounded sellQty below minQty, using filledQty anyway (validation above should have caught)');
+        sellFilledQty = filledQty;
+      }
+    } catch (e) {
+      // symCached might be missing lotSize — fall back to raw filledQty
+      logger.warn({
+        tradeId: trade._id.toString(),
+        symbol: this.bot.symbol, err: e.message,
+      }, 'trader: accept_partial — symbolInfo round failed, using raw filledQty');
+    }
+
     const sellResp = await binanceRest.newOrder({
       symbol: this.bot.symbol,
       side: 'SELL',
       type: 'LIMIT_MAKER',
-      quantity: filledQty.toString(),
+      quantity: sellFilledQty.toString(),
       price: sellPrice,
       newClientOrderId: sellClientOrderId,
       recvWindow: config_recvWindow(),
@@ -2497,7 +6572,12 @@ class Trader {
         );
         await Bot.updateOne({ _id: this.bot._id }, { status: 'holding' });
         eventBus.emit('bot:status', { botId: this.bot._id, status: 'holding' });
-        eventBus.emit('trade:update', { tradeId: trade._id, state: 'holding' });
+        eventBus.emit('trade:update', {
+        tradeId: trade._id,
+        state: 'holding',
+        reason: null,
+        reasonDetail: null,
+      });
         this.scheduleHoldingRetry(trade, filledQty, avgPrice, sellPrice);
       }
       return;
@@ -2535,7 +6615,12 @@ class Trader {
 
     await Bot.updateOne({ _id: this.bot._id }, { status: 'selling', lastError: '' });
     eventBus.emit('bot:status', { botId: this.bot._id, status: 'selling' });
-    eventBus.emit('trade:update', { tradeId: trade._id, state: 'selling' });
+    eventBus.emit('trade:update', {
+        tradeId: trade._id,
+        state: 'selling',
+        reason: null,
+        reasonDetail: null,
+      });
   }
 
   // ── _topUpAndSell — top_up_market path (filledNotional < MIN_NOTIONAL) ──
@@ -2582,8 +6667,10 @@ class Trader {
       logger.warn({
         tradeId: trade._id.toString(),
       }, 'trader: top_up — cannot read current ask, falling back to accept_partial');
-      // ตั้ง state กลับเป็น 'placed' เพื่อให้ _placeSellForPartialFill atomic claim ได้
-      await Trade.updateOne({ _id: trade._id, state: 'partial_wait' }, { state: 'placed' });
+      // FIX-2026-07-31 (BUG-8): keep state as 'partial_wait' instead of downgrading to 'placed'.
+      //   _placeSellForPartialFill guards on 'partial_wait' (L2668) then 'filled' (L2780).
+      //   Downgrading to 'placed' made all subsequent updates no-op → SELL placed at L2749
+      //   but sellOrderId never recorded → guaranteed orphan SELL.
       return this._placeSellForPartialFill(trade, fresh);
     }
 
@@ -2603,7 +6690,7 @@ class Trader {
         topUpQty, currentAsk,
         projectedNotional: (topUpQty * currentAsk).toFixed(4), minNotional,
       }, 'trader: top_up — remaining USDT insufficient for meaningful top-up, falling back to accept_partial');
-      await Trade.updateOne({ _id: trade._id, state: 'partial_wait' }, { state: 'placed' });
+      // FIX-2026-07-31 (BUG-8): keep state as 'partial_wait' — see L2946 comment
       return this._placeSellForPartialFill(trade, fresh);
     }
 
@@ -2620,6 +6707,39 @@ class Trader {
       }, 'trader: top_up — cancel LIMIT_MAKER BUY failed (continuing)');
     }
 
+    // FIX-2026-08-21: Pre-flight reserve check + atomic claim (กัน race + กันกิน reserve)
+    //   - _topUpAndSell ใช้ MARKET BUY ตรง ๆ (ไม่ผ่าน balance check ปกติของ placeBuy)
+    //   - ต้องเช็ค free - reserve - committed >= topUpNotional ก่อนเสมอ
+    //   - claim ผ่าน buyCommitment เพื่อกันบอทอื่น over-spend พร้อมกัน
+    let topUpClaimed = false;
+    const topUpNotional = topUpQty * currentAsk;
+    try {
+      const topUpAccount = await binanceRest.getAccount();
+      const topUpUsdt = (topUpAccount.balances || []).find((b) => b.asset === 'USDT');
+      const topUpFree = topUpUsdt ? parseFloat(topUpUsdt.free) : 0;
+      const topUpReserve = await walletReserve.getReserveUsdt().catch(() => 0);
+      const topUpCommitted = buyCommitment.getCommitted();
+      const topUpAvailable = Math.max(0, topUpFree - topUpReserve - topUpCommitted);
+      if (topUpAvailable < topUpNotional) {
+        logger.warn({
+          botId: this.bot._id.toString(),
+          tradeId: trade._id.toString(),
+          topUpFree, topUpReserve, topUpCommitted, topUpAvailable: topUpAvailable.toFixed(4),
+          topUpNotional: topUpNotional.toFixed(4),
+        }, 'trader: top_up — insufficient USDT (would eat into reserve) — falling back to accept_partial');
+        return this._placeSellForPartialFill(trade, fresh);
+      }
+      buyCommitment.claimBuy(topUpNotional);
+      topUpClaimed = true;
+    } catch (topUpBalErr) {
+      logger.warn({
+        err: topUpBalErr.message,
+        botId: this.bot._id.toString(),
+        tradeId: trade._id.toString(),
+      }, 'trader: top_up — balance check failed (fail-closed) — falling back to accept_partial');
+      return this._placeSellForPartialFill(trade, fresh);
+    }
+
     // FIX V4: place MARKET BUY top-up
     let topUpResp;
     try {
@@ -2634,18 +6754,40 @@ class Trader {
       });
     } catch (err) {
       const fe = binanceRest.formatBinanceError(err);
+      if (topUpClaimed) {
+        buyCommitment.releaseBuy(topUpNotional);
+        topUpClaimed = false;
+      }
       logger.warn({
         err: fe, tradeId: trade._id.toString(),
       }, 'trader: top_up — MARKET BUY failed, falling back to accept_partial');
-      await Trade.updateOne({ _id: trade._id, state: 'partial_wait' }, { state: 'placed' });
+      // FIX-2026-07-31 (BUG-8): keep state as 'partial_wait' — see L2946 comment
       return this._placeSellForPartialFill(trade, fresh);
     }
     if (topUpResp.error) {
+      if (topUpClaimed) {
+        buyCommitment.releaseBuy(topUpNotional);
+        topUpClaimed = false;
+      }
       logger.warn({
         err: topUpResp.error, tradeId: trade._id.toString(),
       }, 'trader: top_up — MARKET BUY rejected, falling back to accept_partial');
-      await Trade.updateOne({ _id: trade._id, state: 'partial_wait' }, { state: 'placed' });
+      // FIX-2026-07-31 (BUG-8): keep state as 'partial_wait' — see L2946 comment
       return this._placeSellForPartialFill(trade, fresh);
+    }
+
+    // FIX-2026-08-21 (rev2): release buy commitment on MARKET BUY success
+    //   - MARKET BUY fills immediately → USDT spent → ไม่ in-flight อีกต่อไป
+    //   - เดิม: release เฉพาะตอน reject (line 6667, 6678) → counter สะสมทุก top-up
+    //     → บอทอื่นโดนบล็อก
+    if (topUpClaimed) {
+      buyCommitment.releaseBuy(topUpNotional);
+      topUpClaimed = false;
+      logger.debug({
+        botId: this.bot._id.toString(),
+        tradeId: trade._id.toString(),
+        releasedUsdt: topUpNotional.toFixed(4),
+      }, 'trader: top_up — MARKET BUY executed, buy commitment released');
     }
 
     const topUpExecuted = parseFloat(topUpResp.executedQty);
@@ -2691,21 +6833,21 @@ class Trader {
         );
         await Bot.updateOne({ _id: this.bot._id }, { status: 'holding' });
         eventBus.emit('bot:status', { botId: this.bot._id, status: 'holding' });
-        eventBus.emit('trade:update', { tradeId: trade._id, state: 'holding' });
+        eventBus.emit('trade:update', {
+        tradeId: trade._id,
+        state: 'holding',
+        reason: null,
+        reasonDetail: null,
+      });
         this.scheduleHoldingRetry(trade, totalQty, avgBuyPrice, 0);
       }
       return;
     }
 
     // Place SELL ตาม TP (avgBuyPrice รวม top-up)
-    const feeRate = fees.getMakerRate();
-    const sellPriceRaw = fees.calcSellPrice({
-      buyPrice: avgBuyPrice,
-      tpPercent: this.bot.tpPercent,
-      feeRate,
-    });
-    const tickSize = info.priceFilter.tickSize;
-    const sellPrice = symbolInfo.roundPrice(sellPriceRaw, tickSize).toString();
+    // FIX-2026-08-02: use _computeTp() helper (was: this.bot.tpPercent only — no mult, no fee buffer)
+    const tp = await this._computeTp({ buyPrice: avgBuyPrice });
+    const sellPrice = tp.sellPrice;
 
     const sellClientOrderId = this.makeClientOrderId('sell', Date.now(), trade.retryCount || 0);
     const sellResp = await binanceRest.newOrder({
@@ -2731,7 +6873,12 @@ class Trader {
         );
         await Bot.updateOne({ _id: this.bot._id }, { status: 'holding' });
         eventBus.emit('bot:status', { botId: this.bot._id, status: 'holding' });
-        eventBus.emit('trade:update', { tradeId: trade._id, state: 'holding' });
+        eventBus.emit('trade:update', {
+        tradeId: trade._id,
+        state: 'holding',
+        reason: null,
+        reasonDetail: null,
+      });
         this.scheduleHoldingRetry(trade, totalQty, avgBuyPrice, sellPrice);
       }
       return;
@@ -2768,13 +6915,252 @@ class Trader {
 
     await Bot.updateOne({ _id: this.bot._id }, { status: 'selling', lastError: '' });
     eventBus.emit('bot:status', { botId: this.bot._id, status: 'selling' });
-    eventBus.emit('trade:update', { tradeId: trade._id, state: 'selling' });
+    eventBus.emit('trade:update', {
+        tradeId: trade._id,
+        state: 'selling',
+        reason: null,
+        reasonDetail: null,
+      });
   }
 
   // ─── FIX-2026-07-23 #4: startup reconciliation ─────────────────────────────
   // Scan Binance balance for this bot's base asset; if found and DB has no active
   // trade that explains it → log a clear orphan warning. Caller decides whether
   // to create a recovery trade. Throttled to once per 5 minutes per bot.
+  // FIX-2026-08-02: DCA mode startup reconciliation
+  //   - load active DCA stack (state in OPEN_STACK_STATES) → set this.currentTrade + register
+  //   - verify Binance SELL order:
+  //     * FILLED → handleSellFilled (จะ route ไป _handleDcaSellFilled)
+  //     * PARTIALLY_FILLED → handleSellPartialFill (keep SELL live, schedule watch)
+  //     * CANCELED / EXPIRED → transition to 'holding' + scheduleHoldingRetry
+  //     * NEW / ACCEPTED → leave alone (state stays selling)
+  //   - ถ้า state='placed' (BUY in flight) → verify BUY order
+  //   - ถ้า BUY FILLED but stack still in 'placed' → trigger handleBuyFilled
+  async _reconcileDcaStackOnStart() {
+    if (!this.running) return;
+    const stack = await Trade.findOne({
+      botId: this.bot._id,
+      isDcaStack: true,
+      state: { $in: ['placed', 'partial_wait', 'filled', 'retrying', 'holding', 'selling', 'partial_sell_wait', 'stopping'] },
+    }).sort({ createdAt: -1 });
+
+    if (!stack) {
+      logger.info({ botId: this.bot._id.toString() }, 'trader: _reconcileDcaStackOnStart — no active DCA stack');
+      return;
+    }
+
+    logger.info({
+      botId: this.bot._id.toString(),
+      symbol: this.bot.symbol,
+      stackId: stack.stackId?.toString() || stack._id.toString(),
+      state: stack.state,
+      dcaLayerCount: stack.dcaLayerCount,
+      stackBep: stack.stackBep,
+      sellOrderId: stack.sellOrderId,
+    }, 'trader: _reconcileDcaStackOnStart — found active DCA stack');
+
+    // Set this.currentTrade + register for order routing
+    this.currentTrade = stack;
+    this._registerTrade(stack);
+
+    // If BUY in flight (state='placed'), verify BUY order
+    if (stack.state === 'placed' && stack.buyOrderId) {
+      try {
+        const buyOrder = await binanceRest.getOrder({ symbol: this.bot.symbol, orderId: stack.buyOrderId });
+        if (buyOrder.status === 'FILLED') {
+          const sig = stack.signalId ? await Signal.findById(stack.signalId).catch(() => null) : null;
+          await this.handleBuyFilled(stack, buyOrder, sig);
+          return;
+        }
+        if (buyOrder.status === 'PARTIALLY_FILLED') {
+          // FIX-2026-08-03 (B2): do NOT call handlePartialBuyFill for DCA stacks
+          //   - classic handler would place single-layer SELL with single-layer TP
+          //   - for DCA we want to LET THE BUY ACCUMULATE (treat as partial layer fill, BUY open)
+          //   - the partial-fill watcher (schedulePartialFillWatch) will poll until full fill
+          //   - then a real _handleDcaBuyFilled will run with full qty + correct BEP
+          //   - meanwhile, mark state='partial_wait' so the claim predicate at L2099 skips new S1s
+          const symCached = symbolInfo.getCached(this.bot.symbol);
+          const minNotional = symCached?.notional?.minNotional ? parseFloat(symCached.notional.minNotional.toString()) : null;
+          const filledQty = parseFloat(buyOrder.executedQty) || 0;
+          const avgPrice = parseFloat(buyOrder.price) || parseFloat(buyOrder.avgPrice) || 0;
+          const notionalNow = filledQty * avgPrice;
+          if (minNotional && notionalNow < minNotional) {
+            // wait for accumulation below MIN_NOTIONAL — keep BUY open
+            logger.info({
+              stackId: stack._id.toString(),
+              buyOrderId: stack.buyOrderId,
+              filledQty, notional: notionalNow.toFixed(4), minNotional,
+            }, 'trader: DCA stack BUY partial-fill below MIN_NOTIONAL — keeping BUY open, will poll');
+            await Trade.updateOne(
+              { _id: stack._id, state: 'placed' },
+              { state: 'partial_wait', buyStatus: 'PARTIALLY_FILLED', buyFilledAt: new Date() }
+            );
+            this.schedulePartialFillWatch(stack);
+          } else {
+            // partial fill already >= MIN_NOTIONAL — close BUY at this layer, treat as partial layer
+            //   - this is the borderline case where notional is enough but BUY is still PARTIALLY_FILLED
+            //   - simplest path: cancel BUY order, accept the partial qty as a real layer, then go to DCA fill path
+            //   - mirror scalars and place aggregate SELL at BEP+TP (using partial qty's avgPrice for BEP)
+            logger.info({
+              stackId: stack._id.toString(),
+              buyOrderId: stack.buyOrderId,
+              filledQty, avgPrice, notional: notionalNow.toFixed(4),
+            }, 'trader: DCA stack BUY partial-fill >= MIN_NOTIONAL — cancel BUY, accept partial layer');
+            await binanceRest.cancelOrder({ symbol: this.bot.symbol, orderId: stack.buyOrderId }).catch(() => null);
+            const sig = stack.signalId ? await Signal.findById(stack.signalId).catch(() => null) : null;
+            const synthOrder = {
+              orderId: stack.buyOrderId,
+              executedQty: buyOrder.executedQty,
+              cummulativeQuoteQty: buyOrder.cummulativeQuoteQty,
+              price: buyOrder.price || buyOrder.avgPrice,
+              avgPrice: buyOrder.avgPrice,
+              updateTime: buyOrder.updateTime,
+              status: 'FILLED',
+              fills: [],
+            };
+            await this.handleBuyFilled(stack, synthOrder, sig);
+          }
+          return;
+        }
+        // NEW/ACCEPTED — keep BUY pending
+        logger.info({ stackId: stack._id.toString(), buyOrderId: stack.buyOrderId, buyStatus: buyOrder.status }, 'trader: DCA stack BUY still in flight, no action');
+      } catch (err) {
+        logger.warn({ err: err.message, stackId: stack._id.toString() }, 'trader: DCA stack BUY order fetch failed');
+      }
+      return;
+    }
+
+    // If SELL in flight (state='selling' or 'partial_sell_wait'), verify SELL order
+    if ((stack.state === 'selling' || stack.state === 'partial_sell_wait') && stack.sellOrderId) {
+      try {
+        const sellOrder = await binanceRest.getOrder({ symbol: this.bot.symbol, orderId: stack.sellOrderId });
+        if (sellOrder.status === 'FILLED') {
+          logger.info({ stackId: stack._id.toString(), sellOrderId: stack.sellOrderId }, 'trader: DCA stack SELL FILLED during downtime — calling handleSellFilled');
+          await this.handleSellFilled({
+            orderId: stack.sellOrderId,
+            status: 'FILLED',
+            executedQty: parseFloat(sellOrder.executedQty),
+            avgPrice: parseFloat(sellOrder.avgPrice),
+            cumulativeQuoteQty: parseFloat(sellOrder.cummulativeQuoteQty),
+            ts: sellOrder.updateTime,
+          }, stack);
+          return;
+        }
+        if (sellOrder.status === 'PARTIALLY_FILLED') {
+          logger.info({ stackId: stack._id.toString(), sellOrderId: stack.sellOrderId, executedQty: sellOrder.executedQty }, 'trader: DCA stack SELL PARTIALLY_FILLED during downtime — calling handleSellPartialFill');
+          await this.handleSellPartialFill({
+            orderId: stack.sellOrderId,
+            status: 'PARTIALLY_FILLED',
+            executedQty: parseFloat(sellOrder.executedQty),
+            avgPrice: parseFloat(sellOrder.avgPrice),
+            cumulativeQuoteQty: parseFloat(sellOrder.cummulativeQuoteQty),
+          }, stack);
+          return;
+        }
+        if (sellOrder.status === 'CANCELED' || sellOrder.status === 'EXPIRED') {
+          logger.warn({ stackId: stack._id.toString(), sellOrderId: stack.sellOrderId, sellStatus: sellOrder.status }, 'trader: DCA stack SELL cancelled/expired during downtime — marking holding');
+          await Trade.updateOne(
+            { _id: stack._id, state: stack.state },
+            { state: 'holding', sellStatus: sellOrder.status, error: `SELL ${sellOrder.status.toLowerCase()} during downtime` }
+          );
+          await Bot.updateOne({ _id: this.bot._id }, { status: 'holding' });
+          eventBus.emit('bot:status', { botId: this.bot._id, status: 'holding' });
+          eventBus.emit('trade:update', {
+            tradeId: stack._id, state: 'holding', reason: null, reasonDetail: null,
+          });
+          this.scheduleHoldingRetry(
+            stack,
+            parseFloat(stack.stackTotalQty) || parseFloat(stack.buyQty) || 0,
+            parseFloat(stack.stackBep) || parseFloat(stack.buyPrice) || 0,
+            parseFloat(stack.targetSellPrice) || 0,
+          );
+          return;
+        }
+        // NEW/ACCEPTED — SELL still live
+        logger.info({ stackId: stack._id.toString(), sellOrderId: stack.sellOrderId, sellStatus: sellOrder.status }, 'trader: DCA stack SELL still live, no action');
+      } catch (err) {
+        logger.warn({ err: err.message, stackId: stack._id.toString() }, 'trader: DCA stack SELL order fetch failed');
+      }
+      return;
+    }
+
+    // 'holding' state — schedule holding retry
+    if (stack.state === 'holding') {
+      logger.info({ stackId: stack._id.toString() }, 'trader: DCA stack in holding state — scheduling holding retry');
+      this.scheduleHoldingRetry(
+        stack,
+        parseFloat(stack.stackTotalQty) || parseFloat(stack.buyQty) || 0,
+        parseFloat(stack.stackBep) || parseFloat(stack.buyPrice) || 0,
+        parseFloat(stack.targetSellPrice) || 0,
+      );
+      return;
+    }
+
+    // 'filled' state — SELL not yet placed (e.g. interrupted between BUY fill and SELL place)
+    if (stack.state === 'filled') {
+      logger.warn({ stackId: stack._id.toString() }, 'trader: DCA stack in filled state (SELL not placed) — placing SELL');
+      // Compute TP from BEP and call _cancelAndReplaceSell (qty=stackTotalQty, newTarget=tp)
+      const { totalQty, totalSpent, bep } = this._computeStackBEP(stack);
+      if (bep && totalQty > 0) {
+        try {
+          const dcaTp = await this._computeDcaTp({ stackBep: bep, totalQty });
+          await this._cancelAndReplaceSell({
+            trade: stack,
+            reason: 'dca_startup_reconcile',
+            source: 'dca_reconcile',
+            qty: totalQty,
+            newTarget: dcaTp.sellPrice,
+          });
+        } catch (err) {
+          logger.warn({ err: err.message, stackId: stack._id.toString() }, 'trader: DCA startup reconcile SELL place failed');
+        }
+      }
+      return;
+    }
+
+    // 'stopping' state — SELL was being cancelled, SELL orphan
+    if (stack.state === 'stopping') {
+      logger.warn({ stackId: stack._id.toString() }, 'trader: DCA stack in stopping state during startup — checking SELL order');
+      if (stack.sellOrderId) {
+        try {
+          const sellOrder = await binanceRest.getOrder({ symbol: this.bot.symbol, orderId: stack.sellOrderId });
+          if (sellOrder.status === 'FILLED') {
+            // race recovery — SELL filled during cancel
+            await this.handleSellFilled({
+              orderId: stack.sellOrderId,
+              status: 'FILLED',
+              executedQty: parseFloat(sellOrder.executedQty),
+              avgPrice: parseFloat(sellOrder.avgPrice),
+              cumulativeQuoteQty: parseFloat(sellOrder.cummulativeQuoteQty),
+            }, stack);
+            return;
+          }
+          if (sellOrder.status === 'CANCELED' || sellOrder.status === 'EXPIRED') {
+            // SELL was cancelled — go to holding
+            await Trade.updateOne(
+              { _id: stack._id, state: 'stopping' },
+              { state: 'holding', error: 'stopping: SELL cancelled during downtime' }
+            );
+            await Bot.updateOne({ _id: this.bot._id }, { status: 'holding' });
+            eventBus.emit('bot:status', { botId: this.bot._id, status: 'holding' });
+            eventBus.emit('trade:update', {
+              tradeId: stack._id, state: 'holding', reason: null, reasonDetail: null,
+            });
+            this.scheduleHoldingRetry(
+              stack,
+              parseFloat(stack.stackTotalQty) || parseFloat(stack.buyQty) || 0,
+              parseFloat(stack.stackBep) || parseFloat(stack.buyPrice) || 0,
+              parseFloat(stack.targetSellPrice) || 0,
+            );
+            return;
+          }
+        } catch (err) {
+          logger.warn({ err: err.message, stackId: stack._id.toString() }, 'trader: DCA startup stopping SELL fetch failed');
+        }
+      }
+    }
+  }
+
   async reconcileAccountBalance({ force = false } = {}) {
     if (!this.running) return null;
     const now = Date.now();
@@ -2869,6 +7255,58 @@ class Trader {
         };
       }
 
+      // FIX-2026-07-30: SELL orphan cross-check — flag trades ที่ DB state='sold' แต่ Binance SELL order ยังไม่ FILLED
+      //   (defense-in-depth สำหรับเคสที่ handleSellFilled เคยถูก trigger โดย PARTIALLY_FILLED — เช่น DEXE incident)
+      //   - เช็คเฉพาะ trade ที่ยังไม่ verified (ไม่มี soldVerifiedAt) เพื่อไม่ให้ reconcile ทำงานซ้ำ
+      //   - ถ้าเจอ → mark `soldVerifiedAt` + `orphanDetected:true` + `orphanReason` เพื่อ audit
+      const unverifiedSold = await Trade.find({
+        botId: this.bot._id,
+        state: 'sold',
+        sellOrderId: { $exists: true, $ne: null },
+        soldVerifiedAt: { $exists: false },
+      }).limit(5).lean();
+
+      for (const st of unverifiedSold) {
+        try {
+          const liveSell = await binanceRest.getOrder({ symbol: this.bot.symbol, orderId: st.sellOrderId });
+          if (liveSell.status !== 'FILLED') {
+            logger.error({
+              botId: this.bot._id.toString(),
+              tradeId: st._id.toString(),
+              sellOrderId: st.sellOrderId,
+              liveStatus: liveSell.status,
+              liveExecutedQty: liveSell.executedQty,
+              liveOrigQty: liveSell.origQty,
+              dbSellQty: st.sellQty,
+            }, 'trader: reconcileAccountBalance — DB says sold but Binance SELL order still ' + liveSell.status);
+            await Trade.updateOne(
+              { _id: st._id },
+              {
+                $set: {
+                  soldVerifiedAt: new Date(),
+                  orphanDetected: true,
+                  orphanReason: `SELL ${liveSell.status} (executedQty=${liveSell.executedQty}/${liveSell.origQty})`,
+                },
+              }
+            );
+            try {
+              telegramNotifier.notify('sellOrphanDetected', {
+                botName: this.bot.name || this.bot.symbol, symbol: this.bot.symbol, timeframe: st.timeframe,
+                tradeId: st._id.toString(), orderId: st.sellOrderId,
+                liveStatus: liveSell.status, executedQty: liveSell.executedQty, origQty: liveSell.origQty,
+              });
+            } catch (_) { /* non-fatal */ }
+          } else {
+            // verify OK — mark verified เพื่อไม่ต้องเช็คอีก
+            await Trade.updateOne({ _id: st._id }, { $set: { soldVerifiedAt: new Date() } });
+          }
+        } catch (err) {
+          logger.warn({
+            err: err.message, tradeId: st._id.toString(),
+          }, 'trader: reconcileAccountBalance — SELL order fetch failed (will retry next reconcile)');
+        }
+      }
+
       return { ok: true, reason: 'balanced', freeQty, lockedQty, expectedFree: expectedFreeFromActive };
     } catch (err) {
       logger.warn({
@@ -2884,6 +7322,8 @@ class Trader {
   // FIX 3: รับ trade parameter (จาก Map/DB lookup) ไม่พึ่ง currentTrade
   // FIX 7: handle ทุก status (FILLED/PARTIALLY_FILLED/CANCELED/EXPIRED)
   async onBuyOrderUpdate(update, trade) {
+    // FIX-2026-07-31 (BUG-16): running check — guard against WS events after stop()
+    if (!this.running) return;
     if (!trade) return;
     if (update.status === 'FILLED') {
       logger.info({ botId: this.bot._id.toString(), orderId: update.orderId, avgPrice: update.avgPrice }, 'trader: BUY FILLED (via WS)');
@@ -2921,6 +7361,8 @@ class Trader {
           { state: 'cancelled', buyStatus: update.status }
         );
         if (this.currentTrade && this.currentTrade._id.toString() === trade._id.toString()) {
+          // FIX-2026-08-02: cancel any SELL orphaned by partial fill before resetting trade
+          await this._cancelOrphanedSells(trade, { reason: 'ws_buy_cancelled', ctx: 'state=placed' });
           this._unregisterTrade(trade);
           this.currentTrade = null;
           await Bot.updateOne({ _id: this.bot._id }, { status: 'idle' });
@@ -2930,7 +7372,73 @@ class Trader {
     }
   }
 
+  // FIX-2026-08-01: derive sellReason from prior state when caller didn't pre-populate
+  //   - called by handleSellFilled() after successful state→'sold' atomic update
+  //   - `trade` is the pre-update snapshot (its `.state` is the PRIOR state)
+  //   - returns null if state can't be classified
+  //   - best-effort: prefer caller pre-population (placeSellOrder / _finalizePartialSellAfterDeadline / etc.)
+  _deriveSellReasonFromPriorState(trade, sellPrice) {
+    const prior = trade.state;
+    // stopping → race recovery / force-close path
+    if (prior === 'stopping') {
+      // Heuristic: if sellPrice > buyPrice and within band → tp_hit (cancelled SELL already filled at TP);
+      // otherwise → stop_loss_upper_kc (MARKET filled at lower price).
+      const buy = parseFloat(trade.buyPrice) || 0;
+      if (buy > 0 && sellPrice >= buy) {
+        return {
+          reason: 'race_recovery_filled',
+          detail: `close=${sellPrice} >= buyPrice=${buy} (filled at TP before SL cancel)`,
+          source: 'handleSellFilled:derived',
+        };
+      }
+      return {
+        reason: 'stop_loss_upper_kc',
+        detail: `close=${sellPrice} < buyPrice=${buy} (MARKET fallback after SL arm)`,
+        source: 'handleSellFilled:derived',
+      };
+    }
+    // partial_sell_wait → pre-populated by _finalizePartialSellAfterDeadline; fallback here
+    if (prior === 'partial_sell_wait') {
+      return {
+        reason: 'partial_sell_finalized',
+        detail: 'partial-sell freeze deadline finalization',
+        source: 'handleSellFilled:derived',
+      };
+    }
+    // holding → could be TP or holding-retry recovery
+    if (prior === 'holding') {
+      if ((trade.holdingRetryCount || 0) > 0) {
+        return {
+          reason: 'holding_retry_recovered',
+          detail: `recovered on retry #${trade.holdingRetryCount}`,
+          source: 'handleSellFilled:derived',
+        };
+      }
+      // holding but no retries → TP filled while in holding state
+      return {
+        reason: 'tp_hit',
+        detail: `TP filled at ${sellPrice} while state=holding`,
+        source: 'handleSellFilled:derived',
+      };
+    }
+    // selling (normal TP path)
+    if (prior === 'selling') {
+      const mult = parseFloat(this.bot.tpTrendMultiplier) || 1;
+      const boosted = mult > 1 && this.bot.tpTrendEnabled !== false;
+      return {
+        reason: boosted ? 'tp_trend_boosted' : 'tp_hit',
+        detail: boosted
+          ? `TP filled at ${sellPrice} (tpTrendMultiplier=${mult})`
+          : `TP filled at ${sellPrice}`,
+        source: 'handleSellFilled:derived',
+      };
+    }
+    return null;
+  }
+
   async onSellOrderUpdate(update, trade) {
+    // FIX-2026-07-31 (BUG-16): running check — guard against WS events after stop()
+    if (!this.running) return;
     if (!trade) return;
     if (update.status === 'FILLED') {
       logger.info({ botId: this.bot._id.toString(), orderId: update.orderId, avgPrice: update.avgPrice }, 'trader: SELL FILLED (via WS)');
@@ -2940,8 +7448,10 @@ class Trader {
     }
     if (update.status === 'PARTIALLY_FILLED') {
       logger.info({ botId: this.bot._id.toString(), orderId: update.orderId, executedQty: update.executedQty }, 'trader: SELL PARTIALLY_FILLED (via WS)');
-      // ส่งไป handleSellFilled ตามปกติ (ส่วนใหญ่จะ fill ที่เหลือใน tick ถัดไป)
-      await this.handleSellFilled(update, trade);
+      // FIX-2026-07-30: เปลี่ยนจาก handleSellFilled → handleSellPartialFill
+      //   ปัญหาเดิม: handleSellFilled บน PARTIALLY_FILLED → mark 'sold' ทันที
+      //   → ส่วนที่เหลือ (origQty - executedQty) กลายเป็น orphan
+      await this.handleSellPartialFill(update, trade);
       return;
     }
     if (update.status === 'CANCELED' || update.status === 'EXPIRED') {
@@ -2954,7 +7464,12 @@ class Trader {
         );
         await Bot.updateOne({ _id: this.bot._id }, { status: 'holding' });
         eventBus.emit('bot:status', { botId: this.bot._id, status: 'holding' });
-        eventBus.emit('trade:update', { tradeId: trade._id, state: 'holding' });
+        eventBus.emit('trade:update', {
+        tradeId: trade._id,
+        state: 'holding',
+        reason: null,
+        reasonDetail: null,
+      });
         // retry MARKET ทุก 30s
         this.scheduleHoldingRetry(trade, trade.sellQty, trade.buyPrice, trade.targetSellPrice);
       }
@@ -2962,7 +7477,158 @@ class Trader {
   }
 
   // FIX 3: รับ trade parameter — ไม่ใช้ this.currentTrade โดยตรง (กัน stale reference)
+  // FIX-2026-07-31 (BUG-16): running check
+  // FIX-2026-08-02: DCA stack SELL filled handler — aggregate SELL filled at BEP+TP
+  //   - mark stack as 'sold', sellReason='dca_target_hit', stackClosedAt
+  //   - 1 stack = 1 bot counter entry (totalTrades, winTrades) — ไม่ใช่ 1 layer
+  //   - ใช้ stackBep/stackTotalQty สำหรับ pnl
+  //   - emit dcaTargetHit + tradeoff + trade:update + bot:status idle
+  async _handleDcaSellFilled(update, trade) {
+    try {
+      const sellQty = parseFloat(update.executedQty);
+      const sellPrice = parseFloat(update.avgPrice) || (parseFloat(update.cumulativeQuoteQty) / sellQty);
+      const feeRate = fees.getMakerRate();
+      const stackBep = parseFloat(trade.stackBep || trade.buyPrice || 0);
+      const stackTotalQty = parseFloat(trade.stackTotalQty || trade.buyQty || 0);
+      const pnl = fees.calcPnl({
+        buyPrice: stackBep,
+        sellPrice,
+        qty: stackTotalQty,
+        feeRate,
+      });
+
+      // Idempotent guard — state must be in 'selling'/'holding'/'stopping'/'partial_sell_wait'
+      //   - ไม่ต้องเพิ่ม 'placed'/'filled' etc. (sellOrderId sell pending only)
+      const upd = await Trade.updateOne(
+        {
+          _id: trade._id,
+          state: { $in: ['selling', 'holding', 'stopping', 'partial_sell_wait'] },
+        },
+        {
+          $set: {
+            state: 'sold',
+            sellStatus: 'FILLED',
+            sellPrice,
+            // FIX-2026-08-06: P2 — persist sellAvgPrice alias (same as handleSellFilled)
+            sellAvgPrice: sellPrice,
+            sellQty: stackTotalQty, // aggregate qty (sum of all layers)
+            sellQuoteQty: parseFloat(update.cumulativeQuoteQty),
+            sellFilledAt: new Date(update.ts || Date.now()),
+            realizedPnl: pnl.net,
+            pnlPercent: pnl.pnlPercent,
+            stackClosedAt: new Date(),
+            // FIX-2026-08-02: sellReason='dca_target_hit' (TP hit for whole stack)
+            sellReason: 'dca_target_hit',
+            sellReasonDetail: `Aggregate SELL filled at TP (close=${sellPrice.toFixed(6)}, stackBep=${stackBep.toFixed(6)}, layers=${trade.dcaLayerCount || (trade.buyLayers || []).length})`,
+            sellReasonAt: new Date(),
+            sellReasonSource: '_handleDcaSellFilled',
+            // FIX-2026-07-31 (F1): reset SL-on-UKC auto-arm flag
+            useStopLossOnUKC: false,
+            autoArmedAt: null,
+            // FIX-2026-08-03: clear F1 threshold snapshots เมื่อ trade ออกจาก selling
+            autoArmLossPct: null,
+            autoArmAgeHours: null,
+            // FIX-2026-08-01: reset SELL partial-fill latch
+            sellPartialDetectedAt: null,
+            sellPartialLatchedAt: null,
+            sellPartialLatchedReason: null,
+          },
+        }
+      );
+
+      // FIX-2026-08-06: P4 — slippage detection (DCA stack — target = stackBep-based targetSellPrice)
+      //   - stackTargetSellPrice persist ใน _handleDcaBuyFilled / _handleDcaLayerAdded
+      //   - ถ้าไม่มี → fall back ไป trade.targetSellPrice
+      const dcaSlipTarget = parseFloat(trade.stackTargetSellPrice || trade.targetSellPrice) || 0;
+      if (dcaSlipTarget > 0) {
+        this._computeSlippage({
+          sellPrice,
+          targetSellPrice: dcaSlipTarget,
+          tradeId: trade._id,
+          sellReason: 'dca_target_hit',
+          pnlPercent: pnl.pnlPercent,
+        });
+      }
+      if (upd.modifiedCount === 0) {
+        logger.debug({ tradeId: trade._id.toString() }, 'trader: _handleDcaSellFilled skipped — already sold');
+        return;
+      }
+
+      // FIX-2026-08-02: 1 stack = 1 bot counter entry (NOT 1 per layer)
+      await Bot.updateOne(
+        { _id: this.bot._id },
+        {
+          $inc: {
+            totalPnl: pnl.net,
+            totalTrades: 1,
+            winTrades: (pnl.net > 0 ? 1 : 0),
+          },
+          $set: {
+            status: 'idle',
+            lastError: '',
+            warning: '',
+          },
+        }
+      );
+
+      this._unregisterTrade(trade);
+      if (this.currentTrade && this.currentTrade._id.toString() === trade._id.toString()) {
+        this.currentTrade = null;
+      }
+
+      const stackId = trade.stackId || trade._id;
+      const layerCount = trade.dcaLayerCount || (trade.buyLayers || []).length;
+      eventBus.emit('dcaTargetHit', {
+        botId: this.bot._id,
+        symbol: this.bot.symbol,
+        stackId,
+        layerCount,
+        stackBep,
+        stackTotalQty,
+        stackTotalSpent: trade.stackTotalSpent || 0,
+        sellPrice,
+        sellQty: stackTotalQty,
+        realizedPnl: pnl.net,
+        pnlPercent: pnl.pnlPercent,
+        sellOrderId: update.orderId,
+      });
+      eventBus.emit('bot:status', { botId: this.bot._id, status: 'idle' });
+      eventBus.emit('trade:update', {
+        tradeId: trade._id,
+        botId: this.bot._id,
+        state: 'sold',
+        reason: 'dca_target_hit',
+        reasonDetail: `Stack closed: ${layerCount} layers, BEP=${stackBep.toFixed(6)}, sold=${sellPrice.toFixed(6)}, PnL=${pnl.net.toFixed(4)} (${pnl.pnlPercent.toFixed(2)}%)`,
+        stackId,
+        dcaLayerCount: layerCount,
+        stackBep,
+        stackTotalQty,
+        realizedPnl: pnl.net,
+        pnlPercent: pnl.pnlPercent,
+      });
+      logger.info({
+        botId: this.bot._id.toString(),
+        stackId: stackId.toString(),
+        layerCount,
+        stackBep, sellPrice,
+        pnl: pnl.net,
+        pnlPercent: pnl.pnlPercent.toFixed(4),
+      }, 'trader: DCA stack SELL filled — stack closed');
+    } catch (err) {
+      logger.error({ err: err.message }, 'trader: _handleDcaSellFilled error');
+    }
+  }
+
   async handleSellFilled(update, tradeParam) {
+    if (!this.running) return;
+    // FIX-2026-08-02: DCA stack handleSellFilled — SELL aggregate SELL filled at BEP+TP
+    //   - mark stack as 'sold', sellReason='dca_target_hit', stackClosedAt
+    //   - 1 stack = 1 bot counter entry (totalTrades, winTrades)
+    //   - ใช้ stackBep/stackTotalQty สำหรับ pnl
+    //   - emit dcaTargetHit event + extra trade:update payload fields
+    if (tradeParam && tradeParam.isDcaStack) {
+      return await this._handleDcaSellFilled(update, tradeParam);
+    }
     try {
       let trade = tradeParam || this.currentTrade;
       if (!trade) {
@@ -3009,25 +7675,90 @@ class Trader {
       //   - ถ้า handleSellFilled ไม่ match guard → trade ค้างใน 'stopping' + _emergencyMarketSell จะทำ MARKET ซ้ำ
       //   - ถ้า handleSellFilled match → 'stopping' → 'sold' ด้วยราคาจริงของ LIMIT_MAKER fill (ถูกต้อง)
       //   - atomic guard กัน _emergencyMarketSell race: ใคร update 'sold' ก่อนชนะ
+      // FIX-2026-07-31: เพิ่ม 'partial_sell_wait' (BUG-2) — `_finalizePartialSellAfterDeadline` claims
+      //   `selling → partial_sell_wait` (atomic guard at L3579), then post-cancel fully-filled branch
+      //   (L3622/3654) calls `handleSellFilled` — without 'partial_sell_wait' in this guard set, the
+      //   modifiedCount=0 → trade stuck in 'partial_sell_wait' forever, no Bot $inc, no 'idle' status.
+      // FIX-2026-08-06: เพิ่ม 'cancelled' (BUG-BICO) — pattern: partial-fill BUY → leftover unfilled
+      //   portion auto-CANCELED → trade auto-marked 'cancelled' by reconcile sweep (line ~392)
+      //   → SELL for the filled portion already placed (state='selling' at that moment)
+      //   → SELL fills on Binance but trade.state is 'cancelled' → handleSellFilled bails (modifiedCount=0)
+      //   → trade stuck 'cancelled' with FILLED SELL forever, reconcile ORPHAN loop every 5min
+      //   incident: BICO 6a73e01514eb21f18b0441d6 08:15 BUY partial 312.52/333.2 → cancel 20.68 → reconcile mark cancelled 08:16:57 → SELL fill 08:20:26 → bailed → 15+ orphan detects
       const upd = await Trade.updateOne(
         {
           _id: trade._id,
-          state: { $in: ['selling', 'holding', 'stopping'] },
+          state: { $in: ['selling', 'holding', 'stopping', 'partial_sell_wait', 'cancelled'] },
+          // FIX-2026-08-06: extra safety for 'cancelled' state — must have an active sellOrderId
+          //   and that sellOrderId must match the one being filled (either from WS event or from
+          //   the trade snapshot passed by reconcile orphan path).
+          ...(trade.state === 'cancelled'
+            ? { sellOrderId: update.orderId || trade.sellOrderId }
+            : {}),
         },
         {
           state: 'sold',
           sellStatus: 'FILLED',
           sellPrice,
+          // FIX-2026-08-06: P2 — persist sellAvgPrice alias เพื่อ query ง่าย
+          //   - เดิม handleSellFilled ตั้งแค่ sellPrice (actual fill)
+          //   - handleSellPartialFill ตั้ง sellAvgPrice เท่านั้น
+          //   - query slippage ต้องใช้ 2 field → สับสน
+          //   - fix: handleSellFilled ก็ตั้ง sellAvgPrice = sellPrice (single source of truth สำหรับ fully-filled)
+          sellAvgPrice: sellPrice,
           sellQty,
           sellQuoteQty: parseFloat(update.cumulativeQuoteQty),
           sellFilledAt: new Date(update.ts || Date.now()),
           realizedPnl: pnl.net,
           pnlPercent: pnl.pnlPercent,
+          // FIX-2026-07-31 (F1): reset SL-on-UKC auto-arm flag
+          useStopLossOnUKC: false,
+          autoArmedAt: null,
+          // FIX-2026-08-03: clear F1 threshold snapshots เมื่อ trade ออกจาก selling
+          autoArmLossPct: null,
+          autoArmAgeHours: null,
+          // FIX-2026-08-01: reset SELL partial-fill latch
+          sellPartialDetectedAt: null,
+          sellPartialLatchedAt: null,
+          sellPartialLatchedReason: null,
         }
       );
       if (upd.modifiedCount === 0) {
         logger.debug({ tradeId: trade._id.toString() }, 'trader: handleSellFilled skipped — already sold');
         return;
+      }
+
+      // FIX-2026-08-06: P4 — slippage detection (warn -1%, alert telegram -3%)
+      //   - targetSellPrice จาก trade snapshot (persist ตอน BUY fill)
+      //   - sellPrice = actual fill จาก Binance
+      //   - ถ้า sellReason pre-populated แล้ว (เช่น race_recovery_filled) → ใช้ค่านั้น, ไม่งั้น derive หลัง
+      const slipCtx = {
+        sellPrice,
+        targetSellPrice: parseFloat(trade.targetSellPrice) || 0,
+        tradeId: trade._id,
+        sellReason: trade.sellReason || (this._deriveSellReasonFromPriorState(trade, sellPrice) || {}).reason || null,
+        pnlPercent: pnl.pnlPercent,
+      };
+      this._computeSlippage(slipCtx);
+
+      // FIX-2026-08-01: derive sellReason if caller didn't pre-populate (TP path = placeSellOrder)
+      //   - prior state is `trade.state` snapshot BEFORE the atomic update above
+      //   - idempotent guard `{sellReason: null}` กัน race กับ placeSellOrder pre-population
+      if (!trade.sellReason) {
+        const derived = this._deriveSellReasonFromPriorState(trade, sellPrice);
+        if (derived) {
+          await Trade.updateOne(
+            { _id: trade._id, sellReason: null },
+            { $set: {
+              sellReason: derived.reason,
+              sellReasonDetail: derived.detail,
+              sellReasonAt: new Date(),
+              sellReasonSource: derived.source,
+            } }
+          );
+          trade.sellReason = derived.reason;
+          trade.sellReasonDetail = derived.detail;
+        }
       }
 
       // update bot stats — ใช้ $inc (atomic) แทน read-modify-write เพื่อกัน
@@ -3041,16 +7772,76 @@ class Trader {
             totalTrades: 1,
             winTrades: (pnl.net > 0 ? 1 : 0),
           },
-          $set: { status: 'idle', lastError: '' },
+          $set: {
+            status: 'idle',
+            lastError: '',
+            // FIX-2026-08-01: reset warning เมื่อ SELL fill สำเร็จ (latch cleared)
+            warning: '',
+          },
         }
       );
+
+      // FIX-2026-08-08: Feature #1 — Dynamic Position Sizing evaluation
+      //   - evaluate after every closed position (BUY→SELL)
+      //   - skip if disabled / DCA mode / martingale / cooldown / master-off
+      //   - apply dynamicSizeCurrent + dynamicLayersCurrent to bot
+      //   - persisted via dps.persistEval (separate updateOne — non-blocking)
+      // FIX-2026-08-08: master switch — read AppConfig.masterDynamicSizeEnabled (30s cache)
+      //   - if master off → stamp _masterDynamicSizeEnabled=false on snapshot → dps.evaluate() returns 'master-off'
+      // FIX-2026-08-08 (rev2): ย้าย getMasterToggles() เข้ามาใน try — DPS ต้องไม่มีทางกระทบ SELL flow
+      // FIX-2026-08-09: refactor → use dpsAfterClose.evaluateDpsAfterClose() helper
+      //   - single source of truth across handleSellFilled / _emergencyMarketSell / forceClose / botManager
+      //   - helper handles deps reload, master toggle, persistState, log + telegram
+      //   - caller syncs in-memory snapshot from evalResult so next BUY uses fresh size
+      try {
+        const dpsAfterClose = require('./dpsAfterClose');
+        const evalResult = await dpsAfterClose.evaluateDpsAfterClose({
+          bot: this.bot,
+          pnl: pnl.net,
+          pnlPct: pnl.pnlPercent,
+          source: 'trader:handleSellFilled',
+        });
+        // refresh in-memory snapshot so next eval/BUY เห็นค่าล่าสุด
+        if (evalResult) {
+          if (Array.isArray(evalResult.newHistory)) {
+            this.bot.dynamicSizeLastResults = evalResult.newHistory;
+            this.bot.dynamicSizeLastEvaluatedAt = evalResult.appliedAt;
+          }
+          if (evalResult.changed) {
+            this.bot.dynamicSizeCurrent = evalResult.after.size;
+            this.bot.dynamicLayersCurrent = evalResult.after.layers;
+            this.bot.dynamicSizeCooldownUntil = evalResult.cooldownUntil;
+          }
+          if (evalResult.skipped) {
+            logger.debug({
+              botId: this.bot._id.toString(),
+              skipped: evalResult.skipped,
+              reason: evalResult.reason,
+            }, 'trader: DPS — skipped');
+          }
+        }
+      } catch (dpsErr) {
+        logger.warn({ err: dpsErr.message, botId: this.bot._id.toString() }, 'trader: DPS evaluation failed (non-fatal)');
+      }
+
+      // FIX-2026-08-08: Feature #3 — Auto Unlock Cooldown (CBv2/CBv3)
+      //   - BUG-FIX: removed from handleSellFilled (deadlock — cooldown suppresses BUYs → no SELL → never evaluated)
+      //   - moved to _cbAutoUnlockKlineHandler (fires every candle close while cooldown active)
+      //   - see _evaluateAutoUnlockOnCandle() below
 
       this._unregisterTrade(trade);
       if (this.currentTrade && this.currentTrade._id.toString() === trade._id.toString()) {
         this.currentTrade = null;
       }
       eventBus.emit('bot:status', { botId: this.bot._id, status: 'idle' });
-      eventBus.emit('trade:update', { tradeId: trade._id, state: 'sold' });
+      // FIX-2026-08-01: include reason + reasonDetail so dashboardWs/telegramNotifier pick it up
+      eventBus.emit('trade:update', {
+        tradeId: trade._id,
+        botId: this.bot._id,
+        state: 'sold',
+        reason: trade.sellReason || null,
+        reasonDetail: trade.sellReasonDetail || null,
+      });
       logger.info({
         botId: this.bot._id.toString(),
         pnl: pnl.net,
@@ -3058,6 +7849,465 @@ class Trader {
       }, 'trader: SELL FILLED, round complete');
     } catch (err) {
       logger.error({ err: err.message }, 'trader: handleSellFilled error');
+    }
+  }
+
+  // FIX-2026-07-30: SELL PARTIALLY_FILLED handler — แยกจาก handleSellFilled ที่ mark 'sold' ทันที
+  //   ปัญหาเดิม (DEXE incident): handleSellFilled บน PARTIALLY_FILLED → mark 'sold' → ส่วนที่เหลือเป็น orphan
+  //   fix: คง state='selling', อัปเดต sellFilledQty, schedule deadline finalizer
+  async handleSellPartialFill(update, trade) {
+    // FIX-2026-07-31 (BUG-16): running check — guard against WS events after stop()
+    if (!this.running) return;
+    // FIX-2026-08-02: DCA stack partial-fill — FREEZE policy preserved
+    //   - ไม่ cancel, ไม่ MARKET replace, ไม่ add layer ใหม่
+    //   - keep SELL live waiting for natural fill (same as non-DCA path)
+    //   - existing _finalizePartialSellAfterDeadline จะใช้ trade.buyPrice (=stackBep) และ trade.buyQty (=stackTotalQty)
+    //     จาก mirror ใน _handleDcaBuyFilled → PnL calculation ถูกต้องอัตโนมัติ
+    if (trade && trade.isDcaStack) {
+      logger.info({
+        botId: this.bot._id.toString(),
+        tradeId: trade._id?.toString(),
+        stackId: trade.stackId?.toString(),
+        sellOrderId: trade.sellOrderId,
+        symbol: this.bot.symbol,
+      }, 'trader: DCA stack SELL partial-fill — FREEZE policy (no cancel, no replace)');
+    }
+    try {
+      if (!trade) return;
+      if (!trade.sellOrderId) {
+        logger.warn({ tradeId: trade._id && trade._id.toString() }, 'trader: handleSellPartialFill — missing sellOrderId, skip');
+        return;
+      }
+      // Re-fetch fresh order เพื่อ catch late partial fills
+      let fresh;
+      try {
+        fresh = await binanceRest.getOrder({ symbol: this.bot.symbol, orderId: trade.sellOrderId });
+      } catch (err) {
+        logger.warn({ err: err.message, tradeId: trade._id.toString() }, 'trader: handleSellPartialFill — getOrder failed, using update snapshot');
+        fresh = update;
+      }
+      const executedQty = parseFloat(fresh.executedQty);
+      const remainingQty = Math.max(0, parseFloat(fresh.origQty) - executedQty);
+      const avgPrice = parseFloat(fresh.avgPrice) || (parseFloat(fresh.cummulativeQuoteQty) / Math.max(executedQty, 1e-12));
+      const cumQuote = parseFloat(fresh.cummulativeQuoteQty);
+
+      if (executedQty <= 0) {
+        logger.warn({ tradeId: trade._id.toString(), executedQty }, 'trader: handleSellPartialFill — zero executedQty, skip');
+        return;
+      }
+
+      // Atomic update — เฉพาะ state='selling' กัน race กับ handleSellFilled
+      // FIX-2026-08-01: ตั้ง sellPartialDetectedAt เฉพาะครั้งแรก (idempotent — $setOnInsert-like pattern)
+      //   - $set จะ overwrite ทุกครั้ง → ใช้ aggregation pipeline + $cond เพื่อ set เฉพาะตอน null
+      //   - ถ้า detectedAt เดิม != null → keep เดิม (latch age ไม่ reset ทุก partial fill)
+      const upd = await Trade.updateOne(
+        { _id: trade._id, state: 'selling' },
+        [
+          {
+            $set: {
+              sellStatus: 'PARTIALLY_FILLED',
+              sellFilledQty: executedQty,
+              sellFilledAt: new Date(),
+              sellAvgPrice: avgPrice,
+              sellCumulativeQuoteQty: cumQuote,
+              sellPartialDetectedAt: {
+                $ifNull: ['$sellPartialDetectedAt', new Date()],
+              },
+              // อย่าเปลี่ยน sellQty — total order qty เดิม
+            },
+          },
+        ]
+      );
+      if (upd.modifiedCount === 0) {
+        logger.info({ tradeId: trade._id.toString(), currentState: trade.state }, 'trader: handleSellPartialFill — trade not in selling state, skip');
+        return;
+      }
+
+      logger.warn({
+        botId: this.bot._id.toString(),
+        tradeId: trade._id.toString(),
+        symbol: this.bot.symbol,
+        orderId: trade.sellOrderId,
+        executedQty, remainingQty, avgPrice,
+      }, 'trader: SELL PARTIALLY_FILLED — keeping state selling, scheduling deadline watch');
+
+      // Telegram alert
+      try {
+        telegramNotifier.notify('sellPartialFill', {
+          botName: this.bot.name || this.bot.symbol,
+          symbol: this.bot.symbol,
+          timeframe: trade.timeframe,
+          tradeId: trade._id.toString(),
+          orderId: trade.sellOrderId,
+          sellQty: trade.sellQty,
+          executedQty, remainingQty, avgPrice,
+        });
+      } catch (_) { /* non-fatal */ }
+
+      this.scheduleSellPartialFillWatch(trade);
+    } catch (err) {
+      logger.error({ err: err.message, tradeId: trade && trade._id && trade._id.toString() }, 'trader: handleSellPartialFill error');
+    }
+  }
+
+  // FIX-2026-07-30: schedule SELL partial-fill watcher — mirror schedulePartialFillWatch (BUY side)
+  //   poll สถานะ SELL order ทุก 30s; เมื่อครบ deadline → _finalizePartialSellAfterDeadline
+  //   deadline = sellPlacedAt + 2 × retryTimeMin × retryMax (นาที) — 2× window เพราะ TP ใกล้ market กว่า BUY fill
+  scheduleSellPartialFillWatch(trade) {
+    if (!this.running || !trade || !trade._id) return;
+    const tradeIdStr = trade._id.toString();
+    const retryMax = this.bot.retryMax ?? 1;
+    const retryTimeMin = this.bot.retryTimeMin ?? 1;
+    const placedAtMs = trade.sellPlacedAt ? new Date(trade.sellPlacedAt).getTime() : Date.now();
+    const deadlineMs = placedAtMs + 2 * retryTimeMin * retryMax * 60 * 1000;
+
+    // FIX-2026-07-31 (BUG-11): always clear previous timer — previous conditional check
+    //   (`&& _sellPartialFillTradeId === tradeIdStr`) left handles orphaned when a different
+    //   trade scheduled its own watch. Always clearTimeout to prevent leaked polls + clobbered deadline.
+    if (this.sellPartialFillTimer) {
+      clearTimeout(this.sellPartialFillTimer);
+      this.sellPartialFillTimer = null;
+    }
+    this.sellPartialFillDeadlineAt = deadlineMs;
+    this._sellPartialFillTradeId = tradeIdStr;
+
+    // Persist deadline ใน DB (mirror partialFillDeadlineAt pattern)
+    Trade.updateOne(
+      { _id: trade._id },
+      { $set: { sellPartialDeadlineAt: new Date(deadlineMs) } }
+    ).catch((err) => logger.warn({ err: err.message, tradeId: tradeIdStr }, 'trader: persist sellPartialDeadline failed'));
+
+    logger.info({
+      botId: this.bot._id.toString(),
+      tradeId: tradeIdStr,
+      placedAtMs, deadlineMs,
+      retryTimeMin, retryMax,
+      deadlineAt: new Date(deadlineMs).toISOString(),
+    }, 'trader: SELL partial-fill watch scheduled with deadline');
+
+    this.sellPartialFillTimer = setTimeout(async () => {
+      try {
+        await this.checkSellPartialFill(tradeIdStr);
+      } catch (err) {
+        logger.error({ err: err.message, tradeId: tradeIdStr }, 'trader: checkSellPartialFill crashed');
+      }
+    }, 30 * 1000);
+  }
+
+  // FIX-2026-07-30: poll SELL order status — mirror checkPartialFill (BUY side)
+  async checkSellPartialFill(tradeIdStr) {
+    const fresh = await Trade.findById(tradeIdStr);
+    if (!fresh) return;
+    if (this.bot._id.toString() !== fresh.botId.toString()) return;
+
+    // ถ้า state เปลี่ยนแล้ว → หยุด watch
+    if (fresh.state !== 'selling' || fresh.sellStatus !== 'PARTIALLY_FILLED') {
+      logger.debug({
+        tradeId: tradeIdStr, currentState: fresh.state, currentSellStatus: fresh.sellStatus,
+      }, 'trader: SELL partial-fill watch — trade no longer in selling/partial state, stop');
+      return;
+    }
+
+    // Restore deadline from DB after restart
+    if (!this.sellPartialFillDeadlineAt && fresh.sellPartialDeadlineAt) {
+      this.sellPartialFillDeadlineAt = new Date(fresh.sellPartialDeadlineAt).getTime();
+      logger.info({ tradeId: tradeIdStr, restoredDeadlineMs: this.sellPartialFillDeadlineAt }, 'trader: SELL partial-fill — restored deadline from DB after restart');
+    }
+
+    let order;
+    try {
+      order = await binanceRest.getOrder({ symbol: this.bot.symbol, orderId: fresh.sellOrderId });
+    } catch (err) {
+      logger.warn({ err: err.message, tradeId: tradeIdStr }, 'trader: checkSellPartialFill — getOrder failed, reschedule');
+      this.scheduleSellPartialFillWatch(fresh);
+      return;
+    }
+
+    // FILLED → terminal path เดิม
+    if (order.status === 'FILLED') {
+      logger.info({ tradeId: tradeIdStr, orderId: fresh.sellOrderId }, 'trader: checkSellPartialFill — SELL now FILLED, calling handleSellFilled');
+      await this.handleSellFilled({
+        status: 'FILLED',
+        orderId: fresh.sellOrderId,
+        executedQty: parseFloat(order.executedQty),
+        avgPrice: parseFloat(order.avgPrice),
+        cumulativeQuoteQty: parseFloat(order.cummulativeQuoteQty),
+      }, fresh);
+      return;
+    }
+
+    // CANCELLED/EXPIRED → holding + scheduleHoldingRetry (mirror line 3179-3193)
+    if (order.status === 'CANCELED' || order.status === 'EXPIRED') {
+      logger.warn({ tradeId: tradeIdStr, orderId: fresh.sellOrderId, status: order.status }, 'trader: checkSellPartialFill — SELL cancelled externally, transitioning to holding');
+      await Trade.updateOne(
+        { _id: fresh._id, state: 'selling' },
+        { state: 'holding', sellStatus: order.status, error: `SELL ${order.status.toLowerCase()} (was partial)` }
+      );
+      await Bot.updateOne({ _id: this.bot._id }, { status: 'holding' });
+      eventBus.emit('bot:status', { botId: this.bot._id, status: 'holding' });
+      eventBus.emit('trade:update', {
+        tradeId: fresh._id,
+        state: 'holding',
+        reason: null,
+        reasonDetail: null,
+      });
+      this.scheduleHoldingRetry(fresh, parseFloat(fresh.sellQty), fresh.buyPrice, fresh.targetSellPrice);
+      return;
+    }
+
+    // ยัง PARTIALLY_FILLED หรือ NEW
+    const now = Date.now();
+    const deadlinePassed = this.sellPartialFillDeadlineAt && now >= this.sellPartialFillDeadlineAt;
+
+    // FIX-2026-08-01: 1h latched alert — ถ้า partial-fill ยังไม่คืบหน้าเกิน 1h → emit warning + telegram
+    //   - เรียกก่อน deadline check (กรณี freeze policy: deadline = 24h, 1h alert ยังควรยิง)
+    //   - sellPartialDetectedAt ตั้งตอน partial-fill ครั้งแรก (handleSellPartialFill) — ไม่ reset
+    //   - sellPartialLatchedAt = latch ตัวล่าสุด (idempotent — กัน re-emit ทุก 30s poll)
+    await this._checkPartialFillLatchedAlert(fresh, order);
+
+    if (deadlinePassed) {
+      logger.warn({ tradeId: tradeIdStr, orderId: fresh.sellOrderId, status: order.status }, 'trader: checkSellPartialFill — deadline passed, finalizing');
+      await this._finalizePartialSellAfterDeadline(fresh, order);
+      return;
+    }
+
+    // ยังไม่ครบ deadline → reschedule
+    this.scheduleSellPartialFillWatch(fresh);
+  }
+
+  // FIX-2026-08-01: 1h latched alert for SELL partial-fill
+  //   - ถ้า sellPartialDetectedAt + 1h <= now AND sellPartialLatchedAt == null
+  //     → emit warning + telegram + set latched timestamp
+  //   - กัน re-emit ด้วย sellPartialLatchedAt (idempotent)
+  //   - reset sellPartialLatchedAt เมื่อ state ออกจาก 'selling' (ใน state-transition handlers)
+  //   - แจ้งผ่าน 3 channels:
+  //     1. Telegram (sellPartialLatched event)
+  //     2. Bot.warning field (UI badge)
+  //     3. trade:warning event (UI bots / positions table)
+  async _checkPartialFillLatchedAlert(trade, order) {
+    if (!trade || !trade.sellPartialDetectedAt) return;
+    if (trade.sellPartialLatchedAt) return; // already latched
+    if (trade.state !== 'selling') return;
+
+    const detectedAt = new Date(trade.sellPartialDetectedAt).getTime();
+    const elapsedMs = Date.now() - detectedAt;
+    const LATCH_MS = 60 * 60 * 1000; // 1 hour
+    if (elapsedMs < LATCH_MS) return;
+
+    const executedSoFar = parseFloat(order.executedQty || 0);
+    const remainingQty = Math.max(0, parseFloat(order.origQty || 0) - executedSoFar);
+    const avgPrice = parseFloat(order.avgPrice) || (parseFloat(order.cummulativeQuoteQty) / Math.max(executedSoFar, 1e-12));
+
+    // Determine reason: 'no_progress' if remainingQty ยังเท่าเดิม, 'remaining_unchanged' otherwise
+    const reason = trade.sellFilledQty && Math.abs(parseFloat(trade.sellFilledQty) - executedSoFar) < 1e-9
+      ? 'no_progress'
+      : 'remaining_unchanged';
+
+    logger.warn({
+      botId: this.bot._id.toString(),
+      tradeId: trade._id.toString(),
+      symbol: this.bot.symbol,
+      orderId: trade.sellOrderId,
+      detectedAt: trade.sellPartialDetectedAt,
+      elapsedMs,
+      elapsedMin: Math.round(elapsedMs / 60000),
+      executedSoFar, remainingQty, avgPrice,
+      reason,
+    }, 'trader: SELL partial-fill LATCHED — 1h no progress, emitting alert');
+
+    // Atomic update — กัน race (poll concurrent call) ตั้ง sellPartialLatchedAt
+    const claim = await Trade.updateOne(
+      { _id: trade._id, state: 'selling', sellPartialLatchedAt: null },
+      {
+        $set: {
+          sellPartialLatchedAt: new Date(),
+          sellPartialLatchedReason: reason,
+        },
+      }
+    );
+    if (claim.modifiedCount === 0) {
+      // race lost — concurrent poll already latched
+      return;
+    }
+
+    // 1) Telegram (sellPartialLatched event)
+    try {
+      await telegramNotifier.notify('sellPartialLatched', {
+        botName: this.bot.name || this.bot.symbol,
+        symbol: this.bot.symbol,
+        timeframe: this.bot.timeframe,
+        tradeId: trade._id.toString(),
+        orderId: trade.sellOrderId,
+        sellQty: trade.sellQty,
+        executedSoFar, remainingQty, avgPrice,
+        elapsedMs,
+        elapsedMin: Math.round(elapsedMs / 60000),
+        reason,
+        note: 'SELL partial-fill ไม่คืบหน้าเกิน 1h — ตรวจสอบ position + พิจารณา manual cancel/new SELL',
+      }).catch((err) => logger.warn({ err: err.message }, 'trader: sellPartialLatched telegram notify failed'));
+    } catch (_) { /* non-fatal */ }
+
+    // 2) Bot.warning field (UI badge)
+    try {
+      const warningMsg = `⚠️ SELL partial-fill ${Math.round(elapsedMs / 60000)}min no progress — remaining ${remainingQty} @ ${avgPrice}`;
+      await Bot.updateOne(
+        { _id: this.bot._id },
+        {
+          $set: {
+            warning: warningMsg,
+            warningAt: new Date(),
+          },
+        }
+      );
+    } catch (err) {
+      logger.warn({ err: err.message }, 'trader: sellPartialLatched — bot.warning persist failed');
+    }
+
+    // 3) trade:warning event (UI positions table — symmetric กับ bot:status)
+    try {
+      eventBus.emit('trade:warning', {
+        tradeId: trade._id,
+        botId: this.bot._id,
+        kind: 'sellPartialLatched',
+        message: `SELL partial-fill ${Math.round(elapsedMs / 60000)}min no progress`,
+        remainingQty,
+        avgPrice,
+        elapsedMs,
+        reason,
+      });
+    } catch (_) { /* non-fatal */ }
+  }
+
+    // FIX-2026-07-30: SELL partial-finalize — atomic claim state='selling' → 'partial_sell_wait'
+  // FIX-2026-08-01 (SELL partial-fill FREEZE policy):
+  //   ❌ เดิม: cancel SELL + MARKET SELL ที่เหลือ (อาจติด MIN_LOT precision = -1111 ทำให้ stuck)
+  //   ✅ ใหม่: คง SELL order ไว้แบบ LIVE รอจนกว่าจะ fill ที่เหลือเอง
+  //   - เหตุผล: ถ้า remainingQty < MIN_LOT (Binance precision) → MARKET SELL fail → holding retry loop ไม่จบ
+  //             และ position บน Binance ≠ DB state (ทำให้ reconcileAccountBalance log spam)
+  //   - เปลี่ยน behavior: keep state='selling' + keep SELL order LIVE + extend watch indefinitely
+  //   - เมื่อ SELL fill ที่เหลือเอง (Binance FILLED event) → handleSellFilled ทำงานปกติ
+  //   - ถ้า SELL cancel/expire externally → handleSellFilled → state='holding' → holding retry
+  //   - ส่ง telegram แจ้ง user ว่า "freeze" ไว้แล้ว (ไม่ใช่ action อัตโนมัติ)
+  async _finalizePartialSellAfterDeadline(trade, order) {
+    // FIX-2026-08-01: ยกเลิก atomic claim 'partial_sell_wait' — ไม่ต้องเปลี่ยน state
+    //   ก่อนหน้านี้: state='selling' → 'partial_sell_wait' (ก่อน cancel)
+    //   ตอนนี้: state='selling' ต่อ + SELL order LIVE ต่อ
+    //
+    // เช็คก่อนว่า tradeยังอยู่ใน state='selling' + sellStatus='PARTIALLY_FILLED' หรือไม่
+    const fresh = await Trade.findById(trade._id).lean();
+    if (!fresh) {
+      logger.warn({ tradeId: trade._id.toString() }, 'trader: SELL partial-finalize — trade not found, abort');
+      return;
+    }
+    if (fresh.state !== 'selling' || fresh.sellStatus !== 'PARTIALLY_FILLED') {
+      logger.info({
+        tradeId: trade._id.toString(),
+        currentState: fresh.state,
+        currentSellStatus: fresh.sellStatus,
+      }, 'trader: SELL partial-finalize — state moved on, abort');
+      return;
+    }
+
+    const executedSoFar = parseFloat(order.executedQty);
+    const remainingQty = Math.max(0, parseFloat(order.origQty) - executedSoFar);
+    const avgPriceSoFar = parseFloat(order.avgPrice) || (parseFloat(order.cummulativeQuoteQty) / Math.max(executedSoFar, 1e-12));
+
+    // ถ้า remainingQty ≤ 0 → SELL fill ครบก่อน finalize (ตรวจตอน poll)
+    if (remainingQty <= 0) {
+      logger.info({ tradeId: trade._id.toString() }, 'trader: SELL partial-finalize — remaining=0, treating as full fill');
+      await this.handleSellFilled({
+        status: 'FILLED',
+        orderId: trade.sellOrderId,
+        executedQty: parseFloat(order.executedQty),
+        avgPrice: avgPriceSoFar,
+        cumulativeQuoteQty: parseFloat(order.cummulativeQuoteQty),
+      }, fresh);
+      return;
+    }
+
+    // คำนวณ lot precision จาก symbolInfo เพื่อ verify remainingQty valid
+    let belowMinLot = false;
+    try {
+      const sym = symbolInfo.getCached(this.bot.symbol);
+      if (sym && sym.lotSize && sym.lotSize.minQty) {
+        const minQty = parseFloat(sym.lotSize.minQty.toString());
+        if (remainingQty < minQty) {
+          belowMinLot = true;
+        }
+      }
+    } catch (_) { /* best-effort */ }
+
+    // ❌ REMOVED 2026-08-01: cancel SELL + MARKET fallback
+    //   ✅ ใหม่: log "freeze" + คง SELL order ไว้ตามเดิม + extend watch
+    //   - เหตุผล: MARKET SELL มักติด MIN_LOT precision (-1111) → holding retry loop ไม่จบ
+    //             และบางครั้งติด MIN_NOTIONAL (dust) → MARKET SELL ก็ fail
+    //   - ทางออก: คง LIMIT_MAKER SELL live ที่ราคาเดิม → Binance จะ fill เมื่อมีคนมาตัดที่ราคานั้น
+    //   - expose ใน DB: state='selling' + sellFreezeReason='lot_below_min' เพื่อ UI แสดง
+    const freezeReason = belowMinLot ? 'lot_below_min' : 'partial_fill_freeze';
+    logger.warn({
+      botId: this.bot._id.toString(),
+      tradeId: trade._id.toString(),
+      symbol: this.bot.symbol,
+      orderId: trade.sellOrderId,
+      executedSoFar, remainingQty, avgPriceSoFar,
+      belowMinLot,
+      freezeReason,
+      policy: 'NO_CANCEL_NO_REPLACE — keep SELL order LIVE waiting for natural fill',
+    }, 'trader: SELL partial-fill FREEZE — keeping SELL order LIVE, NOT cancel + replace');
+
+    // persist freeze flag in DB (UI แสดงสถานะ, manual close path สามารถใช้ตรวจ)
+    await Trade.updateOne(
+      { _id: trade._id },
+      {
+        $set: {
+          sellStatus: 'PARTIALLY_FILLED',
+          sellFreezeReason: freezeReason,
+          sellFreezeAt: new Date(),
+          sellFrozenExecutedQty: executedSoFar,
+          sellFrozenRemainingQty: remainingQty,
+        },
+      }
+    ).catch((err) => logger.warn({ err: err.message, tradeId: trade._id.toString() }, 'freeze flag persist failed'));
+
+    // extend watch deadline — keep polling until SELL FILLED manually (or new S1 signal cancel+replace)
+    //   ใช้ TTL ยาว (24h) แล้วให้ user ตัดสินใจเอง — หรือ SELL fill เองตอนมีคนมาตัด
+    const freezeUntilMs = Date.now() + 24 * 60 * 60 * 1000;
+    this.sellPartialFillDeadlineAt = freezeUntilMs;
+    Trade.updateOne(
+      { _id: trade._id },
+      { $set: { sellPartialDeadlineAt: new Date(freezeUntilMs) } }
+    ).catch((err) => logger.warn({ err: err.message, tradeId: trade._id.toString() }, 'freeze deadline persist failed'));
+
+    // schedule next poll (30s) — watch ต่อปกติ แต่ deadline ยาว 24h
+    this.scheduleSellPartialFillWatch(fresh);
+
+    // Telegram alert — แจ้ง user ว่า freeze แล้ว (manual intervention OK)
+    try {
+      await telegramNotifier.notify('sellPartialFrozen', {
+        botName: this.bot.name || this.bot.symbol,
+        symbol: this.bot.symbol,
+        timeframe: trade.timeframe,
+        tradeId: trade._id.toString(),
+        orderId: trade.sellOrderId,
+        executedSoFar, remainingQty, avgPriceSoFar,
+        belowMinLot,
+        freezeReason,
+        note: 'SELL partial-fill FREEZE — keep order LIVE, waiting for natural fill. Manual cancel/new SELL allowed.',
+      }).catch((err) => logger.warn({ err: err.message }, 'trader: sellPartialFrozen telegram notify failed'));
+    } catch (err) {
+      // fail-safe: log error + persist freeze flag (FREEZE policy — no state change)
+      logger.error({
+        err: err.message, stack: err.stack,
+        tradeId: trade._id.toString(),
+      }, 'trader: SELL partial-finalize crashed');
+      try {
+        await Trade.updateOne(
+          { _id: trade._id },
+          { $set: { sellFreezeError: err.message, sellFreezeAt: new Date() } }
+        );
+      } catch (cleanupErr) {
+        logger.error({ err: cleanupErr.message }, 'trader: SELL partial-finalize cleanup failed');
+      }
     }
   }
 
@@ -3170,6 +8420,69 @@ class Trader {
         if (afterCacheSize > beforeCacheSize) actuallySeeded += 1;
       }
 
+      // FIX-2026-08-01 (CRITICAL-BUG-1): force CB on the most-recent missed candle
+      //   - covers WS-outage scenarios where kline:closed events were missed
+      //   - the direct kline:closed subscription (_cbKlineHandler) handles live path
+      //   - this handles the "WS dropped, sweep is replaying missed candles" path
+      //   - reuses raw[] from above so no extra REST call
+      if (replayed > 0 && this.bot.cbEnabled !== false && !this.cbCheckInFlight) {
+        let lastMissed = null;
+        for (const k of raw) {
+          if (k[6] > nowMs) continue; // forming
+          if (k[6] <= lastSignalCloseMs) continue; // already processed
+          if (!lastMissed || k[6] > lastMissed[6]) lastMissed = k;
+        }
+        if (lastMissed) {
+          await this._checkCBPanicClose({
+            openTime: lastMissed[0],
+            closeTime: lastMissed[6],
+            open: parseFloat(lastMissed[1]),
+            high: parseFloat(lastMissed[2]),
+            low: parseFloat(lastMissed[3]),
+            close: parseFloat(lastMissed[4]),
+            volume: parseFloat(lastMissed[5]),
+            isClosed: true,
+          });
+        }
+      }
+
+      // FIX-2026-08-06: force CBv2 on the most-recent missed candle (sustained breach lock)
+      //   - same WS-outage coverage as CB above but checks CBv2 pattern (4 consecutive red candles below lowerKC)
+      //   - lock expiry is the long-term gate; this just catches the missed candle for force-close
+      // FIX-2026-08-08: Feature #2 — CBv3 replay (mirror CBv2 — _checkCBv3PanicClose internally checks cbVersion)
+      if (replayed > 0) {
+        let lastMissed = null;
+        for (const k of raw) {
+          if (k[6] > nowMs) continue; // forming
+          if (k[6] <= lastSignalCloseMs) continue; // already processed
+          if (!lastMissed || k[6] > lastMissed[6]) lastMissed = k;
+        }
+        if (lastMissed) {
+          const candleObj = {
+            openTime: lastMissed[0],
+            closeTime: lastMissed[6],
+            open: parseFloat(lastMissed[1]),
+            high: parseFloat(lastMissed[2]),
+            low: parseFloat(lastMissed[3]),
+            close: parseFloat(lastMissed[4]),
+            volume: parseFloat(lastMissed[5]),
+            isClosed: true,
+          };
+          if (this.bot.cbv2Enabled !== false && !this.cbv2CheckInFlight) {
+            await this._checkCBv2PanicClose(candleObj);
+          }
+          if (this.bot.cbv3Enabled !== false && !this.cbv3CheckInFlight) {
+            await this._checkCBv3PanicClose(candleObj);
+          }
+          // FIX-2026-08-12 (audit Q7): replay mode CBv5 missing — CBv5 was never
+          //   called in this reconcile loop → if WS outage spans a Support Zone
+          //   break, bot resumes missing the protection.
+          if (this.bot.cbv5Enabled !== false && !this.cbv5CheckInFlight) {
+            await this._checkCBv5PanicClose(candleObj);
+          }
+        }
+      }
+
       // FIX-2026-07-15: advance lastSignalCloseTime แม้ไม่เจอ S1 (กัน re-fetch ซ้ำรอบหน้า)
       if (advancedToMs > lastSignalCloseMs) {
         await Bot.updateOne(
@@ -3208,11 +8521,19 @@ class Trader {
 
   // FIX 6: เพิ่ม random suffix กัน -2010 Duplicate order sent
   // (กรณี retry ที่ ts+retry+side ตรงกัน)
+  // FIX 2026-08-22: sanitize outputs to Binance legal regex `^[a-zA-Z0-9-_]{1,36}$`
+  //   - retry อาจเป็น decimal เช่น `(retryCount || 0) + 0.5` (line 5077 — SELL -2010 retry)
+  //     → '.' ทำให้ Binance ตอบ -1100 "Illegal characters found in parameter 'newClientOrderId'"
+  //     → PEPE (1000PEPE) โดนบ่อยเพราะ SELL race/balance settle ช้า → trigger retry path นี้
+  //   - sanitize: strip ทุก char ที่ไม่ใช่ [a-zA-Z0-9_-] แบบป้องกันทุก caller
   makeClientOrderId(side, refTs, retry) {
     const ts = typeof refTs === 'number' ? refTs : new Date(refTs).getTime();
     const shortBot = this.bot._id.toString().slice(-6);
     const rand = Math.random().toString(36).slice(2, 8); // 6-char random
-    return `b${shortBot}-${ts}-${retry}-${side}-${rand}`.slice(0, 36); // Binance limit 36 chars
+    const safeRetry = String(retry ?? 0).replace(/[^a-zA-Z0-9_-]/g, '');
+    const safeSide = String(side || 'x').replace(/[^a-zA-Z0-9_-]/g, '');
+    const id = `b${shortBot}-${ts}-${safeRetry}-${safeSide}-${rand}`;
+    return id.slice(0, 36); // Binance hard limit 36 chars
   }
 }
 
@@ -3224,6 +8545,9 @@ function config_recvWindow() {
 // FIX-2026-07-15: periodic kline sweep interval (ms) — safety net against missed kline:closed events
 //   WS reconnect storms ดูดูดสังเกตได้ทุกๆ 1-2 วินาที, แต่ละครั้งทำให้ candle close อาจหายไป
 //   ดังนั้น sweep ทุก 90s → กลบ gap ภายใน 90s (เคสเดิมพลาดไป 1.5 ชม. ก่อน user เห็น)
-const SWEEP_INTERVAL_MS = 90 * 1000;
+// FIX-2026-08-04: 90s → 300s (5min) — ลด Binance kline API load — WS push จัดการ live candles
+//   - sweepTimer เป็น safety net เท่านั้น (กัน WS gap) — 5 min gap ยังยอมรับได้
+//   - bot operations ไม่กระทบ — reconcileKlines() logic เหมือนเดิม
+const SWEEP_INTERVAL_MS = 5 * 60 * 1000;
 
 module.exports = Trader;
