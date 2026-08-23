@@ -36,6 +36,8 @@ const historyRoutes = require('./api/routes/history.routes');
 const pnlRoutes = require('./api/routes/pnl.routes');
 // 2026-08-06: Daily Profit Target gauge (radial gauge below navbar)
 const dailyTargetRoutes = require('./api/routes/dailyTarget.routes');
+// 2026-08-23: Live Binance API weight gauge (navbar pill)
+const rateLimitRoutes = require('./api/routes/rateLimit.routes');
 
 function createApp() {
   const app = express();
@@ -141,6 +143,7 @@ function createApp() {
   app.use('/api/pnl', pnlRoutes);
   app.use('/api/history', historyRoutes);
   app.use('/api/daily-target', dailyTargetRoutes); // 2026-08-06: Daily Profit Target gauge
+  app.use('/api/system', rateLimitRoutes); // 2026-08-23: live Binance API weight gauge
   app.use('/api/coins', require('./api/routes/coin.routes')); // FIX-2026-08-01: coin info aggregator
 // FIX-2026-08-21: Trade Analysis aggregator (includes soft-deleted bots)
 app.use('/api/analysis', require('./api/routes/analysis.routes'));
