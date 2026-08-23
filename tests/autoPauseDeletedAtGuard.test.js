@@ -115,7 +115,6 @@ jest.mock('../src/core/trendlineForBot', () => ({
   mapWithConcurrency: jest.fn(async (arr) => arr.map(() => ({}))),
 }));
 jest.mock('../src/core/volatilityForBot', () => ({}));
-jest.mock('../src/core/qualityIndicator', () => ({}));
 jest.mock('../src/core/backtester', () => ({}));
 jest.mock('../src/core/prediction', () => ({}));
 jest.mock('../src/core/dpsAfterClose', () => ({}));

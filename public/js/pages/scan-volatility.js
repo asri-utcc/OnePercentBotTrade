@@ -124,25 +124,51 @@ function fmtNum(v, digits = 2) {
   return v.toFixed(digits);
 }
 
-// FIX-2026-08-01: coin info cache + helpers (scan-volatility)
-//   - prefetch symbol list จาก /api/coins/info/:symbol
+// FIX-2026-08-22 (weight spike): coin info cache + helpers (scan-volatility) — bulk endpoint
+//   - เดิม: parallel GET /api/coins/info/:sym × N symbols = N×22 weight burst
+//   - ใหม่: POST /api/coins/info-bulk = 100 weight ต่อ page load (1 ticker + 1 exchangeInfo)
 //   - cache 5min in-process (server-side 5min, client-side 5min — aligned)
-//   - fail-safe: ถ้า fetch fail → cache { error } → ไม่ retry ทุก render
+//   - fail-safe: 503 CIRCUIT_OPEN → fall back per-symbol + cache error
 const scanCoinInfoCache = new Map(); // symbol -> { data, ts, error? }
 async function prefetchScanCoinInfos(rows) {
   const symbols = [...new Set(rows.map((r) => r.symbol).filter(Boolean))];
+  if (symbols.length === 0) return;
   const now = Date.now();
   const toFetch = symbols.filter((s) => !scanCoinInfoCache.has(s) || (now - scanCoinInfoCache.get(s).ts) > 5 * 60 * 1000);
-  await Promise.all(toFetch.map(async (sym) => {
+  if (toFetch.length === 0) return;
+  try {
+    const r = await API.post('/api/coins/info-bulk', { symbols: toFetch });
+    Object.entries(r.coins || {}).forEach(([sym, data]) => {
+      scanCoinInfoCache.set(sym, { data, ts: now });
+    });
+    for (const sym of toFetch) {
+      if (!scanCoinInfoCache.has(sym)) {
+        scanCoinInfoCache.set(sym, { data: null, ts: now, error: 'not found in bulk response' });
+      }
+    }
+  } catch (err) {
+    if (err.status === 503 && err.data && err.data.code === 'CIRCUIT_OPEN') {
+      console.warn('coinInfo scan bulk: circuit open, falling back to per-symbol', err.data);
+      await prefetchScanCoinInfosFallback(toFetch);
+    } else {
+      for (const sym of toFetch) {
+        scanCoinInfoCache.set(sym, { data: null, ts: now, error: err.message });
+      }
+    }
+  }
+  // re-render table body ให้แสดง coin info (ถ้ามีการ render ก่อน fetch เสร็จ)
+  if (typeof renderTableBody === 'function') renderTableBody();
+}
+async function prefetchScanCoinInfosFallback(symbols) {
+  const now = Date.now();
+  await Promise.all(symbols.map(async (sym) => {
     try {
       const r = await API.get(`/api/coins/info/${encodeURIComponent(sym)}`);
       scanCoinInfoCache.set(sym, { data: r.coin, ts: now });
-    } catch (err) {
-      scanCoinInfoCache.set(sym, { data: null, ts: now, error: err.message });
+    } catch (_err) {
+      scanCoinInfoCache.set(sym, { data: null, ts: now, error: 'fallback failed' });
     }
   }));
-  // re-render table body ให้แสดง coin info (ถ้ามีการ render ก่อน fetch เสร็จ)
-  if (typeof renderTableBody === 'function') renderTableBody();
 }
 function getScanCoinInfo(symbol) {
   const e = scanCoinInfoCache.get(symbol);

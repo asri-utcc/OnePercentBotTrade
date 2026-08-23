@@ -61,16 +61,6 @@ async function init() {
   setupButtons();
   setupCharts();
 
-  // FIX-2026-08-01: Bot Quality Indicator pill click → open modal
-  const hq = document.getElementById('hero-quality');
-  if (hq) {
-    hq.addEventListener('click', () => {
-      if (detail && detail.bot && window.qualityModal) {
-        window.qualityModal.openQualityModal(detail.bot);
-      }
-    });
-  }
-
   // FIX-2026-07-31: preload Binance tickSize precision สำหรับ PriceFormat
   if (window.PriceFormat) await window.PriceFormat.load();
 
@@ -414,21 +404,6 @@ function renderMetaChips() {
       uptimeEl.style.color = 'var(--text-4)';
     }
     document.getElementById('hero-id').textContent = `id: ${b._id.slice(-8)}`;
-
-    // FIX-2026-08-01: Bot Quality Indicator pill (mirror buildQualityBadge logic in bots.js)
-    const hq = document.getElementById('hero-quality');
-    if (hq) {
-      if (b.qualityEnabled === false || b.qualityScore == null) {
-        hq.className = 'quality-pill is-gray';
-        hq.textContent = '—';
-        hq.title = 'Quality Indicator ถูกปิดหรือยังโหลดไม่เสร็จ';
-      } else {
-        hq.className = `quality-pill is-${b.qualityColor || 'gray'}`;
-        hq.textContent = `${b.qualityScore}/4`;
-        const updated = b.qualityUpdatedAt ? new Date(b.qualityUpdatedAt).toLocaleTimeString('th-TH') : '-';
-        hq.title = `คลิกเพื่อดู breakdown · อัปเดตล่าสุด: ${updated}`;
-      }
-    }
 
     // FIX-2026-08-06: Delist pill + banner (mirror buildDelistBadge in bots.js)
     renderDelistInfo(b);

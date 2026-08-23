@@ -113,6 +113,13 @@ class Trader {
     this._tpCacheAt = 0;
     this._tpCacheFields = {}; // { tpPercent, tpTrendEnabled, tpTrendMultiplier, tpOnFloor, updateTpAt }
     this._tpCacheTtlMs = 5000; // 5s — balance between freshness + DB load
+
+    // FIX-2026-08-22 (weight spike): per-instance sweep jitter — de-align 57 bots' periodic ticks
+    //   - เดิมทุก trader start() ใช้ SWEEP_INTERVAL_MS เดียวกัน → reconcileKlines() burst เดียวกันทุก 5 นาที
+    //   - ±10% jitter: 5min→4.5-5.5min, 15min→13.5-16.5min → ticks กระจายตัวใน window ~33s
+    const _jitter = (base, pct = 0.1) => Math.round(base * (1 + (Math.random() * 2 - 1) * pct));
+    this.sweepIntervalMs = _jitter(SWEEP_INTERVAL_MS);                 // 5min ±10%
+    this.reconcileBalanceIntervalMs = _jitter(15 * 60 * 1000);            // 15min ±10%
   }
 
   // ─── FIX P2.1: serialized bot:status emit ──────────────────────────
@@ -175,7 +182,7 @@ class Trader {
       this.reconcileKlines('periodic-sweep')
         .catch((err) => logger.warn({ err: err.message }, 'trader: periodic sweep failed'))
         .finally(() => { this.sweepInFlight = false; });
-    }, SWEEP_INTERVAL_MS);
+    }, this.sweepIntervalMs);
 
     // FIX-2026-07-31 (BUG-9): periodic reconcileAccountBalance — previously fired only on startup
     //   (one-shot L166) so SELL-orphan cross-check + balance reconciliation never ran after first
@@ -184,14 +191,14 @@ class Trader {
     //   - orphan detection ยังครบถ้วน แค่ห่างขึ้น
     this.reconcileBalanceTimer = null;
     this._reconcileBalanceInFlight = false;
-    const RECONCILE_BALANCE_MS = 15 * 60 * 1000;
+    // FIX-2026-08-22 (weight spike): per-instance jitter set in constructor (this.reconcileBalanceIntervalMs)
     this.reconcileBalanceTimer = setInterval(() => {
       if (!this.running || this._reconcileBalanceInFlight) return;
       this._reconcileBalanceInFlight = true;
       this.reconcileAccountBalance({ force: false })
         .catch((err) => logger.warn({ err: err.message }, 'trader: periodic reconcileAccountBalance failed'))
         .finally(() => { this._reconcileBalanceInFlight = false; });
-    }, RECONCILE_BALANCE_MS);
+    }, this.reconcileBalanceIntervalMs);
 
     // FIX-2026-07-15: also reconcile on WS reconnect (immediate catch-up vs 90s sweep wait)
     // FIX-2026-08-22: per-symbol debounce + jitter — �ัน burst ตอน WS reconnect
@@ -346,6 +353,16 @@ class Trader {
     // FIX-2026-07-15: startup sweep — catch up missed closes ถ้า bot เพิ่ง restart
     //   (รอ 2s ให้ klineCache warm-up เสร็จก่อน)
     // FIX-2026-07-31 (BUG-14): track handles (T3 = 2s startup sweep, T4 = inner 4s balance)
+    // FIX-2026-08-22 (weight spike): stagger startup sweep + balance timers — root cause fix
+    //   - เดิม: 57 bots × (T3=2s + T4=4s) ทั้งหมดยิงพร้อมกันใน 17s spawn window
+    //   - per bot: startupSweep (weight 2-5) + startupBalance (weight 10) = 12-15 weight
+    //   - 57 × 12-15 = 684-855 weight burst + reconcilePendingTrades + marketReconnect handlers
+    //     → peak > 100 weight/s → Binance 418 ban (15:07:54 incident, weight 7001)
+    //   - fix: random 0-30s jitter บน T3 → T4 inherits (T4 = T3 + 4s)
+    //   - กระจาย burst ลด peak ~10x (17s → 47s window) พอ fit ใต้ refill rate 100/s
+    //   - downside: orphan BUY detection delay สูงสุด 34s vs เดิม 6s
+    //     ยอมรับได้เพราะ periodic reconcileAccountBalance (15min) เป็น safety net อยู่แล้ว
+    const startupSweepJitterMs = 2000 + Math.floor(Math.random() * 30000); // 2-32s
     this.startupSweepTimer = setTimeout(() => {
       this.startupSweepTimer = null; // mark fired
       if (!this.running) return;
@@ -361,7 +378,7 @@ class Trader {
           logger.warn({ err: err.message }, 'trader: startup reconcileAccountBalance failed')
         );
       }, 4000);
-    }, 2000);
+    }, startupSweepJitterMs);
 
     // FIX-2026-07-31 (BUG-19): re-arm partial-fill watchers for trades with persisted deadlines
     //   เดิม: partialFillDeadlineAt/sellPartialDeadlineAt persist ใน DB แต่ restore เฉพาะในตัว timer

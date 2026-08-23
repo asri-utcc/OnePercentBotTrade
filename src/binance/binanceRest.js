@@ -5,13 +5,116 @@ const crypto = require('crypto');
 const config = require('../../config');
 const logger = require('../utils/logger');
 
+// ─── Circuit breaker — FIX-2026-08-22 (weight spike protection) ────────
+// ป้องกัน burst ที่ทำให้ weight พุ่งเกิน capacity แล้ว Binance ตอบ 429/418
+// - States: closed (normal) → open (block non-critical) → half-open (test) → closed
+// - ตรวจจาก X-MBX-USED-WEIGHT-1M header ใน updateFromHeaders()
+// - Trigger: open เมืือ used > 95% capacity × 5 ตัวอย่างติดต่อกัน (~5s ที่ traffic ปกติ)
+// - Recovery: half-open หลัง cooldownMs (30s), ถ้า used < 95% → closed
+// - critical=true (BUY/SELL) bypass เสมอ — order placement ต้องทำงาน
+// - export _CircuitBreaker class สำหรับ tests
+class CircuitBreaker {
+  constructor({ thresholdPct = 0.95, consecutiveRequired = 5, cooldownMs = 30000 } = {}) {
+    this.thresholdPct = thresholdPct;
+    this.consecutiveRequired = consecutiveRequired;
+    this.cooldownMs = cooldownMs;
+    this.state = 'closed';           // 'closed' | 'open' | 'half-open'
+    this.openedAt = 0;
+    this.consecutiveHighUsed = 0;
+    this.usedPct = 0;
+  }
+
+  /**
+   * Feed a usage sample (used weight / capacity ratio).
+   * Returns the resulting state.
+   */
+  recordUsage(usedPct) {
+    this.usedPct = usedPct;
+    const overThreshold = usedPct > this.thresholdPct;
+
+    if (this.state === 'closed') {
+      if (overThreshold) {
+        this.consecutiveHighUsed += 1;
+        if (this.consecutiveHighUsed >= this.consecutiveRequired) {
+          this._open();
+        }
+      } else {
+        this.consecutiveHighUsed = 0;
+      }
+    } else if (this.state === 'open') {
+      // Check if cooldown elapsed
+      if (Date.now() - this.openedAt >= this.cooldownMs) {
+        this.state = 'half-open';
+        // Allow ONE test request — half-open immediately becomes open again on next over-threshold sample
+      }
+    } else if (this.state === 'half-open') {
+      if (overThreshold) {
+        // Test failed — back to open with reset timer
+        this._open();
+      } else {
+        // Test passed — close
+        this.state = 'closed';
+        this.consecutiveHighUsed = 0;
+      }
+    }
+    return this.state;
+  }
+
+  _open() {
+    this.state = 'open';
+    this.openedAt = Date.now();
+    this.consecutiveHighUsed = 0;
+  }
+
+  /**
+   * Whether take() should throw for a non-critical request.
+   * Lazy transition open → half-open if cooldown elapsed.
+   */
+  isOpen() {
+    if (this.state === 'open') {
+      if (Date.now() - this.openedAt >= this.cooldownMs) {
+        this.state = 'half-open';
+        return false; // allow one request through
+      }
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * Snapshot for status() and dashboard.
+   */
+  snapshot() {
+    const cooldownRemainingMs = this.state === 'open'
+      ? Math.max(0, this.cooldownMs - (Date.now() - this.openedAt))
+      : 0;
+    return {
+      state: this.state,
+      openedAt: this.openedAt,
+      cooldownRemainingMs,
+      consecutiveHighUsed: this.consecutiveHighUsed,
+      usedPct: Number(this.usedPct.toFixed(4)),
+    };
+  }
+
+  /**
+   * Force close (e.g., for tests or manual reset).
+   */
+  reset() {
+    this.state = 'closed';
+    this.openedAt = 0;
+    this.consecutiveHighUsed = 0;
+    this.usedPct = 0;
+  }
+}
+
 // ─── Rate limiter แบบ token bucket ตาม X-MBX-USED-WEIGHT-1M ────
 // IP-based REQUEST_WEIGHT limit = 6000/min (verified via GET /api/v3/exchangeInfo.rateLimits)
 // FIX-2026-08-21: capacity ปรับได้ runtime ผ่าน setCapacity() + src/services/binanceRateLimitConfig
 //   กรณี server เดียวรันหลาย instance (หรือหลายระบบ) ให้หาร capacity กัน
 //   ตัวอย่าง: 2 ระบบแบ่ง 6000/min → ตั้ง 3000/min ต่อ instance
 class RateLimiter {
-  constructor({ capacity = 6000, refillPerMs = 6000 / 60000 } = {}) {
+  constructor({ capacity = 6000, refillPerMs = 6000 / 60000, circuitBreaker = null } = {}) {
     this.capacity = capacity;
     this.refillRate = refillPerMs;
     this.tokens = capacity;
@@ -20,6 +123,8 @@ class RateLimiter {
     //   เดิม rate limiter ไม่รู้จัก → ยิงต่อระหว่างถูกแบน → ได้ 418 ทุก call + WS ตาย
     //   fix: setBanUntil() จาก response interceptor → take() รอจนกว่า banUntilMs จะ expire
     this.banUntilMs = 0;
+    // FIX-2026-08-22: circuit breaker — block non-critical reads เมืือ used ใกล้ capacity
+    this.circuitBreaker = circuitBreaker || new CircuitBreaker();
   }
 
   /**
@@ -42,11 +147,22 @@ class RateLimiter {
     );
   }
 
-  async take(weight = 1) {
+  async take(weight = 1, { critical = false } = {}) {
+    // FIX-2026-08-22 (weight spike): circuit breaker — block non-critical requests
+    //   - ถ้า breaker 'open' และไม่ใช่ critical (BUY/SELL) → throw CIRCUIT_OPEN
+    //   - isOpen() มี side-effect: lazy transition open → half-open ถ้า cooldown หมด
+    //   - critical=true (order placement) bypass เสมอ → ระบบเทรดไม่หยุดแม้ breaker เปิด
+    if (!critical && this.circuitBreaker && this.circuitBreaker.isOpen()) {
+      const err = new Error('binance: rate limit circuit breaker open — non-critical request blocked');
+      err.code = 'CIRCUIT_OPEN';
+      err.circuitSnapshot = this.circuitBreaker.snapshot();
+      throw err;
+    }
+
     // FIX-2026-08-22: respect 418 IP ban — wait until banUntilMs expires before queuing
     //   - Binance bans 5min-2hr หลัง weight > capacity
     //   - ยิงต่อระหว่างแบน → 418 ทุก call + log spam + WS disconnect
-    //   - cap wait �ี่ 5s ต่อรอบเพื่อให้ ban expiry ตรวจใหม่ได้บ่อยๆ
+    //   - cap wait ที่ 5s ต่อรอบเพื่อให้ ban expiry ตรวจใหม่ได้บ่อยๆ
     while (this.banUntilMs && Date.now() < this.banUntilMs) {
       const waitMs = Math.min(5000, this.banUntilMs - Date.now());
       logger.debug({ banUntilMs: this.banUntilMs, waitMs }, 'binance: rate limiter waiting for 418 ban expiry');
@@ -104,6 +220,27 @@ class RateLimiter {
     if (used > warnAt) {
       logger.warn({ used, capacity: this.capacity }, 'binance weight approaching limit');
     }
+    // FIX-2026-08-22: feed circuit breaker — used/capacity ratio drives state machine
+    //   - state transitions: closed → open (×5 consecutive) → half-open → closed
+    //   - non-critical reads get blocked while 'open'
+    if (this.circuitBreaker && this.capacity > 0) {
+      const usedPct = used / this.capacity;
+      const prevState = this.circuitBreaker.state;
+      const nextState = this.circuitBreaker.recordUsage(usedPct);
+      if (prevState !== nextState) {
+        logger.warn(
+          {
+            prevState,
+            nextState,
+            used,
+            capacity: this.capacity,
+            usedPct: Number(usedPct.toFixed(4)),
+            consecutiveHighUsed: this.circuitBreaker.consecutiveHighUsed,
+          },
+          'binance: circuit breaker state transition'
+        );
+      }
+    }
     // clamp กับ capacity ปัจจุบัน (กรณี capacity ถูกปรับลดแต่ server ยังรายงาน used สูง)
     const cap = Math.max(1, this.capacity);
     this.tokens = Math.max(0, cap - used);
@@ -114,6 +251,10 @@ class RateLimiter {
    * - capacity: ค่าที่ตั้งไว้ (จาก AppConfig.binanceRateLimitPerMin)
    * - used (estimate): capacity - tokens
    * - banUntilMs: 0 = no ban, else epoch ms when 418 IP-ban expires
+   * - circuitBreaker: { state, openedAt, cooldownRemainingMs, consecutiveHighUsed, usedPct }
+   *   - 'open' = blocking non-critical reads
+   *   - 'half-open' = probe in progress
+   *   - 'closed' = normal
    */
   status() {
     return {
@@ -126,6 +267,7 @@ class RateLimiter {
       banRemainingSec: this.banUntilMs > Date.now()
         ? Math.round((this.banUntilMs - Date.now()) / 1000)
         : 0,
+      circuitBreaker: this.circuitBreaker ? this.circuitBreaker.snapshot() : null,
     };
   }
 }
@@ -254,7 +396,10 @@ async function signedRequest(method, path, params = {}, weight = 1) {
     e.code = 'NO_API_KEYS';
     throw e;
   }
-  await limiter.take(weight);
+  // FIX-2026-08-22 (weight spike): signedRequest = BUY/SELL/account = critical path
+  //   - bypass circuit breaker เสมอ — ระบบเทรดจะไม่หยุดแม้ breaker 'open'
+  //   - token bucket ยังเข้าคิวตามปกติ (refill 6000/min) แต่ไม่โดน block
+  await limiter.take(weight, { critical: true });
   // FIX-2026-07-14: ใช้ Binance-synced timestamp (apply server-time offset) แทน local clock
   //   กัน -1021 "Timestamp ahead of server" ที่เคยเกิดกับทั้ง BUY และ /api/account/balance
   await ensureTimeOffset();
@@ -312,8 +457,14 @@ async function getServerTime() {
 }
 
 async function getExchangeInfo({ symbol = null } = {}) {
+  // FIX-2026-08-22 (weight spike): support bulk fetch via symbols=[...]
+  //   - Binance docs: ?symbols=[...] form costs the SAME 20 weight as ?symbol=X
+  //   - ใช้กับ getCoinInfosBulk() — 1 call แทน 86 parallel calls (UI page load)
   const params = {};
-  if (symbol) params.symbol = symbol;
+  if (symbol) {
+    if (Array.isArray(symbol)) params.symbols = JSON.stringify(symbol);
+    else params.symbol = symbol;
+  }
   return publicGet('/api/v3/exchangeInfo', params, 20);
 }
 
@@ -396,8 +547,15 @@ async function getKlinesPaginated({ symbol, interval, totalLimit, batchLimit = 1
  *   firstId, lastId, count }
  */
 async function get24hrTickers({ symbol = null } = {}) {
+  // FIX-2026-08-22 (weight spike): support bulk fetch via symbols=[...]
+  //   - Binance docs: symbols=[...] form costs 2 (same as single-symbol)
+  //   - no-symbol form = all 2500+ spot symbols = weight 80
+  //   - ใช้กับ getCoinInfosBulk() — 1 call ครอบคลุมทุก symbol ที่ต้องการ
   const params = {};
-  if (symbol) params.symbol = symbol;
+  if (symbol) {
+    if (Array.isArray(symbol)) params.symbols = JSON.stringify(symbol);
+    else params.symbol = symbol;
+  }
   const weight = symbol ? 2 : 80;
   return publicGet('/api/v3/ticker/24hr', params, weight);
 }
@@ -567,4 +725,5 @@ module.exports = {
   setRateLimitCapacity,
   getRateLimitStatus,
   _RateLimiterClass: RateLimiter, // exported for unit tests
+  _CircuitBreaker: CircuitBreaker, // FIX-2026-08-22: exported for unit tests
 };

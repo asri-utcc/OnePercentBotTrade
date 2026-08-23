@@ -1,20 +1,19 @@
 'use strict';
 
 /**
- * FIX-2026-08-22 (perf): skip vol/quality Binance enrichment for soft-deleted bots
+ * FIX-2026-08-22 (perf): skip vol Binance enrichment for soft-deleted bots
  *
  * Background:
  *   - GET /api/bots with ?includeDeleted=1 returns ALL bots including soft-deleted
- *   - Previously, volSnapshots and qualitySnaps loops in bot.routes.js called
- *     volatilityForBot.computeBotVolatilitySnapshot(bot) and qualityIndicator.computeBotQuality(bot)
- *     on EVERY bot in the array — including soft-deleted ones.
+ *   - Previously, the volSnapshots loop in bot.routes.js called
+ *     volatilityForBot.computeBotVolatilitySnapshot(bot) on EVERY bot — including soft-deleted.
  *   - Soft-deleted bots have no trader → klineCache is empty → every enrichment
  *     triggers a Binance REST call (get24hrTickers + getKlines × N) → wasted weight.
  *   - With 77 soft-deleted bots, that's ~460 weight per page load.
  *
  * Fix:
- *   - Route returns EMPTY_VOL/EMPTY_QUALITY sentinel for deleted bots instead of
- *     calling the Binance-heavy helpers. UI gets null fields → fallback "—".
+ *   - Route returns EMPTY_VOL sentinel for deleted bots instead of
+ *     calling the Binance-heavy helper. UI gets null fields → fallback "—".
  *   - Non-deleted bots still get full enrichment (unchanged behavior).
  *   - Card still appears in the response (so 🗑 DELETED badge renders).
  */
@@ -38,7 +37,6 @@ jest.mock('../src/core/prediction', () => ({
 
 // FIX-2026-08-22: real mapWithConcurrency (so mapper gets invoked) but spy on the helpers
 const mockComputeBotVolatilitySnapshot = jest.fn();
-const mockComputeBotQuality = jest.fn();
 jest.mock('../src/core/volatilityForBot', () => {
   const realMapWithConcurrency = async (arr, limit, mapper) => {
     const out = new Array(arr.length);
@@ -58,12 +56,6 @@ jest.mock('../src/core/volatilityForBot', () => {
     computeBotVolatilitySnapshot: mockComputeBotVolatilitySnapshot,
   };
 });
-jest.mock('../src/core/qualityIndicator', () => ({
-  computeBotsQuality: jest.fn(async () => []), // legacy alias (not called by route after fix)
-  computeBotQuality: mockComputeBotQuality,     // FIX-2026-08-22: route calls singular form
-  getCachedOnly: jest.fn(() => ({})),
-  init: jest.fn(() => Promise.resolve()),
-}));
 jest.mock('../src/core/tradeStats', () => ({
   aggregateTodayPerBot: jest.fn(async () => new Map()),
   aggregateMonthPerBot: jest.fn(async () => new Map()),
@@ -94,10 +86,6 @@ function invokeListBots(bots, query = {}) {
     ok: true, cached: false, ms: 1,
     kcMinPct: 1.0, kcMinPctDisplay: '1.00%', suggestedTpPct: 0.5,
     quoteVolume24h: 1000000, quoteVolume24hDisplay: '1.00M',
-  }));
-  // Quality snapshot stub
-  mockComputeBotQuality.mockImplementation(async (b) => ({
-    enabled: true, score: 3, color: 'green', updatedAt: Date.now(), cached: false,
   }));
 
   const router = require('../src/api/routes/bot.routes');
@@ -144,10 +132,9 @@ function makeBot(overrides = {}) {
   };
 }
 
-describe('GET /api/bots — skip vol/quality enrichment for soft-deleted bots (FIX-2026-08-22 perf)', () => {
+describe('GET /api/bots — skip vol enrichment for soft-deleted bots (FIX-2026-08-22 perf)', () => {
   beforeEach(() => {
     mockComputeBotVolatilitySnapshot.mockClear();
-    mockComputeBotQuality.mockClear();
   });
 
   test('volatilityForBot.computeBotVolatilitySnapshot NOT called for soft-deleted bots', async () => {
@@ -162,20 +149,6 @@ describe('GET /api/bots — skip vol/quality enrichment for soft-deleted bots (F
     // Should be called ONLY for non-deleted (a, c) — 2 calls
     expect(mockComputeBotVolatilitySnapshot).toHaveBeenCalledTimes(2);
     const calledSymbols = mockComputeBotVolatilitySnapshot.mock.calls.map((c) => c[0].symbol).sort();
-    expect(calledSymbols).toEqual(['BTCUSDT', 'SOLUSDT']);
-  });
-
-  test('qualityIndicator.computeBotQuality NOT called for soft-deleted bots', async () => {
-    const bots = [
-      makeBot({ _id: 'a', symbol: 'BTCUSDT' }),
-      makeBot({ _id: 'b', symbol: 'ETHUSDT', deletedAt: new Date('2026-08-15') }),
-      makeBot({ _id: 'c', symbol: 'SOLUSDT' }),
-    ];
-    const { data } = await invokeListBots(bots, { includeDeleted: '1', expand: '1', quality: '1' });
-    expect(data.bots).toHaveLength(3);
-    // Should be called ONLY for non-deleted (a, c) — 2 calls
-    expect(mockComputeBotQuality).toHaveBeenCalledTimes(2);
-    const calledSymbols = mockComputeBotQuality.mock.calls.map((c) => c[0].symbol).sort();
     expect(calledSymbols).toEqual(['BTCUSDT', 'SOLUSDT']);
   });
 

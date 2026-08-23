@@ -105,6 +105,56 @@
       border-radius: 999px;
       transition: width 240ms ease;
     }
+
+    /* Charts (Account Estimate Value + USDT PnL) */
+    .wallet-chart-card .lux-header {
+      padding: 0.85rem 1rem;
+    }
+    .wallet-chart-card .lux-body {
+      padding: 0.5rem 0.75rem 0.75rem;
+    }
+    .wallet-chart-container {
+      position: relative;
+      width: 100%;
+      height: 280px;
+    }
+    .wallet-chart-meta {
+      display: flex; flex-wrap: wrap;
+      gap: 0.75rem; padding: 0.25rem 0.5rem 0;
+      font-size: 0.78rem; color: var(--text-3);
+      font-family: var(--font-mono, monospace);
+    }
+    .wallet-chart-meta .stat { display: inline-flex; align-items: baseline; gap: 0.35rem; }
+    .wallet-chart-meta .stat .lbl { color: var(--text-3); }
+    .wallet-chart-meta .stat .val { color: var(--text-1); font-weight: 600; }
+    .wallet-chart-meta .stat .val.is-pos { color: var(--bull-1); }
+    .wallet-chart-meta .stat .val.is-neg { color: var(--bear-1); }
+
+    .wallet-range-chip-row {
+      display: flex; gap: 0.35rem; flex-wrap: wrap; align-items: center;
+    }
+    .wallet-range-chip {
+      padding: 0.3rem 0.65rem;
+      border: 1px solid var(--border-soft);
+      border-radius: 999px;
+      background: rgba(255,255,255,0.03);
+      color: var(--text-2);
+      font-size: 0.75rem; font-family: var(--font-mono, monospace);
+      cursor: pointer;
+      transition: all 120ms ease;
+    }
+    .wallet-range-chip:hover { border-color: var(--gold-1); color: var(--gold-1); }
+    .wallet-range-chip.is-active { background: var(--gold-1); color: #000; border-color: var(--gold-1); font-weight: 700; }
+    .wallet-range-chip.is-disabled { opacity: 0.45; cursor: not-allowed; pointer-events: none; }
+    .wallet-chart-currency-toggle {
+      display: inline-flex; border: 1px solid var(--border-soft); border-radius: 999px; overflow: hidden;
+    }
+    .wallet-chart-currency-toggle button {
+      padding: 0.25rem 0.65rem; background: transparent;
+      color: var(--text-2); border: 0; font-size: 0.72rem; cursor: pointer;
+      font-family: var(--font-mono, monospace);
+    }
+    .wallet-chart-currency-toggle button.is-active { background: var(--gold-1); color: #000; font-weight: 700; }
     .wallet-warn-banner {
       margin-top: 0.6rem;
       padding: 0.55rem 0.75rem;
@@ -253,6 +303,83 @@
       <div class="wallet-row-meta text-end mt-1" id="wallet-reserve-pct" style="display:none;"></div>
     </div>
 
+    <!-- Chart 1: Account Estimate Value (daily snapshot @ 00:01 BKK) -->
+    <div class="lux-card wallet-chart-card mb-3">
+      <div class="lux-header">
+        <div>
+          <h5>📈 Account Estimate Value</h5>
+          <div class="text-muted-3" style="font-size: 0.78rem;">
+            snapshot ทุกเที่ยงคืน (00:01 Asia/Bangkok) • อัปเดตล่าสุด + live point ตอนนี้
+          </div>
+        </div>
+        <div class="d-flex flex-wrap gap-2 align-items-center">
+          <div class="wallet-chart-currency-toggle" id="portfolio-currency-toggle">
+            <button type="button" data-currency="USDT" class="is-active">USDT</button>
+            <button type="button" data-currency="THB">THB</button>
+          </div>
+          <div class="wallet-range-chip-row" id="portfolio-range-chips">
+            <button class="wallet-range-chip" data-range="1D" type="button">1D</button>
+            <button class="wallet-range-chip" data-range="3D" type="button">3D</button>
+            <button class="wallet-range-chip" data-range="7D" type="button">7D</button>
+            <button class="wallet-range-chip is-active" data-range="30D" type="button">30D</button>
+            <button class="wallet-range-chip" data-range="90D" type="button">90D</button>
+            <button class="wallet-range-chip" data-range="180D" type="button">180D</button>
+            <button class="wallet-range-chip" data-range="1Y" type="button">1Y</button>
+            <button class="wallet-range-chip" data-range="all" type="button">All</button>
+          </div>
+        </div>
+      </div>
+      <div class="lux-body">
+        <div id="portfolio-chart-container" class="wallet-chart-container"></div>
+        <div class="wallet-chart-meta" id="portfolio-chart-meta">
+          <span class="stat"><span class="lbl">points</span><span class="val" id="portfolio-meta-count">—</span></span>
+          <span class="stat"><span class="lbl">first</span><span class="val" id="portfolio-meta-first">—</span></span>
+          <span class="stat"><span class="lbl">last</span><span class="val" id="portfolio-meta-last">—</span></span>
+          <span class="stat"><span class="lbl">change</span><span class="val" id="portfolio-meta-change">—</span></span>
+          <span class="stat"><span class="lbl">updated</span><span class="val" id="portfolio-meta-updated">—</span></span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Chart 2: PnL (cumulative, updated after each SELL) -->
+    <div class="lux-card wallet-chart-card mb-3">
+      <div class="lux-header">
+        <div>
+          <h5>💰 PnL (สะสม)</h5>
+          <div class="text-muted-3" style="font-size: 0.78rem;">
+            อัปเดตทุกครั้งหลังขายเสร็จ • นับรวมทุกบอท (realizedPnl จาก Trade) • THB ใช้อัตราแลกเปลี่ยนปัจจุบัน
+          </div>
+        </div>
+        <div class="d-flex flex-wrap gap-2 align-items-center">
+          <div class="wallet-chart-currency-toggle" id="pnl-currency-toggle">
+            <button type="button" data-currency="USDT" class="is-active">USDT</button>
+            <button type="button" data-currency="THB">THB</button>
+          </div>
+          <div class="wallet-range-chip-row" id="pnl-range-chips">
+            <button class="wallet-range-chip" data-range="1D" type="button">1D</button>
+            <button class="wallet-range-chip" data-range="3D" type="button">3D</button>
+            <button class="wallet-range-chip" data-range="7D" type="button">7D</button>
+            <button class="wallet-range-chip is-active" data-range="30D" type="button">30D</button>
+            <button class="wallet-range-chip" data-range="90D" type="button">90D</button>
+            <button class="wallet-range-chip" data-range="180D" type="button">180D</button>
+            <button class="wallet-range-chip" data-range="1Y" type="button">1Y</button>
+            <button class="wallet-range-chip" data-range="all" type="button">All</button>
+          </div>
+        </div>
+      </div>
+      <div class="lux-body">
+        <div id="pnl-chart-container" class="wallet-chart-container"></div>
+        <div class="wallet-chart-meta" id="pnl-chart-meta">
+          <span class="stat"><span class="lbl">trades</span><span class="val" id="pnl-meta-trades">—</span></span>
+          <span class="stat"><span class="lbl">win</span><span class="val is-pos" id="pnl-meta-wins">—</span></span>
+          <span class="stat"><span class="lbl">loss</span><span class="val is-neg" id="pnl-meta-losses">—</span></span>
+          <span class="stat"><span class="lbl">win rate</span><span class="val" id="pnl-meta-winrate">—</span></span>
+          <span class="stat"><span class="lbl">total</span><span class="val" id="pnl-meta-total">—</span></span>
+          <span class="stat"><span class="lbl">updated</span><span class="val" id="pnl-meta-updated">—</span></span>
+        </div>
+      </div>
+    </div>
+
     <!-- Holdings table -->
     <div class="lux-card">
       <div class="lux-header">
@@ -380,6 +507,7 @@
   </div>
 
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+  <script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
   <script src="/js/api.js"></script>
   <script src="/js/luxConfirm.js"></script>
   <script src="/js/ws-client.js"></script>

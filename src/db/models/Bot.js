@@ -166,6 +166,11 @@ const botSchema = new mongoose.Schema(
     autoPauseLastCheckedAt: { type: Date, default: null },
     autoPauseLastActionAt: { type: Date, default: null },
     autoPauseReason: { type: String, default: null }, // 'low_vol' | 'low_24h_vol' | 'vol_recovered' | 'binance_delist' | null
+    // FIX-2026-08-22: เหตุผลที่ auto-pause ถูก SKIP (เก็บไว้ audit + UI) — ตอนนี้มีแค่ 'buy_in_flight'
+    //   เกิดขึ้นเมื่อ bot เข้าเงื่อนไข pause (low_vol / low_24h_vol) แต่มี BUY order ค้างอยู่
+    //   → checkAutoPauseBots() skip pause เพื่อกัน orphan position (trader.stop() ฆ่า SELL-placement handler)
+    //   cleared เมื่อ pause/resume สำเร็จ
+    autoPauseSkipReason: { type: String, default: null, index: true }, // 'buy_in_flight' | null
     // FIX-2026-07-31: auto-arm SL-on-UKC for stuck losing positions (per-bot toggle, default true)
     //   - เมื่อ position ขาดทุน > autoArmLossPct + เปิดมา > autoArmAgeHours → trader set trade.useStopLossOnUKC=true
     //   - _checkStopLossOnUpperKC จะยอม trigger เฉพาะ trade ที่มี flag นี้

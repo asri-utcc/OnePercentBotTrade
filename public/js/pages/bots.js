@@ -370,18 +370,6 @@ function setupBotSearch() {
   }
 }
 
-// ── FIX-2026-08-01: Bot Quality Indicator pill (badge for bot card) ─────
-//   - HTML returned by buildQualityBadge — string template (uses escapeHtml from below)
-//   - คลิก → delegated ใน init() → qualityModal.openQualityModal(bot)
-function buildQualityBadge(b) {
-  if (b.qualityEnabled === false || b.qualityScore == null) {
-    return '<span class="quality-pill is-gray" title="Quality Indicator ถูกปิดหรือยังโหลดไม่เสร็จ">—</span>';
-  }
-  const updated = b.qualityUpdatedAt ? new Date(b.qualityUpdatedAt).toLocaleTimeString('th-TH') : '-';
-  const tip = `คลิกเพื่อดู breakdown · อัปเดตล่าสุด: ${updated}`;
-  return `<span class="quality-pill is-${b.qualityColor || 'gray'}" data-quality-trigger="${escapeHtml(String(b._id))}" title="${escapeHtml(tip)}">${b.qualityScore}/4</span>`;
-}
-
 // ── FIX-2026-08-03: Safe-trade filter #2 (trendline) badge ─────────────
 //   - แสดงสถานะ live ว่าราคา last close อยู่เหนือเส้น trendline support บน upper-TF หรือไม่
 //   - อัปเดตทุก 60s จาก botManager scanner → /api/bots response มี tlStatus/tlGapPct/tlUpdatedAt
@@ -488,27 +476,6 @@ async function init() {
     loadBnbStatus(), // FIX-2026-08-05: BNB low-balance warning banner
   ]);
 
-  // FIX-2026-08-02: kick off slow quality compute in background — first paint shows pills "—"
-  //   - server returns getCachedOnly() which is 0ms if cached, null otherwise
-  //   - this background fetch forces full compute + warms cache for next loads
-  setTimeout(() => {
-    API.get('/api/bots?quality=1').then((resp) => {
-      if (resp && resp.bots) {
-        // merge quality scores into local bots array
-        for (const fresh of resp.bots) {
-          const local = bots.find((b) => String(b._id) === String(fresh._id));
-          if (local) {
-            local.qualityScore = fresh.qualityScore;
-            local.qualityColor = fresh.qualityColor;
-            local.qualityUpdatedAt = fresh.qualityUpdatedAt;
-            local.qualityCached = fresh.qualityCached;
-          }
-        }
-        renderBots();
-      }
-    }).catch(() => { /* fail-safe — pill stays "—" */ });
-  }, 1500); // 1.5s after first paint — กัน Binance weight contention
-
   // FIX-2026-07-31: wire Compact/Expand toggle (default = compact)
   wireViewModeToggle();
 
@@ -612,7 +579,7 @@ async function init() {
   //   - modal tile count ยังอัปเดตผ่าน trade:update WS handler (เมื่อ BUY/SELL fill → position count เปลี่ยน)
   //   - modal price/PnL จะอยู่นิ่งจนกว่า user จะกดปุ่ม 🔄 Refresh ใน modal (loadOpenPositions({ fresh: true }))
 
-  // FIX-2026-08-04: re-fetch bot list (with quality scores) ทุก 120s
+  // FIX-2026-08-04: re-fetch bot list ทุก 120s
   //   - ลดจาก 60s → 120s (ลด DB load) — display อาจ delay 5-15s แต่ bot operations intact
   //   - ยังได้ live updates ผ่าน WS kline:update (EMA tile) + trade:update (active positions)
   //   - surgical renderBots() ไม่ rebuild DOM เว้นแต่ bot set เปลี่ยน
@@ -622,15 +589,6 @@ async function init() {
   //   - backend cache 30s → frontend poll 60s พอ (max 2 calls/min ไม่กระทบ Binance weight)
   //   - independent จาก loadBots — banner ต้องอัปเดตเร็วกว่า bot list เมื่อ BNB ลดลง
   setInterval(() => { loadBnbStatus().catch(() => {}); }, 60_000);
-
-  // FIX-2026-08-01: click delegation สำหรับ Quality Indicator pill — เปิด modal
-  document.getElementById('bots-list').addEventListener('click', (e) => {
-    const el = e.target.closest('[data-quality-trigger]');
-    if (!el) return;
-    const id = el.getAttribute('data-quality-trigger');
-    const bot = bots.find((b) => String(b._id) === String(id));
-    if (bot && window.qualityModal) window.qualityModal.openQualityModal(bot);
-  });
 
   // โหลด health ครั้งแรก (กรณี WS ยังไม่ติด)
   API.get('/api/health').then((s) => renderHeartbeat(s)).catch(() => {});
@@ -1037,22 +995,50 @@ async function loadBots(opts = {}) {
   }
 }
 
-// FIX-2026-08-01: prefetch coin info per unique symbol + cache in window.coinInfoCache
-//   - dedupe by symbol (multiple bots same symbol → 1 fetch)
-//   - skip symbols already in cache (TTL 5min server-side → align client cache)
-//   - fail-safe: if fetch fails, card shows "—" instead of crashing
+// FIX-2026-08-22 (weight spike): prefetch coin info via bulk endpoint — 1 request แทน N parallel
+//   - เดิม 86 parallel GET /api/coins/info/:sym = 1,892 weight burst
+//   - ใหม่ POST /api/coins/info-bulk = 100 weight (1 ticker + 1 exchangeInfo) — ~19× reduction
+//   - dedupe by symbol + skip already-cached + fail-safe (cache error เพื่อไม่ retry บ่อย)
+//   - ถ้า endpoint 503 CIRCUIT_OPEN → fall back ไปยัง per-symbol call แบบเก่า
 const coinInfoCache = new Map(); // symbol -> { data, ts }
 async function prefetchCoinInfos(bots) {
   const symbols = [...new Set(bots.map((b) => b.symbol).filter(Boolean))];
+  if (symbols.length === 0) return;
   const now = Date.now();
   const toFetch = symbols.filter((s) => !coinInfoCache.has(s) || (now - coinInfoCache.get(s).ts) > 5 * 60 * 1000);
-  await Promise.all(toFetch.map(async (sym) => {
+  if (toFetch.length === 0) return;
+  try {
+    const r = await API.post('/api/coins/info-bulk', { symbols: toFetch });
+    Object.entries(r.coins || {}).forEach(([sym, data]) => {
+      coinInfoCache.set(sym, { data, ts: now });
+    });
+    // mark symbols not in response (e.g. not found on Binance) so we don't retry immediately
+    for (const sym of toFetch) {
+      if (!coinInfoCache.has(sym)) {
+        coinInfoCache.set(sym, { data: null, ts: now, error: 'not found in bulk response' });
+      }
+    }
+  } catch (err) {
+    // FIX-2026-08-22: 503 CIRCUIT_OPEN → fall back to per-symbol (degraded UX แทนที่จะไม่โหลดเลย)
+    if (err.status === 503 && err.data && err.data.code === 'CIRCUIT_OPEN') {
+      console.warn('coinInfo bulk: circuit open, falling back to per-symbol', err.data);
+      await prefetchCoinInfosFallback(toFetch);
+      return;
+    }
+    // cache failure so we don't retry every render
+    for (const sym of toFetch) {
+      coinInfoCache.set(sym, { data: null, ts: now, error: err.message });
+    }
+  }
+}
+async function prefetchCoinInfosFallback(symbols) {
+  const now = Date.now();
+  await Promise.all(symbols.map(async (sym) => {
     try {
       const r = await API.get(`/api/coins/info/${encodeURIComponent(sym)}`);
       coinInfoCache.set(sym, { data: r.coin, ts: now });
-    } catch (err) {
-      // cache failure so we don't retry every render
-      coinInfoCache.set(sym, { data: null, ts: now, error: err.message });
+    } catch (_err) {
+      coinInfoCache.set(sym, { data: null, ts: now, error: 'fallback failed' });
     }
   }));
 }
@@ -1862,9 +1848,6 @@ function renderBotCard(b) {
   const ci = (typeof getCoinInfo === 'function') ? getCoinInfo(b.symbol) : null;
   const coinChip = renderCoinChip(ci, b.symbol);
 
-  // FIX-2026-08-01: Bot Quality Indicator pill (between statusBadge + coinChip)
-  const qualityBadge = buildQualityBadge(b);
-
   // FIX-2026-08-02: DCA mode badge — แสดงเมื่อเปิด DCA stack mode
   const dcaBadge = b.dcaEnabled
     ? `<span class="dca-pill" title="DCA + BEP Stack Mode — max ${b.dcaMaxLayers || 3} layers">📚 DCA${b.dcaMaxLayers ? `/${b.dcaMaxLayers}` : ''}</span>`
@@ -1890,7 +1873,6 @@ function renderBotCard(b) {
             <span class="sym-tag">${b.symbol}</span>
             <span class="tf-tag">${b.timeframe}</span>
             ${statusBadge}
-            ${qualityBadge}
             ${dcaBadge}
             ${trendlineBadge}
             ${delistBadge}

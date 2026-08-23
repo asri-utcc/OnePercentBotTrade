@@ -10,7 +10,6 @@ const { requireAuth } = require('../middleware/auth');
 const AppConfig = require('../../db/models/AppConfig');
 const { encrypt, decrypt } = require('../../services/crypto');
 const notifier = require('../../services/telegramNotifier');
-const qualityIndicator = require('../../core/qualityIndicator'); // FIX-2026-08-01: settings block lives in same /config endpoint
 const logger = require('../../utils/logger');
 
 const router = express.Router();
@@ -30,16 +29,6 @@ router.get('/config', requireAuth, async (req, res) => {
       thresholds: (cfg && cfg.telegramThresholds) || {},
       enabled: !!(cfg && cfg.telegramEnabled),
       hasToken: !!(cfg && cfg.telegramBotTokenEnc),
-      // FIX-2026-08-01: Bot Quality Indicator settings (mirror telegramThresholds pattern)
-      //   - qualityEnabled: default true (mirror schema default — undefined doc fields → true)
-      //   - qualityRefreshMs: default 5 min
-      //   - qualityThresholds: spread defaults if doc field is empty/missing
-      qualityEnabled:    cfg && typeof cfg.qualityEnabled === 'boolean' ? cfg.qualityEnabled : true,
-      qualityRefreshMs:  (cfg && Number.isFinite(cfg.qualityRefreshMs)) ? cfg.qualityRefreshMs : 5 * 60 * 1000,
-      qualityThresholds: Object.assign(
-        { volumeMinUSDT: 100000, topN: 50, kcTightPct: 1.0, squeezeMinPct: 40, trendMinPct: 50 },
-        (cfg && cfg.qualityThresholds) || {},
-      ),
       // FIX-2026-08-08: CB Version (global setting — Feature #2)
       //   - 'v2' = CBv2 only (4 red candles below lowerKC → cooldown)
       //   - 'v3' = CBv2 + ST3 same-candle on upper-TF (default)
@@ -78,28 +67,6 @@ router.put('/config', requireAuth, async (req, res) => {
     }
     if (typeof body.enabled === 'boolean') update.telegramEnabled = body.enabled;
 
-    // FIX-2026-08-01: Bot Quality Indicator (mirror telegramThresholds pattern)
-    let qualityChanged = false;
-    if (typeof body.qualityEnabled === 'boolean') {
-      update.qualityEnabled = body.qualityEnabled;
-      qualityChanged = true;
-    }
-    if (Number.isFinite(body.qualityRefreshMs)) {
-      update.qualityRefreshMs = Math.max(60_000, Math.min(60 * 60 * 1000, body.qualityRefreshMs));
-      qualityChanged = true;
-    }
-    if (body.qualityThresholds && typeof body.qualityThresholds === 'object' && !Array.isArray(body.qualityThresholds)) {
-      const t = body.qualityThresholds;
-      const clean = {};
-      if (Number.isFinite(t.volumeMinUSDT)) clean.volumeMinUSDT = Math.max(0, t.volumeMinUSDT);
-      if (Number.isFinite(t.topN)) clean.topN = Math.max(1, Math.min(500, t.topN));
-      if (Number.isFinite(t.kcTightPct)) clean.kcTightPct = Math.max(0.01, Math.min(50, t.kcTightPct));
-      if (Number.isFinite(t.squeezeMinPct)) clean.squeezeMinPct = Math.max(0, Math.min(100, t.squeezeMinPct));
-      if (Number.isFinite(t.trendMinPct)) clean.trendMinPct = Math.max(0, Math.min(100, t.trendMinPct));
-      update.qualityThresholds = clean;
-      qualityChanged = true;
-    }
-
     // FIX-2026-08-08: CB Version (Feature #2) — global toggle
     if (body.cbVersion === 'v2' || body.cbVersion === 'v3') {
       update.cbVersion = body.cbVersion;
@@ -117,13 +84,6 @@ router.put('/config', requireAuth, async (req, res) => {
 
     await AppConfig.updateOne({ key: 'singleton' }, { $set: update });
     await notifier.reloadConfig();
-    if (qualityChanged) {
-      try {
-        await qualityIndicator.reloadConfig();
-      } catch (qErr) {
-        logger.warn({ err: qErr.message }, 'telegram: qualityIndicator.reloadConfig failed (non-fatal)');
-      }
-    }
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: err.message });

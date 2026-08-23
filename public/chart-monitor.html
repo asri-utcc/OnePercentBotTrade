@@ -662,6 +662,9 @@
     <div class="page-title">
       <h3>📊 Chart Monitor</h3>
       <div class="d-flex gap-2 align-items-center flex-wrap">
+        <!-- FIX-2026-08-23: Master Config (mirror bots.html) — bulk-edit many bots at once -->
+        <button class="btn btn-outline-primary btn-sm" id="btn-cm-master-config" type="button"
+          title="ตั้งค่าหลายบอทพร้อมกัน (clobber mode)">⚙️ Master Config</button>
         <button class="btn btn-primary btn-sm" id="cm-refresh-btn" type="button">🔄 Refresh</button>
       </div>
     </div>
@@ -871,6 +874,9 @@
   <script src="/js/luxConfirm.js"></script>
   <script src="/js/utils/sellReasons.js"></script>
   <script src="/js/utils/pnlModalColumns.js"></script>
+  <!-- FIX-2026-08-23: Master Config modal (same partial as bots.html) -->
+  <script src="/js/botConfigIO.js"></script>
+  <script src="/js/partials/masterConfigModal.js"></script>
   <script src="/js/pages/chart-monitor.js"></script>
 </body>
 </html>

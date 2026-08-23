@@ -22,6 +22,11 @@ const _cmMiniCharts = new Map(); // botId -> { chart, candleSeries, basisSeries,
 const _cmRefreshTimers = new Map(); // botId -> setInterval handle
 const _cmLazyObserver = (typeof IntersectionObserver !== 'undefined') ? new IntersectionObserver(onCmLazyLoad, { rootMargin: '200px' }) : null;
 const _cmLazyPending = new Set(); // botIds pending lazy load
+// FIX-2026-08-23: concurrency cap on mini-chart loading — without this, fast scrolls
+//   trigger 20+ simultaneous /api/bots/:id/mini-chart + createChart() calls → browser spike
+const _CM_MAX_CONCURRENT_CHARTS = 3;
+const _cmChartInFlight = new Set(); // botIds currently loading a chart
+const _cmChartQueue = []; // FIFO of { botId, el } waiting for a free slot
 
 let _cmBots = []; // full bot list (cache)
 let _cmSignals = null; // latest signals response (from /api/bots/chart-monitor/signals)
@@ -32,6 +37,17 @@ let _cmPositionsByBot = new Map(); // botId -> positions[] (for TP line drawing)
 let _cmFilter = 'running-with-position'; // 'running' | 'stopped' | 'all' | 'running-with-position' (default: 2026-08-06)
 let _cmSort = 'default'; // 'default' | 'name' | 'symbol' | 'pnl' | 'tf'
 let _cmPositionModal = null; // bootstrap.Modal instance for #cmPositionModal
+
+// FIX-2026-08-23: debounce renderGrid() — bot:status WS triggers both loadBots()+loadSignals()
+//   which each call renderGrid → 2× full teardown per event. Coalesce into a single delayed render.
+let _cmRenderGridTimer = null;
+function scheduleRenderGrid() {
+  if (_cmRenderGridTimer) clearTimeout(_cmRenderGridTimer);
+  _cmRenderGridTimer = setTimeout(() => {
+    _cmRenderGridTimer = null;
+    renderGrid();
+  }, 250);
+}
 
 // 2026-08-08: Auto-refresh toggle for Open Positions panel — default OFF on every page load.
 // State is NOT persisted; reload always resets to OFF.
@@ -143,10 +159,8 @@ async function init() {
   // Start WS for live candle updates
   WSClient.start();
 
-  // First load
-  await loadBots();
-  await loadSignals();
-  await loadCmPositions();
+  // First load (FIX-2026-08-23: parallel — 3 round-trips fire together, faster first paint)
+  await Promise.all([loadBots(), loadSignals(), loadCmPositions()]);
   // 2026-08-06: BNB fuel gauge (mirror bots.html)
   loadCmBnbStatus().catch(() => {});
 
@@ -155,6 +169,20 @@ async function init() {
 
   // 2026-08-06: BNB gauge poll — 60s (server cache 30s, balance changes slowly)
   setInterval(() => { loadCmBnbStatus().catch(() => {}); }, 60_000);
+
+  // FIX-2026-08-23: Master Config button (mirror bots.html) — bulk-edit many bots at once
+  const cmMasterBtn = document.getElementById('btn-cm-master-config');
+  if (cmMasterBtn) {
+    cmMasterBtn.addEventListener('click', () => {
+      if (window.masterConfigModal) window.masterConfigModal.openMasterConfigModal();
+      else console.warn('masterConfigModal not loaded — check /js/partials/masterConfigModal.js');
+    });
+  }
+  // When Master Config finishes a bulk-update, refresh chart-monitor bots list
+  //   so cards reflect new TP/auto-pause/etc. settings immediately.
+  window.addEventListener('bots:bulk-updated', () => {
+    loadBots().catch((e) => console.debug('chart-monitor master-config refresh:', e.message));
+  });
 
   // Positions refresh — 30s (cache uses klineCache; user-triggered fresh mode uses Binance bookTicker)
   // 2026-08-08: gated by Auto Refresh toggle (default OFF). WS trade:update still refreshes
@@ -174,8 +202,10 @@ async function init() {
 
 async function loadBots() {
   try {
-    // FIX-2026-08-02: ?expand=1 → include volatility, quality, trendline (full bot card snapshot)
-    const resp = await API.get('/api/bots?expand=1');
+    // FIX-2026-08-23: removed ?expand=1 — chart-monitor doesn't render volatility tiles.
+    //   Default /api/bots response already skips volatility snapshot (cheap path).
+    //   Saved: ~1-2s on cold cache (no Binance vol snapshot).
+    const resp = await API.get('/api/bots');
     _cmBots = resp.bots || [];
     renderSummary();
     renderGrid();
@@ -256,8 +286,8 @@ async function loadSignals() {
     _cmSignals = resp;
     _cmSignalMapByBot = new Map((resp.bots || []).map((b) => [String(b.botId), b]));
     renderLatestSignalsPanel();
-    // Re-render cards so highlight/prediction/blocked badges refresh
-    renderGrid();
+    // FIX-2026-08-23: debounce — coalesce with bot:status-driven renderGrid bursts
+    scheduleRenderGrid();
   } catch (err) {
     console.warn('chart-monitor /api/bots/chart-monitor/signals failed:', err);
     renderLatestSignalsPanel();
@@ -271,7 +301,10 @@ async function loadSignals() {
  * ════════════════════════════════════════════════════════════════════ */
 
 async function loadCmPositions(opts = {}) {
-  const url = opts.fresh ? '/api/bots/positions?fresh=1' : '/api/bots/positions';
+  // FIX-2026-08-23: append ?noPrediction=1 — chart-monitor PositionCard doesn't render
+  //   the AU prediction panel, so skip the heavy upper-KC pre-compute on the server.
+  //   Saves: 1 REST klines call per unique (symbol, tf) on cold cache + per-position compute.
+  const url = opts.fresh ? '/api/bots/positions?fresh=1&noPrediction=1' : '/api/bots/positions?noPrediction=1';
   const btn = document.getElementById('cm-positions-refresh');
   let prevLabel = null;
   if (opts.fresh && btn) {
@@ -1144,12 +1177,9 @@ function renderGrid() {
       _cmLazyObserver.observe(el);
     });
   } else {
-    // fallback: load all immediately
+    // fallback: IO unavailable — enqueue all (cap protects us from a spike)
     grid.querySelectorAll('.cm-minichart[data-bot-id]').forEach((el) => {
-      loadCmMiniChart(el.dataset.botId, el, el.dataset.symbol, el.dataset.timeframe).catch((err) => {
-        console.warn(`chart-monitor mini-chart ${el.dataset.botId}:`, err);
-        el.innerHTML = `<div class="cm-minichart-error">⚠️ โหลดไม่สำเร็จ</div>`;
-      });
+      _enqueueCmMiniChart(el.dataset.botId, el);
     });
   }
 }
@@ -1290,11 +1320,34 @@ function onCmLazyLoad(entries) {
     if (_cmLazyPending.has(botId)) {
       _cmLazyPending.delete(botId);
       _cmLazyObserver.unobserve(el);
-      loadCmMiniChart(botId, el, el.dataset.symbol, el.dataset.timeframe).catch((err) => {
+      _enqueueCmMiniChart(botId, el);
+    }
+  }
+}
+
+// FIX-2026-08-23: FIFO worker queue with concurrency cap.
+//   - At most _CM_MAX_CONCURRENT_CHARTS (3) mini-chart loads in-flight at once.
+//   - Cards still load in viewport order; off-screen cards wait their turn.
+//   - Prevents 50+ concurrent /api/bots/:id/mini-chart requests when user scrolls fast.
+function _enqueueCmMiniChart(botId, el) {
+  if (_cmChartInFlight.has(botId) || _cmChartQueue.some((q) => q.botId === botId)) return;
+  _cmChartQueue.push({ botId, el });
+  _drainCmChartQueue();
+}
+
+function _drainCmChartQueue() {
+  while (_cmChartInFlight.size < _CM_MAX_CONCURRENT_CHARTS && _cmChartQueue.length > 0) {
+    const { botId, el } = _cmChartQueue.shift();
+    _cmChartInFlight.add(botId);
+    loadCmMiniChart(botId, el, el.dataset.symbol, el.dataset.timeframe)
+      .catch((err) => {
         console.warn(`chart-monitor mini-chart ${botId}:`, err);
         el.innerHTML = `<div class="cm-minichart-error">⚠️ โหลดไม่สำเร็จ</div>`;
+      })
+      .finally(() => {
+        _cmChartInFlight.delete(botId);
+        _drainCmChartQueue();
       });
-    }
   }
 }
 
@@ -1411,6 +1464,18 @@ async function loadCmMiniChart(botId, el, symbol, timeframe) {
 
   // 2026-08-06: draw TP sell price lines for any active positions on this bot
   drawCmTpLinesForBot(botId);
+
+  // FIX-2026-08-23: skip 120s polling when there's nothing to refresh — saves N concurrent
+  //   /api/bots/:id/mini-chart calls every 2 minutes for bots with no S1/position activity.
+  //   - WS kline:update already keeps the live candle current (no polling needed for that)
+  //   - Polling only needed when markers or TP lines can change
+  const hasS1Markers = s1Markers.length > 0;
+  const hasPosition = (_cmPositionsByBot.get(String(botId)) || []).some((p) =>
+    p.symbol === symbol && Number.isFinite(Number(p.targetSellPrice)) && Number(p.targetSellPrice) > 0);
+  if (!hasS1Markers && !hasPosition) {
+    // Nothing to refresh — let WS handle live candle updates
+    return;
+  }
 
   // 120s poll for marker refresh + KC re-sync (matches bots.js)
   if (_cmRefreshTimers.has(botId)) clearInterval(_cmRefreshTimers.get(botId));
@@ -1563,14 +1628,26 @@ function bindCmWs() {
   });
 
   // When a bot's status changes (start/stop), refresh the grid to update pills
+  // FIX-2026-08-23: coalesce loadBots+loadSignals into a single debounced renderGrid
+  //   (both functions independently called renderGrid before → 2× full teardown per event)
   WSClient.on('bot:status', () => {
-    loadBots().catch((e) => console.debug('chart-monitor bot:status refresh:', e.message));
-    loadSignals().catch((e) => console.debug('chart-monitor signals refresh:', e.message));
+    Promise.all([
+      loadBots().catch((e) => console.debug('chart-monitor bot:status refresh:', e.message)),
+      loadSignals().catch((e) => console.debug('chart-monitor signals refresh:', e.message)),
+    ]).then(() => scheduleRenderGrid());
   });
-  WSClient.on('trade:update', () => {
-    // re-fetch every bot's chart to get fresh markers (cheap, ~120s poll already exists)
-    for (const botId of _cmMiniCharts.keys()) {
-      refreshCmMiniChart(botId).catch((e) => console.debug(`chart-monitor trade:update ${botId}:`, e.message));
+  WSClient.on('trade:update', (p) => {
+    // FIX-2026-08-23: refresh only the affected bot's chart, not all of them.
+    //   trade:update payload includes botId (confirmed in src/core/botManager.js:678,
+    //   src/core/forceClose.js:438, etc.) — fallback to "refresh all" if botId is absent.
+    const targetBotId = p && p.botId ? String(p.botId) : null;
+    if (targetBotId && _cmMiniCharts.has(targetBotId)) {
+      refreshCmMiniChart(targetBotId).catch((e) => console.debug(`chart-monitor trade:update ${targetBotId}:`, e.message));
+    } else if (!targetBotId) {
+      // Legacy event without botId — refresh all (safe fallback)
+      for (const botId of _cmMiniCharts.keys()) {
+        refreshCmMiniChart(botId).catch((e) => console.debug(`chart-monitor trade:update ${botId}:`, e.message));
+      }
     }
     // 2026-08-06: positions panel also reacts to trade updates (BUY/SELL fired)
     loadCmPositions().catch((e) => console.debug('chart-monitor positions trade:update:', e.message));

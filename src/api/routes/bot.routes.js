@@ -18,7 +18,6 @@ const fees = require('../../binance/fees');
 const tpUpdater = require('../../core/tpUpdater'); // FIX-2026-07-28: applyMinNetTpFloor (single source of truth)
 const volatilityForBot = require('../../core/volatilityForBot'); // 2026-07-31: per-bot volatility snapshot (KC + TP + 24h vol)
 const trendlineForBot = require('../../core/trendlineForBot'); // FIX-2026-08-03: Safe-trade #2 (trendline) live status for bot card badge
-const qualityIndicator = require('../../core/qualityIndicator'); // FIX-2026-08-01: Bot Quality Indicator (0-4 score)
 const prediction = require('../../core/prediction'); // FIX-2026-08-05: upper-KC + predicted loss for AU prediction panel
 const dps = require('../../core/dynamicPositionSizing'); // FIX-2026-08-08 (rev2): DPS state reset helper
 const tradeStats = require('../../core/tradeStats'); // FIX-2026-08-20: aggregate today/month/all-time per bot (extracted for testability)
@@ -162,12 +161,10 @@ router.get('/symbols', requireAuth, async (req, res) => {
 // ─── GET /api/bots ────────────────────────────────────
 router.get('/', requireAuth, async (req, res) => {
   try {
-    // FIX-2026-08-02: ?expand=1 → include volatility snapshot (1.5s) + quality (5s on cold cache)
-    //   - default: skip BOTH — compact mode hides the tiles anyway, quality pill shows "—" until warm
+    // FIX-2026-08-02: ?expand=1 → include volatility snapshot (1.5s)
+    //   - default: skip — compact mode hides the tiles anyway
     //   - expand mode (user clicks "Expand") → re-fetch with ?expand=1 to populate tiles
-    //   - background fetch: /api/bots?quality=1 to warm quality cache without blocking first paint
     const includeVolatility = req.query.expand === '1';
-    const includeQuality = req.query.quality === '1' || req.query.expand === '1';
     // FIX-2026-08-08: Feature #5 — exclude soft-deleted bots by default; ?includeDeleted=1 to show them
     const includeDeleted = req.query.includeDeleted === '1';
     // FIX-2026-07-24: เรียง enabled ก่อน (true=1 มาก่อน false=0) → บอทที่เปิดอยู่ลอยขึ้นบนสุดอัตโนมัติ
@@ -197,26 +194,15 @@ router.get('/', requireAuth, async (req, res) => {
       rawSuggestedTpPct: null, feeBufferPct: null,
       quoteVolume24h: null, quoteVolume24hDisplay: null,
     };
-    const EMPTY_QUALITY = { enabled: true, score: null, color: 'gray', updatedAt: null, cached: true };
     const deletedCount = bots.filter((b) => b.deletedAt).length;
     if (deletedCount > 0) {
-      logger.info({ deletedCount, totalBots: bots.length }, 'bots: skipped vol/quality enrichment for soft-deleted bots');
+      logger.info({ deletedCount, totalBots: bots.length }, 'bots: skipped vol enrichment for soft-deleted bots');
     }
     const volSnapshots = includeVolatility
       ? await volatilityForBot.mapWithConcurrency(bots, 6, (b) =>
           b.deletedAt ? Promise.resolve(EMPTY_VOL) : volatilityForBot.computeBotVolatilitySnapshot(b)
         )
       : bots.map(() => EMPTY_VOL);
-    // FIX-2026-08-01: Bot Quality Indicator — 0-4 score per bot (shared top-N + per-bot cache)
-    // FIX-2026-08-02: skip on cold default load (5s) — cache warm = 0ms anyway
-    //   - cached values still returned (server reads perBotCache before returning)
-    //   - explicit ?quality=1 forces full compute
-    //   - FIX-2026-08-22 (perf): same soft-deleted skip as volSnapshots — saves 2 × getKlines per deleted bot
-    const qualitySnaps = includeQuality
-      ? await volatilityForBot.mapWithConcurrency(bots, 6, (b) =>
-          b.deletedAt ? Promise.resolve(EMPTY_QUALITY) : qualityIndicator.computeBotQuality(b)
-        )
-      : bots.map((b) => (b.deletedAt ? EMPTY_QUALITY : (qualityIndicator.getCachedOnly(b) || {})));
     // FIX-2026-08-03: Safe-trade #2 (trendline) — read in-memory status cache populated by botManager
     //   - ไม่เรียก Binance ที่นี่ (พึ่ง botManager's 60s scan) — เพื่อ /api/bots response time คงที่
     //   - ถ้าบอทปิด filter → status=null (UI แสดง "off")
@@ -228,7 +214,6 @@ router.get('/', requireAuth, async (req, res) => {
       const m = monthMap.get(String(b._id)) || { monthTrades: 0, monthPnl: 0 };
       const indicator = computeBotIndicator(b);
       const vol = volSnapshots[idx] || {};
-      const q = qualitySnaps[idx] || {};
       // FIX-2026-08-03: trendline status — null when filter OFF, null when not yet scanned
       const tlEnabled = b.safeTradeTrendlineEnabled === true;
       const tl = tlEnabled ? trendlineStatusMap[String(b._id)] : null;
@@ -262,12 +247,6 @@ router.get('/', requireAuth, async (req, res) => {
         volError: vol.error || null,
         volCached: !!vol.cached,
         volMs: vol.ms ?? null,
-        // FIX-2026-08-01: Bot Quality Indicator flat fields (mirror vol* pattern)
-        qualityScore: q.score ?? null,
-        qualityColor: q.color || 'gray',
-        qualityUpdatedAt: q.updatedAt || null,
-        qualityCached: !!q.cached,
-        qualityEnabled: q.enabled !== false,
         // FIX-2026-08-03: Safe-trade filter #2 (trendline) — live badge fields
         //   - tlEnabled: ค่าจากบอท (bot.safeTradeTrendlineEnabled)
         //   - tlStatus: 'pass' | 'blocked' | 'warmup' | 'insufficient_data' | 'api_error' | 'no_trend_tf' | null (when disabled or not yet scanned)
@@ -420,6 +399,13 @@ router.get('/positions', requireAuth, async (req, res) => {
     //   - dedupe by symbol → 1 Binance call ต่อ symbol ไม่ใช่ต่อ position
     //   - เก็บ fresh price ใน Map<symbol, midPrice> แล้วใช้แทน klineCache snapshot
     const freshMode = req.query.fresh === '1' || req.query.fresh === 'true';
+    // FIX-2026-08-23: ?noPrediction=1 — skip upper-KC prediction computation
+    //   - Chart Monitor page renders PositionCard without the AU prediction panel,
+    //     so the heavy computeUpperKCPrices + computePredictionForTrade work is wasted.
+    //   - Saves: 1 klines REST per unique (symbol, tf) on cold cache + per-position compute.
+    //   - Response fields (upperKC, predictedSellPrice, predictedLossUsdt, ...) become null.
+    //   - Default behavior unchanged for bots.html (which DOES use the prediction panel).
+    const skipPrediction = req.query.noPrediction === '1';
     let freshPriceMap = null;
     if (freshMode) {
       freshPriceMap = new Map();
@@ -503,29 +489,33 @@ router.get('/positions', requireAuth, async (req, res) => {
     // FIX-2026-08-05: pre-compute upper-KC for each unique (symbol, timeframe) pair
     //   - primary: zero Binance weight (klineCache in-memory)
     //   - fallback: REST getKlines when klineCache warmup (e.g. disabled bot / no trader running) — 1 call per unique pair
-    const uniqueKCItems = [];
-    const seenKCKeys = new Set();
-    for (const t of validTrades) {
-      const bot = botMap.get(String(t.botId));
-      if (!bot) continue;
-      const k = prediction.makeKey(t.symbol, t.timeframe);
-      if (seenKCKeys.has(k)) continue;
-      seenKCKeys.add(k);
-      uniqueKCItems.push({ symbol: t.symbol, timeframe: t.timeframe, kcMult: bot.kcMult });
-    }
-    const upperKCMap = await prediction.computeUpperKCPrices(uniqueKCItems, { restFallback: true });
-
-    // OPTIONAL: USDT→THB rate for predicted loss display (graceful fallback if not available)
+    // FIX-2026-08-23: skip prediction entirely when ?noPrediction=1 (Chart Monitor optimization)
+    let upperKCMap = new Map();
     let usdtToThbRate = null;
-    try {
-      const fxMod = require('../../services/fxService');
-      if (fxMod && typeof fxMod.getUsdtToThb === 'function') {
-        const rate = await fxMod.getUsdtToThb().catch(() => null);
-        if (typeof rate === 'number' && Number.isFinite(rate) && rate > 0) {
-          usdtToThbRate = rate;
-        }
+    if (!skipPrediction) {
+      const uniqueKCItems = [];
+      const seenKCKeys = new Set();
+      for (const t of validTrades) {
+        const bot = botMap.get(String(t.botId));
+        if (!bot) continue;
+        const k = prediction.makeKey(t.symbol, t.timeframe);
+        if (seenKCKeys.has(k)) continue;
+        seenKCKeys.add(k);
+        uniqueKCItems.push({ symbol: t.symbol, timeframe: t.timeframe, kcMult: bot.kcMult });
       }
-    } catch (_) { /* ignore — service may not exist */ }
+      upperKCMap = await prediction.computeUpperKCPrices(uniqueKCItems, { restFallback: true });
+
+      // OPTIONAL: USDT→THB rate for predicted loss display (graceful fallback if not available)
+      try {
+        const fxMod = require('../../services/fxService');
+        if (fxMod && typeof fxMod.getUsdtToThb === 'function') {
+          const rate = await fxMod.getUsdtToThb().catch(() => null);
+          if (typeof rate === 'number' && Number.isFinite(rate) && rate > 0) {
+            usdtToThbRate = rate;
+          }
+        }
+      } catch (_) { /* ignore — service may not exist */ }
+    }
 
     // FIX-2026-08-03: fetch fresh bookTicker per unique symbol (Promise.all — parallel)
     //   - ใช้ midPrice = (bidPrice + askPrice) / 2 (bookTicker ไม่มี lastPrice)
@@ -591,9 +581,14 @@ router.get('/positions', requireAuth, async (req, res) => {
       // FIX-2026-08-05: upper-KC prediction — ใช้แสดงใน AU prediction panel (position card)
       //   - zero Binance weight (อ่านจาก klineCache in-memory)
       //   - DCA stacks: refPrice = stackBep, qty = stackTotalQty (handled in computePredictionForTrade)
-      const upperKCKey = prediction.makeKey(t.symbol, t.timeframe);
-      const upperKCInfo = upperKCMap.get(upperKCKey);
-      const pred = prediction.computePredictionForTrade(t, upperKCInfo, usdtToThbRate);
+      // FIX-2026-08-23: skip entirely when ?noPrediction=1 (Chart Monitor doesn't render AU panel)
+      let pred = null;
+      let upperKCInfo = null;
+      if (!skipPrediction) {
+        const upperKCKey = prediction.makeKey(t.symbol, t.timeframe);
+        upperKCInfo = upperKCMap.get(upperKCKey);
+        pred = prediction.computePredictionForTrade(t, upperKCInfo, usdtToThbRate);
+      }
 
       return {
         tradeId: String(t._id),
@@ -995,13 +990,6 @@ router.get('/:id', requireAuth, async (req, res) => {
     const bot = await Bot.findById(req.params.id).lean();
     if (!bot) return res.status(404).json({ error: 'Bot not found' });
     const indicator = computeBotIndicator(bot);
-    // FIX-2026-08-01: enrich with Bot Quality Indicator fields (mirror vol* pattern)
-    let q = {};
-    try {
-      q = await qualityIndicator.computeBotQuality(bot);
-    } catch (qErr) {
-      logger.warn({ botId: String(bot._id), err: qErr.message }, 'bot: qualityIndicator.computeBotQuality failed (non-fatal)');
-    }
     res.json({
       bot: {
         ...bot,
@@ -1015,12 +1003,6 @@ router.get('/:id', requireAuth, async (req, res) => {
         emaGapPct: indicator.emaGapPct,
         emaState: indicator.emaState,
         emaCloses: indicator.closes,
-        // FIX-2026-08-01: Bot Quality Indicator flat fields
-        qualityScore: q.score ?? null,
-        qualityColor: q.color || 'gray',
-        qualityUpdatedAt: q.updatedAt || null,
-        qualityCached: !!q.cached,
-        qualityEnabled: q.enabled !== false,
         // FIX-2026-08-06: delist risk fields (mirror /api/bots list)
         ...(() => {
           try {
@@ -1040,34 +1022,6 @@ router.get('/:id', requireAuth, async (req, res) => {
       },
     });
   } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// ─── GET /api/bots/:id/quality ────────────────────────
-// FIX-2026-08-01: full breakdown for the Quality Indicator modal
-//   - 4 criteria details (value + threshold + pass + extras)
-//   - works even when enabled=false (returns enabled:false, breakdown:null)
-//   - ไม่ผ่าน per-bot cache (modal ต้องการข้อมูลสด — bypass TTL by using computeBotQuality)
-//     (computeBotQuality เองใช้ cache 5min; modal เปิดเร็วๆนี้จะได้ cache hit ตามธรรมชาติ)
-router.get('/:id/quality', requireAuth, async (req, res) => {
-  try {
-    const bot = await Bot.findById(req.params.id).lean();
-    if (!bot) return res.status(404).json({ error: 'Bot not found' });
-    const q = await qualityIndicator.computeBotQuality(bot);
-    res.json({
-      botId: String(bot._id),
-      symbol: bot.symbol,
-      timeframe: bot.timeframe,
-      enabled: q.enabled,
-      score: q.score,
-      color: q.color,
-      updatedAt: q.updatedAt,
-      cached: q.cached,
-      breakdown: q.breakdown || null,
-    });
-  } catch (err) {
-    logger.error({ err: err.message }, 'GET /api/bots/:id/quality failed');
     res.status(500).json({ error: err.message });
   }
 });
@@ -1366,15 +1320,6 @@ router.put('/:id', requireAuth, async (req, res) => {
       try {
         trendlineForBot.invalidate(bot.symbol, bot.timeframe);
         botManager.invalidateTrendlineCache(bot.symbol, bot.timeframe);
-      } catch (_) { /* non-fatal */ }
-    }
-
-    // FIX-2026-08-01: invalidate per-bot Quality Indicator cache เมื่อ timeframe เปลี่ยน
-    //   - kcMult / s1OnlyDown / xs1Enabled / cbEnabled changes ก็ควร recompute — แต่ใช้ key เดิม (symbol+tf)
-    //     ดังนั้น invalidate แค่ครั้งเดียวตอน PUT พอ (next compute จะอ่าน bot.kcMult ใหม่)
-    if (data.timeframe !== undefined || data.kcMult !== undefined) {
-      try {
-        qualityIndicator.invalidate(bot.symbol, bot.timeframe);
       } catch (_) { /* non-fatal */ }
     }
 
@@ -2278,7 +2223,6 @@ router.post('/bulk-update', requireAuth, async (req, res) => {
         const b = await Bot.findById(id).lean();
         if (b) {
           volatilityForBot.invalidate(b.symbol, b.timeframe);
-          qualityIndicator.invalidate(b.symbol, b.timeframe);
         }
       } catch (_) {}
     }
@@ -2362,7 +2306,6 @@ router.post('/bulk-toggle', requireAuth, requireBotActionPassword, async (req, r
           const b = await Bot.findById(r.botId).lean();
           if (b) {
             volatilityForBot.invalidate(b.symbol, b.timeframe);
-            qualityIndicator.invalidate(b.symbol, b.timeframe);
             // FIX-2026-08-03: invalidate Safe-trade #2 (trendline) cache after TF change
             try {
               trendlineForBot.invalidate(b.symbol, b.timeframe);
@@ -2450,8 +2393,3 @@ router.post('/bulk-restore', requireAuth, requireBotActionPassword, async (req, 
 });
 
 module.exports = router;
-
-// FIX-2026-08-01: start Bot Quality Indicator refresh loop at module load
-//   - เรียก init() ตอน Express require ไฟล์นี้ (=ตอน server start)
-//   - refreshMs/qualityEnabled/thresholds มาจาก AppConfig (reload-able via PUT /config)
-qualityIndicator.init().catch((err) => logger.error({ err: err.message }, 'qualityIndicator.init failed at startup'));

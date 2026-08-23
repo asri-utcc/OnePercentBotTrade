@@ -92,19 +92,19 @@
   function ensureSkeleton() {
     if (overlay) return overlay;
     overlay = document.createElement('div');
-    overlay.className = 'quality-modal-overlay';
+    overlay.className = 'master-config-modal-overlay';
     overlay.innerHTML = `
-      <div class="quality-modal-card" style="max-width:880px;">
-        <div class="quality-modal-header">
+      <div class="master-config-modal-card" style="max-width:880px;">
+        <div class="master-config-modal-header">
           <h5 id="mc-title">⚙️ Master Config — ตั้งค่าหลายบอทพร้อมกัน</h5>
-          <button type="button" class="quality-modal-close" aria-label="ปิด">✕</button>
+          <button type="button" class="master-config-modal-close" aria-label="ปิด">✕</button>
         </div>
-        <div class="quality-modal-body" id="mc-body">
+        <div class="master-config-modal-body" id="mc-body">
           <div class="text-muted-3 text-center py-3">กำลังโหลด…</div>
         </div>
       </div>`;
     document.body.appendChild(overlay);
-    overlay.querySelector('.quality-modal-close').addEventListener('click', close);
+    overlay.querySelector('.master-config-modal-close').addEventListener('click', close);
     overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
     document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && overlay.classList.contains('is-open')) close(); });
     return overlay;

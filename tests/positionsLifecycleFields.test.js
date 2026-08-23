@@ -33,11 +33,6 @@ jest.mock('../src/core/volatilityForBot', () => ({
   mapWithConcurrency: jest.fn(async (arr) => arr.map(() => ({}))),
   computeBotVolatilitySnapshot: jest.fn(),
 }));
-jest.mock('../src/core/qualityIndicator', () => ({
-  computeBotsQuality: jest.fn(async () => []),
-  getCachedOnly: jest.fn(() => ({})),
-  init: jest.fn(() => Promise.resolve()),
-}));
 jest.mock('../src/core/tradeStats', () => ({
   aggregateTodayPerBot: jest.fn(async () => new Map()),
   aggregateMonthPerBot: jest.fn(async () => new Map()),

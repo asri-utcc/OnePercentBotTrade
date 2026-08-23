@@ -68,6 +68,17 @@ let trendlineScanTimer = null;
 //   - cleared on bot delete; invalidated when timeframe changes (see botUpdate handler)
 const _trendlineStatusCache = new Map();
 
+// FIX-2026-08-22 (weight spike fix): stagger bot spawns on PM2 restart
+//   - เดิม: start() วน for-loop โหลดบอท enabled=true ทั้งหมดแล้ว spawnTrader ทีละตัวติดกัน
+//   - แต่ละ spawnTrader ทำ exchangeInfo(20) + seedKlines(5-10) + marketWs.subscribeMarket(~klines WS warm-up)
+//   - กับ ~50 บอท: ~30 weight ต่อบอท × 50 = ~1500 weight ใน 5-15 วินาทีแรก
+//   - รวมกับ subsystem periodic timers (healthMonitor/autoBnbBuyer/delistMonitor/walletSnapshot)
+//     → IP weight > 6000/min → 418 ban → PM2 restart loop → ตาย
+//   - fix: SPAWN_STAGGER_MS delay ระหว่างบอท กระจาย API calls ให้เฉลี่ย ~70/วินาที (ใต้ refill 100/s)
+//   - 50 บอท × 300ms = 15s spread; พอเยียวยาโดยไม่ทำให้ startup ช้าเกินไป
+const SPAWN_STAGGER_MS = 300;
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
 /**
  * Bot Manager — spawn/stop Trader ต่อ bot, จัดการ WS subscriptions
  * + seed klineCache ด้วย historical data ตอนเริ่ม
@@ -90,6 +101,11 @@ class BotManager {
     this.running = true;
     logger.info('botManager start');
 
+    // FIX-2026-08-22 (weight spike): subsystem timer jitter — de-align periodic ticks
+    //   - เดิม 4 setInterval เริ่ม t=0 → ทุก tick จะ aligned burst เมื่อถึงเวลา (5min, 2min, 60s)
+    //   - ±10% jitter: 5min→4.5-5.5min, 60s→54-66s, 2min→1.8-2.2min → ticks กระจายตัว
+    const _jitter = (base, pct = 0.1) => Math.round(base * (1 + (Math.random() * 2 - 1) * pct));
+
     // Start market WS
     marketWs.start();
 
@@ -98,7 +114,9 @@ class BotManager {
 
     // Load all enabled bots
     const bots = await Bot.find({ enabled: true });
-    for (const bot of bots) {
+    logger.info({ count: bots.length, staggerMs: SPAWN_STAGGER_MS }, 'botManager: spawning traders (staggered)');
+    for (let i = 0; i < bots.length; i++) {
+      const bot = bots[i];
       try {
         // FIX 2026-08-06 (BANK incident): reset stale cursor on PM2 restart too
         //   - enableBot() + auto-resume มี guard นี้แล้ว แต่ start() (โหลดบอทตอน process boot) ไม่มี
@@ -109,6 +127,12 @@ class BotManager {
         await this.spawnTrader(bot);
       } catch (err) {
         logger.error({ err: err.message, botId: bot._id.toString() }, 'botManager: spawn failed');
+      }
+      // FIX-2026-08-22 (weight spike): stagger between spawns ลด burst บน Binance
+      //   - sleep หลังทุกบอท ยกเว้นตัวสุดท้าย (ไม่ต้องรอหลังงานจบ)
+      //   - skip on first bot too (delay applies AFTER spawn, so first bot runs immediately)
+      if (i < bots.length - 1) {
+        await sleep(SPAWN_STAGGER_MS);
       }
     }
 
@@ -124,14 +148,15 @@ class BotManager {
     //   - clearInterval ตอน stop()
     //   - guard reconcileInFlight กัน overlap กรณี reconcile นาน (เช่น reconcile 50 trades)
     if (this.reconcileTimer) clearInterval(this.reconcileTimer);
+    const reconcileIntervalMs = _jitter(RECONCILE_INTERVAL_MS);
     this.reconcileTimer = setInterval(() => {
       if (!this.running || this.reconcileInFlight) return;
       this.reconcileInFlight = true;
       this.reconcilePendingTrades()
         .catch((err) => logger.error({ err: err.message }, 'botManager: periodic reconcile failed'))
         .finally(() => { this.reconcileInFlight = false; });
-    }, RECONCILE_INTERVAL_MS);
-    logger.info({ intervalMs: RECONCILE_INTERVAL_MS }, 'botManager: periodic reconcile scheduled');
+    }, reconcileIntervalMs);
+    logger.info({ intervalMs: reconcileIntervalMs, baseMs: RECONCILE_INTERVAL_MS }, 'botManager: periodic reconcile scheduled');
 
     // FIX-2026-07-23: schedule TP auto-updater (recompute TP% top-of-hour สำหรับบอทที่ autoUpdateTp=true)
     tpUpdater.scheduleHourlyTpUpdate();
@@ -140,24 +165,26 @@ class BotManager {
     // FIX-2026-08-06 (BANK incident): bind this → BotManager instance
     //   - checkAutoPauseBots เป็น standalone function (declared outside class) ที่ใช้ this.traders / this._resetStaleReplayCursorOnEnable / this.spawnTrader
     //   - ถ้าเรียกเป็น free function `this` = undefined (strict mode) → auto-resume crash ทุกครั้งที่ cursor > 30 min
+    const autoPauseIntervalMs = _jitter(AUTO_PAUSE_INTERVAL_MS);
     autoPauseTimer = setInterval(() => {
       checkAutoPauseBots.call(this).catch((err) => logger.warn({ err: err.message }, 'botManager: auto-pause tick failed'));
-    }, AUTO_PAUSE_INTERVAL_MS);
+    }, autoPauseIntervalMs);
     if (autoPauseTimer && typeof autoPauseTimer.unref === 'function') autoPauseTimer.unref();
-    logger.info({ intervalMs: AUTO_PAUSE_INTERVAL_MS }, 'botManager: auto-pause scanner scheduled');
+    logger.info({ intervalMs: autoPauseIntervalMs, baseMs: AUTO_PAUSE_INTERVAL_MS }, 'botManager: auto-pause scanner scheduled');
 
     // FIX-2026-08-03: Safe-trade #2 (trendline) live status scanner
     //   - ทุก 60s scan บอทที่ safeTradeTrendlineEnabled=true → populate _trendlineStatusCache
     //   - UI bot card badge reads from this cache via /api/bots response (sl fields)
     //   - immediate first scan (non-blocking) so badge shows on page load
+    const trendlineIntervalMs = _jitter(TRENDLINE_SCAN_INTERVAL_MS);
     trendlineScanTimer = setInterval(() => {
       checkTrendlineStatusBots().catch((err) => logger.warn({ err: err.message }, 'botManager: trendline status tick failed'));
-    }, TRENDLINE_SCAN_INTERVAL_MS);
+    }, trendlineIntervalMs);
     if (trendlineScanTimer && typeof trendlineScanTimer.unref === 'function') trendlineScanTimer.unref();
     setImmediate(() => {
       checkTrendlineStatusBots().catch((err) => logger.warn({ err: err.message }, 'botManager: trendline status initial scan failed'));
     });
-    logger.info({ intervalMs: TRENDLINE_SCAN_INTERVAL_MS }, 'botManager: trendline status scanner scheduled');
+    logger.info({ intervalMs: trendlineIntervalMs, baseMs: TRENDLINE_SCAN_INTERVAL_MS }, 'botManager: trendline status scanner scheduled');
 
     // FIX-2026-08-06: delist scheduler — auto-pause + force-close บอทที่อยู่ใน delist schedule
     //   - tick ทุก 5 นาที: scan delistMonitor.getScheduledSymbols() → บอทที่ trade symbol นั้น:
@@ -165,11 +192,12 @@ class BotManager {
     //     * auto-pause (set enabled=false) ถ้า daysUntil <= 7
     //   - botManager scheduler handles BOTH enabled และ disabled bots (force-close ต้องทำแม้บอทปิด)
     //   - emit telegram event (delistMonitor:scheduled ที่ telegramNotifier bind แล้ว)
+    const delistIntervalMs = _jitter(DELIST_SCHEDULE_INTERVAL_MS);
     delistSchedulerTimer = setInterval(() => {
       checkDelistScheduleBots.call(this).catch((err) => logger.warn({ err: err.message }, 'botManager: delist scheduler tick failed'));
-    }, DELIST_SCHEDULE_INTERVAL_MS);
+    }, delistIntervalMs);
     if (delistSchedulerTimer && typeof delistSchedulerTimer.unref === 'function') delistSchedulerTimer.unref();
-    logger.info({ intervalMs: DELIST_SCHEDULE_INTERVAL_MS }, 'botManager: delist scheduler scheduled');
+    logger.info({ intervalMs: delistIntervalMs, baseMs: DELIST_SCHEDULE_INTERVAL_MS }, 'botManager: delist scheduler scheduled');
 
     // FIX-2026-07-24: start Telegram notifier (subscribe eventBus + periodic PnL scan)
     const telegramNotifier = require('../services/telegramNotifier');
@@ -1042,7 +1070,7 @@ async function checkAutoPauseBots() {
   const now = new Date();
 
   // FIX-2026-08-10: bulk fetch 24h tickers (weight 80 once/tick) → build symbol→quoteVolume Map
-  //   - pattern mirrors volatilityScanner.js:227 + qualityIndicator.js:103
+  //   - pattern mirrors volatilityScanner.js:227
   //   - on failure: volMap stays empty → per-bot lookup returns 0 → all bots evaluate as "low 24h vol"
   //     (safer to pause than to miss illiquid coins)
   const volMap = new Map();

@@ -146,7 +146,7 @@ public/                # Frontend dashboard (plain HTML/JS)
 
 ### Where to look
 
-- **Bot card** → 📚 DCA/N badge next to quality pill
+- **Bot card** → 📚 DCA/N badge next to bot name
 - **Bot detail** → DCA Stack card (BEP, total qty, per-layer table, ❄️ Frozen pill if SELL partial-fill)
 - **History** → 📚 L{n} badge on Symbol column + BEP hint under Price
 - **PnL modal** → DCA stack rows with layer count + BEP as Entry

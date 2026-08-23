@@ -28,6 +28,8 @@ const binanceRest = require('../../binance/binanceRest');
 const fxService = require('../../services/fxService');
 const walletReserve = require('../../services/walletReserve');
 const AppConfig = require('../../db/models/AppConfig');
+const Trade = require('../../db/models/Trade');
+const WalletSnapshot = require('../../db/models/WalletSnapshot');
 const config = require('../../../config');
 const logger = require('../../utils/logger');
 const { requireAuth } = require('../middleware/auth');
@@ -275,6 +277,173 @@ router.put('/reserve', requireAuth, requireBotActionPassword, async (req, res) =
     });
   } catch (err) {
     logger.error({ err: err.message }, 'wallet: reserve PUT failed');
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── Time-range helpers (chart query params) ───────────────────────────────
+// FIX-2026-08-22: store entries UPPERCASE — range param is uppercased before lookup,
+//   so 'all' from frontend becomes 'ALL' which matches the Set. (Pre-fix stored
+//   'all' lowercase → Set.has('ALL') = false → 400 even though rangeToMs handled it.)
+// FIX-2026-08-22 (later): added 90D + 180D — long-term trend view (PnL chart + portfolio).
+const ALLOWED_RANGES = new Set(['1D', '3D', '7D', '30D', '90D', '180D', '1Y', 'ALL']);
+
+function rangeToMs(range) {
+  // returns ms offset from now; null = no lower bound (all)
+  switch (String(range || '').toUpperCase()) {
+    case '1D': return 24 * 60 * 60_000;
+    case '3D': return 3 * 24 * 60 * 60_000;
+    case '7D': return 7 * 24 * 60 * 60_000;
+    case '30D': return 30 * 24 * 60 * 60_000;
+    case '90D': return 90 * 24 * 60 * 60_000;
+    case '180D': return 180 * 24 * 60 * 60_000;
+    case '1Y': return 365 * 24 * 60 * 60_000;
+    case 'ALL': return null;
+    default: return null;
+  }
+}
+
+// ─── GET /api/wallet/portfolio-history ─────────────────────────────────────
+// FIX-2026-08-22: time-series of wallet snapshot values (USDT or THB) for chart 1
+//   - Query: ?range=1D|3D|7D|30D|1Y|all (default 30D)
+//   - Source: WalletSnapshot collection (1 doc/day at 00:01 BKK)
+//   - Returns: { range, points: [{time: unixSec, value: number, totalThb?, fxRate?}], count }
+//   - Always appends a "live now" point at the end (today's current wallet) so chart is fresh
+router.get('/portfolio-history', requireAuth, async (req, res) => {
+  try {
+    const range = String(req.query.range || '30D').toUpperCase();
+    if (!ALLOWED_RANGES.has(range)) {
+      return res.status(400).json({ error: `range must be one of ${[...ALLOWED_RANGES].join(',')}` });
+    }
+    const offsetMs = rangeToMs(range);
+    const since = offsetMs == null ? null : new Date(Date.now() - offsetMs);
+
+    // Fetch snapshots ordered ascending
+    const query = since ? { snapshotAt: { $gte: since } } : {};
+    const rows = await WalletSnapshot.find(query)
+      .sort({ snapshotAt: 1 })
+      .lean();
+
+    const points = rows.map((r) => ({
+      time: Math.floor(new Date(r.snapshotAt).getTime() / 1000),
+      totalUsdt: Number(r.totalUsdt) || 0,
+      totalThb: r.totalThb != null ? Number(r.totalThb) : null,
+      coinCount: r.coinCount || 0,
+      fxRate: r.fxRate != null ? Number(r.fxRate) : null,
+    }));
+
+    // Append live point: today's current portfolio value (so chart shows up-to-date)
+    // Only if last snapshot is older than ~6h (avoid duplication when scheduler just ran)
+    let livePoint = null;
+    try {
+      const last = rows.length ? new Date(rows[rows.length - 1].snapshotAt).getTime() : 0;
+      if (Date.now() - last > 6 * 60 * 60_000) {
+        const walletSnapshotSvc = require('../../services/walletSnapshot');
+        const live = await walletSnapshotSvc.snapshotWallet();
+        livePoint = {
+          time: Math.floor(Date.now() / 1000),
+          totalUsdt: live.totalUsdt,
+          totalThb: live.totalThb,
+          coinCount: live.coinCount,
+          fxRate: live.fxRate,
+          isLive: true,
+        };
+      }
+    } catch (liveErr) {
+      logger.warn({ err: liveErr.message }, 'wallet: portfolio-history live point skipped (non-fatal)');
+    }
+
+    res.json({
+      range,
+      points,
+      livePoint,
+      count: points.length + (livePoint ? 1 : 0),
+      ts: Date.now(),
+    });
+  } catch (err) {
+    logger.error({ err: err.message }, 'wallet: portfolio-history failed');
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── GET /api/wallet/pnl-series ───────────────────────────────────────────
+// FIX-2026-08-22: cumulative USDT PnL time-series for chart 2
+//   - Query: ?range=1D|3D|7D|30D|1Y|all (default 30D) — same convention as portfolio-history
+//   - Source: Trade.realizedPnl aggregation (1 point per SELL fill)
+//   - Returns: { range, points: [{time: unixSec, pnlUsdt, cumPnlUsdt, trades}], count, totalPnl, ... }
+//   - Cumulative sum computed server-side (avoid sending 10k+ trades to client)
+//   - Always appends a "live now" point equal to current cumulative (so chart shows fresh)
+router.get('/pnl-series', requireAuth, async (req, res) => {
+  try {
+    const range = String(req.query.range || '30D').toUpperCase();
+    if (!ALLOWED_RANGES.has(range)) {
+      return res.status(400).json({ error: `range must be one of ${[...ALLOWED_RANGES].join(',')}` });
+    }
+    const offsetMs = rangeToMs(range);
+    const since = offsetMs == null ? null : new Date(Date.now() - offsetMs);
+
+    const match = { realizedPnl: { $ne: null }, sellFilledAt: { $ne: null } };
+    if (since) match.sellFilledAt.$gte = since;
+
+    // Aggregate: each trade = 1 point (sorted asc by sellFilledAt)
+    // FIX-2026-08-22: removed broken `$toLong`/`$dateToString` projection — the `time` field
+    //   was never used in the route (we convert sellFilledAt → unix-seconds in JS below).
+    //   $dateToString produced strings like "2026-08-22T01:46:45.123Z" with literal T/Z, then
+    //   $toLong tried to parse them as numbers and threw "Failed to parse number" — the
+    //   entire aggregation failed → route returned 500 → chart rendered empty even with 1800+
+    //   sold trades in DB. Just project sellFilledAt + realizedPnl directly.
+    const trades = await Trade.aggregate([
+      { $match: match },
+      {
+        $project: {
+          sellFilledAt: 1,
+          pnlUsdt: { $ifNull: ['$realizedPnl', 0] },
+        },
+      },
+      { $sort: { sellFilledAt: 1 } },
+      { $limit: 50000 }, // safety cap
+    ]);
+
+    // Build cumulative series (server-side — avoid sending 50k points to client unaggregated)
+    let cum = 0;
+    const points = [];
+    let wins = 0;
+    let losses = 0;
+    for (const t of trades) {
+      cum += Number(t.pnlUsdt) || 0;
+      if (Number(t.pnlUsdt) > 0) wins++;
+      else if (Number(t.pnlUsdt) < 0) losses++;
+      points.push({
+        time: Math.floor(new Date(t.sellFilledAt).getTime() / 1000),
+        pnlUsdt: Number(Number(t.pnlUsdt).toFixed(6)),
+        cumPnlUsdt: Number(cum.toFixed(6)),
+      });
+    }
+
+    // Compute range-relative totals
+    const totalPnlUsdt = cum;
+    const winRate = points.length > 0 ? (wins / points.length) * 100 : 0;
+
+    // For 'all' range also include a leading 0-point (so chart starts at zero baseline)
+    let baselinePoint = null;
+    if (points.length > 0) {
+      // pick earliest point's time
+      baselinePoint = { time: points[0].time, pnlUsdt: 0, cumPnlUsdt: 0 };
+    }
+
+    res.json({
+      range,
+      points,
+      baselinePoint,
+      count: points.length,
+      totalPnlUsdt: Number(totalPnlUsdt.toFixed(6)),
+      wins,
+      losses,
+      winRate: Number(winRate.toFixed(2)),
+      ts: Date.now(),
+    });
+  } catch (err) {
+    logger.error({ err: err.message }, 'wallet: pnl-series failed');
     res.status(500).json({ error: err.message });
   }
 });

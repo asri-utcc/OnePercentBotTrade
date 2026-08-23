@@ -1797,26 +1797,9 @@ small.text-muted {
 .sell-reason-pill.is-manual  { background: #2980b9; }
 .sell-reason-pill.is-neutral { background: #7f8c8d; }
 
-/* FIX-2026-08-01: Bot Quality Indicator pill — 0-4 score, color tier per score */
-.quality-pill {
-  display: inline-flex; align-items: center; gap: 0.25rem;
-  font-family: var(--font-mono); font-size: 0.72rem; font-weight: 600;
-  padding: 0.18rem 0.55rem; border-radius: 999px;
-  background: #555; color: #fff; margin-left: 0.3rem;
-  white-space: nowrap; cursor: pointer; vertical-align: middle;
-  letter-spacing: 0.02em; user-select: none;
-  transition: filter 0.15s ease;
-}
-.quality-pill:hover { filter: brightness(1.15); }
-.quality-pill.is-red    { background: #c0392b; }
-.quality-pill.is-orange { background: #e67e22; }
-.quality-pill.is-yellow { background: #f1c40f; color: #1a1a1a; }
-.quality-pill.is-green  { background: #1e8e3e; }
-.quality-pill.is-gray   { background: #7f8c8d; cursor: default; }
 
 /* FIX-2026-08-03: Safe-trade filter #2 (trendline) live badge — bot card status
    - pass (✅ above) = green, blocked (❌ below) = red, warmup/data/api/no-tf = amber, pending = gray
-   - pill เหมือน quality-pill แต่ cursor: default (ไม่คลิก — แค่แสดงสถานะ)
 */
 .trendline-pill {
   display: inline-flex; align-items: center; gap: 0.25rem;
@@ -2041,25 +2024,6 @@ small.text-muted {
   cursor: help;
 }
 
-/* FIX-2026-08-01: Quality breakdown modal — clone of .pnl-modal-* pattern */
-.quality-modal-overlay { position: fixed; inset: 0; z-index: 9999; background: rgba(0,0,0,0.7); backdrop-filter: blur(4px); display: none; align-items: flex-start; justify-content: center; padding: 5vh 1rem 1rem; overflow-y: auto; }
-.quality-modal-overlay.is-open { display: flex; }
-.quality-modal-card { width: 100%; max-width: 720px; background: linear-gradient(180deg,#131a2a,#0d1320); border: 1px solid rgba(245,184,0,0.3); border-radius: 14px; box-shadow: 0 12px 40px rgba(0,0,0,0.6); }
-.quality-modal-header { display: flex; align-items: center; justify-content: space-between; padding: 1rem 1.25rem; border-bottom: 1px solid rgba(255,255,255,0.08); }
-.quality-modal-header h5 { margin: 0; color: var(--text-1); font-weight: 700; }
-.quality-modal-close { background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1); color: var(--text-2); width: 32px; height: 32px; border-radius: 8px; cursor: pointer; font-size: 1.1em; line-height: 1; }
-.quality-modal-close:hover { background: rgba(255,77,109,0.2); color: #ff4d6d; }
-.quality-modal-body { padding: 1rem 1.25rem; }
-.quality-summary { display: flex; align-items: center; gap: 1rem; margin-bottom: 1rem; padding: 0.85rem 1rem; background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.06); border-radius: 10px; }
-.quality-summary .score-pill { font-size: 1.4rem; font-weight: 700; padding: 0.4rem 1rem; }
-.quality-criterion-row { display: grid; grid-template-columns: 1.4fr 1fr 1fr auto; gap: 0.5rem; padding: 0.6rem 0.4rem; border-bottom: 1px solid rgba(255,255,255,0.05); align-items: center; font-family: var(--font-mono); font-size: 0.85rem; }
-.quality-criterion-row:last-child { border-bottom: none; }
-.quality-criterion-row .k { color: var(--text-2); font-weight: 600; }
-.quality-criterion-row .v { color: var(--text-1); text-align: right; }
-.quality-criterion-row .t { color: var(--text-3); text-align: right; font-size: 0.78rem; }
-.quality-criterion-row .p { font-weight: 700; padding: 0.15rem 0.6rem; border-radius: 999px; font-size: 0.72rem; }
-.quality-criterion-row .p.is-pass { background: rgba(30,142,62,0.18); color: #4ade80; }
-.quality-criterion-row .p.is-fail { background: rgba(192,57,43,0.18); color: #ff6b6b; }
 
 .position-card .pos-head {
   display: flex; align-items: center; justify-content: space-between;
@@ -4226,3 +4190,16 @@ small.text-muted {
 .bot-card-v2 .bc-dps-value {
   flex: 1; word-break: break-word;
 }
+
+/* FIX-2026-08-23: Master Config modal (formerly reused .quality-modal-*
+   - Renamed after Quality Indicator removal to avoid CSS collision
+   - Same look as the old .pnl-modal-* / .quality-modal-* pattern
+*/
+.master-config-modal-overlay { position: fixed; inset: 0; z-index: 9999; background: rgba(0,0,0,0.7); backdrop-filter: blur(4px); display: none; align-items: flex-start; justify-content: center; padding: 5vh 1rem 1rem; overflow-y: auto; }
+.master-config-modal-overlay.is-open { display: flex; }
+.master-config-modal-card { width: 100%; max-width: 720px; background: linear-gradient(180deg,#131a2a,#0d1320); border: 1px solid rgba(245,184,0,0.3); border-radius: 14px; box-shadow: 0 12px 40px rgba(0,0,0,0.6); }
+.master-config-modal-header { display: flex; align-items: center; justify-content: space-between; padding: 1rem 1.25rem; border-bottom: 1px solid rgba(255,255,255,0.08); }
+.master-config-modal-header h5 { margin: 0; color: var(--text-1); font-weight: 700; }
+.master-config-modal-close { background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1); color: var(--text-2); width: 32px; height: 32px; border-radius: 8px; cursor: pointer; font-size: 1.1em; line-height: 1; }
+.master-config-modal-close:hover { background: rgba(255,77,109,0.2); color: #ff4d6d; }
+.master-config-modal-body { padding: 1rem 1.25rem; }
