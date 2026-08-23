@@ -132,7 +132,9 @@
     elUsed.textContent = `${fmtNum(d.usedEstimated)} / ${fmtNum(d.capacity)}`;
     const refillPerSec = (Number(d.refillRate) || 0) * 1000; // refillRate is tokens/ms
     elRefill.textContent = isFinite(refillPerSec) ? `${fmtNum(refillPerSec)} / s` : '—';
-    elBan.textContent = d.banRemainingSec > 0
+    // .innerHTML (ไม่ใช่ .textContent) เพราะ branch "none" มี <span class="rl-tag">
+    //   data มาจาก binanceRest.getRateLimitStatus() ฝั่งเราเอง → ไม่มี XSS risk
+    elBan.innerHTML = d.banRemainingSec > 0
       ? `${fmtNum(d.banRemainingSec)} s`
       : '<span class="rl-tag rl-tag-ok">none</span>';
 
