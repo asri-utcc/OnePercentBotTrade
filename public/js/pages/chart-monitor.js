@@ -1718,11 +1718,11 @@ function renderLatestSignalsPanel() {
       ? `<div class="cm-ls-action-row"><span class="cm-ls-action ${action.cls}" title="${escapeHtml(action.title)}">${escapeHtml(action.label)}</span>${action.tradeLink}</div>`
       : '';
     return `
-      <div class="cm-ls-row ${statusCls}">
+      <div class="cm-ls-row ${statusCls}" data-bot-id="${escapeHtml(s.botId || '')}" role="link" tabindex="0" title="คลิกเพื่อเปิดหน้า bot-detail">
         <div class="cm-ls-left">
           <span class="cm-ls-status">${statusIcon}</span>
           <div class="cm-ls-body">
-            <div class="cm-ls-bot">${escapeHtml(s.name)} <span class="cm-ls-meta">${escapeHtml(s.symbol)} · ${escapeHtml(s.timeframe)}</span></div>
+            <div class="cm-ls-bot">${escapeHtml(s.name)} <span class="cm-ls-meta">${escapeHtml(s.symbol)} · ${escapeHtml(s.timeframe)}</span><span class="cm-ls-arrow" aria-hidden="true">↗</span></div>
             <div class="cm-ls-time">${ageTxt} · bg ${s.bgPrev}→${s.bgState}</div>
             ${dtTxt ? `<div class="cm-ls-datetime">📅 ${dtTxt}</div>` : ''}
             ${actionHtml}
@@ -1736,6 +1736,37 @@ function renderLatestSignalsPanel() {
   }).join('');
   panel.innerHTML = rows;
 }
+
+/* 2026-08-24: delegated click handler — click row → open bot-detail.html?id=<botId>
+ *   - Same URL pattern as the per-card "📊 Detail →" link (bots.js:1945, chart-monitor.js:1287)
+ *   - Skip clicks on the inline "cm-ls-trade-link" anchor (it already opens /history.html in new tab)
+ *   - Keyboard accessible: Enter / Space on a focused row also navigates
+ *   - Bound once at module load (NOT inside renderLatestSignalsPanel) so we don't re-bind on every refresh
+ */
+(function bindCmLatestSignalsNav() {
+  const panel = document.getElementById('cm-latest-signals');
+  if (!panel || panel.__cmNavBound) return;
+  panel.__cmNavBound = true;
+  panel.addEventListener('click', (e) => {
+    // Don't hijack clicks on inline links (e.g. → trade to /history.html)
+    if (e.target.closest('a')) return;
+    const row = e.target.closest('.cm-ls-row');
+    if (!row) return;
+    const botId = row.getAttribute('data-bot-id');
+    if (!botId) return;
+    window.location.href = `/bot-detail.html?id=${encodeURIComponent(botId)}`;
+  });
+  panel.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    if (e.target.closest('a')) return;
+    const row = e.target.closest('.cm-ls-row');
+    if (!row) return;
+    e.preventDefault();
+    const botId = row.getAttribute('data-bot-id');
+    if (!botId) return;
+    window.location.href = `/bot-detail.html?id=${encodeURIComponent(botId)}`;
+  });
+})();
 
 /* 2026-08-20: map (outcome + note) → {cls, label, title, tradeLink}
  *   - `cls`  = "is-filled" / "is-skipped" / "is-expired" / "is-failed" / "is-pending" / ...

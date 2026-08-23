@@ -314,6 +314,12 @@
     }
     .cm-ls-row.is-active  { border-left: 3px solid rgba(0,229,184,0.55); }
     .cm-ls-row.is-blocked { border-left: 3px solid rgba(255,77,109,0.55); opacity: 0.85; }
+    /* 2026-08-24: clickable row → navigates to /bot-detail.html?id=<botId> (chart-monitor.js delegation) */
+    .cm-ls-row { cursor: pointer; transition: background 0.15s ease, transform 0.12s ease; }
+    .cm-ls-row:hover { background: rgba(245,184,0,0.10); border-color: rgba(245,184,0,0.35); }
+    .cm-ls-row:active { transform: scale(0.998); }
+    .cm-ls-arrow { font-size: 0.7rem; color: var(--text-muted, #94a3b8); margin-left: 0.3rem; opacity: 0.6; }
+    .cm-ls-row:hover .cm-ls-arrow { color: var(--gold-1, #f5b800); opacity: 1; }
     .cm-ls-left { display: flex; gap: 0.5rem; align-items: flex-start; min-width: 0; flex: 1 1 auto; }
     .cm-ls-status { font-size: 1rem; line-height: 1.2; flex: 0 0 auto; }
     .cm-ls-body { min-width: 0; flex: 1 1 auto; }
