@@ -388,6 +388,7 @@
               <button type="button" class="btn btn-sm btn-outline-gold" id="mc-select-all">เลือกทั้งหมด</button>
               <button type="button" class="btn btn-sm btn-outline-gold" id="mc-select-none">ไม่เลือกเลย</button>
               <button type="button" class="btn btn-sm btn-outline-gold" id="mc-select-enabled">เฉพาะที่ Enabled</button>
+              ${deletedCount > 0 ? '<button type="button" class="btn btn-sm btn-outline-info" id="mc-select-not-deleted" title="เลือกเฉพาะบอทที่ยังไม่ถูกลบ (active) — มีประโยชน์เมื่อต้องการ deselect บอทที่ถูก soft-delete ออกจากรายการ">✅ เลือกบอทที่ไม่ลบ</button>' : ''}
               ${deletedCount > 0 ? '<button type="button" class="btn btn-sm btn-outline-info" id="mc-select-deleted" title="เลือกเฉพาะบอทที่ถูก soft-delete เพื่อ Restore">🗑 เลือกบอทที่ลบ</button>' : ''}
             </div>
             <div class="mb-3 p-2" style="background:rgba(255,255,255,0.03); border:1px solid rgba(255,255,255,0.06); border-radius:8px; max-height:190px; overflow-y:auto;">
@@ -427,6 +428,17 @@
     };
     document.getElementById('mc-cancel').onclick = close;
     document.getElementById('mc-toggle-start').onclick = () => bulkToggle('enable', '▶️ Start');
+    // FIX-2026-08-23: select-not-deleted — เลือกเฉพาะบอท active (!deletedAt)
+    //   - ใช้ deselect บอทที่ถูก soft-delete ออกจากการเลือก โดยไม่ต้องไล่ untick ทีละตัว
+    //   - ปุ่มนี้แสดงเฉพาะเมื่อมีบอทที่ลบ (เรียงคู่กับ mc-select-deleted)
+    const notDeletedBtn = document.getElementById('mc-select-not-deleted');
+    if (notDeletedBtn) {
+      notDeletedBtn.onclick = () => {
+        container.querySelectorAll('.mc-bot-check').forEach((checkbox, index) => {
+          checkbox.checked = cachedBots[index] && !cachedBots[index].deletedAt;
+        });
+      };
+    }
     document.getElementById('mc-select-deleted').onclick = () => {
       container.querySelectorAll('.mc-bot-check').forEach((checkbox, index) => {
         checkbox.checked = cachedBots[index] && !!cachedBots[index].deletedAt;
