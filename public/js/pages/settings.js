@@ -4,7 +4,7 @@
 //   - 4 main groups: 🤖 บอท, 📢 แจ้งเตือน, 🛒 การซื้อขาย, 🛡️ ความปลอดภัย
 //   - แต่ละกลุ่มใช้ .lux-details (collapsible <details>) เพื่อลด scroll
 //   - Bot Defaults section ใหม่ — ตั้งค่า default ทุก field ที่ใช้ตอนสร้างบอท
-//   - รวมฟังก์ชั่นเดิมทั้งหมด (Telegram / Quality / BNB Auto-Buy / Daily Target / Auto Add Bot /
+//   - รวมฟังก์ชั่นเดิมทั้งหมด (Telegram / BNB Auto-Buy / Daily Target / Auto Add Bot /
 //     CB Version / Auto Delete / DPS) — เพิ่มเติม Bot Defaults เป็น section 1️⃣ ใหม่
 
 let cfg = null;        // telegram config
@@ -96,9 +96,6 @@ function render() {
 
   const ev = (cfg && cfg.events) || {};
   const th = (cfg && cfg.thresholds) || {};
-  const qth = (cfg && cfg.qualityThresholds) || {};
-  const qEnabled = cfg ? cfg.qualityEnabled !== false : true;
-  const qRefreshMin = Math.round((Number.isFinite(cfg && cfg.qualityRefreshMs) ? cfg.qualityRefreshMs : 5 * 60 * 1000) / 60000);
   const aabStatus = autoAddBotCfg.status || {};
   const aabLastRunAt = aabStatus.lastRunAt ? new Date(aabStatus.lastRunAt).toLocaleString() : '—';
   const aabTickCount = aabStatus.tickCount != null ? aabStatus.tickCount : 0;
@@ -125,7 +122,6 @@ function render() {
         <p class="text-muted-3 small mb-3">ตั้งค่าค่าเริ่มต้นสำหรับบอทใหม่ + ระบบอัตโนมัติที่เกี่ยวกับบอท</p>
 
         ${renderBotDefaultsSection()}
-        ${renderQualitySection(qEnabled, qth, qRefreshMin)}
         ${renderAutoAddBotSection(aabStatus, aabLastRunAt, aabTickCount, aabInFlight, aabTrends, aabLastStats)}
         ${renderAutoDeleteSection()}
 
@@ -460,63 +456,6 @@ function renderBotDefaultsSection() {
   `);
 }
 
-// ─── 🤖 Section: Quality Indicator ───────────────────────────────
-function renderQualitySection(qEnabled, qth, qRefreshMin) {
-  return section('sec-quality', '🎯', 'Quality Indicator (0–4 per bot)', false, `
-    <div class="mb-3">
-      <label class="form-check form-switch">
-        <input type="checkbox" class="form-check-input" id="q-enabled" ${qEnabled ? 'checked' : ''} />
-        <span class="form-check-label"><strong>เปิด Quality Indicator</strong> — ถ้าปิดจะไม่คำนวณ score ใดๆ (cache clears)</span>
-      </label>
-    </div>
-
-    <div class="row g-3">
-      <div class="col-md-6">
-        <label class="form-label">💰 Volume threshold (USDT)</label>
-        <input type="number" class="form-control" id="q-vol" value="${qth.volumeMinUSDT != null ? qth.volumeMinUSDT : 100000}" step="1000" min="0" />
-        <small class="text-muted">24h quote volume ≥ ค่านี้ถึงจะ pass</small>
-      </div>
-      <div class="col-md-6">
-        <label class="form-label">🏆 Top-N size</label>
-        <input type="number" class="form-control" id="q-topn" value="${qth.topN != null ? qth.topN : 50}" step="1" min="1" max="500" />
-        <small class="text-muted">top-N symbols by 24h quote volume</small>
-      </div>
-      <div class="col-md-4">
-        <label class="form-label">📏 KC tight % (&lt; = tight)</label>
-        <input type="number" class="form-control" id="q-kc" value="${qth.kcTightPct != null ? qth.kcTightPct : 1.0}" step="0.1" min="0.01" max="50" />
-      </div>
-      <div class="col-md-4">
-        <label class="form-label">💧 Squeeze min % (≥ pass)</label>
-        <input type="number" class="form-control" id="q-sq" value="${qth.squeezeMinPct != null ? qth.squeezeMinPct : 40}" step="1" min="0" max="100" />
-        <small class="text-muted">% ของ 50 แท่งที่ KC &lt; tight</small>
-      </div>
-      <div class="col-md-4">
-        <label class="form-label">📈 Trend min % (≥ pass)</label>
-        <input type="number" class="form-control" id="q-tr" value="${qth.trendMinPct != null ? qth.trendMinPct : 50}" step="1" min="0" max="100" />
-        <small class="text-muted">% ของ bars เหนือ EMA20 บน upper-TF</small>
-      </div>
-      <div class="col-md-4">
-        <label class="form-label">🔄 Refresh interval (นาที)</label>
-        <input type="number" class="form-control" id="q-refresh" value="${qRefreshMin}" step="1" min="1" max="60" />
-        <small class="text-muted">default 5 นาที (60s..1h clamp)</small>
-      </div>
-    </div>
-
-    <div class="mt-3">
-      <button type="button" class="btn btn-primary" id="btn-save-quality">💾 บันทึก Quality Indicator</button>
-      <span class="ms-2 text-muted small" id="quality-status"></span>
-    </div>
-
-    <div class="text-muted small mt-3">
-      <strong>สูตรคะแนน:</strong> Volume (≥) + Top50 (≤N) + Squeeze (% ≥) + Trend (upper-TF + EMA20%) → 0–4
-      <br />สี: <span class="quality-pill is-red">0</span>
-      <span class="quality-pill is-orange">1</span>
-      <span class="quality-pill is-yellow">2</span>
-      <span class="quality-pill is-green">3–4</span>
-    </div>
-  `);
-}
-
 // ─── 🤖 Section: Auto Add New Bot ────────────────────────────────
 function renderAutoAddBotSection(aabStatus, aabLastRunAt, aabTickCount, aabInFlight, aabTrends, aabLastStats) {
   return section('sec-auto-add', '🤖', 'Auto Add New Bot — สแกน + สร้างบอทอัตโนมัติ', false, `
@@ -559,8 +498,19 @@ function renderAutoAddBotSection(aabStatus, aabLastRunAt, aabTickCount, aabInFli
         <label class="form-check form-switch">
           <input class="form-check-input" type="checkbox" id="aab-auto-enable" ${autoAddBotCfg.autoEnable !== false ? 'checked' : ''} />
           <span class="form-check-label">
-            <strong>▶️ Auto-enable บอทที่เพิ่งสร้างทันที</strong>
+            <strong>▶️ Auto-enable �อทที่เพิ่งสร้างทันที</strong>
             — เรียก <code>botManager.enableBot()</code> หลัง create → spawn Trader + เริ่มเทรดเลย · ถ้าปิดจะสร้างบอทในสถานะ DISABLED ไว้รอ user เปิดเองที่ <a href="/bots.html">bots.html</a>
+          </span>
+        </label>
+      </div>
+    </div>
+    <div class="row g-3 mt-1">
+      <div class="col-md-12">
+        <label class="form-check form-switch">
+          <input class="form-check-input" type="checkbox" id="aab-auto-restore" ${autoAddBotCfg.autoRestore !== false ? 'checked' : ''} />
+          <span class="form-check-label">
+            <strong>↩️ Auto-restore บอท soft-deleted</strong>
+            — เมื่อ scan เจอ symbol ที่ตรงเกณ�์ แต่มีบอท soft-deleted อยู่ → restore + auto-enable ทันที (แทนการสร้างบอทใหม่ซ้อน) · ถ้าปิดจะสร้างบอทใหม่ (อาจซ้อนกับบอท soft-deleted)
           </span>
         </label>
       </div>
@@ -1138,10 +1088,6 @@ function bindEvents() {
   const saveThBtn = document.getElementById('btn-save-thresholds');
   if (saveThBtn) saveThBtn.onclick = saveThresholds;
 
-  // Quality
-  const sq = document.getElementById('btn-save-quality');
-  if (sq) sq.onclick = saveQualityThresholds;
-
   // BNB
   const sb = document.getElementById('btn-save-bnb');
   if (sb) sb.onclick = saveAutoBuyBnb;
@@ -1322,34 +1268,6 @@ async function saveThresholds() {
   } catch (err) { setStatus('thresholds-status', '❌ ' + err.message, true); }
 }
 
-// ════════ Quality ════════
-async function saveQualityThresholds() {
-  const qualityEnabled = !!document.getElementById('q-enabled').checked;
-  const refreshMin = parseInt(document.getElementById('q-refresh').value, 10);
-  const qualityThresholds = {
-    volumeMinUSDT:  parseFloat(document.getElementById('q-vol').value),
-    topN:           parseInt(document.getElementById('q-topn').value, 10),
-    kcTightPct:     parseFloat(document.getElementById('q-kc').value),
-    squeezeMinPct:  parseFloat(document.getElementById('q-sq').value),
-    trendMinPct:    parseFloat(document.getElementById('q-tr').value),
-  };
-  if (!Number.isFinite(qualityThresholds.volumeMinUSDT) || !Number.isFinite(qualityThresholds.topN) ||
-      !Number.isFinite(qualityThresholds.kcTightPct) || !Number.isFinite(qualityThresholds.squeezeMinPct) ||
-      !Number.isFinite(qualityThresholds.trendMinPct) || !Number.isFinite(refreshMin)) {
-    setStatus('quality-status', '❌ ค่าต้องเป็นตัวเลข', true);
-    return;
-  }
-  try {
-    await API.put('/api/telegram/config', {
-      qualityEnabled,
-      qualityRefreshMs: Math.max(1, Math.min(60, refreshMin)) * 60_000,
-      qualityThresholds,
-    });
-    setStatus('quality-status', '✅ บันทึกแล้ว · cache จะ refresh ทันที');
-    await loadConfig();
-  } catch (err) { setStatus('quality-status', '❌ ' + err.message, true); }
-}
-
 // ════════ BNB Auto-Buy ════════
 async function saveAutoBuyBnb() {
   const enabled        = !!document.getElementById('bnb-enabled').checked;
@@ -1443,6 +1361,7 @@ async function saveAutoAddBot() {
   const maxPerRun = parseInt(document.getElementById('aab-max-per-run').value, 10);
   const telegramNotify = !!document.getElementById('aab-tg').checked;
   const autoEnable = !!document.getElementById('aab-auto-enable').checked;
+  const autoRestore = !!document.getElementById('aab-auto-restore').checked;
   const namePrefixRaw = (document.getElementById('aab-name-prefix').value || '').trim();
   const namePrefix = namePrefixRaw.slice(0, 32) || '(bAdd)';
   const scanTimeframe = document.getElementById('aab-tf').value;
@@ -1482,25 +1401,31 @@ async function saveAutoAddBot() {
   setStatus('aab-status', '⏳ กำลังบันทึก...');
   try {
     const resp = await API.put('/api/auto-add-bot/config', {
-      enabled, intervalMin, minKcPct, maxPerRun, telegramNotify, autoEnable, namePrefix,
+      enabled, intervalMin, minKcPct, maxPerRun, telegramNotify, autoEnable, autoRestore, namePrefix,
       scanTimeframe, scanThreshold, scanWindow, scanTpWindow, scanTopN, scanMinVol, scanMinPct, scanTrends: trends,
     });
-    setStatus('aab-status', '✅ บันทึกแล้ว' + (resp.enabled ? ' · Auto Add Bot 🟢 ON' : ' · Auto Add Bot ⚪ OFF') + (resp.autoEnable ? ' · Auto-enable ▶️ ON' : ' · Auto-enable ⏸ OFF') + ' · prefix=' + (resp.namePrefix || '(bAdd)'));
+    setStatus('aab-status', '✅ บันทึกแล้ว' + (resp.enabled ? ' · Auto Add Bot 🟢 ON' : ' · Auto Add Bot ⚪ OFF') + (resp.autoEnable ? ' · Auto-enable ▶️ ON' : ' · Auto-enable ⏸ OFF') + (resp.autoRestore !== false ? ' · Auto-restore ↩️ ON' : ' · Auto-restore OFF') + ' · prefix=' + (resp.namePrefix || '(bAdd)'));
     await loadConfig();
   } catch (err) { setStatus('aab-status', '❌ ' + (err.body && err.body.error ? err.body.error : err.message), true); }
 }
 
 async function triggerAutoAddBot() {
-  if (!confirm('⚠️ จะ Run Auto Add Bot ทันที (bypass enabled flag)?\n\nระบบจะสแกน + filter + create บอทใหม่ทันที\nบอทจะอยู่ในสถานะ DISABLED — ต้องเปิดเอง')) return;
+  if (!confirm('⚠️ จะ Run Auto Add Bot ทันที (bypass enabled flag)?\n\nระบบจะสแกน + filter + create บอทใหม่ทันที\nหรือ restore + activate บอท soft-deleted ที่ symbol ตรงเกณ�์ (ถ้า Auto-restore เปิดอยู่)\nบอทจะอยู่ในสถานะ DISABLED — ต้องเปิดเอง')) return;
   setStatus('aab-status', '⏳ กำลังสแกน...');
   try {
     const resp = await API.post('/api/auto-add-bot/run', {});
     const r = resp.result || {};
     const list = (r.createdList || []).map((b) => `${b.symbol} (score ${(b.score || 0).toFixed(2)}, kcMin ${(b.kcMinPct || 0).toFixed(3)}%)`).join(', ');
-    if (r.created > 0) { setStatus('aab-status', `✅ สร้าง ${r.created} บอทจาก ${r.candidates} candidates · ${list}`); }
+    const restoredList = (r.restoredList || []).map((b) => `${b.symbol} (${b.daysSinceDelete || 0}d)`).join(', ');
+    if (r.created > 0 || r.restored > 0) {
+      const parts = [];
+      if (r.created > 0) parts.push(`สร้าง ${r.created} บอท${list ? ' · ' + list : ''}`);
+      if (r.restored > 0) parts.push(`↩️ restore ${r.restored} บอท${restoredList ? ' · ' + restoredList : ''}`);
+      setStatus('aab-status', `✅ จาก ${r.candidates} candidates · ${parts.join(' | ')}`);
+    }
     else if (r.outcome === 'failed_scan') { setStatus('aab-status', '❌ scan failed: ' + (r.error || 'unknown'), true); }
     else if (r.skipped) { setStatus('aab-status', '⏸ ' + r.skipped); }
-    else { setStatus('aab-status', `ℹ️ scanned ${r.scanned ?? '?'} · candidates ${r.candidates ?? 0} · created 0`); }
+    else { setStatus('aab-status', `ℹ️ scanned ${r.scanned ?? '?'} · candidates ${r.candidates ?? 0} · created 0 · restored 0`); }
     await loadConfig();
   } catch (err) {
     if (err.status === 409) { setStatus('aab-status', '⏳ มีคำสั่งกำลังทำงานอยู่ — ลองใหม่ภายหลัง'); }

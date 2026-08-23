@@ -115,6 +115,7 @@ class AutoAddBot {
         maxPerRun: 5,
         telegramNotify: true,
         autoEnable: true, // FIX-2026-08-07: default ON — auto-spawn Trader ทันทีหลัง create
+        autoRestore: true, // FIX-2026-08-23: default ON — restore + activate บอท soft-deleted ที่ symbol ตรงเกณฑ์
         scanParams: {
           timeframe: '3m',
           threshold: 0.5,
@@ -137,6 +138,8 @@ class AutoAddBot {
       telegramNotify: cfg.autoAddBotTelegramNotify !== false,
       // FIX-2026-08-07: auto-enable บอทที่เพิ่งสร้างทันที (default true ตาม new-bot modal default)
       autoEnable: cfg.autoAddBotAutoEnable !== false,
+      // FIX-2026-08-23: auto-restore + activate บอท soft-deleted ที่ symbol ตรงเกณฑ์ (default true)
+      autoRestore: cfg.autoAddBotAutoRestore !== false,
       // 2026-08-08: name prefix (default "(bAdd)" — match DEFAULTS + sanitize)
       namePrefix: typeof cfg.autoAddBotNamePrefix === 'string' && cfg.autoAddBotNamePrefix.trim()
         ? cfg.autoAddBotNamePrefix.trim().slice(0, 32)
@@ -219,87 +222,206 @@ class AutoAddBot {
       }
       const ranked = scanResp.ranked || [];
 
-      // 2. existing bot symbols (uppercase normalize)
-      const existingRaw = await Bot.distinct('symbol');
-      const existing = new Set(existingRaw.map((s) => String(s || '').toUpperCase()));
+      // 2. fetch existing symbols SPLIT by deletion status (FIX-2026-08-23)
+      //   - activeSymbols: bots ที่ยังเ�รดอยู่ (deletedAt: null) — ใช้ skip ถ้า scan เจอ symbol นี้ (มีบอทแล้ว)
+      //   - deletedBySymbol: bots ที่ถูก soft-delete — ถ้า autoRestore=true และ symbol ตรงเกณฑ์ → restore + activate แทนที่จะสร้างบอทใหม่ (กันบอทซ้อน, รัก�า trade history)
+      const [activeSymbolsRaw, deletedBotsRaw] = await Promise.all([
+        Bot.distinct('symbol', { deletedAt: null }),
+        this.config.autoRestore
+          ? Bot.find({ deletedAt: { $ne: null } })
+              .select('_id name symbol deletedAt scheduledDeleteAt')
+              .lean()
+          : Promise.resolve([]),
+      ]);
+      const activeSymbols = new Set(
+        activeSymbolsRaw.map((s) => String(s || '').toUpperCase())
+      );
+      const deletedBySymbol = new Map(
+        deletedBotsRaw.map((b) => [String(b.symbol || '').toUpperCase(), b])
+      );
 
-      // 3. filter: NOT in existing AND kcMinPct > minKcPct threshold
+      // 3. filter: NOT in activeSymbols AND kcMinPct > minKcPct threshold
+      //   - soft-deleted bots จะ *ไม่* ถูกนับเป็น "existing" — จะถูก process ใน step 5 (restore path) แทน
+      //   - autoRestore=false → deletedBySymbol ว่าง → filter นี้จะ pick up symbol เหล่านั้น (จะสร้างบอทใหม่ ถ้า symbol ยังตรงเกณฑ์)
       const candidates = ranked.filter((r) => {
         const sym = String(r.symbol || '').toUpperCase();
         if (!sym) return false;
-        if (existing.has(sym)) return false;
+        if (activeSymbols.has(sym)) return false;
         if (!Number.isFinite(r.kcMinPct)) return false;
         return r.kcMinPct > this.config.minKcPct;
       });
 
-      // 4. cap ตาม maxPerRun
-      const toCreate = candidates.slice(0, this.config.maxPerRun);
+      // 4. cap ตาม maxPerRun (covers BOTH create-new + restore-existing)
+      const toProcess = candidates.slice(0, this.config.maxPerRun);
 
-      // 5. create bots
+      // 5. process: CREATE-NEW หรือ RESTORE-EXISTING (per candidate)
       const createdList = [];
+      const restoredList = [];
       const failedList = [];
-      for (const r of toCreate) {
+      for (const r of toProcess) {
+        const sym = String(r.symbol || '').toUpperCase();
+        const deletedBot = deletedBySymbol.get(sym);
         try {
-          const bot = await this._createBotFor(r);
-          // FIX-2026-08-07: auto-enable ทันทีหลัง create (default ON)
-          //   - เรียก botManager.enableBot() → persisted enabled=true + spawnTrader() + invalidate trendline + scan fresh
-          //   - ถ้า enable ล้มเหลว ไม่ fail ทั้ง batch — ใส่ enabled=false + error ใน createdList ให้ user เปิดเอง
-          let autoEnabled = false;
-          let enableError = null;
-          if (this.config.autoEnable) {
-            try {
-              await botManager.enableBot(bot._id);
-              autoEnabled = true;
-              logger.info({ botId: String(bot._id), symbol: r.symbol }, 'autoAddBot: created + auto-enabled + spawnTrader');
-            } catch (err) {
-              enableError = err.message;
-              logger.warn({ botId: String(bot._id), symbol: r.symbol, err: err.message }, 'autoAddBot: create OK but auto-enable failed');
-            }
+          if (deletedBot) {
+            // RESTORE path: �ีบอท soft-deleted อยู่แล้ว → restore + (optional) auto-enable
+            const result = await this._restoreAndEnableBot(deletedBot, r);
+            restoredList.push(result);
+          } else {
+            // CREATE path: symbol ใหม่ → create new bot + (optional) auto-enable
+            const result = await this._createAndEnableBot(r);
+            createdList.push(result);
           }
-          createdList.push({
-            botId: String(bot._id),
-            symbol: r.symbol,
-            score: r.score,
-            kcMinPct: r.kcMinPct,
-            suggestedTpPct: r.suggestedTpPct,
-            autoEnabled,
-            enableError,
-          });
-          // emit event for telegram notifier
-          if (this.config.telegramNotify) {
-            eventBus.emit('autoAddBot:created', {
-              botId: String(bot._id),
-              botName: bot.name,
-              symbol: r.symbol,
-              timeframe: this.config.scanParams.timeframe,
-              score: r.score,
-              kcMinPct: r.kcMinPct,
-              suggestedTpPct: r.suggestedTpPct,
-              autoEnabled,
-              autoEnable: this.config.autoEnable,
-            });
-          }
-          logger.info({ botId: String(bot._id), symbol: r.symbol, score: r.score, kcMinPct: r.kcMinPct, autoEnabled }, 'autoAddBot: created');
         } catch (err) {
-          logger.warn({ symbol: r.symbol, err: err.message }, 'autoAddBot: create failed');
+          logger.warn({ symbol: r.symbol, err: err.message }, 'autoAddBot: process failed');
           failedList.push({ symbol: r.symbol, error: err.message });
         }
       }
 
       return {
-        outcome: createdList.length > 0 ? 'created' : 'no_candidates',
+        outcome: createdList.length > 0 || restoredList.length > 0 ? 'created' : 'no_candidates',
         scanned: ranked.length,
         candidates: candidates.length,
         created: createdList.length,
         createdEnabled: createdList.filter((b) => b.autoEnabled).length,
-        capped: candidates.length - toCreate.length,
+        restored: restoredList.length,
+        restoredEnabled: restoredList.filter((b) => b.autoEnabled).length,
+        capped: candidates.length - toProcess.length,
         createdList,
+        restoredList,
         failedList,
         source,
       };
     } finally {
       this.inFlight = false;
     }
+  }
+
+  /**
+   * CREATE path (FIX-2026-08-23): extract inline create+enable logic into helper.
+   * - สร้างบอทใหม่ (DISABLED) แล้ว (optional) เรียก botManager.enableBot() เพื่อ spawnTrader
+   * - emit `autoAddBot:created` event สำหรับ telegram notifier
+   */
+  async _createAndEnableBot(r) {
+    const bot = await this._createBotFor(r);
+    let autoEnabled = false;
+    let enableError = null;
+    if (this.config.autoEnable) {
+      try {
+        await botManager.enableBot(bot._id);
+        autoEnabled = true;
+        logger.info({ botId: String(bot._id), symbol: r.symbol }, 'autoAddBot: created + auto-enabled + spawnTrader');
+      } catch (err) {
+        enableError = err.message;
+        logger.warn({ botId: String(bot._id), symbol: r.symbol, err: err.message }, 'autoAddBot: create OK but auto-enable failed');
+      }
+    }
+    const result = {
+      botId: String(bot._id),
+      symbol: r.symbol,
+      score: r.score,
+      kcMinPct: r.kcMinPct,
+      suggestedTpPct: r.suggestedTpPct,
+      autoEnabled,
+      enableError,
+    };
+    if (this.config.telegramNotify) {
+      eventBus.emit('autoAddBot:created', {
+        botId: result.botId,
+        botName: bot.name,
+        symbol: r.symbol,
+        timeframe: this.config.scanParams.timeframe,
+        score: r.score,
+        kcMinPct: r.kcMinPct,
+        suggestedTpPct: r.suggestedTpPct,
+        autoEnabled,
+        autoEnable: this.config.autoEnable,
+      });
+    }
+    logger.info({ botId: result.botId, symbol: r.symbol, score: r.score, kcMinPct: r.kcMinPct, autoEnabled }, 'autoAddBot: created');
+    return result;
+  }
+
+  /**
+   * RESTORE path (FIX-2026-08-23): restore บอท soft-deleted ที่ symbol ตรงเก�ฑ์ + (optional) auto-enable.
+   *
+   * ต่างจาก POST /api/bots/:id/restore ตรงที่:
+   *   - ไม่ต้อง requireBotActionPassword (เป็น internal service trigger)
+   *   - เรียก botManager.enableBot() ทันทีตามค่า autoEnable (เดิม restore endpoint ไม่ spawn)
+   *   - emit `bot:restored` + `autoAddBot:restored` events
+   *
+   * Mirror logic ของ POST /api/bots/:id/restore (bot.routes.js:1376-1404):
+   *   - clear deletedAt / scheduledDeleteAt / deleteNotificationSentAt / status='idle'
+   *   - guard 30-day window (เ�มือน manual restore)
+   *   - ตั้ง restoredAt + restoredBy='autoAddBot' เพื่อ audit trail
+   */
+  async _restoreAndEnableBot(deletedBot, scanMeta) {
+    const botId = deletedBot._id;
+    const deletedAt = deletedBot.deletedAt ? new Date(deletedBot.deletedAt) : null;
+    if (!deletedAt) {
+      throw new Error('deletedBot.deletedAt is null — cannot restore');
+    }
+    const daysSinceDelete = (Date.now() - deletedAt.getTime()) / (86_400_000);
+    if (daysSinceDelete > 30) {
+      // เหมือน POST /:id/restore — ถ้าเกิน 30 วัน ให้ fail (ไม่ silent skip) เพื่อให้ user เห็นใน failedList
+      throw new Error(`Beyond 30-day restore window (${Math.floor(daysSinceDelete)}d)`);
+    }
+
+    // 1. clear soft-delete fields + audit trail
+    const now = new Date();
+    await Bot.updateOne({ _id: botId }, {
+      $set: {
+        deletedAt: null,
+        scheduledDeleteAt: null,
+        deleteNotificationSentAt: null,
+        status: 'idle',
+        restoredAt: now,
+        restoredBy: 'autoAddBot',
+      },
+    });
+    eventBus.emit('bot:updated', { botId: String(botId) });
+    eventBus.emit('bot:restored', { botId: String(botId), source: 'autoAddBot' });
+
+    // 2. (optional) auto-enable — เรียก enableBot() ตามค่า autoEnable (FIX-2026-08-07)
+    //    หมายเหตุ: enableBot() throws ถ้า bot.deletedAt != null — แต่เราเพิ่ง clear ไปแล้ว → safe
+    let autoEnabled = false;
+    let enableError = null;
+    if (this.config.autoEnable) {
+      try {
+        await botManager.enableBot(botId);
+        autoEnabled = true;
+      } catch (err) {
+        enableError = err.message;
+        logger.warn({ botId: String(botId), symbol: deletedBot.symbol, err: err.message }, 'autoAddBot: restored OK but auto-enable failed');
+      }
+    }
+
+    // 3. emit telegram event (แยกจาก autoAddBot:created — ต่าง use case)
+    if (this.config.telegramNotify) {
+      eventBus.emit('autoAddBot:restored', {
+        botId: String(botId),
+        botName: deletedBot.name,
+        symbol: deletedBot.symbol,
+        timeframe: this.config.scanParams.timeframe,
+        score: scanMeta.score,
+        kcMinPct: scanMeta.kcMinPct,
+        suggestedTpPct: scanMeta.suggestedTpPct,
+        daysSinceDelete: Math.floor(daysSinceDelete),
+        autoEnabled,
+        autoEnable: this.config.autoEnable,
+      });
+    }
+    logger.info({ botId: String(botId), symbol: deletedBot.symbol, daysSinceDelete: Math.floor(daysSinceDelete), autoEnabled }, 'autoAddBot: restored + activated');
+
+    return {
+      botId: String(botId),
+      symbol: deletedBot.symbol,
+      score: scanMeta.score,
+      kcMinPct: scanMeta.kcMinPct,
+      suggestedTpPct: scanMeta.suggestedTpPct,
+      daysSinceDelete: Math.floor(daysSinceDelete),
+      autoEnabled,
+      enableError,
+    };
   }
 
   /**

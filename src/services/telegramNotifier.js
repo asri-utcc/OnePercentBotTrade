@@ -54,6 +54,8 @@ const DEFAULT_EVENTS = {
   // FIX-2026-08-07: Auto Add New Bot — แจ้งเตือนเมื่อระบบ auto-create บอทใหม่
   //   - ส่งทุกครั้งที่มีการสร้างบอทจาก autoAddBot service (manual/periodic)
   autoAddBotCreated: true,
+  // FIX-2026-08-23: Auto Add Bot restore + activate soft-deleted bot
+  autoAddBotRestored: true,
   // FIX-2026-08-08: Feature #1 — Dynamic Position Sizing resize notification (size/layers changed)
   //   - แจ้งเฉพาะเมื่อ size หรือ layers เปลี่ยนจริง (changed=true)
   //   - ระบุ reason (3-wins / 2-wins-2pct / loss) + before/after
@@ -522,6 +524,21 @@ function renderMessage(eventKey, p, cfg) {
           ? '\n\n▶️ บอทเริ่มเทรดทันทีแล้ว (spawnTrader) · ดูสถานะที่ /bots.html'
           : '\n\n⏸ บอทอยู่ในสถานะ DISABLED — ไปเปิดที่หน้า bots.html ถ้าต้องการเทรด';
         return `🤖 Auto Add New Bot — สร้างบอทใหม่อัตโนมัติ\nBot: ${p.botName}\nSymbol: ${p.symbol} (${tf})\nScore: ${score}\nkcMin: ${kcMin}%\nTP (NET): ${tp}%${tail}`;
+      }
+      // FIX-2026-08-23: Auto Add Bot — restore + activate บอท soft-deleted ที่ symbol ตรงเกณฑ์
+      //   - ต่างจาก autoAddBotCreated ตรงที่: เป็นบอทเดิม (มี trade history) — ไม่ใช่บอทใหม่
+      //   - แจ้ง user ว่า restore เพราะ minKC กลับมาตรงเกณฑ์ + มีบอทเก่าค้างอยู่
+      case 'autoAddBotRestored': {
+        const score = p.score != null ? p.score.toFixed(2) : '?';
+        const kcMin = p.kcMinPct != null ? p.kcMinPct.toFixed(3) : '?';
+        const tp = p.suggestedTpPct != null ? p.suggestedTpPct.toFixed(3) : '?';
+        const tf = p.timeframe || '?';
+        const ae = p.autoEnabled === true;
+        const days = p.daysSinceDelete || 0;
+        const tail = ae
+          ? `\n\n▶️ บอทเริ่มเทรดทันทีแล้ว (spawnTrader) · ดูสถานะที่ /bots.html`
+          : `\n\n⏸ บอทอยู่ในสถานะ DISABLED — ไปเปิดที่หน้า bots.html ถ้าต้องการเทรด`;
+        return `🤖↩️ Auto Add Bot — restore + activate บอทเก่าอัตโนมัติ\nBot: ${p.botName}\nSymbol: ${p.symbol} (${tf})\nScore: ${score}\nkcMin: ${kcMin}%\nTP (NET): ${tp}%\nRestore window: ${days}d since soft-delete${tail}`;
       }
       // FIX-2026-08-08: Feature #2 — CBv3 panic-close (mirror cbv2PanicClose but with ST3 upper-TF gate)
       case 'cbv3PanicClose':
@@ -1199,6 +1216,27 @@ function bindEventHandlers() {
       logger.warn({ err: err.message }, 'telegramNotifier: autoAddBot:created handler error');
     }
   });
+  // FIX-2026-08-23: Auto Add Bot — relay autoAddBot:restored event
+  //   - ส่งเมื่อ autoAddBot service restore + activate บอท soft-deleted ที่ symbol ตรงเกณฑ์
+  //   - event ต่างหากจาก autoAddBot:created — เพราะเป็นบอทเก่า (มี trade history) ไม่ใช่บอทใหม่
+  eventBus.on('autoAddBot:restored', async (p) => {
+    try {
+      if (!p || !p.botId) return;
+      await dispatch('autoAddBotRestored', {
+        botId: p.botId,
+        botName: p.botName || '(restored)',
+        symbol: p.symbol,
+        timeframe: p.timeframe,
+        score: p.score,
+        kcMinPct: p.kcMinPct,
+        suggestedTpPct: p.suggestedTpPct,
+        daysSinceDelete: p.daysSinceDelete || 0,
+        autoEnabled: p.autoEnabled === true,
+      });
+    } catch (err) {
+      logger.warn({ err: err.message }, 'telegramNotifier: autoAddBot:restored handler error');
+    }
+  });
 }
 
 // ─── Periodic scan (PnL threshold + stuck duration) ───
@@ -1511,6 +1549,8 @@ function stop() {
   eventBus.removeAllListeners('bot:deleted');
   eventBus.removeAllListeners('insufficient:balance');
   eventBus.removeAllListeners('tp:low'); // FIX-2026-07-26
+  eventBus.removeAllListeners('autoAddBot:created'); // FIX-2026-08-07
+  eventBus.removeAllListeners('autoAddBot:restored'); // FIX-2026-08-23
   eventBus.removeAllListeners('bookTicker');
   usdtBalanceCache = null; // FIX-2026-07-27: reset balance cache
   bnbBalanceCache = null; // FIX-2026-08-05: reset BNB cache

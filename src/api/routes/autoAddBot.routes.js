@@ -36,6 +36,7 @@ const DEFAULTS = {
   scanTrends: ['uptrend', 'downtrend', 'sideways'],
   telegramNotify: true,
   autoEnable: true, // FIX-2026-08-07: spawnTrader ทันทีหลัง create (default ON)
+  autoRestore: true, // FIX-2026-08-23: restore + activate บอท soft-deleted ที่ symbol ตรงเกณฑ์ (default ON)
   namePrefix: '(bAdd)', // 2026-08-08: prefix สำหรับชื่อบอทที่ auto-add สร้าง (เดิม hardcode)
 };
 
@@ -66,6 +67,7 @@ function readConfig(cfg) {
       : DEFAULTS.scanTrends,
     telegramNotify: cfg.autoAddBotTelegramNotify !== false,
     autoEnable: cfg.autoAddBotAutoEnable !== false, // FIX-2026-08-07: default true
+    autoRestore: cfg.autoAddBotAutoRestore !== false, // FIX-2026-08-23: default true
     namePrefix: sanitizeNamePrefix(cfg.autoAddBotNamePrefix), // 2026-08-08: editable prefix
     lastRunAt: cfg.autoAddBotLastRunAt || null,
     lastStats: cfg.autoAddBotLastStats || null,
@@ -136,6 +138,10 @@ router.put('/config', requireAuth, async (req, res) => {
     // FIX-2026-08-07: auto-enable บอทที่เพิ่งสร้าง (default true)
     if (typeof body.autoEnable === 'boolean') {
       update.autoAddBotAutoEnable = body.autoEnable;
+    }
+    // FIX-2026-08-23: auto-restore บอท soft-deleted ที่ symbol ตรงเกณฑ์ (default true)
+    if (typeof body.autoRestore === 'boolean') {
+      update.autoAddBotAutoRestore = body.autoRestore;
     }
     // 2026-08-08: name prefix (string) — sanitize + cap 32 chars (fallback "(bAdd)" ถ้าว่าง)
     if (typeof body.namePrefix === 'string') {

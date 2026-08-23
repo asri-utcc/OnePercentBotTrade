@@ -65,6 +65,8 @@ const appConfigSchema = new mongoose.Schema(
         tpLowPnL: true,
         // FIX-2026-08-07: แจ้งเตือนเมื่อ Auto Add New Bot สร้างบอทใหม่อัตโนมัติ
         autoAddBotCreated: true,
+        // FIX-2026-08-23: แจ้งเตือนเมื่อ Auto Add New Bot restore + activate บอท soft-deleted
+        autoAddBotRestored: true,
         // FIX-2026-08-09: Telegram Login — alternative login channel (ส่ง OTP 6 หลักเข้า Telegram แทน password)
         //   - ไม่ใช่ 2FA — ใช้แทน password เมื่อลืม
         //   - default ON (user ปิดเองได้ใน Settings > Telegram Events)
@@ -74,23 +76,6 @@ const appConfigSchema = new mongoose.Schema(
     telegramThresholds: {
       type: Object,
       default: () => ({ positionLossPct: 2, positionProfitPct: 1, positionStuckMin: 30 }),
-    },
-
-    // FIX-2026-08-01: Bot Quality Indicator (mirror telegramThresholds pattern)
-    //   - qualityEnabled: master switch — ถ้าปิด, computeBotQuality returns {enabled:false,score:null,color:'gray'}
-    //   - qualityRefreshMs: shared top-N cache TTL (60s..1h clamp), default 5min
-    //   - qualityThresholds: { volumeMinUSDT, topN, kcTightPct, squeezeMinPct, trendMinPct }
-    qualityEnabled:  { type: Boolean, default: true },
-    qualityRefreshMs: { type: Number,  default: 5 * 60 * 1000 },
-    qualityThresholds: {
-      type: Object,
-      default: () => ({
-        volumeMinUSDT: 100_000,
-        topN: 50,
-        kcTightPct: 1.0,
-        squeezeMinPct: 40,
-        trendMinPct: 50,
-      }),
     },
 
     // FIX-2026-08-05: Auto-Buy BNB (ป้องกัน BNB-empty fee-deduct incident)
@@ -141,7 +126,8 @@ const appConfigSchema = new mongoose.Schema(
     autoAddBotScanTrends:     { type: [String], default: ['uptrend', 'downtrend', 'sideways'] },
     autoAddBotTelegramNotify: { type: Boolean, default: true },
     autoAddBotAutoEnable:     { type: Boolean, default: true },  // FIX-2026-08-07: auto-enable บอทที่เพิ่งสร้าง + spawnTrader ทันที (default ON)
-    // 2026-08-08: name prefix สำหรับบอทที่ auto-add สร้าง (default "(bAdd)" — เดิม hardcode)
+    autoAddBotAutoRestore:    { type: Boolean, default: true },  // FIX-2026-08-23: restore + activate บอท soft-deleted ที่ symbol ตรงเกณฑ์ (default ON)
+    // 2026-08-08: name prefix สำหรับบอทที่ auto-add สร้า� (default "(bAdd)" — เดิม hardcode)
     //   - ใช้ใน autoAddBot._createBotFor(): name = `${base}${namePrefix}`
     //   - ปลอดภัย: trim + fallback เป็น "(bAdd)" ถ้าว่าง
     autoAddBotNamePrefix:     { type: String,  default: '(bAdd)', maxlength: 32 },
