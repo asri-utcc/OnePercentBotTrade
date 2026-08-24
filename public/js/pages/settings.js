@@ -894,8 +894,8 @@ function renderAutoReserveSection() {
 
     <div class="text-muted small mt-3">
       <strong>สถานะ:</strong> ${enabled ? '🟢 enabled' : '⚪ disabled'} · poleCount=${cfg.poleCount ?? 3} · usdtPerPole=${cfg.usdtPerPole ?? 10} · lossThreshold=${cfg.lossThresholdPct ?? 2}% · checkHours=${cfg.checkHours ?? 4} · stepUsdt=${cfg.stepUsdt ?? 10} ${inFlight}
-      <br /><strong>Last run:</strong> ${lastRunAt} · tickCount=${tickCount}
-      ${lastStats ? `<br /><strong>Last stats:</strong> action=${escapeHtml(lastStats.action || '—')} · deltaUsdt=${lastStats.deltaUsdt ?? 0} · usablePole=${lastStats.usablePoleCount ?? '?'} · lossPole=${lastStats.lossPoleCount ?? 0} · available=${lastStats.availablePoleCount ?? '?'} · target=${lastStats.targetPoleCount ?? '?'} · positions=${lastStats.positionCount ?? 0}` : ''}
+      <br /><strong>Last fire:</strong> ${lastRunAt} · tickCount=${tickCount} <span class="text-muted-3">(อัปเดตเฉพาะตอนยิงจริงที่ HH:00 BKK ตาม checkHours — ไม่ใช่ทุก 60s tick)</span>
+      ${lastStats ? `<br /><strong>Last stats:</strong> outcome=${escapeHtml(lastStats.outcome || '—')} · action=${escapeHtml(lastStats.action || '—')} · deltaUsdt=${lastStats.deltaUsdt ?? 0} · usablePole=${lastStats.usablePoleCount ?? '?'} · lossPole=${lastStats.lossPoleCount ?? 0} · available=${lastStats.availablePoleCount ?? '?'} · target=${lastStats.targetPoleCount ?? '?'} · positions=${lastStats.positionCount ?? 0}` : ''}
       ${status.lastRunError ? `<br /><strong>Last error:</strong> <span class="text-danger">${escapeHtml(status.lastRunError)}</span>` : ''}
     </div>
   `);

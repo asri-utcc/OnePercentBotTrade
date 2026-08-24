@@ -275,21 +275,33 @@ class AutoReserve {
         }
       })
       .catch((err) => {
+        // FIX-2026-08-24: defensive — runOnce now returns failed_apply instead of throwing,
+        // but keep this branch for unexpected errors (e.g. config load fail)
         this.lastRunError = err.message;
-        logger.error({ err: err.message, stack: err.stack, tickCount: this.tickCount }, 'autoReserve: tick failed');
+        this.lastStats = { ...(this.lastStats || {}), outcome: 'failed_unexpected', error: err.message, ts: Date.now(), tickCount: this.tickCount };
+        logger.error({ err: err.message, stack: err.stack, tickCount: this.tickCount }, 'autoReserve: tick failed (unexpected)');
       })
       .finally(async () => {
-        this.lastRunAt = new Date();
-        try {
-          await AppConfig.updateOne({ key: 'singleton' }, {
-            $set: {
-              autoReserveLastRunAt: this.lastRunAt,
-              autoReserveLastStats: this.lastStats,
-              autoReserveLastError: this.lastRunError,
-            },
-          });
-        } catch (err) {
-          logger.warn({ err: err.message }, 'autoReserve: persist lastRun failed');
+        // FIX-2026-08-24: only persist telemetry for "real" runs (fired, manual, or error).
+        //   - skipped ticks (not_trigger_time / disabled / inFlight) are normal — don't update lastRunAt
+        //   - เดิมอัปเดตทุก 60s ทำให้ UI/memory misleading ว่าระบบ "รันบ่อย"
+        //   - failed_apply + failed_unexpected ต้อง persist (เก็บ lastError ไว้ดู)
+        const stats = this.lastStats;
+        const isManual = stats && stats.source === 'manual';
+        const isRealFire = stats && stats.outcome !== 'skipped';
+        if (isManual || isRealFire) {
+          this.lastRunAt = new Date();
+          try {
+            await AppConfig.updateOne({ key: 'singleton' }, {
+              $set: {
+                autoReserveLastRunAt: this.lastRunAt,
+                autoReserveLastStats: this.lastStats,
+                autoReserveLastError: this.lastRunError,
+              },
+            });
+          } catch (err) {
+            logger.warn({ err: err.message }, 'autoReserve: persist lastRun failed');
+          }
         }
       });
   }
@@ -371,8 +383,11 @@ class AutoReserve {
       if (decision.action === 'reserve' || decision.action === 'release') {
         const beforeReserve = reserveUsdt;
         const afterReserve = decision.afterReserve;
+        // FIX-2026-08-24: don't throw on apply failure — set stats.outcome='failed_apply'
+        // and return stats. This lets _tickSafe.finally() distinguish real-fire from skip
+        // and persist telemetry correctly.
         try {
-          const updateResult = await AppConfig.findOneAndUpdate(
+          await AppConfig.findOneAndUpdate(
             { key: 'singleton' },
             { $set: { walletReserveUsdt: afterReserve } },
             { new: true }
@@ -409,10 +424,13 @@ class AutoReserve {
             source,
           }, 'autoReserve: reserve adjusted');
         } catch (err) {
+          // FIX-2026-08-24: capture failure in stats instead of throwing — telemetry
+          // needs to know when apply failed (so lastRunAt persists with lastError)
           stats.outcome = 'failed_apply';
           stats.error = err.message;
+          stats.failedBeforeReserve = beforeReserve;
+          stats.failedAfterReserve = afterReserve;
           logger.error({ err: err.message }, 'autoReserve: apply failed');
-          throw err;
         }
       }
 
