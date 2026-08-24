@@ -124,13 +124,19 @@ function decideAction({ availablePoleCount, targetPoleCount, reserveUsdt, stepUs
   }
 
   if (availablePoleCount > targetPoleCount) {
-    // Reserve MORE: lock stepUsdt extra
-    const after = Math.min(MAX_RESERVE, safeTotal, safeReserve + safeStep);
-    const delta = after - safeReserve;
-    if (delta <= 0) {
+    // Reserve MORE: lock stepUsdt extra — but ONLY if full stepUsdt fits
+    //   - FIX-2026-08-24: skip partial reserve. ถ้า usable < stepUsdt → wait for
+    //     next tick ดีกว่า lock เศษ 2 USDT (พอกั๊กจริงไม่พอ)
+    //   - reserve_at_max เมื่อ safeReserve + step > MAX_RESERVE
+    //   - insufficient_usable_for_step เมื่อ safeReserve + step > totalUsdt
+    const fullAfter = safeReserve + safeStep;
+    if (fullAfter > MAX_RESERVE) {
       return { action: 'none', deltaUsdt: 0, afterReserve: safeReserve, reason: 'reserve_at_max' };
     }
-    return { action: 'reserve', deltaUsdt: delta, afterReserve: after, reason: 'available_exceeds_target' };
+    if (fullAfter > safeTotal) {
+      return { action: 'none', deltaUsdt: 0, afterReserve: safeReserve, reason: 'insufficient_usable_for_step' };
+    }
+    return { action: 'reserve', deltaUsdt: safeStep, afterReserve: fullAfter, reason: 'available_exceeds_target' };
   }
 
   if (availablePoleCount < targetPoleCount) {

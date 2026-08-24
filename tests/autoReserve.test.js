@@ -308,20 +308,23 @@ describe('autoReserve — pure calculator functions', () => {
       expect(r.reason).toBe('reserve_already_zero');
     });
 
-    test('reserve clamp: totalUsdt < reserve+step → reserve capped at total', () => {
+    test('reserve clamp: totalUsdt < reserve+step → SKIP (insufficient_usable_for_step) — FIX-2026-08-24 no partial', () => {
       const r = autoReserve.decideAction({
         availablePoleCount: 5,
         targetPoleCount: 3,
         reserveUsdt: 95,
         stepUsdt: 10,
-        totalUsdt: 100,
+        totalUsdt: 100, // total = reserve(95) + usable(5) < step(10)
       });
-      expect(r.action).toBe('reserve');
-      expect(r.afterReserve).toBe(100); // capped at totalUsdt
-      expect(r.deltaUsdt).toBe(5);      // partial step
+      expect(r.action).toBe('none');
+      expect(r.afterReserve).toBe(95); // unchanged
+      expect(r.deltaUsdt).toBe(0);
+      expect(r.reason).toBe('insufficient_usable_for_step');
     });
 
-    test('reserve already at total → none (reserve_at_max)', () => {
+    test('reserve already at total → none (insufficient_usable_for_step) — FIX-2026-08-24', () => {
+      // reserve=total → usable=0 → can't do full step → skip
+      // (reserve_at_max only triggers if safeReserve+step > MAX_RESERVE=1M)
       const r = autoReserve.decideAction({
         availablePoleCount: 5,
         targetPoleCount: 3,
@@ -332,10 +335,10 @@ describe('autoReserve — pure calculator functions', () => {
       expect(r.action).toBe('none');
       expect(r.deltaUsdt).toBe(0);
       expect(r.afterReserve).toBe(100);
-      expect(r.reason).toBe('reserve_at_max');
+      expect(r.reason).toBe('insufficient_usable_for_step');
     });
 
-    test('totalUsdt=0 → reserve action clamped to 0 (no change)', () => {
+    test('totalUsdt=0 → SKIP (no usable) — FIX-2026-08-24 no partial', () => {
       const r = autoReserve.decideAction({
         availablePoleCount: 5,
         targetPoleCount: 3,
@@ -345,7 +348,51 @@ describe('autoReserve — pure calculator functions', () => {
       });
       expect(r.action).toBe('none');
       expect(r.afterReserve).toBe(0);
-      expect(r.reason).toBe('reserve_at_max');
+      expect(r.reason).toBe('insufficient_usable_for_step');
+    });
+
+    test('FIX-2026-08-24: usable=2, reserve=50, step=10 → SKIP (insufficient_usable_for_step)', () => {
+      // real-world scenario: 5 loss poles counted, usable only 2 USDT
+      // ระบบต้องการ reserve 10 แต่มีแค่ 2 → ข้าม รอบถัดไป
+      const r = autoReserve.decideAction({
+        availablePoleCount: 5,
+        targetPoleCount: 3,
+        reserveUsdt: 50,
+        stepUsdt: 10,
+        totalUsdt: 52, // total = reserve(50) + usable(2)
+      });
+      expect(r.action).toBe('none');
+      expect(r.deltaUsdt).toBe(0);
+      expect(r.afterReserve).toBe(50); // unchanged
+      expect(r.reason).toBe('insufficient_usable_for_step');
+    });
+
+    test('FIX-2026-08-24: usable=step exactly → reserve (full step boundary)', () => {
+      // usable = 10, step = 10 → exactly full step available
+      const r = autoReserve.decideAction({
+        availablePoleCount: 5,
+        targetPoleCount: 3,
+        reserveUsdt: 90,
+        stepUsdt: 10,
+        totalUsdt: 100, // usable = 10 = step
+      });
+      expect(r.action).toBe('reserve');
+      expect(r.deltaUsdt).toBe(10);
+      expect(r.afterReserve).toBe(100);
+      expect(r.reason).toBe('available_exceeds_target');
+    });
+
+    test('FIX-2026-08-24: usable = step-1 → SKIP (off-by-one boundary)', () => {
+      // usable = 9, step = 10 → 9 < 10 → skip
+      const r = autoReserve.decideAction({
+        availablePoleCount: 5,
+        targetPoleCount: 3,
+        reserveUsdt: 91,
+        stepUsdt: 10,
+        totalUsdt: 100, // usable = 9 = step - 1
+      });
+      expect(r.action).toBe('none');
+      expect(r.reason).toBe('insufficient_usable_for_step');
     });
 
     test('stepUsdt=0 → none (zero_step)', () => {
@@ -449,18 +496,19 @@ describe('autoReserve — pure calculator functions', () => {
       expect(r.deltaUsdt).toBe(10);
     });
 
-    test('large step: step=100, available > target → reserve capped by totalUsdt', () => {
+    test('large step: step=100, available > target → SKIP (insufficient_usable_for_step) — FIX-2026-08-24', () => {
+      // ก่อนหน้านี้: partial reserve (delta=70). หลังแก้: skip ทั้งดอก
       const r = autoReserve.decideAction({
         availablePoleCount: 20,
         targetPoleCount: 3,
         reserveUsdt: 30,
         stepUsdt: 100,
-        totalUsdt: 100,
+        totalUsdt: 100, // total = reserve(30) + usable(70) < step(100)
       });
-      // after = min(MAX, 100, 30+100) = 100; delta = 100-30 = 70
-      expect(r.action).toBe('reserve');
-      expect(r.afterReserve).toBe(100);
-      expect(r.deltaUsdt).toBe(70);
+      expect(r.action).toBe('none');
+      expect(r.afterReserve).toBe(30); // unchanged
+      expect(r.deltaUsdt).toBe(0);
+      expect(r.reason).toBe('insufficient_usable_for_step');
     });
 
     test('release when availableUsdt already covers: multiple-step gap', () => {
