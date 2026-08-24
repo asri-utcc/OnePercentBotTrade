@@ -515,7 +515,12 @@
     status.textContent = '⏳ กำลังรัน…';
     status.style.color = 'var(--text-3)';
     try {
-      const resp = await API.post('/api/admin/auto-delete-run', {});
+      // FIX-2026-08-24: /api/admin/auto-delete-run is password-gated (requireBotActionPassword)
+      //   - ใช้ callBotWithPassword เ�ื่อ popup themed password modal อัตโนมัติถ้า server ขอ
+      const callFn = (window.LUX_CONFIRM && window.LUX_CONFIRM.callBotWithPassword)
+        || window.callBotWithPassword
+        || (async (m, u, d) => API.post(u, d));
+      const resp = await callFn('POST', '/api/admin/auto-delete-run', {}, '▶ Run Auto Delete 1 รอบ');
       status.textContent = `✅ scanned=${resp.stats?.scanned ?? '?'} · warned=${resp.stats?.warned ?? 0} · deleted=${resp.stats?.scheduled ?? 0}`;
       status.style.color = '#4ade80';
       // update last-run display
@@ -580,7 +585,18 @@
     status.textContent = '⏳ กำลังส่ง…';
     status.style.color = 'var(--text-3)';
     try {
-      const resp = await API.post('/api/bots/bulk-update', { botIds: selectedBotIds, settings });
+      // FIX-2026-08-24: /api/bots/bulk-update is password-gated (requireBotActionPassword)
+      //   - ใช้ callBotWithPassword เพื่อ popup themed password modal อัตโนมัติถ้า server ขอ
+      //   - same pattern กับ bulkToggle/bulkRestore �้านล่าง
+      const callFn = (window.LUX_CONFIRM && window.LUX_CONFIRM.callBotWithPassword)
+        || window.callBotWithPassword
+        || (async (m, u, d) => API.post(u, d));
+      const resp = await callFn(
+        'POST',
+        '/api/bots/bulk-update',
+        { botIds: selectedBotIds, settings },
+        `Apply ${Object.keys(settings).length} fields → ${selectedBotIds.length} บอท`,
+      );
       // FIX-2026-08-02: แสดง trader restart count ด้วย (กรณีเปลี่ยน TF) เพื่อให้ user รู้ว่าบอทจะ offline ชั่วครู่
       const restartInfo = resp.traderRestarts > 0
         ? ` · restart trader ${resp.traderRestarts} ตัว`
