@@ -265,8 +265,13 @@ class PositionWatchdog {
       if (toArm.length === 0) continue;
 
       // Atomic claim with state filter — race-safe against trader path
+      // FIX-2026-08-24 (P0 audit): widen state guard to mirror fetch filter (L215)
+      //   - เดิม guard แค่ 'selling' แต่ fetch เอา 'selling'/'holding'/'filled'
+      //   - trades ที่อยู่ 'holding'/'filled' ถูก eval ทุก tick แต่ updateMany drop silently
+      //   - effect: stuck trades (เช่น RVN/PEPE orphan) ไม่ auto-arm จนกว่า manual intervene
+      //   - regression risk: ไม่กระทบ 'selling' path เดิม (still race-safe against trader path)
       const upd = await Trade.updateMany(
-        { _id: { $in: toArm }, state: 'selling', useStopLossOnUKC: { $ne: true } },
+        { _id: { $in: toArm }, state: { $in: ['selling', 'holding', 'filled'] }, useStopLossOnUKC: { $ne: true } },
         {
           $set: {
             useStopLossOnUKC: true,
