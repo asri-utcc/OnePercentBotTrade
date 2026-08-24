@@ -293,13 +293,32 @@ describe('P2-R2-11: analysis.routes.js /trade-analysis/invalidate password-gated
 // ─────────────────────────────────────────────────────────────
 // P2-R2-12/13: bot.routes.js dps-reset + bulk-update password-gated
 // ─────────────────────────────────────────────────────────────
-describe('P2-R2-12/13: bot.routes.js dps-reset + bulk-update password-gated', () => {
-  test('POST /:id/dps-reset uses requireBotActionPassword', () => {
-    expect(botRoutesSrc).toMatch(/router\.post\('.*dps-reset'.*requireAuth.*requireBotActionPassword/s);
+describe('FIX-2026-08-24: dps-reset + bulk-update no longer password-gated', () => {
+  test('POST /:id/dps-reset does NOT use requireBotActionPassword', () => {
+    expect(botRoutesSrc).toMatch(/router\.post\('.*dps-reset'.*requireAuth(?!.*requireBotActionPassword)/s);
   });
 
-  test('POST /bulk-update uses requireBotActionPassword', () => {
-    expect(botRoutesSrc).toMatch(/router\.post\('.*bulk-update'.*requireAuth.*requireBotActionPassword/s);
+  test('POST /bulk-update does NOT use requireBotActionPassword', () => {
+    expect(botRoutesSrc).toMatch(/router\.post\('.*bulk-update'.*requireAuth(?!.*requireBotActionPassword)/s);
+  });
+
+  test('POST /bulk-toggle does NOT use requireBotActionPassword', () => {
+    expect(botRoutesSrc).toMatch(/router\.post\('.*bulk-toggle'.*requireAuth(?!.*requireBotActionPassword)/s);
+  });
+
+  test('POST /bulk-restore does NOT use requireBotActionPassword', () => {
+    expect(botRoutesSrc).toMatch(/router\.post\('.*bulk-restore'.*requireAuth(?!.*requireBotActionPassword)/s);
+  });
+
+  test('POST /invalidate-volatility-cache does NOT use requireBotActionPassword', () => {
+    expect(botRoutesSrc).toMatch(/router\.post\('.*invalidate-volatility-cache'.*requireAuth(?!.*requireBotActionPassword)/s);
+  });
+
+  test('Destructive single-bot routes STILL use requireBotActionPassword', () => {
+    // force-close + delete + unlock-cbv2 remain password-gated (out of scope)
+    expect(botRoutesSrc).toMatch(/router\.post\('.*force-close'.*requireAuth.*requireBotActionPassword/s);
+    expect(botRoutesSrc).toMatch(/router\.delete\('.*:id'.*requireAuth.*requireBotActionPassword/s);
+    expect(botRoutesSrc).toMatch(/router\.post\('.*unlock-cbv2'.*requireAuth.*requireBotActionPassword/s);
   });
 });
 

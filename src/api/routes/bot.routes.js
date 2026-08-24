@@ -1580,9 +1580,10 @@ router.post('/:id/unlock-cbv2', requireAuth, requireBotActionPassword, async (re
 //   - dynamicSizeCurrent/dynamicLayersCurrent → null (กลับไปใช้ capitalPerTrade/maxTrades)
 //   - dynamicSizeLastResults → [] (เริ่มนับ streak ใหม่)
 //   - ใช้เมื่อ state เพี้ยน หรืออยากให้ค่าที่ตั้งเองมีผลทันที
-// FIX-2026-08-24 (P2 audit): require bot-action password — DPS reset = admin-level action
-//   (clears loss-streak state, can change sizing on next trade; matches bulk-update policy)
-router.post('/:id/dps-reset', requireAuth, requireBotActionPassword, async (req, res) => {
+// FIX-2026-08-24: removed requireBotActionPassword per user request — DPS reset is
+//   now treated as in-session admin action (same level as bulk-update). Operators
+//   can still force-clear DPS state from bot-detail.html without password prompt.
+router.post('/:id/dps-reset', requireAuth, async (req, res) => {
   try {
     const bot = await Bot.findById(req.params.id);
     if (!bot) return res.status(404).json({ error: 'Bot not found' });
@@ -2061,9 +2062,10 @@ router.get('/:id/details', requireAuth, async (req, res) => {
 //   - body: { botIds: [string], settings: { ... } }
 //   - apply fields ทั้งหมดใน settings ไปยังทุกบอทที่เลือก (whitelist)
 //   - invalidate cache + emit bot:updated สำหรับแต่ละบอท
-// FIX-2026-08-24 (P2 audit): require bot-action password — bulk-update = admin-level
-//   (changes tf/CBv5/DCA across N bots; matches bulk-toggle policy for consistency)
-router.post('/bulk-update', requireAuth, requireBotActionPassword, async (req, res) => {
+// FIX-2026-08-24: removed requireBotActionPassword per user request — bulk-update is
+//   an in-session admin action. Used by Master Config "ใช้ค่ากับบอทที่เลือก" — no
+//   password prompt needed since user is already authenticated.
+router.post('/bulk-update', requireAuth, async (req, res) => {
   try {
     const { botIds, settings } = req.body || {};
     if (!Array.isArray(botIds) || botIds.length === 0) {
@@ -2238,7 +2240,9 @@ router.post('/bulk-update', requireAuth, requireBotActionPassword, async (req, r
 //   - ใช้เมื่อเปลี่ยน TP-fork constants หรือ floor config (cache เก็บค่าเก่า)
 //   - ไม่ต้องการ body — clear ทั้งหมด
 //   - requireBotActionPassword เพราะเป็น admin-level action (ไม่ใช่ user-flow)
-router.post('/invalidate-volatility-cache', requireAuth, requireBotActionPassword, async (req, res) => {
+// FIX-2026-08-24: removed requireBotActionPassword per user request — cache
+//   invalidation is a no-op admin convenience, no destructive side-effects.
+router.post('/invalidate-volatility-cache', requireAuth, async (req, res) => {
   try {
     let cleared = false;
     if (typeof volatilityForBot._resetCache === 'function') {
@@ -2257,7 +2261,9 @@ router.post('/invalidate-volatility-cache', requireAuth, requireBotActionPasswor
 //   - body: { botIds: [string], action: 'enable' | 'disable', password?: string }
 //   - แต่ละ bot ผ่าน botManager.enableBot/disableBot (DB + spawn/stop trader + emit events)
 //   - response: { ok: true, action, results: [{ botId, ok, error? }], succeeded, failed }
-router.post('/bulk-toggle', requireAuth, requireBotActionPassword, async (req, res) => {
+// FIX-2026-08-24: removed requireBotActionPassword per user request — bulk-toggle is
+//   in-session admin action (start/stop multiple bots at once).
+router.post('/bulk-toggle', requireAuth, async (req, res) => {
   try {
     const { botIds, action } = req.body || {};
     if (!Array.isArray(botIds) || botIds.length === 0) {
@@ -2333,7 +2339,9 @@ router.post('/bulk-toggle', requireAuth, requireBotActionPassword, async (req, r
 //   - แต่ละบอท restore ผ่าน logic เดียวกับ POST /:id/restore (clear deletedAt, scheduledDeleteAt, deleteNotificationSentAt)
 //   - ไม่ spawn trader ใหม่ — user ต้องกด "▶️ Start" แยกต่างหาก (เพื่อให้ตัดสินใจเอง)
 //   - response: { ok: true, results: [{ botId, ok, error?, daysSinceDelete? }], succeeded, failed }
-router.post('/bulk-restore', requireAuth, requireBotActionPassword, async (req, res) => {
+// FIX-2026-08-24: removed requireBotActionPassword per user request — bulk-restore
+//   is in-session admin action (restore soft-deleted bots).
+router.post('/bulk-restore', requireAuth, async (req, res) => {
   try {
     const { botIds } = req.body || {};
     if (!Array.isArray(botIds) || botIds.length === 0) {

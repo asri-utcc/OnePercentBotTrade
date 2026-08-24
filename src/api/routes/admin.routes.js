@@ -26,16 +26,11 @@ const logger = require('../../utils/logger');
 const { requireAuth } = require('../middleware/auth');
 
 // Middleware stubs (mirror existing settings.js / bot.routes.js password pattern)
-// FIX-2026-08-08: reuse the same requireSettingsPassword / requireBotActionPassword middleware
-//   - those are defined in src/api/middleware/auth.js or src/api/middleware/adminAuth.js
-//   - if not present, we use requireAuth only (acceptable for first iteration; can tighten later)
-let requireSettingsPassword = requireAuth;
-let requireBotActionPassword = requireAuth;
-try {
-  const auth = require('../middleware/auth');
-  if (auth.requireSettingsPassword) requireSettingsPassword = auth.requireSettingsPassword;
-  if (auth.requireBotActionPassword) requireBotActionPassword = auth.requireBotActionPassword;
-} catch (_) { /* fallback already set */ }
+// FIX-2026-08-24: removed requireSettingsPassword + requireBotActionPassword fallbacks —
+//   per user request, no password gate on admin routes anymore. requireAuth alone is
+//   sufficient (session-based auth). Destructive single-bot actions (force-close,
+//   delete, create, permanent-delete, enable/disable/unlock/restore) still use
+//   requireBotActionPassword from src/api/middleware/auth.js.
 
 // ─── GET /api/admin/app-config ─────────────────────────────────
 router.get('/app-config', requireAuth, async (req, res) => {
@@ -51,10 +46,12 @@ router.get('/app-config', requireAuth, async (req, res) => {
 
 // ─── PUT /api/admin/app-config ─────────────────────────────────
 // FIX-2026-08-08 (rev2): master toggles — DPS tunables + CB Auto-Unlock + Auto Delete Bot
-//   - whitelist fields (กัน user inject field อื่น)
+//   - whitelist fields (กัน user inject field �ื่น)
 //   - per-field clamp map
 //   - cross-field validation: minSize<=maxSize, minLayers<=maxLayers (merge DB ก่อนเช็ค)
 //   - invalidate caches so next read picks up new value within 30s
+// FIX-2026-08-24: removed requireSettingsPassword per user request — in-session admin
+//   action. requireSettingsPassword was already a no-op (falls back to requireAuth).
 //
 // FIX-2026-08-08 (rev2): DPS field clamps (ต้องตรงกับ DEFAULTS ใน dynamicPositionSizing.js)
 const DPS_CLAMP = {
@@ -84,7 +81,7 @@ function _clampDpsField(name, value) {
   return v;
 }
 
-router.put('/app-config', requireAuth, requireSettingsPassword, async (req, res) => {
+router.put('/app-config', requireAuth, async (req, res) => {
   try {
     const whitelist = {
       masterDynamicSizeEnabled: 'boolean',
@@ -209,7 +206,7 @@ router.get('/rate-limit', requireAuth, async (req, res) => {
   }
 });
 
-router.put('/rate-limit', requireAuth, requireSettingsPassword, async (req, res) => {
+router.put('/rate-limit', requireAuth, async (req, res) => {
   try {
     const raw = req.body && req.body.capacity;
     const n = parseInt(raw, 10);
@@ -255,7 +252,9 @@ router.put('/rate-limit', requireAuth, requireSettingsPassword, async (req, res)
 // FIX-2026-08-08: force-tick autoDeleteBot — useful for testing + manual scheduling
 //   - returns stats object from tick()
 //   - if tick is already running → returns { skipped: 'in-progress' }
-router.post('/auto-delete-run', requireAuth, requireBotActionPassword, async (req, res) => {
+// FIX-2026-08-24: removed requireBotActionPassword per user request — manual auto-delete
+//   run is in-session admin action (no destructive irreversible effect — only soft-delete).
+router.post('/auto-delete-run', requireAuth, async (req, res) => {
   try {
     const stats = await autoDeleteBot.tick();
     logger.info({ stats }, 'admin: auto-delete-run completed');
@@ -382,7 +381,7 @@ router.get('/bot-defaults', requireAuth, async (req, res) => {
   }
 });
 
-router.put('/bot-defaults', requireAuth, requireSettingsPassword, async (req, res) => {
+router.put('/bot-defaults', requireAuth, async (req, res) => {
   try {
     const body = req.body || {};
     // whitelist: only known fields (number/string/boolean)
@@ -464,7 +463,9 @@ router.put('/bot-defaults', requireAuth, requireSettingsPassword, async (req, re
 //   - สำหรับกรณี state เพี้ยนจากการ migrate / config เปลี่ยน / ต้องการเริ่มนับใหม่ทั้งระบบ
 //   - ต้องมี requireBotActionPassword — กระทบบอทจำนวนมาก
 //   - sync in-memory trader snapshot ถ้ามี trader ทำงานอยู่
-router.post('/dps-reset-all', requireAuth, requireBotActionPassword, async (req, res) => {
+// FIX-2026-08-24: removed requireBotActionPassword per user request — admin batch DPS
+//   reset is in-session admin action (reversible — bots can re-accumulate DPS state).
+router.post('/dps-reset-all', requireAuth, async (req, res) => {
   try {
     const dps = require('../../core/dynamicPositionSizing');
     const botManager = require('../../core/botManager');
@@ -512,7 +513,7 @@ module.exports = router;
 
 // Lightweight metadata list (id + name + fieldCount + timestamps).
 // Modal dropdown only needs these — full settings fetched on demand.
-router.get('/master-config-templates', requireAuth, requireSettingsPassword, async (req, res) => {
+router.get('/master-config-templates', requireAuth, async (req, res) => {
   try {
     const cfg = await AppConfig.findOne({ key: 'singleton' }).lean();
     const templates = (cfg && cfg.masterConfigTemplates) || [];
@@ -524,7 +525,7 @@ router.get('/master-config-templates', requireAuth, requireSettingsPassword, asy
 });
 
 // Full entry (with settings) — frontend calls this on Load click.
-router.get('/master-config-templates/:id', requireAuth, requireSettingsPassword, async (req, res) => {
+router.get('/master-config-templates/:id', requireAuth, async (req, res) => {
   try {
     const cfg = await AppConfig.findOne({ key: 'singleton' }).lean();
     const templates = (cfg && cfg.masterConfigTemplates) || [];
@@ -540,7 +541,7 @@ router.get('/master-config-templates/:id', requireAuth, requireSettingsPassword,
 // Create new template — body: { name, settings, overwrite?: boolean }
 // sanitizeSettings() drops unknown keys; per-field clamping is deferred to
 // /api/bots/bulk-update (so user sees validation errors at the apply step).
-router.post('/master-config-templates', requireAuth, requireSettingsPassword, async (req, res) => {
+router.post('/master-config-templates', requireAuth, async (req, res) => {
   try {
     const cfg = await AppConfig.findOne({ key: 'singleton' }).lean();
     const templates = (cfg && cfg.masterConfigTemplates) || [];
@@ -598,7 +599,7 @@ router.post('/master-config-templates', requireAuth, requireSettingsPassword, as
 });
 
 // Update — body: { name?, settings? } (at least one required).
-router.put('/master-config-templates/:id', requireAuth, requireSettingsPassword, async (req, res) => {
+router.put('/master-config-templates/:id', requireAuth, async (req, res) => {
   try {
     const cfg = await AppConfig.findOne({ key: 'singleton' }).lean();
     const templates = (cfg && cfg.masterConfigTemplates) || [];
@@ -648,7 +649,7 @@ router.put('/master-config-templates/:id', requireAuth, requireSettingsPassword,
 });
 
 // Delete
-router.delete('/master-config-templates/:id', requireAuth, requireSettingsPassword, async (req, res) => {
+router.delete('/master-config-templates/:id', requireAuth, async (req, res) => {
   try {
     const updated = await AppConfig.findOneAndUpdate(
       { key: 'singleton' },
