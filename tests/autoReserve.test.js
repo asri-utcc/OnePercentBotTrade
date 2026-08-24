@@ -281,7 +281,7 @@ describe('autoReserve — pure calculator functions', () => {
       expect(r.reason).toBe('available_below_target');
     });
 
-    test('release floor: reserveUsdt=5, step=10 → release only 5 (delta=5)', () => {
+    test('release floor: reserveUsdt=5, step=10 → release ALL remaining 5 (FIX-2026-08-24)', () => {
       const r = autoReserve.decideAction({
         availablePoleCount: 0,
         targetPoleCount: 3,
@@ -292,6 +292,49 @@ describe('autoReserve — pure calculator functions', () => {
       expect(r.action).toBe('release');
       expect(r.afterReserve).toBe(0);
       expect(r.deltaUsdt).toBe(5);
+      expect(r.reason).toBe('release_remaining_below_step'); // FIX-2026-08-24 new reason
+    });
+
+    test('FIX-2026-08-24: reserve=3, step=10 → release 3, after=0', () => {
+      const r = autoReserve.decideAction({
+        availablePoleCount: 0,
+        targetPoleCount: 3,
+        reserveUsdt: 3,
+        stepUsdt: 10,
+        totalUsdt: 100,
+      });
+      expect(r.action).toBe('release');
+      expect(r.deltaUsdt).toBe(3);
+      expect(r.afterReserve).toBe(0);
+      expect(r.reason).toBe('release_remaining_below_step');
+    });
+
+    test('FIX-2026-08-24: reserve=1, step=10 → release 1 (drain to zero)', () => {
+      const r = autoReserve.decideAction({
+        availablePoleCount: 0,
+        targetPoleCount: 3,
+        reserveUsdt: 1,
+        stepUsdt: 10,
+        totalUsdt: 100,
+      });
+      expect(r.action).toBe('release');
+      expect(r.deltaUsdt).toBe(1);
+      expect(r.afterReserve).toBe(0);
+      expect(r.reason).toBe('release_remaining_below_step');
+    });
+
+    test('release full step: reserve=30, step=10 → release exactly 10', () => {
+      const r = autoReserve.decideAction({
+        availablePoleCount: 0,
+        targetPoleCount: 5,
+        reserveUsdt: 30,
+        stepUsdt: 10,
+        totalUsdt: 100,
+      });
+      expect(r.action).toBe('release');
+      expect(r.deltaUsdt).toBe(10);
+      expect(r.afterReserve).toBe(20);
+      expect(r.reason).toBe('available_below_target'); // not the new reason — has enough
     });
 
     test('release at zero: reserveUsdt=0 → none (reserve_already_zero)', () => {

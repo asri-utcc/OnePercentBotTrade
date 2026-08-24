@@ -140,13 +140,17 @@ function decideAction({ availablePoleCount, targetPoleCount, reserveUsdt, stepUs
   }
 
   if (availablePoleCount < targetPoleCount) {
-    // Release: unlock stepUsdt
-    const after = Math.max(0, safeReserve - safeStep);
-    const delta = safeReserve - after;
-    if (delta <= 0) {
-      return { action: 'none', deltaUsdt: 0, afterReserve: safeReserve, reason: 'reserve_already_zero' };
+    // Release: unlock stepUsdt — but if reserve < step, release ALL remaining (FIX-2026-08-24)
+    //   - Asymmetric vs reserve branch (which skips partial)
+    //   - ถ้า reserveUsdt=5, step=10 → release 5 ทั้งหมด (after=0) — drain leftover
+    //   - ถ้า reserveUsdt=0 → none (ไม่มีอะไรให้ปล่อย)
+    if (safeReserve <= 0) {
+      return { action: 'none', deltaUsdt: 0, afterReserve: 0, reason: 'reserve_already_zero' };
     }
-    return { action: 'release', deltaUsdt: delta, afterReserve: after, reason: 'available_below_target' };
+    const releaseAmount = Math.min(safeStep, safeReserve);
+    const after = safeReserve - releaseAmount;
+    const reason = safeReserve < safeStep ? 'release_remaining_below_step' : 'available_below_target';
+    return { action: 'release', deltaUsdt: releaseAmount, afterReserve: after, reason };
   }
 
   // exact match → no action
