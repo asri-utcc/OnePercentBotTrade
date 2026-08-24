@@ -1599,21 +1599,16 @@ async function triggerAutoReserve() {
         title: 'Run Auto Reserve ทันที',
         message:
           '🤖 จะรัน Auto Reserve ทันที (bypass checkHours + enabled flag)\n\n' +
-          'ระบบจะคำนวณ usable + loss poles แล้วปรับ reserve ทันที\n' +
-          '(ใช้รหัส BOT_ACTION_PASSWORD)',
+          'ระบบจะคำนวณ usable + loss poles แล้วปรับ reserve ทันที',
         confirmLabel: 'รันเลย',
         cancelLabel: 'ยกเลิก',
-        requirePassword: true,
+        requirePassword: false,
       })
-    : (function () {
-        const ok = confirm('⚠️ จะรัน Auto Reserve ทันที (bypass checkHours + enabled flag)?\n\nระบบจะคำนวณ usable + loss poles แล้วปรับ reserve ทันที');
-        return ok ? prompt('กรุณาใส่รหัส BOT_ACTION_PASSWORD') : null;
-      })();
-  if (proceed === null) return;
-  const password = (typeof proceed === 'string') ? proceed : '';
+    : confirm('🤖 จะรัน Auto Reserve ทันที (bypass checkHours + enabled flag)?\n\nระบบจะคำนวณ usable + loss poles แล้วปรับ reserve ทันที');
+  if (!proceed) return;
   setStatus('ar-status', '⏳ กำลังรัน...');
   try {
-    const resp = await API.post('/api/wallet/auto-reserve/run', { password });
+    const resp = await API.post('/api/wallet/auto-reserve/run', {});
     const s = (resp && resp.stats) || {};
     if (s.outcome === 'failed_apply') { setStatus('ar-status', '❌ apply failed: ' + (s.error || 'unknown'), true); }
     else if (s.skipped) { setStatus('ar-status', '⏸ ' + s.skipped); }
@@ -1628,8 +1623,7 @@ async function triggerAutoReserve() {
     }
     await loadConfig();
   } catch (err) {
-    if (err.status === 403) { setStatus('ar-status', '🔒 รหัส BOT_ACTION_PASSWORD ไม่ถูกต้อง'); }
-    else { setStatus('ar-status', '❌ ' + (err.body && err.body.error ? err.body.error : err.message), true); }
+    setStatus('ar-status', '❌ ' + (err.body && err.body.error ? err.body.error : err.message), true);
   }
 }
 

@@ -383,8 +383,10 @@ router.put('/auto-reserve/config', requireAuth, async (req, res) => {
 
 // ─── POST /api/wallet/auto-reserve/run ──────────────────────────────────────
 //   Manual trigger — runs one cycle NOW (bypasses time-of-day guard + disabled check).
-//   requireBotActionPassword because it changes walletReserveUsdt.
-router.post('/auto-reserve/run', requireAuth, requireBotActionPassword, async (req, res) => {
+//   requireAuth only (no bot-action password) — FIX-2026-08-24: reserve adjust is
+//   non-destructive (just a number change, next 4h tick re-evaluates). Session
+//   cookie alone is sufficient gate. Matches PUT /api/wallet/reserve UX.
+router.post('/auto-reserve/run', requireAuth, async (req, res) => {
   try {
     const stats = await autoReserve.runOnce({ source: 'manual', force: true });
     res.json({ ok: true, stats, ts: Date.now() });
