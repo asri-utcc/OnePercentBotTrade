@@ -6,7 +6,7 @@
  *   GET  /api/wallet/balances  → aggregate Binance Spot balances with USDT price
  *                                  + THB value (filtered > 1 THB)
  *   GET  /api/wallet/reserve   → read current reserve + total USDT + usable
- *   PUT  /api/wallet/reserve   → update reserve (gated by requireBotActionPassword)
+ *   PUT  /api/wallet/reserve   → update reserve (no password — 2026-08-24 quick adjust UX)
  *
  * Price source:
  *   - binanceRest.get24hrTickers() — single batch (weight 80) for ALL symbols
@@ -15,8 +15,8 @@
  *
  * Auth:
  *   - GET endpoints: requireAuth
- *   - PUT /api/wallet/reserve: requireAuth + bot-action password (inlined — mirror
- *     bot.routes.js pattern since admin.routes.js uses try/require fallback).
+ *   - PUT /api/wallet/reserve: requireAuth only (FIX-2026-08-24: removed bot-action
+ *     password gate — quick ±5/±10 adjust is too frequent to prompt every time)
  *
  * Cache discipline:
  *   - reserve: src/services/walletReserve.js (10s)
@@ -30,33 +30,15 @@ const walletReserve = require('../../services/walletReserve');
 const AppConfig = require('../../db/models/AppConfig');
 const Trade = require('../../db/models/Trade');
 const WalletSnapshot = require('../../db/models/WalletSnapshot');
-const config = require('../../../config');
 const logger = require('../../utils/logger');
 const { requireAuth } = require('../middleware/auth');
 
-// ─── Bot-Action Password middleware (inlined mirror of bot.routes.js) ─────
-// รับ password จาก body.password, header X-Bot-Action-Password, หรือ query ?password=
-// ถ้า config.botActionPassword ว่าง → reject ทุก action (force secure by default)
-function requireBotActionPassword(req, res, next) {
-  const expected = (config.botActionPassword || '').trim();
-  if (!expected) {
-    logger.warn({ path: req.path, ip: req.ip }, 'wallet: bot action blocked: BOT_ACTION_PASSWORD not configured');
-    return res.status(503).json({
-      error: 'Bot actions are disabled because BOT_ACTION_PASSWORD is not set. Set it in .env to enable reserve changes.',
-    });
-  }
-  const provided = (
-    (req.body && req.body.password)
-    || req.get('X-Bot-Action-Password')
-    || req.query.password
-    || ''
-  ).toString().trim();
-  if (!provided || provided !== expected) {
-    logger.warn({ path: req.path, ip: req.ip, hasPassword: !!provided }, 'wallet: bot action blocked: invalid/missing password');
-    return res.status(403).json({ error: 'Invalid or missing password for bot action' });
-  }
-  next();
-}
+// FIX-2026-08-24: removed requireBotActionPassword — wallet reserve adjust is too
+// frequent (±5/±10 buttons) to prompt for password every save. Auth is still
+// requireAuth (session cookie). The middleware below is kept as a comment-only
+// reference in case we ever want to re-enable.
+//
+// function requireBotActionPassword(req, res, next) { ... }
 
 // ─── Constants ─────────────────────────────────────────────────────────────
 const STABLECOINS = new Set([
@@ -233,7 +215,7 @@ router.get('/reserve', requireAuth, async (req, res) => {
 });
 
 // ─── PUT /api/wallet/reserve ───────────────────────────────────────────────
-router.put('/reserve', requireAuth, requireBotActionPassword, async (req, res) => {
+router.put('/reserve', requireAuth, async (req, res) => {
   try {
     const raw = req.body && req.body.reserveUsdt;
     if (raw === undefined || raw === null) {

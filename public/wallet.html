@@ -64,6 +64,54 @@
     .wallet-chip.is-active { background: var(--gold-1); color: #000; border-color: var(--gold-1); font-weight: 700; }
     .wallet-chip.is-disabled { opacity: 0.45; cursor: not-allowed; pointer-events: none; }
 
+    /* Quick-adjust group: ±5/±10 — bigger pills, color-coded */
+    .wallet-quick-group {
+      display: flex;
+      gap: 0.5rem;
+      align-items: center;
+      flex-wrap: wrap;
+      padding: 0.55rem 0.7rem;
+      background: linear-gradient(135deg, rgba(245,184,0,0.06), rgba(245,184,0,0.02));
+      border: 1px dashed rgba(245,184,0,0.28);
+      border-radius: 10px;
+    }
+    .wallet-quick-group .group-label {
+      font-size: 0.72rem; color: var(--gold-1); font-weight: 600;
+      letter-spacing: 0.04em; text-transform: uppercase;
+      margin-right: 0.25rem;
+    }
+    .wallet-quick-btn {
+      min-width: 56px;
+      padding: 0.5rem 0.85rem;
+      border-radius: 10px;
+      border: 1px solid var(--border-soft);
+      background: rgba(255,255,255,0.05);
+      color: var(--text-1);
+      font-size: 0.95rem; font-weight: 700;
+      font-family: var(--font-mono, monospace);
+      cursor: pointer;
+      transition: all 140ms ease;
+    }
+    .wallet-quick-btn:hover { transform: translateY(-1px); }
+    .wallet-quick-btn.is-plus:hover {
+      border-color: var(--bull-1); color: var(--bull-1);
+      box-shadow: 0 0 0 2px rgba(0,229,184,0.18);
+    }
+    .wallet-quick-btn.is-minus:hover {
+      border-color: var(--bear-1); color: var(--bear-1);
+      box-shadow: 0 0 0 2px rgba(255,77,109,0.18);
+    }
+    .wallet-quick-btn.is-plus:active { background: rgba(0,229,184,0.20); }
+    .wallet-quick-btn.is-minus:active { background: rgba(255,77,109,0.20); }
+    .wallet-preset-row {
+      display: flex; gap: 0.35rem; flex-wrap: wrap;
+      align-items: center;
+    }
+    .wallet-preset-row .group-label {
+      font-size: 0.7rem; color: var(--text-3);
+      margin-right: 0.15rem; font-weight: 500;
+    }
+
     .wallet-usable-grid {
       display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
       gap: 0.5rem; margin-top: 0.5rem;
@@ -277,15 +325,22 @@
                style="width: 120px; padding: 0.35rem 0.55rem; background: rgba(255,255,255,0.04); border: 1px solid var(--border-soft); color: var(--text-1); border-radius: 8px; font-family: var(--font-mono, monospace);" />
       </div>
 
-      <div class="wallet-chip-row mt-2">
+      <!-- Quick Adjust group: −10 / −5 / +5 / +10 (the frequent-tap buttons) -->
+      <div class="wallet-quick-group mt-3">
+        <span class="group-label">⚡ ปรับเร็ว</span>
+        <button class="wallet-quick-btn is-minus" data-reserve-delta="-10" type="button" title="ลด 10 USDT">−10</button>
+        <button class="wallet-quick-btn is-minus" data-reserve-delta="-5"  type="button" title="ลด 5 USDT">−5</button>
+        <button class="wallet-quick-btn is-plus"  data-reserve-delta="5"   type="button" title="เพิ่ม 5 USDT">+5</button>
+        <button class="wallet-quick-btn is-plus"  data-reserve-delta="10"  type="button" title="เพิ่ม 10 USDT">+10</button>
+      </div>
+
+      <!-- Preset group: exact amounts + Max -->
+      <div class="wallet-preset-row mt-2">
+        <span class="group-label">📌 ตั้งค่าตรง ๆ:</span>
         <button class="wallet-chip" data-reserve="0" type="button">0</button>
         <button class="wallet-chip" data-reserve="50" type="button">50</button>
         <button class="wallet-chip" data-reserve="100" type="button">100</button>
         <button class="wallet-chip" data-reserve="1000" type="button">1,000</button>
-        <button class="wallet-chip" data-reserve-delta="-10" type="button" title="ลด 10 USDT">−10</button>
-        <button class="wallet-chip" data-reserve-delta="-5" type="button" title="ลด 5 USDT">−5</button>
-        <button class="wallet-chip" data-reserve-delta="5" type="button" title="เพิ่ม 5 USDT">+5</button>
-        <button class="wallet-chip" data-reserve-delta="10" type="button" title="เพิ่ม 10 USDT">+10</button>
         <button class="wallet-chip" data-reserve="max" type="button" title="กั๊กทั้งหมดที่มี">Max</button>
       </div>
 

@@ -71,7 +71,7 @@
     pnlRangeChips: document.querySelectorAll('#pnl-range-chips .wallet-range-chip'),
     pnlCurrencyBtns: document.querySelectorAll('#pnl-currency-toggle button'),
   };
-  const chips = Array.from(document.querySelectorAll('.wallet-chip'));
+  const chips = Array.from(document.querySelectorAll('.wallet-chip, .wallet-quick-btn'));
 
   // Local state
   let _savedReserve = 0;        // last value persisted on server
@@ -152,6 +152,11 @@
 
   function syncChipsActive() {
     for (const c of chips) {
+      // Skip delta quick-buttons (±5/±10) — they represent "add N" not a fixed target
+      if (c.dataset.reserveDelta != null) {
+        c.classList.remove('is-active');
+        continue;
+      }
       const v = c.dataset.reserve;
       const target = (v === 'max') ? _totalUsdt : parseFloat(v);
       const isActive = Math.abs(_draftReserve - target) < 0.5;
