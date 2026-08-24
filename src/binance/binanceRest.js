@@ -327,6 +327,14 @@ http.interceptors.response.use(
           }
         }
       }
+      // FIX-2026-08-24 (P1 audit): HTTP 429 = weight limit reached (short of full IP ban)
+      //   - เดิม: 429 → reject only → token bucket drained → next requests queue หนัก → burst re-fires 429
+      //   - fix: setBanUntil(now + 5000) → take() blocks 5s (refresh bucket) → reduces burst spam
+      //   - 5s พอให้ refill rate 100/s catch up โดยไม่ block normal traffic นานเกินไป
+      if (err.response.status === 429) {
+        limiter.setBanUntil(Date.now() + 5000);
+        logger.warn({ status: 429, headers: err.response.headers }, 'binanceRest: HTTP 429 — pausing 5s for token-bucket refill');
+      }
     }
     return Promise.reject(err);
   }
@@ -553,6 +561,10 @@ async function getKlinesPaginated({ symbol, interval, totalLimit, batchLimit = 1
  *   openPrice, highPrice, lowPrice, volume, quoteVolume, openTime, closeTime,
  *   firstId, lastId, count }
  */
+// FIX-2026-08-24 (P1 audit DEFECT-3): in-process 60s cache for no-symbol get24hrTickers (weight 80)
+let _tickers24hCache = null; // { atMs, value }
+const _tickers24hCacheTtlMs = 60 * 1000;
+
 async function get24hrTickers({ symbol = null } = {}) {
   // FIX-2026-08-22 (weight spike): support bulk fetch via symbols=[...]
   //   - Binance docs: symbols=[...] form costs 2 (same as single-symbol)
@@ -564,7 +576,25 @@ async function get24hrTickers({ symbol = null } = {}) {
     else params.symbol = symbol;
   }
   const weight = symbol ? 2 : 80;
+  // FIX-2026-08-24 (P1 audit DEFECT-3): cache no-symbol form (weight 80) for 60s
+  //   - เดิม wallet + botManager.auto-pause + walletSnapshot ทุก tick → N×80 weight ต่อนาที
+  //   - fix: in-process 60s cache — caller ส่วนใหญ่ tolerates 60s stale (topN/ranking/snapshot)
+  //   - skip cache for per-symbol form (weight 2 only)
+  if (!symbol) {
+    const now = Date.now();
+    if (_tickers24hCache && (now - _tickers24hCache.atMs) < _tickers24hCacheTtlMs) {
+      return _tickers24hCache.value;
+    }
+    const value = await publicGet('/api/v3/ticker/24hr', params, weight);
+    _tickers24hCache = { atMs: now, value };
+    return value;
+  }
   return publicGet('/api/v3/ticker/24hr', params, weight);
+}
+
+// FIX-2026-08-24 (P1 audit DEFECT-3): expose cache clear for tests + admin invalidate-volatility-cache pattern
+function _resetTickerCache() {
+  _tickers24hCache = null;
 }
 
 // FIX-2026-07-24: bookTicker (best bid/ask) — ใช้ refresh stale bookTicker ก่อน retry
@@ -718,6 +748,7 @@ module.exports = {
   getKlines,
   getKlinesPaginated,
   get24hrTickers,
+  _resetTickerCache,
   getBookTicker,
   getSpotDelistSchedule,  // FIX-2026-08-06: delist schedule for bot filter
   getAccount,

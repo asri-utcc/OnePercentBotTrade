@@ -1,6 +1,8 @@
 'use strict';
 
 const express = require('express');
+// FIX-2026-08-24 (P1 audit): bulk operations stagger — must match botManager.SPAWN_STAGGER_MS
+const SPAWN_STAGGER_MS = 300;
 const { requireAuth } = require('../middleware/auth');
 const Bot = require('../../db/models/Bot');
 const Trade = require('../../db/models/Trade');
@@ -2199,9 +2201,13 @@ router.post('/bulk-update', requireAuth, async (req, res) => {
     //   - trader caches interval ใน kline subscription + indicator cache ตอน spawn
     //     → ถ้าไม่ restart, bot:updated จะ refresh this.bot.timeframe แต่ logic ยังใช้ TF เก่า
     //   - stopTrader + spawnTrader sequentially ต่อบอท กัน race กับ in-flight signal
+    // FIX-2026-08-24 (P1 audit): stagger between TF-change restarts
+    //   - เดิม 50-500 บอท TF เปลี่ยนพร้อมกัน → 50×30=1500 weight burst → 418 IP ban
+    //   - fix: sleep SPAWN_STAGGER_MS ระหว่าง iterations → average ~70 calls/s (ใต้ refill 100/s)
     let traderRestarts = 0;
     const restartErrors = [];
-    for (const id of tfChangeBotIds) {
+    for (let i = 0; i < tfChangeBotIds.length; i++) {
+      const id = tfChangeBotIds[i];
       try {
         await botManager.stopTrader(id);
         const fresh = await Bot.findById(id);
@@ -2211,6 +2217,10 @@ router.post('/bulk-update', requireAuth, async (req, res) => {
       } catch (err) {
         restartErrors.push({ botId: id, err: err.message });
         logger.warn({ botId: id, err: err.message }, 'bulk-update: trader restart failed after TF change');
+      }
+      // stagger between iterations — skip after last
+      if (i < tfChangeBotIds.length - 1) {
+        await new Promise((resolve) => setTimeout(resolve, SPAWN_STAGGER_MS));
       }
     }
     if (restartErrors.length > 0) {
@@ -2286,7 +2296,11 @@ router.post('/bulk-toggle', requireAuth, requireBotActionPassword, async (req, r
     let succeeded = 0;
     let failed = 0;
     // รัน sequentially เพื่อไม่ให้ trader spawn/in-flight log ปนกัน + กัน Binance weight spike
-    for (const id of botIds) {
+    // FIX-2026-08-24 (P1 audit): stagger between iterations
+    //   - 100 bots × enable path อาจ spawn trader → symbolInfo.loadSymbol(weight 20) × 100 = 2000 weight burst
+    //   - fix: sleep SPAWN_STAGGER_MS between iterations → average ~3 bots/s
+    for (let i = 0; i < botIds.length; i++) {
+      const id = botIds[i];
       try {
         const bot = action === 'enable'
           ? await botManager.enableBot(id)
@@ -2296,6 +2310,10 @@ router.post('/bulk-toggle', requireAuth, requireBotActionPassword, async (req, r
       } catch (err) {
         results.push({ botId: String(id), ok: false, error: err.message });
         failed += 1;
+      }
+      // FIX-2026-08-24 (P1 audit): stagger between iterations — skip after last
+      if (i < botIds.length - 1) {
+        await new Promise((resolve) => setTimeout(resolve, SPAWN_STAGGER_MS));
       }
     }
 

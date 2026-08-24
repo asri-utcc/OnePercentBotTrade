@@ -539,7 +539,22 @@ class Trader {
         // FIX P2.2: ใช้ **blacklist** แทน whitelist — refresh ทุก field ยกเว้น hot-path state
         //   เดิม whitelist = 13 fields → ถ้า dev เพิ่ม field ใหม่แล้วลืม update array = bug
         //   fix: blacklist เฉพาะ fields ที่ต้อง preserve (status, currentTrade, lastSignalCloseTime, etc.)
-        const preservedKeys = ['_id', 'status', 'lastSignalCloseTime', 'lastSignalAt', 'totalPnl', 'totalTrades', 'winTrades', 'lastError', 'createdAt', 'updatedAt', '__v', 'cbLastFiredAt', 'cbv2LastFiredAt']; // FIX-2026-08-06: add cbv2LastFiredAt to preserve CBv2 suppression across bot:updated refresh
+        const preservedKeys = [
+          '_id', 'status', 'lastSignalCloseTime', 'lastSignalAt',
+          'totalPnl', 'totalTrades', 'winTrades', 'lastError',
+          'createdAt', 'updatedAt', '__v',
+          // FIX-2026-08-06: add cbv2LastFiredAt to preserve CBv2 suppression across bot:updated refresh
+          'cbLastFiredAt', 'cbv2LastFiredAt',
+          // FIX-2026-08-24 (P1 audit): add CBv3/CBv5 + F1 auto-arm timestamps —
+          //   instance state (_cbv3FiredAt/_cbv5FiredAt/autoArmedAt) is restored at startup
+          //   from these fields. If bot:updated refresh overwrites them with stale DB
+          //   values (or null after toggle), the in-memory suppression window collapses
+          //   → CB/CBv3/CBv5 can fire AGAIN within the same cooldown → duplicate force-close
+          //   pattern (seen on 1000CAT incident). preserveKeys ensures the in-memory
+          //   snapshot stays authoritative for these "live runtime" timestamps.
+          'cbv3LastFiredAt', 'cbv5LastFiredAt',
+          'autoArmedAt', 'autoArmLossPct', 'autoArmAgeHours',
+        ];
         for (const k of Object.keys(fresh)) {
           if (preservedKeys.includes(k)) continue;
           if (k in this.bot) {
@@ -8477,6 +8492,7 @@ class Trader {
       let actuallySeeded = 0;
       let skipped = 0;
       let advancedToMs = lastSignalCloseMs;
+      let candleErrors = 0;
       for (const k of raw) {
         const openTime = k[0];
         const closeTime = k[6];
@@ -8488,20 +8504,49 @@ class Trader {
         //   2) run detectS1Signals(klines) บน full cache
         //   3) ถ้าเจอ S1 ที่ closeTime ตรงกับ candle นี้ → save Signal + place BUY
         const beforeCacheSize = klineCache.size(this.bot.symbol, this.bot.timeframe);
-        await this.onCandleClosed({
-          openTime,
-          closeTime,
-          open: parseFloat(k[1]),
-          high: parseFloat(k[2]),
-          low: parseFloat(k[3]),
-          close: parseFloat(k[4]),
-          volume: parseFloat(k[5]),
-          isClosed: true,
-        }, { replay: true, trigger });
+        // FIX-2026-08-24 (P1 audit): per-candle try/catch — one bad candle ไม่ควร abort
+        //   200-candle replay. เดิม throw ใน onCandleClosed → skip remaining candles → ghost BUY
+        //   on next sweep (candles 51-200 never processed). fix: catch + continue + log.
+        try {
+          await this.onCandleClosed({
+            openTime,
+            closeTime,
+            open: parseFloat(k[1]),
+            high: parseFloat(k[2]),
+            low: parseFloat(k[3]),
+            close: parseFloat(k[4]),
+            volume: parseFloat(k[5]),
+            isClosed: true,
+          }, { replay: true, trigger });
+        } catch (candleErr) {
+          candleErrors += 1;
+          logger.warn({
+            botId: this.bot._id.toString(),
+            symbol: this.bot.symbol,
+            tf: this.bot.timeframe,
+            closeTime,
+            err: candleErr.message,
+          }, 'trader: reconcileKlines per-candle error — continuing sweep');
+          // FIX-2026-08-24 (P1 audit): ถ้า candle throw ใน replay mode → onCandleClosed likely
+          //   ไม่ได้ update internal state (lastSignalCloseTime etc.) → ต้องหยุด sweep
+          //   เพราะถ้า skip candle นี้แล้วไป process candle ถัดไปที่อ้างอิง state ของ candle นี้
+          //   → indicators จะคำนวณผิด (เช่น KC width ใช้ rolling window ที่ขาดข้อมูล)
+          //   safe path: break + log warning — operator ตรวจสอบ symbol/TF นี้
+          logger.warn({
+            botId: this.bot._id.toString(),
+            symbol: this.bot.symbol,
+            tf: this.bot.timeframe,
+            closeTime,
+          }, 'trader: reconcileKlines aborting replay after error to prevent indicator drift');
+          break;
+        }
         replayed += 1;
         if (closeTime > advancedToMs) advancedToMs = closeTime;
         const afterCacheSize = klineCache.size(this.bot.symbol, this.bot.timeframe);
         if (afterCacheSize > beforeCacheSize) actuallySeeded += 1;
+      }
+      if (candleErrors > 0) {
+        logger.warn({ botId: this.bot._id.toString(), symbol: this.bot.symbol, candleErrors }, 'trader: reconcileKlines had candle errors');
       }
 
       // FIX-2026-08-01 (CRITICAL-BUG-1): force CB on the most-recent missed candle

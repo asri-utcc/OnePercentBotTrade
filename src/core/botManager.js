@@ -47,9 +47,27 @@ const AUTO_PAUSE_BUY_IN_FLIGHT_STATES = [
   'stopping',
 ];
 // FIX-2026-08-06: delist scheduler — interval + forceCloseDays/blockBuyDays
-const DELIST_SCHEDULE_INTERVAL_MS = 5 * 60 * 1000; // ทุก 5 นา�ี ตรวจ delist schedule
+const DELIST_SCHEDULE_INTERVAL_MS = 5 * 60 * 1000; // ทุก 5 นาที ตรวจ delist schedule
 let delistSchedulerTimer = null;
 let delistSchedulerInFlight = false;
+
+// FIX-2026-08-24 (P1 audit): Auto-pause/resume hysteresis — กัน ping-pong ที่ boundary
+//   - เดิม: KC/24hVol แกว่งใกล้ threshold → pause tick A → resume tick B (5 นาทีถัดไป) → pause tick C
+//     - ผลข้างเคียง: telegram spam, bot status flip-flop, trader spawn/stop บ่อย → CPU + API load
+//   - fix: track lastFlipMs per bot ใน in-memory Map → ถ้า flip ใหม่เกิดภายใน HYSTERESIS_MS → skip
+//   - HYSTERESIS_MS = 30min: pause/resume เกิดได้ไม่เกิดชั่วโมงละ 2 ครั้งต่อบอท
+//   - in-memory only — process restart = reset (acceptable; first tick may pause again if needed)
+//   - exported as helper for testability
+const AUTO_PAUSE_HYSTERESIS_MS = 30 * 60 * 1000; // 30 minutes
+const _autoPauseFlipAt = new Map(); // botId (string) → Date.now() ms of last flip
+function recordAutoPauseFlip(botId) {
+  if (botId) _autoPauseFlipAt.set(String(botId), Date.now());
+}
+function shouldSkipFlipByHysteresis(botId) {
+  const last = _autoPauseFlipAt.get(String(botId));
+  if (!last) return false;
+  return (Date.now() - last) < AUTO_PAUSE_HYSTERESIS_MS;
+}
 
 // FIX-2026-08-03: Safe-trade filter #2 (trendline) — live status scanner
 //   - every 60s (matches trendlineForBot CACHE_TTL_MS) for bots with safeTradeTrendlineEnabled=true
@@ -401,11 +419,24 @@ class BotManager {
       state: { $in: ['placed', 'filled', 'holding', 'cancelled', 'selling'] },
     });
 
+    // FIX-2026-08-24 (P1 audit): bulk-load bots + signals to replace per-trade N+1 queries
+    //   - เดิม: 100 pending trades × Bot.findById = 100 sequential round-trips × 1-2ms = 100-200ms blocking
+    //   - fix: pre-pass collect unique botIds + signalIds → single $in query each → maps
+    //   - scale: 500 bots × pending trades → was 500 round-trips, now 2 queries
+    const Signal = require('../db/models/Signal');
+    const uniqueBotIds = [...new Set(pending.map((t) => String(t.botId)).filter(Boolean))];
+    const uniqueSignalIds = [...new Set(pending.map((t) => t.signalId).filter(Boolean).map(String))];
+    const [botsArr, signalsArr] = await Promise.all([
+      uniqueBotIds.length > 0 ? Bot.find({ _id: { $in: uniqueBotIds } }).lean() : Promise.resolve([]),
+      uniqueSignalIds.length > 0 ? Signal.find({ _id: { $in: uniqueSignalIds } }).lean() : Promise.resolve([]),
+    ]);
+    const botMap = new Map(botsArr.map((b) => [String(b._id), b]));
+    const signalMap = new Map(signalsArr.map((s) => [String(s._id), s]));
+
     for (const trade of pending) {
       try {
-        const bot = await Bot.findById(trade.botId);
+        const bot = botMap.get(String(trade.botId));
         if (!bot) continue;
-        const Signal = require('../db/models/Signal');
 
         // ตรวจ BUY order (กรณี state=placed หรือ cancelled ที่ BUY อาจ fill จริง)
         if (trade.buyOrderId) {
@@ -431,7 +462,7 @@ class BotManager {
                   botId: trade.botId.toString(),
                 }, 'reconcile: ORPHAN detected — BUY filled but DB state stuck');
 
-                const sig = trade.signalId ? await Signal.findById(trade.signalId).catch(() => null) : null;
+                const sig = trade.signalId ? (signalMap.get(String(trade.signalId)) || null) : null;
                 const trader = this.traders.get(bot._id.toString());
                 if (trader) {
                   trader.currentTrade = trade;
@@ -1125,6 +1156,9 @@ async function checkAutoPauseBots() {
   }
   if (!bots || bots.length === 0) return;
 
+  // FIX-2026-08-24 (P1 audit): stats accumulator (P1-7 hysteresis counter)
+  let stats = { skippedHysteresis: 0, skippedBuyInFlight: 0, paused: 0, resumed: 0, errors: 0 };
+
   const telegramNotifier = require('../services/telegramNotifier');
   const now = new Date();
 
@@ -1203,6 +1237,18 @@ async function checkAutoPauseBots() {
 
       if (pauseReason && b.enabled !== false) {
         // ─── PAUSE ────────────────────────────────────────────────────
+        // FIX-2026-08-24 (P1 audit): hysteresis guard — กัน ping-pong ที่ boundary
+        //   - เดิม: Min-%KC แกว่งใกล้ threshold → pause/resume/pause ทุก 5 นาที
+        //     → telegram spam + bot status flip-flop + trader spawn/stop บ่อย
+        //   - fix: skip ถ้า bot เพิ่งถูก flip (pause/resume) ภายใน AUTO_PAUSE_HYSTERESIS_MS
+        if (shouldSkipFlipByHysteresis(b._id)) {
+          update.autoPauseLastCheckedAt = now;
+          update.autoPauseSkipReason = 'hysteresis';
+          await Bot.updateOne({ _id: b._id }, { $set: update });
+          stats.skippedHysteresis = (stats.skippedHysteresis || 0) + 1;
+          logger.debug({ botId: String(b._id), pauseReason, minKcPct, quoteVolume24h }, 'botManager: auto-pause skipped — within hysteresis window');
+          continue;
+        }
         // FIX-2026-08-22: skip pause if bot has a BUY in flight — pausing here would
         //   orphan the position (trader.stop() removes the in-memory SELL-placement
         //   handler).  Next tick (10min) will re-evaluate when BUY has progressed
@@ -1211,6 +1257,7 @@ async function checkAutoPauseBots() {
           update.autoPauseLastCheckedAt = now;
           update.autoPauseSkipReason = 'buy_in_flight';
           await Bot.updateOne({ _id: b._id }, { $set: update });
+          stats.skippedBuyInFlight = (stats.skippedBuyInFlight || 0) + 1;
           logger.info({
             botId: String(b._id),
             pauseReason,
@@ -1229,6 +1276,8 @@ async function checkAutoPauseBots() {
           autoPauseSkipReason: null,
         });
         await Bot.updateOne({ _id: b._id }, { $set: update });
+        recordAutoPauseFlip(b._id);
+        stats.paused = (stats.paused || 0) + 1;
         const stopReason = pauseReason === 'low_vol' ? 'auto_pause_low_kc' : 'auto_pause_low_24h_vol';
         eventBus.emit('bot:disabled', {
           botId: String(b._id),
@@ -1271,6 +1320,15 @@ async function checkAutoPauseBots() {
         && (b.autoPauseReason === 'low_vol' || b.autoPauseReason === 'low_24h_vol')
       ) {
         // ─── RESUME (เฉพาะบอทที่เคยถูก auto-pause) ──────────────────
+        // FIX-2026-08-24 (P1 audit): hysteresis guard mirror — กัน resume/pause ping-pong
+        if (shouldSkipFlipByHysteresis(b._id)) {
+          update.autoPauseLastCheckedAt = now;
+          update.autoPauseSkipReason = 'hysteresis';
+          await Bot.updateOne({ _id: b._id }, { $set: update });
+          stats.skippedHysteresis = (stats.skippedHysteresis || 0) + 1;
+          logger.debug({ botId: String(b._id), minKcPct, quoteVolume24h }, 'botManager: auto-resume skipped — within hysteresis window');
+          continue;
+        }
         // FIX-2026-08-07: HYBRID mode — CBv2 cooldown ไม่ block resume อีกต่อไป
         //   - CBv2 cooldown แค่กั้น BUY — ไม่ disable บอท, ไม่ override auto-pause logic
         //   - ลบ CBv2 lock override blocks เดิม (FIX-2026-08-06) — ไม่จำเป็นใน HYBRID mode
@@ -1287,6 +1345,7 @@ async function checkAutoPauseBots() {
           autoPauseSkipReason: null,
         });
         await Bot.updateOne({ _id: b._id }, { $set: update });
+        recordAutoPauseFlip(b._id);
         // FIX 2026-08-05 (GIGGLE): reset stale cursor ก่อน spawnTrader (กัน ghost BUY จาก reconcileKlines replay)
         //   - b เป็น plain object จาก .find() → mutate directly แล้ว persist ผ่าน helper
         // FIX-2026-08-22: capture pendingReplayCandle เพื่อ replay last closed candle (auto-resume เท่านั้น)
@@ -1324,6 +1383,7 @@ async function checkAutoPauseBots() {
         // re-spawn trader (mirror enableBot behavior — without totalActiveMs accrual since autoPause is short)
         // FIX-2026-08-22: pass pendingReplayCandle → spawnTrader จะ schedule onCandleClosed replay หลัง start
         await this._withSpawnLock(b._id, () => this.spawnTrader({ _id: b._id, ...b }, { pendingReplayCandle })).catch((err) => logger.warn({ botId: String(b._id), err: err.message }, 'botManager: auto-resume spawn failed'));
+        stats.resumed = (stats.resumed || 0) + 1;
         logger.info({
           botId: String(b._id),
           minKcPct,
@@ -1336,8 +1396,14 @@ async function checkAutoPauseBots() {
         await Bot.updateOne({ _id: b._id }, { $set: update });
       }
     } catch (err) {
+      stats.errors = (stats.errors || 0) + 1;
       logger.warn({ botId: String(b._id), err: err.message }, 'botManager: auto-pause check failed');
     }
+  }
+
+  // FIX-2026-08-24 (P1 audit): roll-up log for observability
+  if (stats.paused > 0 || stats.resumed > 0 || stats.skippedHysteresis > 0 || stats.skippedBuyInFlight > 0 || stats.skippedCursorResetFailed > 0 || stats.errors > 0) {
+    logger.info({ stats }, 'botManager: checkAutoPauseBots roll-up');
   }
 }
 

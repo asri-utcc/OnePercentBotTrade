@@ -92,10 +92,17 @@ class PositionWatchdog {
   start({ intervalMs = DEFAULT_INTERVAL_MS } = {}) {
     if (this.interval) return;
     this.intervalMs = intervalMs;
-    this.interval = setInterval(() => this._tickSafe(), this.intervalMs);
-    logger.info({ intervalMs }, 'positionWatchdog: started');
-    // run once immediately on start
-    setImmediate(() => this._tickSafe());
+    // FIX-2026-08-24 (P1 audit): jitter on initial tick to de-align from other subsystem timers
+    //   - เดิม: setImmediate fixed → aligned กับ botManager._jitter base 100% (trader reconcile + auto-pause
+    //     ทุก subsystem เริ่ม t=0) → burst รวมที่ t=0 + fixed schedule
+    //   - fix: random delay 0-5s before first tick → กระจาย initial burst
+    //   - subsequent ticks: setInterval with jittered interval (±10%)
+    const jitteredInterval = Math.round(intervalMs * (1 + (Math.random() * 2 - 1) * 0.1));
+    this.interval = setInterval(() => this._tickSafe(), jitteredInterval);
+    logger.info({ intervalMs, jitteredIntervalMs: jitteredInterval }, 'positionWatchdog: started');
+    // run once immediately on start, with random delay 0-5s to de-align
+    const initialDelayMs = Math.floor(Math.random() * 5000);
+    setTimeout(() => this._tickSafe(), initialDelayMs);
   }
 
   stop() {
@@ -235,6 +242,25 @@ class PositionWatchdog {
       : [];
     const botMap = new Map(bots.map((b) => [String(b._id), b]));
 
+    // FIX-2026-08-24 (P1 audit): group-by (symbol, timeframe) → fetch last-close once per unique pair
+    //   - เดิม N+1: 100 bots × _fetchLastClose = 100 REST calls per tick
+    //   - fix: pre-pass collect unique (symbol,tf) → single fetch each → shared map
+    //   - scale: 100 bots across 20 symbols/TFs = 80 calls saved per tick (≈167 calls/min reduction)
+    const lastCloseBySymTf = new Map(); // Map<"SYM|TF", number|null>
+    const symTfSet = new Set();
+    for (const bot of bots) {
+      if (bot && bot.symbol && bot.timeframe && bot.autoArmStopLossOnUKC !== false) {
+        symTfSet.add(`${bot.symbol}|${bot.timeframe}`);
+      }
+    }
+    for (const key of symTfSet) {
+      const [symbol, timeframe] = key.split('|');
+      // synthesize a minimal bot object for _fetchLastClose
+      const stubBot = { symbol, timeframe };
+      const lastClose = await this._fetchLastClose(stubBot);
+      lastCloseBySymTf.set(key, lastClose);
+    }
+
     for (const [botIdStr, trades] of byBot) {
       const bot = botMap.get(botIdStr);
       if (!bot) { stats.skippedNoBot += trades.length; continue; }
@@ -249,8 +275,8 @@ class PositionWatchdog {
       const ageHours = bot.autoArmAgeHours ?? 4;
       const ageThresholdAgo = new Date(Date.now() - ageHours * 60 * 60 * 1000);
 
-      // Get latest close price for this bot (single REST call shared across candidates)
-      const lastClose = await this._fetchLastClose(bot);
+      // Get latest close price from pre-fetched cache (shared across bots on same (symbol,tf))
+      const lastClose = lastCloseBySymTf.get(`${bot.symbol}|${bot.timeframe}`);
       if (lastClose == null) { stats.skippedNoKc += trades.length; continue; }
 
       const toArm = [];
