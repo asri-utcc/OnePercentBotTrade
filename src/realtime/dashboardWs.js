@@ -15,6 +15,7 @@ const EVENTS_TO_FORWARD = [
   'account:update',
   'health:update',
   'rateLimit:update', // FIX-2026-08-23: live Binance API weight pill on navbar
+  'autoReserve:adjusted', // FIX-2026-08-24: auto reserve/release USDT event → refresh wallet UI
 ];
 
 /**

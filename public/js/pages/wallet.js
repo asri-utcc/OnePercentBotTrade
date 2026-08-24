@@ -45,6 +45,9 @@
     barFill:           document.getElementById('wallet-reserve-bar-fill'),
     barPct:            document.getElementById('wallet-reserve-pct'),
     help:              document.getElementById('wallet-reserve-help'),
+    // FIX-2026-08-24: Auto-Reserve switch + summary
+    autoReserveSwitch: document.getElementById('auto-reserve-switch'),
+    autoReserveSummary: document.getElementById('auto-reserve-summary'),
     tableMeta:         document.getElementById('wallet-table-meta'),
     tableWrap:         document.getElementById('wallet-table-wrap'),
     tbody:             document.getElementById('wallet-tbody'),
@@ -476,6 +479,98 @@
     setReserveDraft(_savedReserve, null);
   }
 
+  // ─── Auto-Reserve (FIX-2026-08-24) ────────────────────────────────────────
+  //   - small switch in reserve card header
+  //   - status line shows: target poles + next check time + last action
+  //   - toggle → PUT /api/wallet/auto-reserve/config (debounced 200ms)
+  let _autoReserveCfg = null;
+  let _autoReserveStatus = null;
+  let _autoReserveDebounceTimer = null;
+
+  function fmtTimeLocal(d) {
+    if (!d) return '—';
+    return new Date(d).toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' });
+  }
+
+  function computeNextCheckHour(checkHours) {
+    if (!checkHours || !Number.isFinite(checkHours)) return '—';
+    const now = new Date();
+    const curH = now.getHours();
+    const nextH = (Math.floor(curH / checkHours) + 1) * checkHours;
+    if (nextH >= 24) return '00:00 (พรุ่งนี้)';
+    return `${String(nextH).padStart(2, '0')}:00`;
+  }
+
+  function syncAutoReserveUI() {
+    if (!els.autoReserveSwitch || !els.autoReserveSummary) return;
+    const enabled = !!(els.autoReserveSwitch && els.autoReserveSwitch.checked);
+    const cfg = _autoReserveCfg || {};
+    if (!enabled) {
+      els.autoReserveSummary.textContent = 'OFF';
+      els.autoReserveSummary.style.color = 'var(--text-3)';
+      return;
+    }
+    const poleCount = cfg.poleCount || 3;
+    const next = computeNextCheckHour(cfg.checkHours || 4);
+    els.autoReserveSummary.textContent = `ON · target ${poleCount} poles · ตรวจ ${next}`;
+    els.autoReserveSummary.style.color = 'var(--gold-1)';
+  }
+
+  async function loadAutoReserveStatus(force = false) {
+    try {
+      const r = await API.get('/api/wallet/auto-reserve/config');
+      _autoReserveCfg = (r && r.config) || null;
+      _autoReserveStatus = (r && r.status) || null;
+      if (els.autoReserveSwitch && _autoReserveCfg) {
+        // Only set if not user-dirty
+        if (!_autoReserveSwitchBusy) {
+          els.autoReserveSwitch.checked = _autoReserveCfg.enabled === true;
+        }
+      }
+      syncAutoReserveUI();
+      return r;
+    } catch (err) {
+      const msg = (err && err.body && err.body.error) || err.message || 'unknown';
+      if (els.autoReserveSummary) {
+        els.autoReserveSummary.textContent = `⚠ ${msg}`;
+        els.autoReserveSummary.style.color = 'var(--bear-1)';
+      }
+      return null;
+    }
+  }
+
+  let _autoReserveSwitchBusy = false;
+  async function onAutoReserveSwitchChange() {
+    if (!els.autoReserveSwitch) return;
+    const newEnabled = els.autoReserveSwitch.checked;
+    _autoReserveSwitchBusy = true;
+    try {
+      // debounce 200ms in case user double-toggles
+      if (_autoReserveDebounceTimer) clearTimeout(_autoReserveDebounceTimer);
+      _autoReserveDebounceTimer = setTimeout(async () => {
+        try {
+          const r = await API.put('/api/wallet/auto-reserve/config', { enabled: newEnabled });
+          _autoReserveCfg = (r && r.config) || _autoReserveCfg;
+          syncAutoReserveUI();
+          // After enable, refresh reserve display (service may have immediately fired)
+          if (newEnabled) {
+            loadReserve(true);
+          }
+        } catch (err) {
+          const msg = (err && err.body && err.body.error) || err.message || 'unknown';
+          // revert switch on failure
+          if (els.autoReserveSwitch) els.autoReserveSwitch.checked = !newEnabled;
+          syncAutoReserveUI();
+          if (els.help) els.help.textContent = `❌ Auto-Reserve toggle failed: ${msg}`;
+        } finally {
+          _autoReserveSwitchBusy = false;
+        }
+      }, 200);
+    } catch (e) {
+      _autoReserveSwitchBusy = false;
+    }
+  }
+
   // ─── Charts: helpers + setup ─────────────────────────────────────────────
 
   function fmtTimeShort(d) {
@@ -774,6 +869,10 @@
     // Save / Cancel
     els.saveBtn.addEventListener('click', saveReserve);
     els.cancelBtn.addEventListener('click', cancelEdit);
+    // FIX-2026-08-24: Auto-Reserve switch
+    if (els.autoReserveSwitch) {
+      els.autoReserveSwitch.addEventListener('change', onAutoReserveSwitchChange);
+    }
     // Refresh
     els.refreshBtn.addEventListener('click', () => {
       _lastLoadAt = 0;
@@ -787,6 +886,7 @@
         loadOpenOrders(true),
         loadPortfolioChart(true),
         loadPnlChart(true),
+        loadAutoReserveStatus(true),
       ]);
     });
 
@@ -872,6 +972,23 @@
       WSClient.on('balance:update', onAcct);
       WSClient.on('order:update', onOrder); // Binance order update → refresh open orders
       WSClient.on('trade:update', onTradeUpdate);
+      // FIX-2026-08-24: autoReserve:adjusted → refresh reserve display + status line
+      WSClient.on('autoReserve:adjusted', (payload) => {
+        if (payload && typeof payload.afterReserve === 'number') {
+          _savedReserve = payload.afterReserve;
+          if (typeof payload.totalUsdt === 'number') _totalUsdt = payload.totalUsdt;
+          // Reset slider max to fit new reserve
+          const sliderMax = Math.max(_totalUsdt, _savedReserve, 100);
+          els.reserveSlider.max = String(Math.ceil(sliderMax));
+          if (els.saveBtn.disabled) {
+            setReserveDraft(_savedReserve, null);
+          }
+          syncReserveDisplay();
+          syncChipsActive();
+          syncDirtyFlag();
+        }
+        loadAutoReserveStatus(true);
+      });
     }
 
     // Polling fallback every 60s
@@ -881,6 +998,7 @@
       loadOpenOrders();
       loadPortfolioChart();
       loadPnlChart();
+      loadAutoReserveStatus();
     }, 60 * 1000);
 
     // initial state
@@ -906,6 +1024,7 @@
       loadOpenOrders(true),
       loadPortfolioChart(true),
       loadPnlChart(true),
+      loadAutoReserveStatus(true),
     ]);
   });
 })();

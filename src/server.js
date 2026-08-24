@@ -17,6 +17,7 @@ const { syncBotActionPasswordFromAppConfig } = require('./utils/botActionPasswor
 const binanceRateLimitConfig = require('./services/binanceRateLimitConfig'); // FIX-2026-08-21: dynamic Binance rate-limit capacity
 const binanceRest = require('./binance/binanceRest'); // FIX-2026-08-21: apply capacity to live token-bucket
 const walletSnapshot = require('./services/walletSnapshot'); // FIX-2026-08-22: daily portfolio-value snapshot scheduler
+const autoReserve = require('./services/autoReserve'); // FIX-2026-08-24: auto reserve/release USDT scheduler
 
 async function main() {
   logger.info({ env: config.env, port: config.port }, 'starting OnePercentBotTrade');
@@ -114,6 +115,12 @@ async function main() {
   //   - On startup: ensures "today" snapshot exists (backfill if missing), then schedules next 00:01 BKK
   //   - Idempotent upsert by dateKey — no toggle needed, always runs (safe + small footprint)
   walletSnapshot.start();
+  await sleep(SUBSYSTEM_STAGGER_MS);
+
+  // FIX-2026-08-24: Auto Reserve / Release USDT — periodic adjuster
+  //   - Reads AppConfig.autoReserve* every 60s, fires on BKK-aligned HH:00 (where HH % checkHours === 0)
+  //   - Default OFF — start() handles dormant mode (no interval if disabled)
+  autoReserve.start();
 
   // Graceful shutdown
   let shuttingDown = false;
@@ -128,6 +135,7 @@ async function main() {
     try { delistMonitor.stop(); } catch (e) { /* ignore */ }
     try { autoDeleteBot.stop(); } catch (e) { /* ignore */ }
     try { walletSnapshot.stop(); } catch (e) { /* ignore */ }
+    try { autoReserve.stop(); } catch (e) { /* ignore */ }
     try { await botManager.flushActiveTimeOnShutdown(); } catch (e) { /* ignore */ }
     try { await botManager.stop(); } catch (e) { /* ignore */ }
     server.close(() => {

@@ -63,6 +63,7 @@ jest.mock('../src/db/models/AppConfig', () => ({
 // Mock auth middleware to always pass
 jest.mock('../src/api/middleware/auth', () => ({
   requireAuth: (req, res, next) => next(),
+  requireBotActionPassword: (req, res, next) => next(),
 }));
 
 const config = require('../config');

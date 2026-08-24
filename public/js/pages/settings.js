@@ -14,6 +14,7 @@ let autoAddBotCfg = null; // FIX-2026-08-07: auto add new bot config
 let adminCfg = null;   // FIX-2026-08-08 (rev2): DPS tunables
 let botDefaults = null; // FIX-2026-08-08 (rev3): Bot Defaults
 let rateLimit = null;  // FIX-2026-08-21: Binance API rate-limit capacity
+let autoReserveCfg = null; // FIX-2026-08-24: auto reserve/release USDT config
 
 async function init() {
   const me = await API.get('/api/auth/me').catch(() => null);
@@ -73,6 +74,14 @@ async function loadConfig() {
     } catch (err) {
       console.warn('rate-limit load failed:', err.message);
       rateLimit = { capacity: 6000, min: 500, max: 120000, default: 6000, limiter: { tokens: 0 } };
+    }
+    // FIX-2026-08-24: Auto Reserve / Release USDT
+    try {
+      const r = await API.get('/api/wallet/auto-reserve/config');
+      autoReserveCfg = r;
+    } catch (err) {
+      console.warn('auto-reserve config load failed:', err.message);
+      autoReserveCfg = { config: { enabled: false, poleCount: 3, usdtPerPole: 10, lossThresholdPct: 2, checkHours: 4, stepUsdt: 10 }, status: {} };
     }
     render();
   } catch (err) {
@@ -138,6 +147,7 @@ function render() {
         <p class="text-muted-3 small mb-3">ค่าเกี่ยวกับการเทรด (DPS + CB Version + Daily Target)</p>
 
         ${renderRateLimitSection()}
+        ${renderAutoReserveSection()}
         ${renderCbVersionSection()}
         ${renderDpsSection()}
         ${renderDailyTargetSection()}
@@ -820,6 +830,77 @@ function renderRateLimitSection() {
   `);
 }
 
+// ─── 🛒 Section: Auto Reserve / Release (FIX-2026-08-24) ─────────
+function renderAutoReserveSection() {
+  const cfg = (autoReserveCfg && autoReserveCfg.config) || {};
+  const status = (autoReserveCfg && autoReserveCfg.status) || {};
+  const enabled = !!cfg.enabled;
+  const lastRunAt = status.lastRunAt ? new Date(status.lastRunAt).toLocaleString() : '—';
+  const tickCount = status.tickCount != null ? status.tickCount : 0;
+  const inFlight = status.inFlight ? '⏳ in-flight' : '';
+  const lastStats = status.lastStats || null;
+  return section('sec-auto-reserve', '🤖', 'Auto Reserve / Release USDT — กั๊กเงินอัตโนมัติ', false, `
+    <div class="alert alert-info small mb-3">
+      <strong>📌 วิธีทำงาน:</strong> ทุก ๆ <code>checkHours</code> �ั่วโมง (ตามเวลา BKK) ระบบจะเช็คว่า
+      <code>(usable / usdtPerPole) + จำนวน positions ที่ติดลบน้อยกว่า lossThresholdPct</code>
+      เท่ากับเป้า <code>poleCount</code> หรือไม่ — ถ้ามากกว่า → กั๊กเพิ่ม, ถ้าน้อยกว่า → ปล่อย
+      (ครั้งละ <code>stepUsdt</code> USDT) · ดูสวิทช์เล็ก ๆ ในหน้า <a href="/wallet.html">wallet.html</a> ก็ได้
+    </div>
+
+    <div class="mb-3">
+      <label class="form-check form-switch">
+        <input type="checkbox" class="form-check-input" id="ar-enabled" ${enabled ? 'checked' : ''} />
+        <span class="form-check-label"><strong>เปิด Auto Reserve</strong> — ระบบจะปรับ reserve อัตโนมัติทุก � <code>checkHours</code> ชั่วโมง</span>
+      </label>
+    </div>
+
+    <div class="row g-3">
+      <div class="col-md-3">
+        <label class="form-label">🎯 Pole count (เ�้า)</label>
+        <input type="number" class="form-control" id="ar-polecount" value="${cfg.poleCount ?? 3}" step="1" min="1" max="100" />
+        <small class="text-muted">จำนวนไม้ที่ต้องการให้ "สำรอง" (default 3)</small>
+      </div>
+      <div class="col-md-3">
+        <label class="form-label">💵 USDT / ไม้</label>
+        <input type="number" class="form-control" id="ar-usdtperpole" value="${cfg.usdtPerPole ?? 10}" step="1" min="1" max="1000" />
+        <small class="text-muted">มูลค่า 1 ไม้ (default 10)</small>
+      </div>
+      <div class="col-md-3">
+        <label class="form-label">📉 Loss threshold %</label>
+        <input type="number" class="form-control" id="ar-losspct" value="${cfg.lossThresholdPct ?? 2}" step="0.1" min="0.1" max="50" />
+        <small class="text-muted">positions ที่ขาดทุน &lt; นี้ → นับเป็น 1 ไม้ (default 2%)</small>
+      </div>
+      <div class="col-md-3">
+        <label class="form-label">⏱ Check (hours)</label>
+        <select class="form-select" id="ar-checkhours">
+          ${[1,2,3,4,6,8,12,24].map((h) => `<option value="${h}" ${(cfg.checkHours ?? 4) === h ? 'selected' : ''}>${h} �ม.</option>`).join('')}
+        </select>
+        <small class="text-muted">ต้องหาร 24 ลงตัว (default 4 → 00/04/08/12/16/20 BKK)</small>
+      </div>
+    </div>
+    <div class="row g-3 mt-1">
+      <div class="col-md-3">
+        <label class="form-label">📏 Step USDT</label>
+        <input type="number" class="form-control" id="ar-step" value="${cfg.stepUsdt ?? 10}" step="1" min="1" max="1000" />
+        <small class="text-muted">กั๊ก/ปล่อยครั้งละกี่ USDT (default 10)</small>
+      </div>
+    </div>
+
+    <div class="mt-3">
+      <button type="button" class="btn btn-primary" id="btn-save-ar">💾 บันทึก Auto Reserve</button>
+      <button type="button" class="btn btn-outline-warning ms-2" id="btn-trigger-ar">🖐 Run now</button>
+      <span class="ms-2 text-muted small" id="ar-status"></span>
+    </div>
+
+    <div class="text-muted small mt-3">
+      <strong>สถานะ:</strong> ${enabled ? '🟢 enabled' : '⚪ disabled'} · poleCount=${cfg.poleCount ?? 3} · usdtPerPole=${cfg.usdtPerPole ?? 10} · lossThreshold=${cfg.lossThresholdPct ?? 2}% · checkHours=${cfg.checkHours ?? 4} · stepUsdt=${cfg.stepUsdt ?? 10} ${inFlight}
+      <br /><strong>Last run:</strong> ${lastRunAt} · tickCount=${tickCount}
+      ${lastStats ? `<br /><strong>Last stats:</strong> action=${escapeHtml(lastStats.action || '—')} · deltaUsdt=${lastStats.deltaUsdt ?? 0} · usablePole=${lastStats.usablePoleCount ?? '?'} · lossPole=${lastStats.lossPoleCount ?? 0} · available=${lastStats.availablePoleCount ?? '?'} · target=${lastStats.targetPoleCount ?? '?'} · positions=${lastStats.positionCount ?? 0}` : ''}
+      ${status.lastRunError ? `<br /><strong>Last error:</strong> <span class="text-danger">${escapeHtml(status.lastRunError)}</span>` : ''}
+    </div>
+  `);
+}
+
 // ─── 🛒 Section: CB Version ──────────────────────────────────────
 function renderCbVersionSection() {
   return section('sec-cb-ver', '⚡', 'CB Version (v2 vs v3)', false, `
@@ -1117,6 +1198,12 @@ function bindEvents() {
   // CB Version
   const scbv = document.getElementById('btn-save-cbversion');
   if (scbv) scbv.onclick = saveCbVersion;
+
+  // FIX-2026-08-24: Auto Reserve / Release USDT
+  const sar = document.getElementById('btn-save-ar');
+  if (sar) sar.onclick = saveAutoReserveConfig;
+  const tar = document.getElementById('btn-trigger-ar');
+  if (tar) tar.onclick = triggerAutoReserve;
 
   // Auto Delete
   const sadb = document.getElementById('btn-save-adb');
@@ -1442,6 +1529,104 @@ async function saveCbVersion() {
     setStatus('cbversion-status', `✅ บันทึกแล้ว · CB version = ${v} (cache 30s จะ refresh)`);
     await loadConfig();
   } catch (err) { setStatus('cbversion-status', '❌ ' + (err.body && err.body.error ? err.body.error : err.message), true); }
+}
+
+// ════════ Auto Reserve / Release (FIX-2026-08-24) ════════
+async function saveAutoReserveConfig() {
+  const enabled = !!document.getElementById('ar-enabled').checked;
+  const poleCount = parseInt(document.getElementById('ar-polecount').value, 10);
+  const usdtPerPole = parseFloat(document.getElementById('ar-usdtperpole').value);
+  const lossThresholdPct = parseFloat(document.getElementById('ar-losspct').value);
+  const checkHours = parseInt(document.getElementById('ar-checkhours').value, 10);
+  const stepUsdt = parseFloat(document.getElementById('ar-step').value);
+  if (!Number.isFinite(poleCount) || poleCount < 1 || poleCount > 100) {
+    setStatus('ar-status', '❌ Pole count ต้องอยู่ระหว่าง 1..100', true); return;
+  }
+  if (!Number.isFinite(usdtPerPole) || usdtPerPole < 1 || usdtPerPole > 1000) {
+    setStatus('ar-status', '❌ USDT/ไม้ ต้องอยู่ระหว่าง 1..1000', true); return;
+  }
+  if (!Number.isFinite(lossThresholdPct) || lossThresholdPct < 0.1 || lossThresholdPct > 50) {
+    setStatus('ar-status', '❌ Loss threshold ต้องอยู่ระหว่าง 0.1..50', true); return;
+  }
+  if (!Number.isFinite(checkHours) || checkHours < 1 || checkHours > 24) {
+    setStatus('ar-status', '❌ Check hours ต้องอยู่ระหว่าง 1..24', true); return;
+  }
+  if (24 % checkHours !== 0) {
+    setStatus('ar-status', '❌ Check hours ต้องหาร 24 ลงตัว (1, 2, 3, 4, 6, 8, 12, 24)', true); return;
+  }
+  if (!Number.isFinite(stepUsdt) || stepUsdt < 1 || stepUsdt > 1000) {
+    setStatus('ar-status', '❌ Step USDT �้องอยู่ระหว่าง 1..1000', true); return;
+  }
+
+  if (enabled) {
+    const ok = window.LUX_CONFIRM
+      ? await window.LUX_CONFIRM({
+          title: 'เปิด Auto Reserve',
+          message:
+            `🤖 Auto Reserve จะปรับ USDT Reserve อัตโนมัติทุก ๆ ${checkHours} ชั่วโมง\n\n` +
+            `เป้า: ${poleCount} ไม้ × ${usdtPerPole} = ${poleCount * usdtPerPole} USDT\n` +
+            `ทุกครั้งจะกั๊ก/ปล่อยครั้งละ ${stepUsdt} USDT\n` +
+            `นับ position ที่ขาดทุน < ${lossThresholdPct}% เป็น 1 ไม้\n\n` +
+            `⚠️ ถ้าเปิดแล้ว ระบบจะรันทันทีหลังบันทึก (first tick)\n\n` +
+            `ต้องการเปิดหรือไม่?`,
+          confirmLabel: 'เปิด Auto Reserve',
+          cancelLabel: 'ยกเลิก',
+          password: false,
+        })
+      : confirm(
+          `🤖 Auto Reserve จะปรับ USDT Reserve อัตโนมัติทุก ๆ ${checkHours} ชั่วโมง\n\n` +
+          `เป้า: ${poleCount} ไม้ × ${usdtPerPole} = ${poleCount * usdtPerPole} USDT\n` +
+          `ทุกครั้งจะกั๊ก/ปล่อยครั้งละ ${stepUsdt} USDT\n\n` +
+          `⚠️ ถ้าเปิดแล้ว ระบบจะรันทันทีหลังบันทึก\n\nต้องการเปิดหรือไม่?`
+        );
+    if (!ok) { document.getElementById('ar-enabled').checked = false; return; }
+  }
+
+  setStatus('ar-status', '⏳ กำลังบันทึก...');
+  try {
+    const r = await API.put('/api/wallet/auto-reserve/config', {
+      enabled, poleCount, usdtPerPole, lossThresholdPct, checkHours, stepUsdt,
+    });
+    const c = (r && r.config) || {};
+    setStatus('ar-status', `✅ บันทึกแล้ว · ${c.enabled ? '🟢 ON' : '⚪ OFF'} · poleCount=${c.poleCount} · usdtPerPole=${c.usdtPerPole} · lossThr=${c.lossThresholdPct}% · checkHours=${c.checkHours} · step=${c.stepUsdt}`);
+    await loadConfig();
+  } catch (err) { setStatus('ar-status', '❌ ' + (err.body && err.body.error ? err.body.error : err.message), true); }
+}
+
+async function triggerAutoReserve() {
+  const proceed = window.LUX_CONFIRM
+    ? await window.LUX_CONFIRM({
+        title: 'Run Auto Reserve ทันที',
+        message:
+          '🤖 จะรัน Auto Reserve ทันที (bypass checkHours + enabled flag)\n\n' +
+          'ระบบจะคำนวณ usable + loss poles แล้วปรับ reserve ทันที\n' +
+          '(ใช้รหัส BOT_ACTION_PASSWORD)',
+        confirmLabel: 'รันเลย',
+        cancelLabel: 'ยกเลิก',
+        password: true,
+      })
+    : confirm('⚠️ จะรัน Auto Reserve ทันที (bypass checkHours + enabled flag)?\n\nระบบจะคำนวณ usable + loss poles แล้วปรับ reserve ทันที');
+  if (!proceed) return;
+  setStatus('ar-status', '⏳ กำลังรัน...');
+  try {
+    const resp = await API.post('/api/wallet/auto-reserve/run', {});
+    const s = (resp && resp.stats) || {};
+    if (s.outcome === 'failed_apply') { setStatus('ar-status', '❌ apply failed: ' + (s.error || 'unknown'), true); }
+    else if (s.skipped) { setStatus('ar-status', '⏸ ' + s.skipped); }
+    else if (s.action === 'reserve') {
+      setStatus('ar-status', `🔒 RESERVE +${s.deltaUsdt} USDT · reserve ${s.beforeReserve}→${s.afterReserve} · available ${s.availablePoleCount} (target ${s.targetPoleCount})`);
+    }
+    else if (s.action === 'release') {
+      setStatus('ar-status', `🟡 RELEASE -${s.deltaUsdt} USDT · reserve ${s.beforeReserve}→${s.afterReserve} · available ${s.availablePoleCount} (target ${s.targetPoleCount})`);
+    }
+    else {
+      setStatus('ar-status', `ℹ️ no action · available ${s.availablePoleCount ?? '?'} = target ${s.targetPoleCount ?? '?'} (reason: ${s.reason || 'in_target'})`);
+    }
+    await loadConfig();
+  } catch (err) {
+    if (err.status === 403) { setStatus('ar-status', '🔒 รหัส BOT_ACTION_PASSWORD ไม่ถูกต้อง'); }
+    else { setStatus('ar-status', '❌ ' + (err.body && err.body.error ? err.body.error : err.message), true); }
+  }
 }
 
 // ════════ Auto Delete ════════

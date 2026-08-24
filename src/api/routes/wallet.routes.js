@@ -27,11 +27,12 @@ const express = require('express');
 const binanceRest = require('../../binance/binanceRest');
 const fxService = require('../../services/fxService');
 const walletReserve = require('../../services/walletReserve');
+const autoReserve = require('../../services/autoReserve');
 const AppConfig = require('../../db/models/AppConfig');
 const Trade = require('../../db/models/Trade');
 const WalletSnapshot = require('../../db/models/WalletSnapshot');
 const logger = require('../../utils/logger');
-const { requireAuth } = require('../middleware/auth');
+const { requireAuth, requireBotActionPassword } = require('../middleware/auth');
 
 // FIX-2026-08-24: removed requireBotActionPassword — wallet reserve adjust is too
 // frequent (±5/±10 buttons) to prompt for password every save. Auth is still
@@ -259,6 +260,136 @@ router.put('/reserve', requireAuth, async (req, res) => {
     });
   } catch (err) {
     logger.error({ err: err.message }, 'wallet: reserve PUT failed');
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── Auto Reserve / Release (FIX-2026-08-24) ────────────────────────────────
+//   3 endpoints:
+//     GET  /api/wallet/auto-reserve/config   → read config + live status
+//     PUT  /api/wallet/auto-reserve/config   → update config (no password — quick toggle)
+//     POST /api/wallet/auto-reserve/run      → manual tick (requireBotActionPassword — actual move)
+
+// ─── GET /api/wallet/auto-reserve/config ────────────────────────────────────
+router.get('/auto-reserve/config', requireAuth, async (req, res) => {
+  try {
+    const status = autoReserve.getStatus();
+    res.json({
+      config: status.config || {
+        enabled: false,
+        poleCount: 3,
+        usdtPerPole: 10,
+        lossThresholdPct: 2,
+        checkHours: 4,
+        stepUsdt: 10,
+      },
+      status: {
+        running: status.running,
+        inFlight: status.inFlight,
+        tickCount: status.tickCount,
+        lastRunAt: status.lastRunAt,
+        lastRunError: status.lastRunError,
+        lastStats: status.lastStats,
+        lastFiredHourKey: status.lastFiredHourKey,
+      },
+      ts: Date.now(),
+    });
+  } catch (err) {
+    logger.error({ err: err.message }, 'wallet: auto-reserve GET failed');
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── PUT /api/wallet/auto-reserve/config ────────────────────────────────────
+router.put('/auto-reserve/config', requireAuth, async (req, res) => {
+  try {
+    const body = req.body || {};
+    // Allow partial updates — only validate fields that are present
+    const update = {};
+    if ('enabled' in body) {
+      update.autoReserveEnabled = body.enabled === true;
+    }
+    if ('poleCount' in body) {
+      const n = Number(body.poleCount);
+      if (!Number.isFinite(n) || n < 1 || n > 100) {
+        return res.status(400).json({ error: 'poleCount must be 1..100' });
+      }
+      update.autoReservePoleCount = Math.floor(n);
+    }
+    if ('usdtPerPole' in body) {
+      const n = Number(body.usdtPerPole);
+      if (!Number.isFinite(n) || n < 1 || n > 1000) {
+        return res.status(400).json({ error: 'usdtPerPole must be 1..1000' });
+      }
+      update.autoReserveUsdtPerPole = n;
+    }
+    if ('lossThresholdPct' in body) {
+      const n = Number(body.lossThresholdPct);
+      if (!Number.isFinite(n) || n < 0.1 || n > 50) {
+        return res.status(400).json({ error: 'lossThresholdPct must be 0.1..50' });
+      }
+      update.autoReserveLossThresholdPct = n;
+    }
+    if ('checkHours' in body) {
+      const n = Number(body.checkHours);
+      if (!Number.isFinite(n) || n < 1 || n > 24) {
+        return res.status(400).json({ error: 'checkHours must be 1..24' });
+      }
+      // Must divide 24 evenly (00:00, 04:00, 08:00... etc.)
+      if (24 % n !== 0) {
+        return res.status(400).json({ error: 'checkHours must divide 24 evenly (1,2,3,4,6,8,12,24)' });
+      }
+      update.autoReserveCheckHours = Math.floor(n);
+    }
+    if ('stepUsdt' in body) {
+      const n = Number(body.stepUsdt);
+      if (!Number.isFinite(n) || n < 1 || n > 1000) {
+        return res.status(400).json({ error: 'stepUsdt must be 1..1000' });
+      }
+      update.autoReserveStepUsdt = n;
+    }
+
+    if (Object.keys(update).length === 0) {
+      return res.status(400).json({ error: 'no valid fields to update' });
+    }
+
+    await AppConfig.findOneAndUpdate(
+      { key: 'singleton' },
+      { $set: update },
+      { new: true, upsert: true }
+    );
+
+    // Reload config in the running service (install/clear interval if needed)
+    await autoReserve.reloadConfig();
+
+    const status = autoReserve.getStatus();
+    logger.info({ update }, 'wallet: auto-reserve config updated');
+    res.json({
+      ok: true,
+      config: status.config,
+      status: {
+        running: status.running,
+        lastRunAt: status.lastRunAt,
+        lastRunError: status.lastRunError,
+        lastStats: status.lastStats,
+      },
+      ts: Date.now(),
+    });
+  } catch (err) {
+    logger.error({ err: err.message }, 'wallet: auto-reserve PUT failed');
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── POST /api/wallet/auto-reserve/run ──────────────────────────────────────
+//   Manual trigger — runs one cycle NOW (bypasses time-of-day guard + disabled check).
+//   requireBotActionPassword because it changes walletReserveUsdt.
+router.post('/auto-reserve/run', requireAuth, requireBotActionPassword, async (req, res) => {
+  try {
+    const stats = await autoReserve.runOnce({ source: 'manual', force: true });
+    res.json({ ok: true, stats, ts: Date.now() });
+  } catch (err) {
+    logger.error({ err: err.message }, 'wallet: auto-reserve manual run failed');
     res.status(500).json({ error: err.message });
   }
 });

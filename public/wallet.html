@@ -298,6 +298,14 @@
           <div class="text-muted-3" style="font-size: 0.82rem;">
             กั๊ก USDT จำนวนนี้ไว้ — บอททั้งหมดจะมองว่าเงินส่วนนี้<b style="color: var(--bear-1);"> ไม่มีอยู่</b> และจะไม่แตะต้อง
           </div>
+          <!-- FIX-2026-08-24: Auto-Reserve switch — periodic adjuster -->
+          <div class="d-flex align-items-center gap-2 mt-2" style="font-size: 0.82rem;">
+            <div class="form-check form-switch m-0">
+              <input class="form-check-input" type="checkbox" role="switch" id="auto-reserve-switch" />
+              <label class="form-check-label" for="auto-reserve-switch" style="color: var(--text-2); font-weight: 600;">🤖 Auto-Reserve</label>
+            </div>
+            <span id="auto-reserve-summary" class="text-muted-3" style="font-size: 0.72rem;">OFF</span>
+          </div>
         </div>
         <div class="wallet-usable-grid" style="flex: 1 1 360px; min-width: 260px;">
           <div class="wallet-usable-cell">

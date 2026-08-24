@@ -304,6 +304,28 @@ const appConfigSchema = new mongoose.Schema(
     walletReserveUsdt: { type: Number, default: 0, min: 0, max: 1_000_000 },
 
     // ═══════════════════════════════════════════════════════════════════════
+    // FIX-2026-08-24: Auto Reserve / Release USDT — periodic adjuster
+    //   - enabled: master switch (default false — user must opt-in)
+    //   - poleCount: target # of poles reserved (default 3) — 1 pole = usdtPerPole USDT
+    //   - usdtPerPole: USDT value of 1 pole (default 10)
+    //   - lossThresholdPct: positions with unrealized loss% < this count as 1 pole (default 2)
+    //     e.g. pole=3, lossThrPct=2 → 3 loss positions (each < 2%) = 3 poles "reserved"
+    //   - checkHours: trigger every N hours aligned to BKK HH:00 boundary (default 4 → 00/04/08/12/16/20)
+    //   - stepUsdt: amount to add/remove per action (default 10)
+    //   - lastRunAt/lastStats/lastError: telemetry (persist across restart)
+    //   - Engine: src/services/autoReserve.js (singleton scheduler)
+    // ═══════════════════════════════════════════════════════════════════════
+    autoReserveEnabled:          { type: Boolean, default: false },
+    autoReservePoleCount:        { type: Number,  default: 3,   min: 1,   max: 100 },
+    autoReserveUsdtPerPole:      { type: Number,  default: 10,  min: 1,   max: 1000 },
+    autoReserveLossThresholdPct: { type: Number,  default: 2,   min: 0.1, max: 50 },
+    autoReserveCheckHours:       { type: Number,  default: 4,   min: 1,   max: 24 },
+    autoReserveStepUsdt:         { type: Number,  default: 10,  min: 1,   max: 1000 },
+    autoReserveLastRunAt:        { type: Date,    default: null },
+    autoReserveLastStats:        { type: Object,  default: null },
+    autoReserveLastError:        { type: String,  default: null },
+
+    // ═══════════════════════════════════════════════════════════════════════
     // FIX-2026-08-21: Binance API rate-limit capacity (token-bucket)
     //   - capacity (REQUEST_WEIGHT per minute) for the IP-bucket in binanceRest.js
     //   - default 6000 (= Binance standard IP-based limit)
