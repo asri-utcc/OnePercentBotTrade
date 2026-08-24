@@ -94,6 +94,15 @@ class BotManager {
     //   fix: ยิง reconcilePendingTrades() ทุก RECONCILE_INTERVAL_MS (default 2 นาที)
     this.reconcileTimer = null;
     this.reconcileInFlight = false; // guard กัน overlap ถ้า reconcile รอบก่อนยังไม่จบ
+
+    // FIX-2026-08-24 (P0 audit): per-bot spawn mutex ป้องกัน duplicate trader instance
+    //   - เดิม enableBot + auto-resume + start() (PM2 boot) ไม่มี mutex รอบ spawnTrader
+    //   - ถ้า user toggle + auto-pause tick + PM2 restart พร้อมกัน → 2 spawnTrader calls
+    //     → 2 trader instances / 1 bot → double WS subscribe + double reconcileKlines
+    //     → silent leak (instance เก่าไม่ถูก unsub) หรือ orphan (overwrite + leak เก่า)
+    //   - fix: per-bot promise chain — caller await chain เดียวกัน → serialized
+    //   - pattern: Map<botId, Promise>; lock ก่อน spawn, delete หลังเสร็จ (finally)
+    this._spawningLocks = new Map(); // Map<string, Promise<void>>
   }
 
   async start() {
@@ -124,7 +133,7 @@ class BotManager {
         //     จะ replay historical candles หลายร้อยแท่ง → S1 detector ยิง ghost BUY บน candles เก่า
         //   - safe: cursor advances monotonically ($max guard ใน trader reconcileKlines กันย้อนหลังอยู่แล้ว)
         await this._resetStaleReplayCursorOnEnable(bot);
-        await this.spawnTrader(bot);
+        await this._withSpawnLock(bot._id, () => this.spawnTrader(bot));
       } catch (err) {
         logger.error({ err: err.message, botId: bot._id.toString() }, 'botManager: spawn failed');
       }
@@ -302,11 +311,32 @@ class BotManager {
     }
   }
 
+  /**
+   * FIX-2026-08-24 (P0 audit): per-bot spawn mutex
+   *   - ห่อ spawnTrader() เพื่อ serialize concurrent spawn calls (enableBot + auto-resume + PM2 boot)
+   *   - pattern: Map<botId, Promise> — caller await chain เดียวกัน
+   *   - usage: `await this._withSpawnLock(bot._id, () => this.spawnTrader(bot))`
+   */
+  async _withSpawnLock(botId, fn) {
+    const id = botId.toString();
+    const prev = this._spawningLocks.get(id) || Promise.resolve();
+    const next = prev.then(() => fn(), () => fn()); // run even if previous failed
+    // store a no-throw tail so the chain doesn't break if fn rejects
+    this._spawningLocks.set(id, next.catch(() => {}));
+    try {
+      await next;
+    } finally {
+      // only delete if we're still the tail of the chain
+      if (this._spawningLocks.get(id) && this._spawningLocks.get(id) === next.catch(() => {})) {
+        this._spawningLocks.delete(id);
+      }
+    }
+  }
+
   async stopTrader(botId) {
     const id = botId.toString();
     const trader = this.traders.get(id);
     if (!trader) return;
-
     await trader.stop();
     this.traders.delete(id);
 
@@ -899,9 +929,25 @@ class BotManager {
         }
       }
     } catch (err) {
-      logger.warn({ botId: String(bot._id), symbol: bot.symbol, err: err.message },
-        'botManager: _resetStaleReplayCursorOnEnable — getKlines failed, skipping reset');
-      return { newCursorMs: lastSignalCloseMs, pendingReplayCandle: null };
+      // FIX-2026-08-24 (P0 audit): re-throw to surface stale-cursor failure instead of swallowing
+      //   - เดิม log warn + return stale cursor → trader.spawnTrader → reconcileKlines('startup')
+      //     replay 200 candles จาก stale cursor → ghost BUY (regression GIGGLE 2026-08-05)
+      //   - ใหม่: throw เพื่อให้ caller (enableBot, auto-resume) abort spawn safely
+      //   - ก่อน throw: log + emit 'bot:enable_cursor_reset_failed' เพื่อให้ telegramNotifier แจ้ง
+      logger.error({ botId: String(bot._id), symbol: bot.symbol, err: err.message },
+        'botManager: _resetStaleReplayCursorOnEnable — getKlines failed; refusing enable to prevent ghost BUY replay');
+      try {
+        eventBus.emit('bot:enable_cursor_reset_failed', {
+          botId: String(bot._id),
+          symbol: bot.symbol,
+          timeframe: bot.timeframe,
+          reason: err.message,
+        });
+      } catch (_) { /* never let emit fail the throw */ }
+      const wrappedErr = new Error(`stale-cursor reset failed for bot ${bot._id}: ${err.message}`);
+      wrappedErr.code = 'STALE_CURSOR_RESET_FAILED';
+      wrappedErr.botId = String(bot._id);
+      throw wrappedErr;
     }
     if (latestClosedMs === 0) {
       return { newCursorMs: lastSignalCloseMs, pendingReplayCandle: null };
@@ -944,12 +990,25 @@ class BotManager {
       throw new Error('Bot is soft-deleted — call POST /api/bots/:id/restore first to re-enable');
     }
     // FIX 2026-08-05: reset stale cursor ก่อน spawnTrader (กัน ghost BUY จาก reconcileKlines replay)
-    await this._resetStaleReplayCursorOnEnable(bot);
+    // FIX-2026-08-24 (P0 audit): catch STALE_CURSOR_RESET_FAILED and abort enable safely
+    //   - เดิม: error ถูก swallow ใน helper → spawn → ghost BUY replay
+    //   - ใหม่: helper throws → caller abort (do NOT set enabled=true, do NOT spawn)
+    let pendingReplayCandle = null;
+    try {
+      ({ pendingReplayCandle } = await this._resetStaleReplayCursorOnEnable(bot));
+    } catch (cursorErr) {
+      if (cursorErr.code === 'STALE_CURSOR_RESET_FAILED') {
+        logger.warn({ botId: String(bot._id), symbol: bot.symbol }, 'botManager: enableBot aborted — stale cursor reset failed; bot remains disabled to prevent ghost BUY');
+        // rethrow as-is so route handler returns 503 to user
+        throw cursorErr;
+      }
+      throw cursorErr;
+    }
     bot.enabled = true;
     bot.enabledAt = new Date();
     bot.status = 'idle';
     await bot.save();
-    await this.spawnTrader(bot);
+    await this._withSpawnLock(bot._id, () => this.spawnTrader(bot));
     eventBus.emit('bot:updated', { botId });
     // FIX-2026-07-24: action-specific event สำหรับ Telegram notifier (bot:updated payload ไม่มี verb)
     eventBus.emit('bot:enabled', { botId });
@@ -1233,7 +1292,20 @@ async function checkAutoPauseBots() {
         // FIX-2026-08-22: capture pendingReplayCandle เพื่อ replay last closed candle (auto-resume เท่านั้น)
         //   - manual enable / PM2 boot ไม่ trigger replay (user อาจตั้งใจปิด)
         //   - safe window (30s, 5min] enforced ใน helper แล้ว
-        const { pendingReplayCandle } = await this._resetStaleReplayCursorOnEnable(b);
+        // FIX-2026-08-24 (P0 audit): catch STALE_CURSOR_RESET_FAILED — skip auto-resume for this bot
+        //   - เดิม: error swallow → ghost BUY on next reconcile cycle
+        //   - ใหม่: skip resume + leave bot disabled + try again on next 5-min tick
+        let pendingReplayCandle = null;
+        try {
+          ({ pendingReplayCandle } = await this._resetStaleReplayCursorOnEnable(b));
+        } catch (cursorErr) {
+          if (cursorErr.code === 'STALE_CURSOR_RESET_FAILED') {
+            logger.warn({ botId: String(b._id), symbol: b.symbol }, 'auto-resume skipped this tick — stale cursor reset failed; will retry on next 5-min cycle');
+            stats.skippedCursorResetFailed = (stats.skippedCursorResetFailed || 0) + 1;
+            continue;
+          }
+          throw cursorErr;
+        }
         eventBus.emit('bot:enabled', {
           botId: String(b._id),
           reason: 'auto_resume_vol_recovered',
@@ -1251,7 +1323,7 @@ async function checkAutoPauseBots() {
         } catch (_) { /* non-fatal */ }
         // re-spawn trader (mirror enableBot behavior — without totalActiveMs accrual since autoPause is short)
         // FIX-2026-08-22: pass pendingReplayCandle → spawnTrader จะ schedule onCandleClosed replay หลัง start
-        await this.spawnTrader({ _id: b._id, ...b }, { pendingReplayCandle }).catch((err) => logger.warn({ botId: String(b._id), err: err.message }, 'botManager: auto-resume spawn failed'));
+        await this._withSpawnLock(b._id, () => this.spawnTrader({ _id: b._id, ...b }, { pendingReplayCandle })).catch((err) => logger.warn({ botId: String(b._id), err: err.message }, 'botManager: auto-resume spawn failed'));
         logger.info({
           botId: String(b._id),
           minKcPct,

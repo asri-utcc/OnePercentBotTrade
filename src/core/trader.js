@@ -399,9 +399,17 @@ class Trader {
     eventBus.on('bookTicker', this._bookTickerHandler);
 
     // kline:closed handler
+    // FIX-2026-08-24 (P0 audit): wrap onCandleClosed in .catch to prevent unhandled
+    //   promise rejection from killing the Node process (sibling handlers _cbKlineHandler,
+    //   _cbv2/v3/v5KlineHandler all do this — _klineHandler was the only one missing).
+    //   Without .catch, a transient Mongo blip during Signal.create would crash the bot,
+    //   PM2 would restart, and 57 bots would burst-replay → 418 IP ban (regression of
+    //   2026-08-22 weight-spike incident).
     this._klineHandler = (payload) => {
       if (payload.symbol !== this.bot.symbol || payload.timeframe !== this.bot.timeframe) return;
-      this.onCandleClosed(payload.candle);
+      this.onCandleClosed(payload.candle).catch((err) => {
+        logger.error({ err: err.message, stack: err.stack, botId: this.bot._id?.toString() }, 'trader: onCandleClosed threw — caught to prevent process exit');
+      });
     };
     eventBus.on('kline:closed', this._klineHandler);
 
@@ -4368,6 +4376,18 @@ class Trader {
       logger.error({ err: err.message, stack: err.stack }, 'trader: placeBuy error');
       // FIX-2026-07-21: release flag on error path too
       this.buyInFlight = false;
+      // FIX-2026-08-24 (P0 audit): release buyCommitment claim on outer-catch paths
+      //   - เดิมมี release แค่ใน L4280-4284 (reject) + L4323-4330 (success)
+      //   - ถ้า Trade.create/updateOne throw ระหว่าง L4086-L4148 → claim ค้าง → bots อื่นโดนหักเงินซ้อน
+      //   - regression ของ "กั๊กเงินหลุด" pattern (FIX-2026-08-21)
+      if (claimedBuy) {
+        try {
+          buyCommitment.releaseBuy(requiredWithBuffer);
+          logger.debug({ botId: this.bot._id.toString(), requiredWithBuffer }, 'trader: placeBuy outer catch — buyCommitment released');
+        } catch (releaseErr) {
+          logger.error({ err: releaseErr.message }, 'trader: placeBuy outer catch — releaseBuy failed (claim leak risk)');
+        }
+      }
       // FIX P2.1+P3.4: serialized error status (ถ้า candle ใหม่มา = P1.1 จะ reset เป็น idle)
       this._setBotStatus('error', { lastError: err.message });
     }
@@ -5078,6 +5098,26 @@ class Trader {
         reason: null,
         reasonDetail: null,
       });
+
+      // FIX-2026-08-24 (P0 audit): defensive symbolInfo guard
+      //   - เดิม validateOrder (L5103) throws ถ้า symbolInfo cache miss (priceFilter is null → TypeError)
+      //   - BUY filled แล้ว throw → outer catch → return → no SELL placed → orphan asset
+      //   - fix: load symbolInfo synchronously if missing before any downstream call.
+      //     ถ้า loadSymbol fail → schedule holding-retry แทน (auto-recover เมื่อ network กลับมา)
+      if (!symbolInfo.getCached(this.bot.symbol)) {
+        try {
+          await symbolInfo.loadSymbol(this.bot.symbol);
+        } catch (loadErr) {
+          logger.error({ botId: this.bot._id.toString(), symbol: this.bot.symbol, err: loadErr.message },
+            'trader: _handleBuyFilledImpl — symbolInfo unavailable, scheduling holding-retry to prevent orphan asset');
+          await Trade.updateOne({ _id: trade._id }, { state: 'holding', targetSellPrice: parseFloat(sellPrice), error: `symbolInfo unavailable: ${loadErr.message}` });
+          await Bot.updateOne({ _id: this.bot._id }, { status: 'holding' });
+          eventBus.emit('bot:status', { botId: this.bot._id, status: 'holding' });
+          eventBus.emit('trade:update', { tradeId: trade._id, state: 'holding', reason: null, reasonDetail: null });
+          this.scheduleHoldingRetry(trade, filledQty, avgPrice, sellPrice);
+          return;
+        }
+      }
 
       // FIX 1: ถ้า validation fail (เช่น tick size / min notional) → MARKET fallback
       const validation = symbolInfo.validateOrder({ symbol: this.bot.symbol, price: sellPrice, qty: filledQty });
@@ -7486,7 +7526,29 @@ class Trader {
   async _handleDcaSellFilled(update, trade) {
     try {
       const sellQty = parseFloat(update.executedQty);
-      const sellPrice = parseFloat(update.avgPrice) || (parseFloat(update.cumulativeQuoteQty) / sellQty);
+      let sellPrice = parseFloat(update.avgPrice) || (parseFloat(update.cumulativeQuoteQty) / sellQty);
+      // FIX-2026-08-24 (P0 audit): NaN guard for incomplete WS SELL update
+      //   - LIMIT_MAKER post-only WS event อาจไม่มี avgPrice/cumulativeQuoteQty
+      //   - เดิม write NaN ลง DB → Bot.$inc(totalPnl: NaN) → corrupt aggregates silently
+      //   - ถ้า Number.isFinite fail → fetch order from REST เพื่อ recompute
+      //     ถ้า REST ก็ไม่ได้ → bail + retry next event (กัน silent corruption)
+      if (!Number.isFinite(sellPrice) || sellPrice <= 0 || !Number.isFinite(sellQty) || sellQty <= 0) {
+        logger.warn({ tradeId: trade._id?.toString?.(), update: { orderId: update.orderId, avgPrice: update.avgPrice, cumulativeQuoteQty: update.cumulativeQuoteQty, executedQty: update.executedQty } },
+          'trader: sell-filled — incomplete WS data, fetching from REST');
+        try {
+          const fresh = await binanceRest.getOrder({ symbol: trade.symbol, orderId: update.orderId });
+          if (fresh && fresh.executedQty && fresh.cummulativeQuoteQty) {
+            sellPrice = parseFloat(fresh.price) || (parseFloat(fresh.cummulativeQuoteQty) / parseFloat(fresh.executedQty));
+          }
+        } catch (fetchErr) {
+          logger.error({ err: fetchErr.message }, 'trader: sell-filled — REST fetch failed; bailing (will retry on next WS event)');
+          return;
+        }
+        if (!Number.isFinite(sellPrice) || sellPrice <= 0) {
+          logger.error({ tradeId: trade._id?.toString?.(), sellPrice }, 'trader: sell-filled — sellPrice still non-finite after REST fetch; bailing');
+          return;
+        }
+      }
       const feeRate = fees.getMakerRate();
       const stackBep = parseFloat(trade.stackBep || trade.buyPrice || 0);
       const stackTotalQty = parseFloat(trade.stackTotalQty || trade.buyQty || 0);
@@ -7660,7 +7722,29 @@ class Trader {
         }
       }
       const sellQty = parseFloat(update.executedQty);
-      const sellPrice = parseFloat(update.avgPrice) || (parseFloat(update.cumulativeQuoteQty) / sellQty);
+      let sellPrice = parseFloat(update.avgPrice) || (parseFloat(update.cumulativeQuoteQty) / sellQty);
+      // FIX-2026-08-24 (P0 audit): NaN guard for incomplete WS SELL update
+      //   - LIMIT_MAKER post-only WS event อาจไม่มี avgPrice/cumulativeQuoteQty
+      //   - เดิม write NaN ลง DB → Bot.$inc(totalPnl: NaN) → corrupt aggregates silently
+      //   - ถ้า Number.isFinite fail → fetch order from REST เพื่อ recompute
+      //     ถ้า REST ก็ไม่ได้ → bail + retry next event (กัน silent corruption)
+      if (!Number.isFinite(sellPrice) || sellPrice <= 0 || !Number.isFinite(sellQty) || sellQty <= 0) {
+        logger.warn({ tradeId: trade._id?.toString?.(), update: { orderId: update.orderId, avgPrice: update.avgPrice, cumulativeQuoteQty: update.cumulativeQuoteQty, executedQty: update.executedQty } },
+          'trader: sell-filled — incomplete WS data, fetching from REST');
+        try {
+          const fresh = await binanceRest.getOrder({ symbol: trade.symbol, orderId: update.orderId });
+          if (fresh && fresh.executedQty && fresh.cummulativeQuoteQty) {
+            sellPrice = parseFloat(fresh.price) || (parseFloat(fresh.cummulativeQuoteQty) / parseFloat(fresh.executedQty));
+          }
+        } catch (fetchErr) {
+          logger.error({ err: fetchErr.message }, 'trader: sell-filled — REST fetch failed; bailing (will retry on next WS event)');
+          return;
+        }
+        if (!Number.isFinite(sellPrice) || sellPrice <= 0) {
+          logger.error({ tradeId: trade._id?.toString?.(), sellPrice }, 'trader: sell-filled — sellPrice still non-finite after REST fetch; bailing');
+          return;
+        }
+      }
       const feeRate = fees.getMakerRate();
       const pnl = fees.calcPnl({
         buyPrice: trade.buyPrice,

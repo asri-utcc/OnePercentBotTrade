@@ -297,7 +297,10 @@ describe('FIX-2026-08-22: _resetStaleReplayCursorOnEnable return shape', () => {
     expect(result.pendingReplayCandle).toBeNull();
   });
 
-  test('Binance fetch fails → no reset, no replay (graceful)', async () => {
+  test('Binance fetch fails → THROW STALE_CURSOR_RESET_FAILED (FIX-2026-08-24 P0-6: refuse to enable to prevent ghost BUY replay)', async () => {
+    // FIX-2026-08-24 (P0-6 audit): เดิม swallow error เงียบๆ → spawnTrader → reconcileKlines('startup')
+    //   replay 200 candles จาก stale cursor → ghost BUY (regression GIGGLE 2026-08-05)
+    //   ใหม่ throw เพื่อให้ caller (enableBot, auto-resume) abort spawn safely
     binanceRest.getKlines.mockRejectedValueOnce(new Error('Network error'));
 
     const bot = {
@@ -307,11 +310,17 @@ describe('FIX-2026-08-22: _resetStaleReplayCursorOnEnable return shape', () => {
       lastSignalCloseTime: nowMock - (60 * 1000), // 60s old (would normally replay)
     };
 
-    const result = await botManager._resetStaleReplayCursorOnEnable(bot);
+    await expect(botManager._resetStaleReplayCursorOnEnable(bot))
+      .rejects
+      .toThrow(/stale-cursor reset failed for bot fetchFailBot: Network error/);
 
-    expect(result.newCursorMs).toBe(bot.lastSignalCloseTime);
-    expect(result.pendingReplayCandle).toBeNull();
-    expect(BotModel.updateOne).not.toHaveBeenCalled();
+    // wrapped error must carry code for caller to identify
+    try {
+      await botManager._resetStaleReplayCursorOnEnable(bot);
+    } catch (err) {
+      expect(err.code).toBe('STALE_CURSOR_RESET_FAILED');
+      expect(err.botId).toBe('fetchFailBot');
+    }
   });
 
   test('No closed candle available (Binance returns only forming) → no reset, no replay', async () => {

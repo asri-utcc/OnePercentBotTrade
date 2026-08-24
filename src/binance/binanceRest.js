@@ -390,16 +390,23 @@ async function publicGet(path, params = {}, weight = 1) {
   return resp.data;
 }
 
-async function signedRequest(method, path, params = {}, weight = 1) {
+async function signedRequest(method, path, params = {}, weight = 1, opts = {}) {
   if (!config.binance.apiKey || !config.binance.apiSecret) {
     const e = new Error('Binance API keys not configured. Please set BINANCE_API_KEY and BINANCE_API_SECRET in .env or via dashboard.');
     e.code = 'NO_API_KEYS';
     throw e;
   }
-  // FIX-2026-08-22 (weight spike): signedRequest = BUY/SELL/account = critical path
-  //   - bypass circuit breaker เสมอ — ระบบเทรดจะไม่หยุดแม้ breaker 'open'
-  //   - token bucket ยังเข้าคิวตามปกติ (refill 6000/min) แต่ไม่โดน block
-  await limiter.take(weight, { critical: true });
+  // FIX-2026-08-24 (P0 audit): signedRequest criticality split
+  //   - เดิม: ทุก signed call bypass CB (weight-spike 2026-08-22 mitigation)
+  //   - ปัญหา: signed READS (getAccount weight 20, getOpenOrders weight 80, getOrder weight 4)
+  //     ก็ bypass CB → 4,560 weight/min รั่วจาก signed reads อย่างเดียว (watchdog 57 bots × 30s)
+  //   - fix: caller opt-in via opts.critical (default false for safety)
+  //     - true order ops (newOrder, cancelOrder) → pass { critical: true }
+  //     - signed reads (getAccount, getOrder, getOpenOrders, getAllOrders, myTrades) → critical: false
+  //   - effect: signed reads get blocked เมื่อ CB open → ไม่ทำให้ 418 (defensive)
+  //            order placement ยังผ่านเสมอ (trading ไม่หยุด)
+  const isCritical = opts.critical === true;
+  await limiter.take(weight, { critical: isCritical });
   // FIX-2026-07-14: ใช้ Binance-synced timestamp (apply server-time offset) แทน local clock
   //   กัน -1021 "Timestamp ahead of server" ที่เคยเกิดกับทั้ง BUY และ /api/account/balance
   await ensureTimeOffset();
@@ -587,12 +594,17 @@ async function getSpotDelistSchedule() {
 }
 
 // ─── Signed endpoints ───────────────────────────────────
+// FIX-2026-08-24 (P0 audit): signed READS explicit critical:false
+//   - getAccount (weight 20), getOrder (4), getOpenOrders (6-80), getAllOrders (10),
+//     myTrades (10) — all marked critical:false → CB จะ block เมื่อ open
+//   - watchdog reconcile (P0-5 risk) จะหยุดยิงเมื่อ breaker open → ไม่ทำให้ 418
 async function getAccount() {
-  return signedRequest('GET', '/api/v3/account', {}, 20);
+  return signedRequest('GET', '/api/v3/account', {}, 20, { critical: false });
 }
 
 async function newOrder(params) {
-  return signedRequest('POST', '/api/v3/order', params, 1);
+  // FIX-2026-08-24 (P0 audit): order placement = critical (bypass CB)
+  return signedRequest('POST', '/api/v3/order', params, 1, { critical: true });
 }
 
 async function cancelOrder({ symbol, orderId = null, origClientOrderId = null }) {
@@ -605,23 +617,26 @@ async function cancelOrder({ symbol, orderId = null, origClientOrderId = null })
   const params = { symbol };
   if (orderId) params.orderId = orderId;
   if (origClientOrderId) params.origClientOrderId = origClientOrderId;
-  return signedRequest('DELETE', '/api/v3/order', params, 1);
+  // FIX-2026-08-24 (P0 audit): order cancel = critical (bypass CB)
+  return signedRequest('DELETE', '/api/v3/order', params, 1, { critical: true });
 }
 
 async function getOrder({ symbol, orderId = null, origClientOrderId = null }) {
   const params = { symbol };
   if (orderId) params.orderId = orderId;
   if (origClientOrderId) params.origClientOrderId = origClientOrderId;
-  return signedRequest('GET', '/api/v3/order', params, 4);
+  return signedRequest('GET', '/api/v3/order', params, 4, { critical: false });
 }
 
 async function getOpenOrders({ symbol = null } = {}) {
   const params = symbol ? { symbol } : {};
-  return signedRequest('GET', '/api/v3/openOrders', params, symbol ? 6 : 80);
+  // FIX-2026-08-24 (P0 audit): getOpenOrders no-symbol = weight 80 — must respect CB
+  return signedRequest('GET', '/api/v3/openOrders', params, symbol ? 6 : 80, { critical: false });
 }
 
 async function cancelAllOpenOrders({ symbol }) {
-  return signedRequest('DELETE', '/api/v3/openOrders', { symbol }, 1);
+  // FIX-2026-08-24 (P0 audit): cancel-all = critical (bypass CB)
+  return signedRequest('DELETE', '/api/v3/openOrders', { symbol }, 1, { critical: true });
 }
 
 // ─── User Data Stream via WebSocket API (new, post Feb 2026) ─────
