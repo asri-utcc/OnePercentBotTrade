@@ -1571,7 +1571,7 @@ async function saveAutoReserveConfig() {
             `ต้องการเปิดหรือไม่?`,
           confirmLabel: 'เปิด Auto Reserve',
           cancelLabel: 'ยกเลิก',
-          password: false,
+          requirePassword: false,
         })
       : confirm(
           `🤖 Auto Reserve จะปรับ USDT Reserve อัตโนมัติทุก ๆ ${checkHours} ชั่วโมง\n\n` +
@@ -1603,13 +1603,17 @@ async function triggerAutoReserve() {
           '(ใช้รหัส BOT_ACTION_PASSWORD)',
         confirmLabel: 'รันเลย',
         cancelLabel: 'ยกเลิก',
-        password: true,
+        requirePassword: true,
       })
-    : confirm('⚠️ จะรัน Auto Reserve ทันที (bypass checkHours + enabled flag)?\n\nระบบจะคำนวณ usable + loss poles แล้วปรับ reserve ทันที');
-  if (!proceed) return;
+    : (function () {
+        const ok = confirm('⚠️ จะรัน Auto Reserve ทันที (bypass checkHours + enabled flag)?\n\nระบบจะคำนวณ usable + loss poles แล้วปรับ reserve ทันที');
+        return ok ? prompt('กรุณาใส่รหัส BOT_ACTION_PASSWORD') : null;
+      })();
+  if (proceed === null) return;
+  const password = (typeof proceed === 'string') ? proceed : '';
   setStatus('ar-status', '⏳ กำลังรัน...');
   try {
-    const resp = await API.post('/api/wallet/auto-reserve/run', {});
+    const resp = await API.post('/api/wallet/auto-reserve/run', { password });
     const s = (resp && resp.stats) || {};
     if (s.outcome === 'failed_apply') { setStatus('ar-status', '❌ apply failed: ' + (s.error || 'unknown'), true); }
     else if (s.skipped) { setStatus('ar-status', '⏸ ' + s.skipped); }
