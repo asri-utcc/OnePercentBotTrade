@@ -8,9 +8,8 @@
  *
  *   - loadBalances()        : GET /api/wallet/balances → render table + hero totals
  *   - loadReserve()         : GET /api/wallet/reserve  → render slider + chips + usable grid
- *   - saveReserve(value)    : PUT /api/wallet/reserve  (gated by bot-action password)
- *                              uses window.callBotWithPassword() — same pattern as
- *                              enable/disable bot in bots.js
+ *   - saveReserve(value)    : PUT /api/wallet/reserve  (no password gate — 2026-08-24)
+ *                              uses API.put() directly
  *   - loadPortfolioChart()  : GET /api/wallet/portfolio-history?range=…
  *   - loadPnlChart()        : GET /api/wallet/pnl-series?range=…
  *
@@ -442,12 +441,8 @@
     els.saveBtn.disabled = true;
     els.saveBtn.textContent = '⏳ กำลังบันทึก…';
     try {
-      const r = await window.callBotWithPassword(
-        'PUT',
-        '/api/wallet/reserve',
-        { reserveUsdt: _draftReserve },
-        'บันทึกการกั๊กเงิน'
-      );
+      // 2026-08-24: กั๊กเงินไม่ต้องใช้ password (ปุ่ม +5/+10/-5/-10 ทำให้ต้องกดบ่อย)
+      const r = await API.put('/api/wallet/reserve', { reserveUsdt: _draftReserve });
       _savedReserve = Number((r && r.reserveUsdt) || 0);
       if (r && typeof r.totalUsdt === 'number') {
         _totalUsdt = r.totalUsdt;
@@ -756,6 +751,15 @@
     // Chips
     for (const c of chips) {
       c.addEventListener('click', () => {
+        // Delta chips (±5, ±10): adjust current draft by the delta
+        const deltaStr = c.dataset.reserveDelta;
+        if (deltaStr != null) {
+          const delta = parseInt(deltaStr, 10);
+          if (!Number.isFinite(delta)) return;
+          setReserveDraft(_draftReserve + delta, 'chip');
+          return;
+        }
+        // Fixed-value chips (0, 50, 100, 1000, Max): set draft to exact value
         const v = c.dataset.reserve;
         const target = (v === 'max') ? Math.floor(_totalUsdt) : parseFloat(v);
         if (!Number.isFinite(target)) return;
