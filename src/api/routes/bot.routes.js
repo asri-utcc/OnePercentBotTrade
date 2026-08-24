@@ -38,34 +38,9 @@ function formatTpToXxx1(value) {
   return Number((truncated2 + 0.001).toFixed(3));
 }
 
-const router = express.Router();
+const { requireBotActionPassword } = require('../middleware/auth');
 
-/**
- * Middleware: ต้องใส่ password สำหรับ action อันตราย (สร้าง/ลบ/เปิด/ปิดบอท)
- * ป้องกันคนเปิด browser ที่ login ค้างไว้แล้วเผลอกด หรือ CSRF
- * รับ password จาก body.password, header X-Bot-Action-Password, หรือ query ?password=
- * ถ้า config.botActionPassword ว่าง → reject ทุก action (force secure by default)
- */
-function requireBotActionPassword(req, res, next) {
-  const expected = (config.botActionPassword || '').trim();
-  if (!expected) {
-    logger.warn({ path: req.path, ip: req.ip }, 'bot action blocked: BOT_ACTION_PASSWORD not configured');
-    return res.status(503).json({
-      error: 'Bot actions are disabled because BOT_ACTION_PASSWORD is not set. Set it in .env to enable create/delete/enable/disable.',
-    });
-  }
-  const provided = (
-    (req.body && req.body.password)
-    || req.get('X-Bot-Action-Password')
-    || req.query.password
-    || ''
-  ).toString().trim();
-  if (!provided || provided !== expected) {
-    logger.warn({ path: req.path, ip: req.ip, hasPassword: !!provided }, 'bot action blocked: invalid/missing password');
-    return res.status(403).json({ error: 'Invalid or missing password for bot action' });
-  }
-  next();
-}
+const router = express.Router();
 
 /**
  * Start of "today" in server local timezone (00:00:00 local).
@@ -1605,7 +1580,9 @@ router.post('/:id/unlock-cbv2', requireAuth, requireBotActionPassword, async (re
 //   - dynamicSizeCurrent/dynamicLayersCurrent → null (กลับไปใช้ capitalPerTrade/maxTrades)
 //   - dynamicSizeLastResults → [] (เริ่มนับ streak ใหม่)
 //   - ใช้เมื่อ state เพี้ยน หรืออยากให้ค่าที่ตั้งเองมีผลทันที
-router.post('/:id/dps-reset', requireAuth, async (req, res) => {
+// FIX-2026-08-24 (P2 audit): require bot-action password — DPS reset = admin-level action
+//   (clears loss-streak state, can change sizing on next trade; matches bulk-update policy)
+router.post('/:id/dps-reset', requireAuth, requireBotActionPassword, async (req, res) => {
   try {
     const bot = await Bot.findById(req.params.id);
     if (!bot) return res.status(404).json({ error: 'Bot not found' });
@@ -2084,7 +2061,9 @@ router.get('/:id/details', requireAuth, async (req, res) => {
 //   - body: { botIds: [string], settings: { ... } }
 //   - apply fields ทั้งหมดใน settings ไปยังทุกบอทที่เลือก (whitelist)
 //   - invalidate cache + emit bot:updated สำหรับแต่ละบอท
-router.post('/bulk-update', requireAuth, async (req, res) => {
+// FIX-2026-08-24 (P2 audit): require bot-action password — bulk-update = admin-level
+//   (changes tf/CBv5/DCA across N bots; matches bulk-toggle policy for consistency)
+router.post('/bulk-update', requireAuth, requireBotActionPassword, async (req, res) => {
   try {
     const { botIds, settings } = req.body || {};
     if (!Array.isArray(botIds) || botIds.length === 0) {

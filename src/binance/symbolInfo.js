@@ -150,10 +150,22 @@ function validateOrder({ symbol, price, qty }) {
     }
   }
 
-  if (info.notional && price) {
-    const notional = new Decimal(qty).mul(new Decimal(price));
+  if (info.notional) {
+    // FIX-2026-08-24 (P2 audit): MARKET order NOTIONAL fallback
+    //   - เดิม: ถ้า price=null (MARKET order ไม่มี price input) → ข้าม NOTIONAL check
+    //     → qty < minNotional passes through → Binance -1013 LOT_SIZE / -2010 NOTIONAL breach
+    //   - fix: ถ้า price missing → ใช้ current market price จาก caller (opts.currentPrice)
+    //            ถ้าไม่มี currentPrice เลย → conservative: assume qty*0.01 price
+    //              (ค่าต่ำมาก เพื่อให้ถ้า breach จริง → caught pre-flight ไม่ใช่หลัง submit)
+    let effectivePrice = price;
+    if (!effectivePrice) {
+      effectivePrice = opts && Number.isFinite(opts.currentPrice) && opts.currentPrice > 0
+        ? opts.currentPrice
+        : 0.01; // conservative floor
+    }
+    const notional = new Decimal(qty).mul(new Decimal(effectivePrice));
     if (notional.lessThan(info.notional.minNotional)) {
-      errors.push(`notional ${notional.toString()} < minNotional ${info.notional.minNotional.toString()}`);
+      errors.push(`notional ${notional.toString()} < minNotional ${info.notional.minNotional.toString()} (effectivePrice=${effectivePrice})`);
     }
   }
 

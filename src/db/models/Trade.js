@@ -209,13 +209,27 @@ tradeSchema.index({ botId: 1, stackId: 1 });
 //   - botId + createdAt — history/pnl list endpoints
 tradeSchema.index(
   { sellFilledAt: -1, realizedPnl: 1 },
-  { partialFilterExpression: { realizedPnl: { $exists: true } } }
+  // FIX-2026-08-24 (P2 audit): partial index filter uses $type instead of $exists
+  //   - เดิม: realizedPnl: { $exists: true } matches docs ที่มี field (รวม null → default)
+  //   - ผล: index bloated with docs ที่ realizedPnl = null (unfilled trades)
+  //   - fix: $type: 'number' → strictly matches numeric values, excludes null/undefined
+  { partialFilterExpression: { realizedPnl: { $type: 'number' } } }
 );
 tradeSchema.index({ buyFilledAt: -1, buyStatus: 1 });
 tradeSchema.index({ botId: 1, useStopLossOnUKC: 1, state: 1 });
 tradeSchema.index({ botId: 1, sellFilledAt: -1 });
 tradeSchema.index({ botId: 1, buyFilledAt: -1 });
 tradeSchema.index({ botId: 1, createdAt: -1 });
+// FIX-2026-08-24 (P2 audit): compound index for sellInFlight atomic claim
+//   - เดิม: sellInFlight=false ถูก query ผ่าน findOneAndUpdate({ state, sellInFlight: $ne:true })
+//   - ปัญหา: no compound index → COLLSCAN ทุกครั้งที่ SELL placement race
+//   - ที่ 500 bots × 5 trades/min = 2,500 queries/min → ~50 COLLSCAN/sec ตอน peak
+//   - fix: compound (botId + state + sellInFlight) covers the claim query
+tradeSchema.index({ botId: 1, state: 1, sellInFlight: 1 });
+// FIX-2026-08-24 (P2 audit): index for SELL freeze detection + cleanup queries
+//   - forceClose + forceClose_synthetic cleanup queries filter by sellOrderId existing
+//   - findOneAndUpdate on sellOrderId needs unique-ish index for orphan detection
+tradeSchema.index({ sellOrderId: 1 }, { sparse: true });
 
 const Trade = mongoose.model('Trade', tradeSchema);
 module.exports = Trade;

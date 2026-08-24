@@ -56,6 +56,21 @@ class LoginGuard {
     entry.attempts = entry.attempts.filter((t) => t >= cutoff);
     entry.attempts.push(now);
 
+    // FIX-2026-08-24 (P2 audit): cap attempts array — guard against burst flood
+    //   - เดิม: credential stuffing 1000 attempts/s → array โตเป็น 900,000 entries ใน 15 min window
+    //   - memory + filter() O(n) per call
+    //   - fix: hard cap = maxAttempts × 10 + ถ้าเกิน cap ให้ trigger lock ทันที
+    const ATTEMPTS_CAP = this.maxAttempts * 10;
+    if (entry.attempts.length > ATTEMPTS_CAP) {
+      entry.attempts = entry.attempts.slice(-ATTEMPTS_CAP);
+      entry.lockedUntil = now + this.lockoutMs;
+      logger.warn({
+        ip, fails: entry.attempts.length, lockoutMs: this.lockoutMs, reason: 'cap_exceeded',
+      }, 'login: IP locked (cap exceeded — likely credential stuffing)');
+      this.attempts.set(ip, entry);
+      return;
+    }
+
     if (entry.attempts.length >= this.maxAttempts) {
       entry.lockedUntil = now + this.lockoutMs;
       logger.warn({

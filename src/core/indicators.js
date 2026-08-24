@@ -18,18 +18,46 @@ function ema(values, length) {
   const out = new Array(values.length).fill(null);
   const k = 2 / (length + 1);
 
+  // FIX-2026-08-24 (P2 audit): sanitize non-finite inputs (NaN/undefined/null)
+  //   - เดิม: NaN ใน input → NaN propagate ทุก EMA value downstream → Keltner width NaN
+  //     → false signal + auto-pause misfire (เคย trigger incident 2026-08-22)
+  //   - fix: แทน non-finite ด้วย null ก่อนคำนวณ (warmup pattern มาตรฐาน)
+  const v = values.map((x) => (Number.isFinite(x) ? x : null));
+  if (v.some((x) => x === null)) {
+    // ถ้ามี non-finite ใน window แรก → ขยาย warmup จนกว่าจะเจอ finite ทั้ง length ตัว
+    let startIdx = 0;
+    while (startIdx < v.length && v[startIdx] === null) startIdx += 1;
+    if (v.length - startIdx < length) return out;
+    // shift window: out indices 0..startIdx+length-2 are null, then compute from startIdx+length-1
+    let sum = 0;
+    for (let i = startIdx; i < startIdx + length; i += 1) sum += v[i];
+    let prev = sum / length;
+    out[startIdx + length - 1] = prev;
+    for (let i = startIdx + length; i < v.length; i += 1) {
+      if (v[i] === null) {
+        // skip + carry prev forward (warmup gap)
+        out[i] = prev;
+        continue;
+      }
+      const cur = v[i] * k + prev * (1 - k);
+      out[i] = cur;
+      prev = cur;
+    }
+    return out;
+  }
+
   // Init: SMA of first 'length' values
-  if (values.length < length) return out;
+  if (v.length < length) return out;
 
   let sum = 0;
   for (let i = 0; i < length; i += 1) {
-    sum += values[i];
+    sum += v[i];
   }
   let prev = sum / length;
   out[length - 1] = prev;
 
-  for (let i = length; i < values.length; i += 1) {
-    const cur = values[i] * k + prev * (1 - k);
+  for (let i = length; i < v.length; i += 1) {
+    const cur = v[i] * k + prev * (1 - k);
     out[i] = cur;
     prev = cur;
   }
@@ -37,8 +65,12 @@ function ema(values, length) {
 }
 
 function trueRange(high, low, prevClose) {
+  // FIX-2026-08-24 (P2 audit): NaN guard
+  //   - ถ้า high/low/prevClose มี non-finite → คืน 0 (safe fallback)
+  //   - เดิม: NaN propagate ทั้ง ATR → KC range → false SL-UKC trigger
+  if (!Number.isFinite(high) || !Number.isFinite(low)) return 0;
   const hl = high - low;
-  if (prevClose === null || prevClose === undefined) return hl;
+  if (!Number.isFinite(prevClose)) return hl;
   const hc = Math.abs(high - prevClose);
   const lc = Math.abs(low - prevClose);
   return Math.max(hl, hc, lc);
@@ -67,14 +99,23 @@ function rma(values, length) {
   const out = new Array(values.length).fill(null);
   if (values.length < length) return out;
 
+  // FIX-2026-08-24 (P2 audit): sanitize non-finite inputs
+  const v = values.map((x) => (Number.isFinite(x) ? x : null));
+  if (v.slice(0, length).some((x) => x === null)) return out;
+
   // SMA ของ first N
   let sum = 0;
-  for (let i = 0; i < length; i += 1) sum += values[i];
+  for (let i = 0; i < length; i += 1) sum += v[i];
   let prev = sum / length;
   out[length - 1] = prev;
 
-  for (let i = length; i < values.length; i += 1) {
-    const cur = (prev * (length - 1) + values[i]) / length;
+  for (let i = length; i < v.length; i += 1) {
+    if (v[i] === null) {
+      // skip + carry prev (warmup gap pattern)
+      out[i] = prev;
+      continue;
+    }
+    const cur = (prev * (length - 1) + v[i]) / length;
     out[i] = cur;
     prev = cur;
   }
@@ -96,12 +137,25 @@ function sma(values, length) {
   const out = new Array(values.length).fill(null);
   if (values.length < length || length <= 0) return out;
 
+  // FIX-2026-08-24 (P2 audit): sanitize non-finite inputs (NaN/undefined/null)
+  //   - NaN ใน window → propagate ไป SMA → KC basis → false signal
+  //   - skip + carry previous sum forward for non-finite values
+  const v = values.map((x) => (Number.isFinite(x) ? x : null));
   let sum = 0;
-  for (let i = 0; i < length; i += 1) sum += values[i];
+  for (let i = 0; i < length; i += 1) {
+    if (v[i] === null) return out; // เคยเจอ non-finite ใน first window → extend warmup
+    sum += v[i];
+  }
   out[length - 1] = sum / length;
 
-  for (let i = length; i < values.length; i += 1) {
-    sum += values[i] - values[i - length];
+  for (let i = length; i < v.length; i += 1) {
+    if (v[i] === null) {
+      // non-finite ใน window → skip + carry prev (warmup gap)
+      out[i] = out[i - 1];
+      continue;
+    }
+    const drop = v[i - length] === null ? 0 : v[i - length];
+    sum += v[i] - drop;
     out[i] = sum / length;
   }
   return out;
@@ -123,6 +177,10 @@ function keltnerChannel(highs, lows, closes, length = 20, mult = 1.5) {
   if (!Array.isArray(closes) || closes.length === 0) {
     return { basis: [], upper: [], lower: [], width: [] };
   }
+  // FIX-2026-08-24 (P2 audit): filter non-finite in highs/lows/closes BEFORE ema/atr
+  //   - เดิม: NaN ใน highs/lows → trueRangeSeries=NaN → atr=NaN → range=NaN → upper/lower=NaN
+  //   - fix: NaN sanitize ที่ source — ema/rma already sanitize, แต่ atr ผ่าน trueRangeSeries
+  //     ที่ใช้ trueRange(high, low, prevClose) — trueRange guard NaN แล้ว return 0 → atr ปลอดภัย
   const basis = ema(closes, length);
   const range = atr(highs, lows, closes, length);
   const upper = new Array(closes.length).fill(null);
@@ -131,12 +189,14 @@ function keltnerChannel(highs, lows, closes, length = 20, mult = 1.5) {
   for (let i = 0; i < closes.length; i += 1) {
     const b = basis[i];
     const r = range[i];
-    if (b == null || r == null || r === undefined) continue;
+    // FIX-2026-08-24 (P2 audit): strict Number.isFinite guard (was b == null || r == null — let NaN slip)
+    if (!Number.isFinite(b) || !Number.isFinite(r)) continue;
     const u = b + mult * r;
     const l = b - mult * r;
     upper[i] = u;
     lower[i] = l;
-    width[i] = closes[i] > 0 ? ((u - l) / closes[i]) * 100 : 0;
+    const c = closes[i];
+    width[i] = Number.isFinite(c) && c > 0 ? ((u - l) / c) * 100 : null;
   }
   return { basis, upper, lower, width };
 }

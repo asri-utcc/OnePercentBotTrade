@@ -70,9 +70,18 @@ class HealthMonitor {
       await binanceRest.ping();
       this.binanceLatencyMs = Date.now() - t0;
       this.lastBinancePingOk = true;
+      // FIX-2026-08-24 (P2 audit): reset binanceErrorCount on success path
+      //   - เดิม: counter โต unbounded (เดือนละ thousands) → ไม่มี semantic อีกต่อไป
+      //   - fix: reset เมื่อ ping สำเร็จ 2 ครั้งติด (hysteresis: กัน false reset ระหว่าง 418 flapping)
+      if (this._consecutiveSuccess == null) this._consecutiveSuccess = 0;
+      this._consecutiveSuccess += 1;
+      if (this._consecutiveSuccess >= 2 && this.binanceErrorCount > 0) {
+        this.binanceErrorCount = 0;
+      }
     } catch (err) {
       this.lastBinancePingOk = false;
       this.binanceErrorCount += 1;
+      this._consecutiveSuccess = 0;
       logger.warn({ err: err.message }, 'binance ping failed');
     }
   }

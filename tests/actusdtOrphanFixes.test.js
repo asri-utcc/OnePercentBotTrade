@@ -121,8 +121,12 @@ describe('FIX-2026-08-08 ACTUSDT orphan fixes', () => {
       expect(r.lastLowerType).toBe('number');
     });
 
-    test('NaN close values → shouldSkip=true (NaN is not finite)', () => {
-      // NaN close values → ema(closes) returns NaN → basis[i]=NaN → rangeArr[i]=NaN → lower[i]=NaN
+    test('NaN close values → ema carry-forward keeps finite, shouldSkip=false', () => {
+      // FIX-2026-08-24 (P2 audit): indicators.js sanitize non-finite inputs BEFORE ema/atr
+      //   - NaN close values → ema(closes) maps non-finite → null
+      //   - BUT ema carries prev forward on null (warmup gap pattern) → out[i] = prev (finite)
+      //   - Result: lower[lastIdx] is finite (not NaN) — guard passes (shouldSkip=false)
+      //   - This is MORE CORRECT than old behavior — no false positive skip on minor data hiccups
       const klines = mkKlines(30);
       klines[25].close = NaN;
       klines[26].close = NaN;
@@ -132,9 +136,10 @@ describe('FIX-2026-08-08 ACTUSDT orphan fixes', () => {
       const lastCloseTime = klines[klines.length - 1].closeTime;
       expect(() => checkLastLowerGuard(klines, lastCloseTime)).not.toThrow();
       const r = checkLastLowerGuard(klines, lastCloseTime);
-      // lastLower is NaN → guard catches it → shouldSkip=true (no throw)
-      expect(r.shouldSkip).toBe(true);
-      expect(Number.isNaN(r.lastLowerValue)).toBe(true);
+      // After P2 fix: NaN never propagates, ema carry-forward keeps value finite
+      expect(r.shouldSkip).toBe(false);
+      expect(r.lastLowerType).toBe('number');
+      expect(Number.isFinite(parseFloat(r.lastLowerValue))).toBe(true);
     });
 
     test('warmup scenario (< 21 klines) → shouldSkip=true (lower[] still null)', () => {
@@ -156,68 +161,71 @@ describe('FIX-2026-08-08 ACTUSDT orphan fixes', () => {
       expect(r.shouldSkip).toBe(false);
     });
 
-    test('Infinity in klines → shouldSkip=true (Infinity is not finite)', () => {
+    test('Infinity in klines → ema sanitizes to null, carry-forward keeps finite', () => {
+      // FIX-2026-08-24 (P2 audit): Infinity is non-finite → sanitize to null → ema carry-forward
+      //   - lower[lastIdx] is finite (carried from prev) → guard passes (shouldSkip=false)
+      //   - OLD behavior: Infinity propagated through ema → lower[lastIdx]=Infinity → shouldSkip=true
+      //   - NEW behavior: more resilient, no false positive skip
       const klines = mkKlines(30);
       klines[29].close = Infinity;
       const lastCloseTime = klines[klines.length - 1].closeTime;
       expect(() => checkLastLowerGuard(klines, lastCloseTime)).not.toThrow();
       const r = checkLastLowerGuard(klines, lastCloseTime);
-      expect(r.shouldSkip).toBe(true);
+      expect(r.shouldSkip).toBe(false);
+      expect(r.lastLowerType).toBe('number');
     });
 
-    test('null close value → shouldSkip=true (null !== number)', () => {
+    test('null close value → ema sanitizes to null, carry-forward keeps finite', () => {
+      // FIX-2026-08-24 (P2 audit): null is non-finite → sanitize to null → ema carry-forward
+      //   - lower[lastIdx] is finite (carried from prev) → guard passes (shouldSkip=false)
+      //   - OLD behavior: parseFloat(null)=NaN propagated → shouldSkip=true
+      //   - NEW behavior: more resilient, single missing data point doesn't trigger skip
       const klines = mkKlines(30);
       klines[29].close = null;
       const lastCloseTime = klines[klines.length - 1].closeTime;
       expect(() => checkLastLowerGuard(klines, lastCloseTime)).not.toThrow();
       const r = checkLastLowerGuard(klines, lastCloseTime);
-      // parseFloat(null) = NaN → lower[lastIdx] = NaN → guard catches
-      expect(r.shouldSkip).toBe(true);
+      expect(r.shouldSkip).toBe(false);
+      expect(r.lastLowerType).toBe('number');
     });
 
-    test('REGRESSION GUARD: string klines → lower[lastIdx]=NaN → silent CBv2 fail (the ACTUSDT bug)', () => {
-      // This test documents the EXACT bug pattern from ACTUSDT 2026-08-07.
+    test('REGRESSION GUARD: string klines → ACTUSDT bug → indicators sanitize to null, guard catches', () => {
+      // FIX-2026-08-24 (P2 audit): indicator-level NaN guard catches the original ACTUSDT bug
+      //   - Original 2026-08-07 bug: string klines → parseFloat(str) succeeds for valid numbers
+      //     BUT for "NaN" strings or malformed → lower[lastIdx]=NaN → silent CB fail
+      //   - P2 fix: ema/rma/trueRange sanitize ALL non-finite inputs at source (incl. strings that
+      //     parseFloat→NaN, or non-numeric strings). lower[lastIdx] becomes null instead of NaN.
+      //   - Guard (typeof !== 'number') catches null → shouldSkip=true → no false CB
       //
-      // Initial hypothesis (wrong): `lastLower.toFixed(6)` throws on string.
-      // Actual behavior: string klines → computeBgStates propagates NaN through
-      // ema/atr arithmetic → lower[lastIdx] = NaN. `NaN.toFixed(6)` returns
-      // "NaN" (no throw). But the comparison `close < parseFloat("NaN")` is
-      // always false → CBv2 isCBv2At() never matches → force-close never fires
-      // → SILENT FAIL → SELL order stays live for ~12h.
-      //
-      // The OLD code: `lastLower == null` returns false for NaN, so the guard
-      // does NOT skip. The check proceeds but with NaN values everywhere.
-      // The NEW code: parseFloat first (rescues strings), AND
-      // `Number.isFinite(lastLower)` catches any residual NaN/undefined.
+      //   This test verifies the full pipeline: string klines that contain "NaN" or non-numeric
+      //   values no longer cause silent CB failure.
       const klines = mkKlines(30).map((k) => ({
         ...k,
         open: String(k.open),
-        high: String(k.high),
+        high: 'NaN', // simulate malformed high → parseFloat(NaN)=NaN
         low: String(k.low),
         close: String(k.close),
       }));
-      // OLD buggy pattern: pass raw strings (NO parseFloat)
       const { lower } = signalEngine.computeBgStates({
-        closes: klines.map((k) => k.close),
-        highs: klines.map((k) => k.high),
-        lows: klines.map((k) => k.low),
+        closes: klines.map((k) => parseFloat(k.close)),
+        highs: klines.map((k) => parseFloat(k.high)),
+        lows: klines.map((k) => parseFloat(k.low)),
         length: 20,
         mult: 1.5,
         useTrueRange: true,
       });
       const lastLower = lower[lower.length - 1];
-      // Confirm the bug surface: lastLower is NaN (not null, not string)
-      expect(typeof lastLower).toBe('number');
-      expect(Number.isNaN(lastLower)).toBe(true);
-      // OLD guard `== null` does NOT catch NaN — silent skip
-      expect(lastLower == null).toBe(false); // guard would let it through
-      // toFixed doesn't throw on NaN — returns "NaN" string
-      expect(lastLower.toFixed(6)).toBe('NaN');
-      // NaN comparison is always false → close < NaN never matches → silent fail
-      const closePrice = 100.5;
-      expect(closePrice < parseFloat(lastLower.toFixed(6))).toBe(false);
-      // NEW guard Number.isFinite DOES catch NaN → shouldSkip
-      expect(Number.isFinite(lastLower)).toBe(false);
+      // After P2 fix: NaN never propagates. lastLower is null (sanitized) instead of NaN
+      // - before P2: typeof lastLower === 'number' && Number.isNaN(lastLower) === true
+      // - after P2:  lastLower === null (typeof === 'object')
+      expect(lastLower).toBeNull();
+      // The guard (typeof !== 'number') catches null → shouldSkip=true
+      const r = checkLastLowerGuard(klines, klines[klines.length - 1].closeTime);
+      expect(r.shouldSkip).toBe(true);
+      // ACTUSDT-style silent fail CANNOT happen anymore:
+      // - no NaN propagation
+      // - guard catches null cleanly
+      // - no CB firing with garbage data
     });
   });
 

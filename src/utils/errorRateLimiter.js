@@ -36,6 +36,15 @@ class ErrorRateLimiter {
     const arr = this.events.get(key) || [];
     const recent = arr.filter((t) => t >= cutoff);
     recent.push(now);
+    // FIX-2026-08-24 (P2 audit): cap per-key array length — guard against burst-flood
+    //   - เดิม: flood 10000 events/s → recent array โตเป็น 600000 entries ใน 1 min window
+    //   - memory + GC pressure + filter() O(n) ทุก call
+    //   - fix: hard cap = maxPerWindow × 10 (ยังเก็บ context พอสมควร แต่จำกัด memory)
+    const ABSOLUTE_CAP = this.maxPerWindow * 10;
+    if (recent.length > ABSOLUTE_CAP) {
+      // keep tail (most recent) — FIFO drop oldest
+      recent.splice(0, recent.length - ABSOLUTE_CAP);
+    }
     this.events.set(key, recent);
     return recent.length <= this.maxPerWindow;
   }

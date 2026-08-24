@@ -20,6 +20,7 @@
 
 const express = require('express');
 const { requireAuth } = require('../middleware/auth');
+const { requireBotActionPassword } = require('../middleware/auth');
 const { aggregateTradeAnalysis } = require('../../core/tradeAnalysis');
 const logger = require('../../utils/logger');
 
@@ -55,7 +56,9 @@ router.get('/trade-analysis', requireAuth, async (req, res) => {
 });
 
 // Manual cache invalidation (admin-only optional future hook)
-router.post('/trade-analysis/invalidate', requireAuth, async (_req, res) => {
+// FIX-2026-08-24 (P2 audit): require bot-action password — เดิม any logged-in session
+//   can wipe the 60s analysis cache → cache stampede ทุกครั้งที่ user กด invalid บ่อยๆ
+router.post('/trade-analysis/invalidate', requireAuth, requireBotActionPassword, async (_req, res) => {
   _cache = { at: 0, key: null, value: null };
   res.json({ ok: true, invalidated: true });
 });

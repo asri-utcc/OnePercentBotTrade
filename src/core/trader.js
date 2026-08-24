@@ -5038,7 +5038,26 @@ class Trader {
   async _handleBuyFilledImpl(trade, order, signalDoc) {
     try {
       const filledQty = parseFloat(order.executedQty);
-      const avgPrice = parseFloat(order.price) || parseFloat(order.cummulativeQuoteQty) / filledQty;
+      // FIX-2026-08-24 (P2 audit): division-by-0 guard
+      //   - เดิม: filledQty=0 → avgPrice=NaN → BEP/PNL ทุกอย่าง NaN → false alarm
+      //   - ป้องกัน: ถ้า filledQty<=0 หรือไม่ finite → log + abort (BUY ที่ executedQty=0 คือ race anomaly)
+      let avgPrice = parseFloat(order.price);
+      if (!Number.isFinite(avgPrice) && filledQty > 0) {
+        const cqQty = parseFloat(order.cummulativeQuoteQty);
+        if (Number.isFinite(cqQty) && cqQty > 0) {
+          avgPrice = cqQty / filledQty;
+        }
+      }
+      if (!Number.isFinite(avgPrice) || avgPrice <= 0) {
+        logger.error({
+          botId: this.bot._id.toString(),
+          symbol: this.bot.symbol,
+          tradeId: trade && trade._id && trade._id.toString(),
+          orderId: order && order.orderId,
+          filledQty, cqQty: order && order.cummulativeQuoteQty,
+        }, 'trader: _handleBuyFilledImpl — cannot derive avgPrice (filledQty=0 or NaN) — abort');
+        return;
+      }
 
       // FIX-2026-08-02: DCA mode branch — append layer + recompute BEP + replace aggregate SELL
       if (trade.isDcaStack) {
@@ -8597,17 +8616,30 @@ class Trader {
             volume: parseFloat(lastMissed[5]),
             isClosed: true,
           };
+          // FIX-2026-08-24 (P2 audit): parallel CB panic-close checks via Promise.all
+          //   - เดิม: sequential await × 3 (CBv2 + CBv3 + CBv5) → reconcile sweep latency = sum
+          //   - ปัญหา: reconcile ทุก 2 min × 50 bots × 3× sequential → เพิ่ม latency reconcile
+          //   - fix: แต่ละ CB มี per-instance *CheckInFlight guard อยู่แล้ว → parallel safe
+          //   - effect: reconcileKlines latency ลด ~3× (3 Binance pattern check พร้อมกัน)
+          const cbChecks = [];
           if (this.bot.cbv2Enabled !== false && !this.cbv2CheckInFlight) {
-            await this._checkCBv2PanicClose(candleObj);
+            cbChecks.push(this._checkCBv2PanicClose(candleObj));
           }
           if (this.bot.cbv3Enabled !== false && !this.cbv3CheckInFlight) {
-            await this._checkCBv3PanicClose(candleObj);
+            cbChecks.push(this._checkCBv3PanicClose(candleObj));
           }
           // FIX-2026-08-12 (audit Q7): replay mode CBv5 missing — CBv5 was never
           //   called in this reconcile loop → if WS outage spans a Support Zone
           //   break, bot resumes missing the protection.
           if (this.bot.cbv5Enabled !== false && !this.cbv5CheckInFlight) {
-            await this._checkCBv5PanicClose(candleObj);
+            cbChecks.push(this._checkCBv5PanicClose(candleObj));
+          }
+          if (cbChecks.length > 0) {
+            await Promise.all(cbChecks).catch((err) => logger.warn({
+              botId: this.bot._id.toString(),
+              symbol: this.bot.symbol,
+              err: err.message,
+            }, 'trader: parallel CB panic-close check failed (non-fatal)'));
           }
         }
       }

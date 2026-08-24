@@ -189,8 +189,25 @@ class MarketWsManager {
   scheduleReconnect() {
     if (!this.shouldRun) return;
     if (this.reconnectTimer) return;
+    // FIX-2026-08-24 (P2 audit): max retry guard — เดิม reconnectAttempts โต unbounded
+    //   ถ้า Binance ล่มเป็นชั่วโมง → loop retry ตลอด + log spam + memory growth
+    //   fix: cap MAX_RECONNECT_ATTEMPTS = 20 → exhausted → alert via getStatus()
+    const MAX_RECONNECT_ATTEMPTS = 20;
+    if (this.reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
+      logger.error({
+        attempts: this.reconnectAttempts,
+        max: MAX_RECONNECT_ATTEMPTS,
+      }, 'market WS reconnect attempts exhausted — likely permanent outage. Stop retrying until manual restart.');
+      this.shouldRun = false;
+      return;
+    }
     this.reconnectAttempts += 1;
     let wait = Math.min(1000 * 2 ** (this.reconnectAttempts - 1), 30000);
+    // FIX-2026-08-24 (P2 audit): add ±30% jitter to break thundering-herd alignment
+    //   เดิม: 2 manager reconnect พร้อมกัน (PM2 boot, weight spike) → ทั้งคู่ reconnect ตัวเดียวกัน
+    //   → Binance spike + 418 IP ban
+    //   fix: random factor 0.7..1.3 spread across instances
+    wait = Math.floor(wait * (0.7 + Math.random() * 0.6));
     // FIX-2026-08-22: respect HTTP 418 IP ban (shared with REST) — wait for banUntilMs expiry
     //   เดิม reconnect ทุก attempt โดยไม่เช็ค HTTP ban state → WS handshake 418 → fail loop
     //   fix: extend wait �้า binanceRest rate limiter บอกว่า IP ยังถูกแบน
@@ -240,11 +257,27 @@ class MarketWsManager {
   }
 
   handleKline(data, stream) {
+    // FIX-2026-08-24 (P2 audit): defensive null guards
+    //   - Binance WS occasionally sends malformed payload (no `k` field during burst disconnect)
+    //   - เดิม: k.i crash → process restart loop (silent corruption)
+    //   - fix: validate shape before destructuring + log + skip
+    if (!data || typeof data !== 'object') {
+      logger.warn({ stream }, 'market WS handleKline — data not object, skipping');
+      return;
+    }
     const k = data.k;
     const symbol = data.s;
+    if (!k || !symbol) {
+      logger.warn({ stream, hasK: !!k, hasSymbol: !!symbol }, 'market WS handleKline — missing k or s, skipping');
+      return;
+    }
     const interval = k.i;
+    if (!interval) {
+      logger.warn({ stream, symbol }, 'market WS handleKline — missing k.i (interval), skipping');
+      return;
+    }
     // Layer B: อัปเดต timestamp ล่าสุดที่ได้รับ kline (กัน false positive ของ watchdog)
-    const streamKey = stream || `${symbol.toLowerCase()}@kline_${interval}`;
+    const streamKey = stream || `${String(symbol).toLowerCase()}@kline_${interval}`;
     this._lastKlineAt[streamKey] = Date.now();
 
     const kline = {
@@ -265,12 +298,26 @@ class MarketWsManager {
   }
 
   handleBookTicker(data) {
+    // FIX-2026-08-24 (P2 audit): null guard for bookTicker fields
+    //   - Binance occasionally sends empty bookTicker payload during burst
+    //   - เดิม: parseFloat(null) = NaN → eventBus emits NaN → downstream cascade
+    //   - fix: validate required fields present + parseFloat is finite
+    if (!data || !data.s || !data.b || !data.a) {
+      // benign noise — don't log warn every time, use debug
+      return;
+    }
+    const bid = parseFloat(data.b);
+    const ask = parseFloat(data.a);
+    if (!Number.isFinite(bid) || !Number.isFinite(ask)) {
+      logger.debug({ data }, 'market WS handleBookTicker — non-finite bid/ask, skipping');
+      return;
+    }
     const bookTicker = {
       symbol: data.s,
-      bid: parseFloat(data.b),
-      bidQty: parseFloat(data.B),
-      ask: parseFloat(data.a),
-      askQty: parseFloat(data.A),
+      bid,
+      bidQty: parseFloat(data.B) || 0,
+      ask,
+      askQty: parseFloat(data.A) || 0,
       ts: Date.now(),
     };
     eventBus.emit('bookTicker', bookTicker);
@@ -448,8 +495,20 @@ class UserDataStreamManager {
   scheduleReconnect() {
     if (!this.shouldRun) return;
     if (this.reconnectTimer) return;
+    // FIX-2026-08-24 (P2 audit): max retry guard — เดิม reconnectAttempts โต unbounded
+    const MAX_RECONNECT_ATTEMPTS = 20;
+    if (this.reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
+      logger.error({
+        attempts: this.reconnectAttempts,
+        max: MAX_RECONNECT_ATTEMPTS,
+      }, 'user data stream reconnect attempts exhausted — likely permanent outage. Stop retrying until manual restart.');
+      this.shouldRun = false;
+      return;
+    }
     this.reconnectAttempts += 1;
     let wait = Math.min(1000 * 2 ** (this.reconnectAttempts - 1), 30000);
+    // FIX-2026-08-24 (P2 audit): ±30% jitter — break thundering-herd alignment
+    wait = Math.floor(wait * (0.7 + Math.random() * 0.6));
     // FIX-2026-08-22: respect HTTP 418 IP ban — extend wait ถ้า REST rate limiter บอกว่า IP ยังถูกแบน
     //   Binance ใช้ IP-level ban ทั้ง HTTP และ WS — ถ้า HTTP โดนแบน WS ก็โดนด้วย
     const status = binanceRest.getRateLimitStatus();
@@ -478,16 +537,24 @@ class UserDataStreamManager {
       }
       this.requestId += 1;
       const id = String(this.requestId);
-      this.pendingRequests.set(id, { resolve, reject, method });
+      // FIX-2026-08-24 (P2 audit): store timeout id + clearTimeout on resolve/reject
+      //   - เดิม: setTimeout closure เก็บ id + this ไว้จนกว่าจะครบ 10s
+      //   - fast RPC (success in 100ms) → timer ยังเดินจนกว่าจะครบ 10s + ทำ pendingRequests.delete (no-op)
+      //   - ผล: 100 RPC/min × 10s overlap = มี setTimeout ค้าง ~17 ตัว → memory leak เล็กน้อย
+      //   - fix: store timerId + clear ใน resolve/reject wrapper
+      let timeoutId = null;
+      const wrappedResolve = (val) => { if (timeoutId) clearTimeout(timeoutId); resolve(val); };
+      const wrappedReject = (err) => { if (timeoutId) clearTimeout(timeoutId); reject(err); };
+      this.pendingRequests.set(id, { resolve: wrappedResolve, reject: wrappedReject, method });
       const payload = { id, method, params };
       try {
         this.ws.send(JSON.stringify(payload));
       } catch (err) {
         this.pendingRequests.delete(id);
-        return reject(err);
+        return wrappedReject(err);
       }
       // safety timeout: ถ้า 10 วินาทีไม่ตอบ ถือว่า fail
-      setTimeout(() => {
+      timeoutId = setTimeout(() => {
         if (this.pendingRequests.has(id)) {
           this.pendingRequests.delete(id);
           reject(new Error('rpc timeout'));

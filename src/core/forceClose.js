@@ -539,8 +539,14 @@ async function forceCloseTrade_synthetic({ trade, logCtx, reason, source = 'api'
     tradeId: trade._id,
     botId: trade.botId,
     state: 'sold',
-    reason: 'manual_api_synthetic',
-    reasonDetail: reason || 'asset missing on exchange',
+    // FIX-2026-08-24 (P2 audit): forward finalSellReason — เดิม hardcode 'manual_api_synthetic'
+    //   ทำให้ cleanup_script / dca_stack branches หาย downstream filter (telegramNotifier
+    //   กรองด้วย reason='manual_api_cleanup_script' → หาไม่เจอเพราะ emit 'manual_api_synthetic')
+    reason: finalSellReason,
+    reasonDetail: finalSellReasonDetail,
+    // FIX-2026-08-24 (P2 audit): forward source for analytics parity
+    source,
+    isDcaStack,
   });
   eventBus.emit('bot:status', { botId: trade.botId, status: 'idle' });
   logger.warn({ ...logCtx, reason }, 'forceCloseTrade: synthetic close recorded');
