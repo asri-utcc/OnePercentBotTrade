@@ -76,6 +76,11 @@ const DEFAULT_EVENTS = {
   //   - ใช้แทน password เมื่อลืม — ไม่ใช่ 2FA
   //   - default ON (user ปิดเองได้ใน Settings > Telegram Events)
   telegramLogin: true,
+  // FIX-2026-08-24: Login brute-force lock alert — แจ้ง admin เมื่อ IP/account ถูก lock
+  //   - trigger: loginGuard escalation (level 1+) หรือ account lock
+  //   - caller latches per-IP via loginGuard (1 alert ต่อ lock event)
+  //   - default ON — admin ควรรู้ทันทีถ้ามี brute-force attempt
+  loginLocked: true,
   // FIX-2026-08-14: Orphan BUY filled on disabled bot — BUY filled แต่บอทปิดอยู่
   //   (trader ถูก stop ไปแล้ว) → ไม่มีใคร place SELL → ค้างใน DB state='filled' + balance ค้างบน Binance
   //   ก่อนหน้านี้ silent log → user ไม่รู้จนกว่าจะสังเกตเห็น "10 positions vs 9 open orders" ใน UI
@@ -589,6 +594,32 @@ function renderMessage(eventKey, p, cfg) {
           parseMode: 'HTML',
         };
       }
+      // FIX-2026-08-24: Login brute-force lock alert — IP/account ถูก lock (progressive backoff + escalation)
+      //   - p = { ip, userAgent, ipLockoutLevel, ipLocked, accountLocked, retryAfterSec }
+      //   - level: 1 = 15 min, 2 = 30 min, 3+ = 60 min (cap)
+      //   - accountLocked = true → distributed brute-force signal (5 fails across หลาย IP)
+      //   - ไม่มี latch ในตัว — caller latches ผ่าน loginGuard (1 alert ต่อ lock event)
+      case 'loginLocked': {
+        const level = p.ipLockoutLevel || 1;
+        const mins = p.retryAfterSec ? Math.ceil(p.retryAfterSec / 60) : '?';
+        const ipLocked = p.ipLocked !== false;
+        const accountLocked = p.accountLocked === true;
+        const reasonTag = accountLocked
+          ? '🔒 Distributed brute-force (account-level)'
+          : ipLocked ? `🔒 IP locked (level ${level})` : '⚠️';
+        const uaShort = p.userAgent ? String(p.userAgent).slice(0, 80) : 'unknown';
+        return {
+          text:
+            `🚨 <b>Brute-force LOCK alert</b>\n\n` +
+            `${reasonTag}\n` +
+            `IP: <code>${p.ip || 'unknown'}</code>\n` +
+            `Lock duration: ${mins} นาที\n` +
+            `User-Agent: <code>${escapeHtml(uaShort)}</code>\n\n` +
+            `📌 ถ้าไม่ใช่คุณ → เปลี่ยน password ทันที + เช็ค /password-sessions.html\n` +
+            `<i>OnePercentBotTrade · ${new Date().toISOString()}</i>`,
+          parseMode: 'HTML',
+        };
+      }
       // FIX-2026-08-02: DCA + BEP stack events (full notifications, not compact — per user request)
       case 'dcaLayerAdded': {
         const layerIdx = p.layerIndex || '?';
@@ -689,6 +720,15 @@ function formatQty(q) {
   if (!Number.isFinite(n)) return String(q);
   if (n >= 1) return n.toFixed(4);
   return n.toFixed(8);
+}
+
+// FIX-2026-08-24: escapeHtml — ใช้กับ user-controlled text ใน loginLocked message
+//   (กัน HTML injection เข้า telegram message ผ่าน userAgent)
+function escapeHtml(s) {
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
 }
 
 // FIX-2026-07-31: ใช้ tickSize จาก Binance (authoritative per-symbol) — ก่อนหน้านี้ heuristic

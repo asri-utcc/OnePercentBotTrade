@@ -43,6 +43,8 @@
         <label class="form-label">Password</label>
         <input type="password" class="form-control" id="login-password" autocomplete="current-password" autofocus />
       </div>
+      <!-- FIX-2026-08-24: brute-force UI hints — attempts remaining + countdown when locked -->
+      <div id="login-status" class="small mt-2" style="display:none;"></div>
       <button class="btn btn-primary w-100" id="login-btn">เข้าสู่ระบบ</button>
     </div>
 
@@ -117,12 +119,84 @@
       } catch (err) { showError(err.message); }
     };
 
+    // FIX-2026-08-24: brute-force UI — handle attempts remaining + progressive backoff countdown
+    //   - response from /api/auth/login now includes { attemptsRemaining, nextDelayMs, locked, retryAfterSec, lockoutLevel }
+    //   - show "เหลืออีก X ครั้ง" hint when attempts remaining ≤ 3
+    //   - show countdown + disable button when locked
+    let loginLockoutTimer = null;
+    function clearLoginLockout() {
+      if (loginLockoutTimer) { clearInterval(loginLockoutTimer); loginLockoutTimer = null; }
+    }
+    function fmtSecs(sec) {
+      if (sec < 60) return `${sec}s`;
+      const m = Math.floor(sec / 60);
+      const s = sec % 60;
+      return s > 0 ? `${m}m ${s}s` : `${m}m`;
+    }
+    function renderLoginStatus(status) {
+      const el = document.getElementById('login-status');
+      const btn = document.getElementById('login-btn');
+      const pwInput = document.getElementById('login-password');
+      if (!status) { el.style.display = 'none'; return; }
+      // Locked → countdown + disable
+      if (status.locked) {
+        const total = status.retryAfterSec || 0;
+        let remaining = total;
+        const level = status.lockoutLevel || 1;
+        const levelTag = level >= 3 ? ' (escalated)' : level === 2 ? ' (escalated)' : '';
+        el.style.display = 'block';
+        el.style.color = 'var(--bear-1)';
+        const paint = () => {
+          if (remaining <= 0) {
+            clearLoginLockout();
+            btn.disabled = false;
+            pwInput.disabled = false;
+            el.style.color = 'var(--bull-1)';
+            el.textContent = '✅ ปลดล็อกแล้ว — ลองอีกครั้งได้';
+            setTimeout(() => { el.style.display = 'none'; }, 3000);
+            return;
+          }
+          btn.disabled = true;
+          pwInput.disabled = true;
+          el.textContent = `🔒 ถูกล็อก ${fmtSecs(remaining)}${levelTag} — รอก่อน`;
+          remaining--;
+        };
+        paint();
+        clearLoginLockout();
+        loginLockoutTimer = setInterval(paint, 1000);
+        return;
+      }
+      // Not locked — show "เหลืออีก X ครั้ง" if close to limit
+      clearLoginLockout();
+      btn.disabled = false;
+      pwInput.disabled = false;
+      if (status.attemptsRemaining != null && status.attemptsRemaining <= 3) {
+        el.style.display = 'block';
+        el.style.color = status.attemptsRemaining <= 1 ? 'var(--warn-1)' : 'var(--text-3)';
+        const warn = status.attemptsRemaining <= 1 ? ' ⚠️' : '';
+        const delayTag = status.nextDelayMs > 0 ? ` (จะหน่วง ${Math.round(status.nextDelayMs / 1000)}s)` : '';
+        el.textContent = `เหลืออีก ${status.attemptsRemaining} ครั้ง${delayTag}${warn}`;
+      } else {
+        el.style.display = 'none';
+      }
+    }
+    // Apply status from response to UI — call after every /api/auth/login response
+    function applyLoginStatus(resp) {
+      if (resp && typeof resp === 'object' && ('attemptsRemaining' in resp || 'locked' in resp)) {
+        renderLoginStatus(resp);
+      }
+    }
     document.getElementById('login-btn').onclick = async () => {
       const password = document.getElementById('login-password').value;
       try {
-        await API.post('/api/auth/login', { password });
-        location.href = '/bots.html';
-      } catch (err) { showError(err.message); }
+        const resp = await API.post('/api/auth/login', { password });
+        applyLoginStatus(resp);
+        if (resp && resp.ok) location.href = '/bots.html';
+      } catch (err) {
+        // err.body carries the 429/401 payload with attemptsRemaining etc.
+        if (err && err.body) applyLoginStatus(err.body);
+        showError(err.message);
+      }
     };
 
     document.getElementById('login-password').addEventListener('keypress', (e) => {

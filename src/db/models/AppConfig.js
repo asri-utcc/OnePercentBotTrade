@@ -71,6 +71,8 @@ const appConfigSchema = new mongoose.Schema(
         //   - ไม่ใช่ 2FA — ใช้แทน password เมื่อลืม
         //   - default ON (user ปิดเองได้ใน Settings > Telegram Events)
         telegramLogin: true,
+        // FIX-2026-08-24: Login brute-force lock alert — แจ้ง admin เมื่อ IP/account ถูก lock
+        loginLocked: true,
       }),
     },
     telegramThresholds: {

@@ -2,6 +2,7 @@
 
 const express = require('express');
 const bcrypt = require('bcryptjs');
+const rateLimit = require('express-rate-limit'); // FIX-2026-08-24: HTTP-layer brute-force protection
 const config = require('../../../config');
 const AppConfig = require('../../db/models/AppConfig');
 const crypto = require('../../services/crypto');
@@ -37,10 +38,47 @@ function clientIp(req) {
 
 const router = express.Router();
 
+// FIX-2026-08-24: HTTP-layer brute-force protection (กัน flood ระดับ HTTP ก่อนถึง handler)
+//   - ทำงานก่อน loginGuard + bcrypt → ลด CPU burn จาก 1000+ req/s flood
+//   - trust proxy ถูกตั้งใน app.js (`app.set('trust proxy', 1)`) → keyGenerator ใช้ XFF/CF-Connecting-IP ถูกต้อง
+//   - ตัวเลข generous พอสำหรับ progressive backoff (user fail 5-9 ครั้งใน 60s ยังไม่โดนตัด)
+//   - แต่ block flood 100 req/s ได้ทันที
+const authLoginLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 10,
+  standardHeaders: 'draft-7',
+  legacyHeaders: false,
+  message: { error: 'Too many login attempts. Please slow down.' },
+});
+
+const authTgRequestLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 5,
+  standardHeaders: 'draft-7',
+  legacyHeaders: false,
+  message: { error: 'Too many OTP requests. Please slow down.' },
+});
+
+const authTgVerifyLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 10,
+  standardHeaders: 'draft-7',
+  legacyHeaders: false,
+  message: { error: 'Too many verify attempts. Please slow down.' },
+});
+
+const authSetupLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 3,
+  standardHeaders: 'draft-7',
+  legacyHeaders: false,
+  message: { error: 'Too many setup attempts. Please slow down.' },
+});
+
 // ─── POST /api/auth/setup ─────────────────────────────
 // Setup ครั้งแรก: ตั้ง password + Binance API keys (encrypted)
 // หลัง setup เสร็จแล้ว endpoint นี้จะถูกปิดถาวร (return 404)
-router.post('/setup', async (req, res) => {
+router.post('/setup', authSetupLimiter, async (req, res) => {
   try {
     // เช็คก่อนว่า setup เสร็จยัง — ถ้าใช่ ไม่ต้องเปิดเผยว่า�ี route นี้อยู่
     const existing = await AppConfig.findOne({ key: 'singleton' }).lean();
@@ -118,11 +156,19 @@ router.get('/status', async (req, res) => {
 
 // ─── POST /api/auth/login ─────────────────────────────
 // FIX-2026-08-09: log failed attempts for /password-sessions.html "Failed Logins" tab
-router.post('/login', async (req, res) => {
+// FIX-2026-08-24: layered brute-force protection — progressive backoff + IP lockout escalation
+//   + per-account lockout + Telegram admin alert on lock + UI hints (attemptsRemaining/nextDelayMs)
+router.post('/login', authLoginLimiter, async (req, res) => {
   const ip = clientIp(req);
   const userAgent = req.get('user-agent') || '';
 
-  // Check lockout ก่อน — ถ้า IP ถูก lock ไม่ต้องทำ bcrypt เลย (กัน CPU burn)
+  // FIX-2026-08-24: rich status — UI polls this to show "เหลืออีก X ครั้ง" + countdown
+  //   Returned on every response (401/429/200) so frontend can sync state after submit
+  function statusPayload() {
+    return loginGuard.getStatus(ip);
+  }
+
+  // Check IP lockout ก่อน — ถ้า IP ถูก lock ไม่ต้องทำ bcrypt เลย (กัน CPU burn)
   const lockStatus = loginGuard.check(ip);
   if (lockStatus.locked) {
     // FIX-2026-08-09: log locked-attempt
@@ -130,6 +176,7 @@ router.post('/login', async (req, res) => {
     res.set('Retry-After', String(lockStatus.retryAfterSec));
     return res.status(429).json({
       error: `Too many failed attempts. Try again in ${lockStatus.retryAfterSec}s`,
+      ...statusPayload(),
     });
   }
 
@@ -141,22 +188,56 @@ router.post('/login', async (req, res) => {
     if (!configDoc || !configDoc.passwordHash) {
       return res.status(400).json({ error: 'Setup not completed' });
     }
+    const passwordHash = configDoc.passwordHash;
 
-    const ok = await bcrypt.compare(password, configDoc.passwordHash);
+    // FIX-2026-08-24: per-account lockout — distributed brute-force (หลาย IP ยิง hash เดียวกัน)
+    const acctStatus = loginGuard.checkAccount(passwordHash);
+    if (acctStatus.locked) {
+      loginAudit.logFailedLoginAttempt({ ip, method: 'password', reason: 'locked', userAgent });
+      res.set('Retry-After', String(acctStatus.retryAfterSec));
+      logger.warn({ ip, hashPrefix: passwordHash.slice(0, 8) + '...' },
+        'login: account locked (distributed brute-force signal)');
+      return res.status(429).json({
+        error: `Too many failed attempts. Try again in ${acctStatus.retryAfterSec}s`,
+        ...statusPayload(),
+      });
+    }
+
+    const ok = await bcrypt.compare(password, passwordHash);
     if (!ok) {
-      loginGuard.recordFail(ip);
+      // FIX-2026-08-24: recordFail updates BOTH IP + account counters
+      loginGuard.recordFail(ip, passwordHash);
       const fails = loginGuard.check(ip);
-      if (fails.locked) {
-        res.set('Retry-After', String(fails.retryAfterSec));
-        logger.warn({ ip }, 'login: invalid password — IP locked');
-        // FIX-2026-08-09: log wrong-password attempt (now locked)
+      const acctFails = loginGuard.checkAccount(passwordHash);
+
+      // FIX-2026-08-24: if EITHER IP or account just got locked → 429 + Telegram alert
+      if (fails.locked || acctFails.locked) {
+        const retryAfter = fails.locked ? fails.retryAfterSec : acctFails.retryAfterSec;
+        res.set('Retry-After', String(retryAfter));
+        logger.warn({
+          ip,
+          hashPrefix: passwordHash.slice(0, 8) + '...',
+          ipLocked: fails.locked,
+          acctLocked: acctFails.locked,
+          lockoutLevel: fails.lockoutLevel || 0,
+        }, 'login: invalid password — locked');
         loginAudit.logFailedLoginAttempt({ ip, method: 'password', reason: 'locked', userAgent });
+        // FIX-2026-08-24: Telegram admin alert (best-effort, never blocks)
+        _sendLoginLockedAlert({
+          ip,
+          userAgent,
+          ipLockoutLevel: fails.lockoutLevel || 0,
+          ipLocked: fails.locked,
+          accountLocked: acctFails.locked,
+          retryAfterSec: retryAfter,
+        });
         return res.status(429).json({
-          error: `Too many failed attempts. Try again in ${fails.retryAfterSec}s`,
+          error: `Too many failed attempts. Try again in ${retryAfterSecFmt(retryAfter)}`,
+          ...statusPayload(),
         });
       }
-      // FIX-2026-08-09: log wrong-password attempt
-      // FIX-2026-08-10: + attemptedPassword (plaintext) — admin audits old password leaks
+
+      // FIX-2026-08-10: log wrong-password attempt + attemptedPassword (admin audit)
       loginAudit.logFailedLoginAttempt({
         ip,
         method: 'password',
@@ -164,10 +245,16 @@ router.post('/login', async (req, res) => {
         userAgent,
         attemptedPassword: password,
       });
-      return res.status(401).json({ error: 'Invalid password' });
+      // FIX-2026-08-24: surface attemptsRemaining + nextDelayMs in 401 body
+      //   so frontend can show "เหลืออีก 6 ครั้ง" + "รอ 5s ก่อน"
+      return res.status(401).json({
+        error: 'Invalid password',
+        ...statusPayload(),
+      });
     }
 
-    loginGuard.recordSuccess(ip);
+    // FIX-2026-08-24: success → reset BOTH IP + account counters
+    loginGuard.recordSuccess(ip, passwordHash);
     req.session.authenticated = true;
     // 2026-08-09: stash session metadata
     const now = new Date().toISOString();
@@ -176,12 +263,42 @@ router.post('/login', async (req, res) => {
     req.session.loginIp = ip;
     req.session.userAgent = req.get('user-agent') || '';
     req.session.deviceLabel = parseDeviceLabel(req.session.userAgent);
-    res.json({ ok: true });
+    res.json({ ok: true, ...statusPayload() });
   } catch (err) {
     logger.error({ err: err.message, ip }, 'login error');
     res.status(500).json({ error: err.message });
   }
 });
+
+// FIX-2026-08-24: helper — format seconds → "Xm Ys" for human-readable countdown
+function retryAfterSecFmt(sec) {
+  if (sec < 60) return `${sec}s`;
+  const m = Math.floor(sec / 60);
+  const s = sec % 60;
+  return s > 0 ? `${m}m ${s}s` : `${m}m`;
+}
+
+// FIX-2026-08-24: helper — fire Telegram admin alert when IP/account locked
+//   Best-effort: never throws, never blocks the response
+function _sendLoginLockedAlert({ ip, userAgent, ipLockoutLevel, ipLocked, accountLocked, retryAfterSec }) {
+  try {
+    // dispatch() awaits; use fire-and-forget (don't block response)
+    setImmediate(() => {
+      telegramNotifier.sendNow('loginLocked', {
+        ip,
+        userAgent,
+        ipLockoutLevel,
+        ipLocked: !!ipLocked,
+        accountLocked: !!accountLocked,
+        retryAfterSec,
+      }).catch((err) => {
+        logger.warn({ err: err.message }, 'login: telegram alert failed (non-fatal)');
+      });
+    });
+  } catch (err) {
+    logger.warn({ err: err.message }, 'login: telegram alert dispatch failed (non-fatal)');
+  }
+}
 
 // ─── POST /api/auth/login-telegram/request ─────────────
 // 2026-08-09: alternative login channel — generate 6-digit OTP, send via Telegram
@@ -189,7 +306,7 @@ router.post('/login', async (req, res) => {
 //   - ตรวจสอบ Telegram ตั้งค่า + telegramLogin event เปิดอยู่
 //   - ส่ง OTP เข้า chat + set HTTP-only cookie `tg_login_token` (5 min) สำหรับ verify step
 // FIX-2026-08-09: log failures (rate-limited / telegram-disabled / event-disabled)
-router.post('/login-telegram/request', async (req, res) => {
+router.post('/login-telegram/request', authTgRequestLimiter, async (req, res) => {
   const ip = clientIp(req);
   const userAgent = req.get('user-agent') || '';
   try {
@@ -236,7 +353,7 @@ router.post('/login-telegram/request', async (req, res) => {
 //   - loginToken จาก cookie หรือ body (cookie preferred — more secure)
 //   - success → clear cookie + set session + loginGuard.recordSuccess
 // FIX-2026-08-09: log OTP failures (token-invalid, wrong, locked, expired, malformed)
-router.post('/login-telegram/verify', async (req, res) => {
+router.post('/login-telegram/verify', authTgVerifyLimiter, async (req, res) => {
   const ip = clientIp(req);
   const userAgent = req.get('user-agent') || '';
   try {
