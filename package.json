@@ -11,6 +11,7 @@
     "backtest": "node scripts/run-backtest.js",
     "cleanup:orphans": "node scripts/cleanup-orphan.js",
     "cleanup:orphans:dexe": "node scripts/cleanup-orphan.js DEXEUSDT",
+    "consent:reset": "node scripts/reset-consent.js",
     "pm2:start": "pm2 start ecosystem.config.js --env production",
     "pm2:dev": "pm2 start ecosystem.config.js --env development",
     "pm2:stop": "pm2 stop onepercentbot",
