@@ -114,7 +114,8 @@ describe('consent routes (Phase 2c-v2)', () => {
     expect(r.status).toBe(200);
     expect((r.headers['content-type'] || '').includes('text/html')).toBe(true);
     expect(r.body).toContain('OnePercentBot');
-    expect(r.body).toContain('First-Run Consent');
+    expect(r.body).toContain('Consent and Agreement');
+    expect(r.body).toContain('คำยินยอมและข้อตกลง');
     expect(r.body).toContain('/api/consent/accept'); // actionBase uses new route
   });
 

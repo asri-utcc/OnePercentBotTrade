@@ -200,3 +200,45 @@ describe('consent/html — pageHtml actionBase', () => {
     expect(html).not.toContain('"/consent/accept"'); // the form action attribute, escaped
   });
 });
+
+describe('consent/html — formal/boring design (Phase 2c-v3)', () => {
+  test('uses formal document title (no emoji)', () => {
+    const html = pageHtml({ sections: text({ adminMonitorEnabled: false }) });
+    expect(html).toContain('Consent and Agreement');
+    expect(html).toContain('คำยินยอมและข้อตกลง');
+    expect(html).not.toContain('First-Run Consent');
+    expect(html).not.toContain('�️');
+    expect(html).not.toContain('✅');
+    expect(html).not.toContain('�');
+  });
+  test('single acknowledgement checkbox (not one per section)', () => {
+    const html = pageHtml({ sections: text({ adminMonitorEnabled: false }) });
+    expect(html).toContain('id="cs-ack-box"');
+    expect(html).toContain('I have read the entire document above and accept all conditions');
+    expect(html).toContain('ฉันอ่านเอกสารทั้งหมดข้างต้นแล้ว และยอมรับทุกเงื่อนไข');
+    // No per-section checkboxes anymore
+    expect(html).not.toContain('class="cs-read"');
+    expect(html).not.toContain('class="cs-tick"');
+  });
+  test('formal buttons labeled Accept / Decline', () => {
+    const html = pageHtml({ sections: text({ adminMonitorEnabled: false }) });
+    expect(html).toContain('id="cs-accept"');
+    expect(html).toContain('id="cs-decline"');
+    expect(html).toContain('>Accept</span>');
+    expect(html).toContain('>Decline</span>');
+    expect(html).toContain('>ตกลง</span>');
+    expect(html).toContain('>ไม่ตกลง</span>');
+  });
+  test('uses serif font + document meta (version + date)', () => {
+    const html = pageHtml({ sections: text({ adminMonitorEnabled: false }) });
+    expect(html).toMatch(/font-family.*Times New Roman/);
+    expect(html).toMatch(/Document version \d+/);
+    expect(html).toMatch(/Issued \d{4}-\d{2}-\d{2}/);
+  });
+  test('buttons disabled until ack box ticked', () => {
+    const html = pageHtml({ sections: text({ adminMonitorEnabled: false }) });
+    // Buttons render with disabled attribute; JS toggles on box change
+    expect(html).toMatch(/id="cs-accept"[^>]*disabled/);
+    expect(html).toMatch(/id="cs-decline"[^>]*disabled/);
+  });
+});
