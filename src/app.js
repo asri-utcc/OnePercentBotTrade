@@ -15,6 +15,7 @@ const { ErrorRateLimiter } = require('./utils/errorRateLimiter');
 const errorRateLimiter = new ErrorRateLimiter({ windowMs: 60_000, maxPerWindow: 5 });
 
 const authRoutes = require('./api/routes/auth.routes');
+const licenseRoutes = require('./api/routes/license.routes'); // FIX-2026-08-26 Phase 3a: /api/license/* for Settings page UI
 const botRoutes = require('./api/routes/bot.routes');
 const tradeRoutes = require('./api/routes/trade.routes');
 const signalRoutes = require('./api/routes/signal.routes');
@@ -127,6 +128,7 @@ function createApp() {
 
   // API
   app.use('/api/auth', authRoutes);
+  app.use('/api/license', licenseRoutes); // FIX-2026-08-26 Phase 3a: license info + refresh for Settings UI
   app.use('/api/bots', botRoutes);
   app.use('/api/trades', tradeRoutes);
   app.use('/api/signals', signalRoutes);
