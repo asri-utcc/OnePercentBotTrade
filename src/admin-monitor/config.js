@@ -29,6 +29,10 @@ const config = {
   enabled: _bool(process.env.ADMIN_ENABLED, false),
   url: process.env.ADMIN_URL || 'http://localhost:6016',
   licenseKey: process.env.ADMIN_LICENSE_KEY || '',
+  // FIX-2026-08-26: per-customer watermark tag. Echoed in every heartbeat to admin.
+  //   If code is leaked and run by an unauthorized machine, the tag still
+  //   identifies which customer it came from. Set per-customer at delivery time.
+  customerTag: process.env.ADMIN_CUSTOMER_TAG || '',
   heartbeatMs: _int(process.env.ADMIN_HEARTBEAT_MS, 300000),
   pollMs: _int(process.env.ADMIN_POLL_MS, 60000),
   botVersion: require(path.join(__dirname, '..', '..', 'package.json')).version,

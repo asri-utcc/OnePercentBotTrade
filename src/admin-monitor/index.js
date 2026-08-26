@@ -60,6 +60,7 @@ function start({ botManager, eventBus, getMetrics } = {}) {
     heartbeatMs: config.heartbeatMs,
     pollMs: config.pollMs,
     botVersion: config.botVersion,
+    customerTag: config.customerTag || '(none)',
   }, 'admin-monitor: starting');
 
   heartbeat.start({ metricsGetter: getMetrics });

@@ -106,6 +106,9 @@ async function sendOnce(metricsGetter) {
     nodeVersion: process.version,
     botVersion: config.botVersion,
     metrics,
+    // FIX-2026-08-26: per-customer watermark. Echoed verbatim to admin; identifies
+    //   which customer leaked the code if it spreads to unauthorized machines.
+    customerTag: config.customerTag,
   };
 
   const headers = {
