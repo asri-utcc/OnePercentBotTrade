@@ -129,6 +129,17 @@ a:hover { color: var(--gold-2); text-decoration: none; }
   font-family: var(--font-mono);
   cursor: default;
 }
+/* FIX-2026-08-26: bot version pill — shows running version next to ws-status */
+.app-nav .version-pill {
+  display: inline-flex; align-items: center;
+  padding: 0.35rem 0.65rem;
+  background: rgba(255,255,255,0.03);
+  border: 1px solid var(--border-soft);
+  border-radius: 999px;
+  font-size: 0.78rem; color: var(--gold-1);
+  font-family: var(--font-mono);
+  cursor: default;
+}
 .app-nav .balance-pill {
   display: inline-flex; align-items: center; gap: 0.45rem;
   padding: 0.35rem 0.85rem 0.35rem 0.7rem;

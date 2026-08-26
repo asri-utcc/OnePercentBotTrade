@@ -150,6 +150,11 @@ app.use('/api/analysis', require('./api/routes/analysis.routes'));
 // FIX-2026-08-26: Admin Snapshot — read-only aggregated bot state for OnePercentBot-Admin
 app.use('/api/admin/snapshot', require('./api/routes/adminSnapshot.routes'));
 
+// FIX-2026-08-26: App version endpoint — public, used by navbar to show user what version is running
+app.get('/api/app/version', (_req, res) => {
+  res.json({ version: require('../package.json').version });
+});
+
   // Health
   app.get('/health', (req, res) => {
     res.json({ ok: true, ts: Date.now() });

@@ -162,15 +162,28 @@ async function main() {
   //   - ADMIN_ENABLED=true required (default OFF)
   //   - Provides admin with machine health + accepts remote pause/resume/kill/force_close_all
   //   - No-op if ADMIN_ENABLED != 'true' or ADMIN_LICENSE_KEY missing
+  // FIX-2026-08-26: bug fix — botManager.listBots() does NOT exist; read .traders Map directly.
+  //   Each entry is a Trader instance with .running flag and .position (or .openPosition).
   try {
     adminMonitor.start({
       botManager,
       eventBus,
-      getMetrics: () => ({
-        runningBots: botManager.listBots ? botManager.listBots().filter(b => b.running).length : 0,
-        activePositions: botManager.listBots ? botManager.listBots().reduce((acc, b) => acc + (b.position ? 1 : 0), 0) : 0,
-        uptime: Math.floor(process.uptime()),
-      }),
+      getMetrics: () => {
+        let runningBots = 0;
+        let activePositions = 0;
+        if (botManager && botManager.traders instanceof Map) {
+          for (const trader of botManager.traders.values()) {
+            if (!trader) continue;
+            if (trader.running) runningBots++;
+            if (trader.position || trader.openPosition) activePositions++;
+          }
+        }
+        return {
+          runningBots,
+          activePositions,
+          uptime: Math.floor(process.uptime()),
+        };
+      },
     });
   } catch (err) {
     logger.warn({ err: err.message }, 'adminMonitor start failed (non-fatal)');

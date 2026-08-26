@@ -20,6 +20,7 @@
 
 const http = require('http');
 const url = require('url');
+const { spawn } = require('child_process');
 const { EventEmitter } = require('events');
 
 const config = require('./config');
@@ -32,6 +33,28 @@ const { getMachineId } = require('../admin-monitor/machineId');
 const rootLogger = require('../utils/logger');
 
 const logger = rootLogger.child ? rootLogger.child({ module: 'consent-web' }) : rootLogger;
+
+/**
+ * FIX-2026-08-26: auto-open default browser so user actually sees the consent page
+ *   (was a silent gap — page was served but never displayed).
+ *   Windows: `start "" <url>`; macOS: `open <url>`; Linux: `xdg-open <url>`.
+ *   Failures are swallowed (user can navigate manually).
+ */
+function _autoOpenBrowser(url) {
+  try {
+    const platform = process.platform;
+    let cmd, args;
+    if (platform === 'win32') { cmd = 'cmd'; args = ['/c', 'start', '""', url]; }
+    else if (platform === 'darwin') { cmd = 'open'; args = [url]; }
+    else { cmd = 'xdg-open'; args = [url]; }
+    const child = spawn(cmd, args, { detached: true, stdio: 'ignore' });
+    child.unref();
+    return true;
+  } catch (err) {
+    logger.warn({ err: err.message }, 'consent-web: auto-open browser failed');
+    return false;
+  }
+}
 
 class ConsentServer extends EventEmitter {
   constructor() {
@@ -65,6 +88,15 @@ class ConsentServer extends EventEmitter {
           host: addr.address, port: addr.port,
           currentDecision: current, adminMonitorEnabled,
         }, 'consent-web: listening');
+
+        // FIX-2026-08-26: auto-open browser so user actually sees the page.
+        //   Only fires on first-run (no decision yet) — re-opens via settings page are user-initiated.
+        if (!current && config.autoOpen) {
+          const url = `http://${addr.address}:${addr.port}/consent`;
+          if (_autoOpenBrowser(url)) {
+            logger.info({ url }, 'consent-web: auto-opened browser');
+          }
+        }
 
         // If user has already decided, keep server open for 60s for settings access,
         // then auto-close to free the port. They can restart bot to re-open.

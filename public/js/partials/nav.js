@@ -58,6 +58,8 @@
           <span class="reserve-text" id="nav-reserve-text">0</span>
         </span>
         <span class="ws-status" id="ws-status"><span class="ws-dot"></span><span id="ws-status-label">offline</span></span>
+        <!-- FIX-2026-08-26: bot version pill — surfaces the running version to the user -->
+        <span class="version-pill" id="nav-version" title="Bot version ที่กำลังรันอยู่">v…</span>
         ${active !== 'login' ? `<button class="btn-lux btn-sm" id="logout-btn" type="button">Logout</button>` : ''}
         <button class="nav-toggle d-md-none" type="button" id="nav-toggle" aria-label="Toggle menu">☰</button>
       </div>
@@ -109,6 +111,16 @@
   // ─── Balance + FX pill ────────────────────────────
   // skip on the login page
   if (active === 'login') return;
+
+  // FIX-2026-08-26: fetch bot version once and show in navbar pill
+  const versionEl = document.getElementById('nav-version');
+  if (versionEl) {
+    API.get('/api/app/version').then((r) => {
+      versionEl.textContent = `v${r.version}`;
+    }).catch(() => {
+      versionEl.textContent = 'v?';
+    });
+  }
 
   const usdtEl = document.getElementById('nav-balance-usdt');
   const thbEl = document.getElementById('nav-balance-thb');
