@@ -21,6 +21,7 @@ const autoReserve = require('./services/autoReserve'); // FIX-2026-08-24: auto r
 const adminMonitor = require('./admin-monitor'); // FIX-2026-08-26: OnePercentBot-Admin heartbeat + command listener
 const eventBus = require('./services/eventBus');
 const consent = require('./consent'); // FIX-2026-08-26 Phase 2c: first-run consent gate (3 sections + admin DB + local file)
+const consentHandlers = require('./consent/handlers'); // FIX-2026-08-26 Phase 2c-v2: shared decision core — used for declined→accepted auto-resume
 
 async function main() {
   logger.info({ env: config.env, port: config.port }, 'starting OnePercentBotTrade');
@@ -45,6 +46,11 @@ async function main() {
 
   // 4. Connect MongoDB in background (retry forever, doesn't block listen)
   db.connect().then(async () => {
+    // FIX-2026-08-26 Phase 2c-v2: idempotent botManager.start() guard
+    //   - True once botManager.start() has been called for the first time (initial start OR auto-resume)
+    //   - Prevents double-start if user accepts before server.js reaches this block
+    let _botManagerStarted = false;
+
     // FIX-2026-08-26: License gate — if admin-monitor enabled, validate license FIRST
     //   - throws on missing/invalid/revoked license → botManager.start() is skipped
     //   - no-op if ADMIN_ENABLED != 'true' (preserves default behavior)
@@ -72,15 +78,42 @@ async function main() {
     }
     if (consentDecision === 'declined') {
       logger.warn('consent: declined — botManager.start() SKIPPED; web server stays open for settings');
+      // FIX-2026-08-26 Phase 2c-v2: Auto-resume — when user changes mind via /consent on 6015,
+      //   start botManager without requiring a process restart.
+      //   Idempotent via _botManagerStarted flag (also covers initial-start if user accepts before
+      //   server.js reaches the botManager.start() line in a race).
+      consentHandlers.emitter.on('decision', async (payload) => {
+        if (_botManagerStarted) return;
+        if (payload.decision !== 'accepted' || payload.previousDecision !== 'declined') return;
+        try {
+          logger.info(
+            { port: payload.port, source: payload.source },
+            'consent: declined → accepted — auto-starting botManager'
+          );
+          await botManager.start();
+          _botManagerStarted = true;
+          // Re-apply the post-start hooks that the early-return below skipped.
+          try { await syncBotActionPasswordFromAppConfig(); }
+          catch (err) { logger.warn({ err: err.message }, 'consent: botActionPassword sync failed (non-fatal)'); }
+          try {
+            const cap = await binanceRateLimitConfig.getBinanceRateLimit({ forceRefresh: true });
+            binanceRest.setRateLimitCapacity(cap);
+            logger.info({ capacity: cap }, 'consent: binanceRateLimit applied on auto-resume');
+          } catch (err) { logger.warn({ err: err.message }, 'consent: binanceRateLimit apply failed'); }
+        } catch (err) {
+          logger.error({ err: err.message }, 'consent: auto-resume botManager failed');
+        }
+      });
       // Don't return — keep the process alive so the web server stays up.
       // The user can change their decision via /consent (settings page).
-      // When they accept, we can manually restart botManager (Phase 2f: position-safety).
+      // When they accept, the listener above auto-starts botManager.
       return;
     }
 
     // 5. Start bot manager (after DB ready)
     try {
       await botManager.start();
+      _botManagerStarted = true;
     } catch (err) {
       logger.error({ err: err.message }, 'botManager start failed');
     }

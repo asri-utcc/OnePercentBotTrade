@@ -82,6 +82,46 @@
     </div>
   </div>
 
+  <!-- FIX-2026-08-26 Phase 2c-v2: Consent overlay — blocks login until user decides.
+       - pending  → form disabled, link to /consent (or wait for poll to flip)
+       - declined → form disabled, link to /consent to change mind
+       - accepted → no overlay (hidden)
+       - fail-open on fetch error (server-side gate is the source of truth) -->
+  <div id="consent-overlay" style="display:none;">
+    <div class="consent-overlay-card">
+      <div class="consent-overlay-icon" id="consent-overlay-icon">🛡️</div>
+      <h4 id="consent-overlay-title">First-Run Consent Required</h4>
+      <p id="consent-overlay-body">
+        กรุณาตัดสินใจเกี่ยวกับ Consent ก่อน — please decide on the consent screen before logging in.
+      </p>
+      <a id="consent-overlay-link" class="btn btn-primary" href="/consent">📋 Open Consent Screen</a>
+      <p id="consent-overlay-foot" class="small text-muted mt-3 mb-0">
+        Polling every 3s — จะหายไปเมื่อคุณตัดสินใจ
+      </p>
+    </div>
+  </div>
+  <style>
+    #consent-overlay {
+      position: fixed; inset: 0; z-index: 9999;
+      background: rgba(15, 20, 25, 0.92);
+      backdrop-filter: blur(4px);
+      display: flex; align-items: center; justify-content: center;
+    }
+    #consent-overlay.is-declined { background: rgba(45, 10, 10, 0.92); }
+    .consent-overlay-card {
+      background: var(--surface-2, #1a1f29);
+      border: 1px solid var(--border-mid, #2d3748);
+      border-radius: 12px;
+      padding: 32px 28px;
+      max-width: 480px; width: calc(100% - 32px);
+      text-align: center;
+      box-shadow: 0 12px 40px rgba(0,0,0,0.6);
+    }
+    .consent-overlay-icon { font-size: 48px; margin-bottom: 12px; }
+    .consent-overlay-card h4 { color: var(--text-1, #e6e6e6); margin-bottom: 12px; }
+    .consent-overlay-card p  { color: var(--text-3, #8b95a5); margin-bottom: 18px; }
+  </style>
+
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
   <script src="/js/api.js"></script>
   <script>
@@ -281,6 +321,77 @@
     document.getElementById('tg-otp-input').addEventListener('input', (e) => {
       e.target.value = e.target.value.replace(/\D/g, '');
     });
+
+    // FIX-2026-08-26 Phase 2c-v2: Consent overlay — poll /api/consent/status every 3s
+    //   - pending: hide login form, force user to /consent
+    //   - declined: same but red theme + reminder that bot won't trade
+    //   - accepted: overlay removed, login proceeds
+    //   - fail-open on fetch error (server-side gate is the source of truth)
+    const consentOverlay = document.getElementById('consent-overlay');
+    const consentTitle = document.getElementById('consent-overlay-title');
+    const consentBody = document.getElementById('consent-overlay-body');
+    const consentLink = document.getElementById('consent-overlay-link');
+    const consentFoot = document.getElementById('consent-overlay-foot');
+    const consentIcon = document.getElementById('consent-overlay-icon');
+    let consentPollTimer = null;
+
+    function disableForms() {
+      const ids = ['login-password', 'login-btn', 'setup-password', 'setup-btn', 'setup-api-key', 'setup-api-secret', 'setup-bnb-fees', 'tg-request-btn'];
+      ids.forEach((id) => {
+        const el = document.getElementById(id);
+        if (el) el.disabled = true;
+      });
+    }
+    function showOverlay(state) {
+      if (state === 'accepted') {
+        consentOverlay.style.display = 'none';
+        return;
+      }
+      disableForms();
+      consentOverlay.style.display = 'flex';
+      consentOverlay.classList.toggle('is-declined', state === 'declined');
+      if (state === 'declined') {
+        consentIcon.textContent = '⛔';
+        consentTitle.textContent = 'Bot Suspended — Consent Declined';
+        consentBody.innerHTML = 'คุณเคยเลือก <strong>ไม่ยอมรับ</strong> — บอทจะไม่เปิด position ใหม่<br><span class="text-muted-2">You previously declined — bot will not open new positions.</span>';
+        consentLink.textContent = '🔄 เปลี่ยนเป็นยอมรับ / Change to Accept';
+        consentFoot.textContent = 'คลิกปุ่มด้านบนเพื่อเปลี่ยนการตัดสินใจ — Click above to change your decision.';
+      } else {
+        consentIcon.textContent = '🛡️';
+        consentTitle.textContent = 'First-Run Consent Required';
+        consentBody.innerHTML = 'กรุณาตัดสินใจเกี่ยวกับ Consent ก่อน<br><span class="text-muted-2">Please decide on the consent screen before logging in.</span>';
+        consentLink.textContent = '📋 Open Consent Screen';
+        consentFoot.textContent = 'Polling every 3s — จะหายไปเมื่อคุณตัดสินใจ';
+      }
+    }
+    async function pollConsent() {
+      try {
+        const r = await fetch('/api/consent/status', { cache: 'no-store' });
+        if (!r.ok) { showOverlay('pending'); return; }
+        const j = await r.json();
+        showOverlay(j.decision);
+      } catch (err) {
+        // Fail-open — server-side gate is the real source of truth.
+        // Show pending overlay so the user isn't surprised if login works but bot doesn't trade.
+        showOverlay('pending');
+      }
+    }
+    // Start polling after init (so the existing /api/auth/status flow isn't blocked)
+    pollConsent();
+    consentPollTimer = setInterval(pollConsent, 3000);
+    // Stop polling once accepted
+    const origShowOverlay = showOverlay;
+    function maybeStopPoll(state) {
+      if (state === 'accepted' && consentPollTimer) {
+        clearInterval(consentPollTimer);
+        consentPollTimer = null;
+      }
+    }
+    // Wrap original to also stop polling on accepted
+    showOverlay = function(state) {
+      origShowOverlay(state);
+      maybeStopPoll(state);
+    };
 
     init();
   </script>

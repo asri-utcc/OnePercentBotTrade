@@ -4,12 +4,15 @@
  * FIX-2026-08-26 Phase 2c: Consent config loader
  *
  * Env vars (set in .env or process.env):
- *   CONSENT_ENABLED       'true' to enable first-run consent screen (default: true)
- *   CONSENT_VERSION       consent text version (audit only, NOT a re-trigger)
- *   CONSENT_WEB_PORT      port for the local consent web server (default: 6017)
- *   CONSENT_WEB_HOST      bind host (default: 127.0.0.1 — safest for settings page)
- *   CONSENT_FILE_PATH     local storage path (default: ~/.onepercentbot-consent.json)
- *   CONSENT_AUTO_OPEN     'true' to auto-open browser on first-run (default: true)
+ *   CONSENT_ENABLED            'true' to enable first-run consent screen (default: true)
+ *   CONSENT_VERSION            consent text version (audit only, NOT a re-trigger)
+ *   CONSENT_WEB_PORT           port for the local consent web server (default: 6017)
+ *   CONSENT_WEB_HOST           bind host (default: 127.0.0.1 — safest for settings page)
+ *   CONSENT_FILE_PATH          local storage path (default: ~/.onepercentbot-consent.json)
+ *   CONSENT_AUTO_OPEN          'true' to auto-open browser on first-run (default: true)
+ *   CONSENT_FALLBACK_DELAY_MS  ms to wait for 6015 /consent engagement before auto-starting
+ *                              the legacy 6017 fallback server (default: 60000). 0 = old behavior
+ *                              (start 6017 immediately). -1 = never start fallback.
  */
 
 const path = require('path');
@@ -38,6 +41,9 @@ const config = {
   webHost: process.env.CONSENT_WEB_HOST || '127.0.0.1',
   filePath: _expandHome(process.env.CONSENT_FILE_PATH) || path.join(os.homedir(), '.onepercentbot-consent.json'),
   autoOpen: _bool(process.env.CONSENT_AUTO_OPEN, true),
+  // FIX-2026-08-26 Phase 2c-v2: Hybrid fallback delay. 0 = start 6017 immediately (legacy).
+  //   60000 = wait 60s for 6015 engagement, then auto-start 6017. -1 = never start fallback.
+  fallbackDelayMs: _int(process.env.CONSENT_FALLBACK_DELAY_MS, 60000),
 };
 
 module.exports = config;

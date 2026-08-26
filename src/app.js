@@ -38,6 +38,9 @@ const pnlRoutes = require('./api/routes/pnl.routes');
 const dailyTargetRoutes = require('./api/routes/dailyTarget.routes');
 // 2026-08-23: Live Binance API weight gauge (navbar pill)
 const rateLimitRoutes = require('./api/routes/rateLimit.routes');
+// FIX-2026-08-26 Phase 2c-v2: Consent routes on the bot's main port —
+//   public (no requireAuth) so first-run users can decide before logging in.
+const consentRoutes = require('./api/routes/consent.routes');
 
 function createApp() {
   const app = express();
@@ -150,6 +153,9 @@ app.use('/api/analysis', require('./api/routes/analysis.routes'));
 // FIX-2026-08-26: Admin Snapshot — read-only aggregated bot state for OnePercentBot-Admin
 app.use('/api/admin/snapshot', require('./api/routes/adminSnapshot.routes'));
 
+// FIX-2026-08-26 Phase 2c-v2: Consent routes (public; first-run users can decide pre-login)
+app.use('/api/consent', consentRoutes);
+
 // FIX-2026-08-26: App version endpoint — public, used by navbar to show user what version is running
 app.get('/api/app/version', (_req, res) => {
   res.json({ version: require('../package.json').version });
@@ -160,6 +166,12 @@ app.get('/api/app/version', (_req, res) => {
     res.json({ ok: true, ts: Date.now() });
   });
 
+  // FIX-2026-08-26 Phase 2c-v2: Top-level /consent (full-page) MUST be registered BEFORE
+  //   the auth-gating static catch-all below — otherwise the user would be redirected
+  //   to /login.html instead of seeing the consent form. Public on purpose: consent
+  //   must be reachable pre-login so the first-run overlay on /login.html works.
+  app.get('/consent', consentRoutes.page);
+
   // ─── Static files (HTML auth-gated) ──────────────────────────────
   // 2026-08-10: ล็อค HTML/JS ทุกหน้ายกเว้น login + favicon + CSS + /js/api.js
   //   - ป้องกัน AI/AI-coding-tool scrape HTML/JS labels + feature names + modal flow
@@ -167,7 +179,7 @@ app.get('/api/app/version', (_req, res) => {
   //   - ไฟล์ HTML ที่ต้อง auth → Cache-Control: no-store (กัน back-button cache leak หลัง logout)
   //   - Public (whitelist): /login.html, /favicon.svg, /css/*, /js/api.js, /js/botConfigIO.js
   //   - ทุก path อื่น → ต้อง session.authenticated === true ถึงจะเห็นเนื้อหา
-  const PUBLIC_EXACT = new Set(['/login.html', '/favicon.svg']);
+  const PUBLIC_EXACT = new Set(['/login.html', '/favicon.svg', '/consent']); // FIX-2026-08-26 Phase 2c-v2: /consent reachable pre-login (top-level handler also registers it, belt-and-braces)
   const PUBLIC_PREFIXES = ['/css/', '/js/api.js', '/js/botConfigIO.js'];
 
   function isPublicStaticPath(p) {

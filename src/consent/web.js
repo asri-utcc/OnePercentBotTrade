@@ -26,7 +26,7 @@ const { EventEmitter } = require('events');
 const config = require('./config');
 const adminConfig = require('../admin-monitor/config');
 const storage = require('./storage');
-const api = require('./api');
+const handlers = require('./handlers'); // FIX-2026-08-26 Phase 2c-v2: shared decision core
 const { pageHtml } = require('./html');
 const buildSections = require('./text');
 const { getMachineId } = require('../admin-monitor/machineId');
@@ -62,6 +62,11 @@ class ConsentServer extends EventEmitter {
     this.server = null;
     this.bound = null; // { host, port }
     this.decidedAt = null; // when decision was made (to stop server)
+
+    // FIX-2026-08-26 Phase 2c-v2: re-emit decisions from handlers.emitter so existing
+    //   `web.once('decision', ...)` consumers (gateStartup, openSettingsPage) keep
+    //   working even when the decision is made via the new Express routes on 6015.
+    handlers.emitter.on('decision', (payload) => this.emit('decision', payload));
   }
 
   /**
@@ -154,47 +159,49 @@ class ConsentServer extends EventEmitter {
   }
 
   servePage(req, res, ctx) {
-    const html = pageHtml({ sections: ctx.sections, currentDecision: ctx.currentDecision });
+    // FIX-2026-08-26 Phase 2c-v2: actionBase='/consent' preserves legacy 6017 form posts.
+    const html = pageHtml({
+      sections: ctx.sections,
+      currentDecision: ctx.currentDecision,
+      actionBase: '/consent',
+    });
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
     res.end(html);
   }
 
   serveStatus(req, res, ctx) {
+    // FIX-2026-08-26 Phase 2c-v2: keep legacy `currentDecision` key so 6017 consumers don't break.
+    //   New 6015 endpoint at /api/consent/status uses `decision` instead (different shape).
+    const status = handlers.getStatusPayload();
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({
       currentDecision: ctx.currentDecision,
-      consentVersion: config.version,
+      consentVersion: status.consentVersion,
       web: this.bound,
-      adminMonitorEnabled: !!(adminConfig.enabled && adminConfig.licenseKey),
+      adminMonitorEnabled: status.adminMonitorEnabled,
     }));
   }
 
   async handleDecision(req, res, ctx, decision) {
-    const previousDecision = storage.currentDecision();
-    const source = previousDecision ? 'settings_change' : 'first_run';
-
-    // 1. Persist locally first (atomic)
-    storage.write({ decision, source, previousDecision });
-
-    // 2. Push to admin (best-effort; doesn't block)
-    api.pushDecision({
-      machineId: ctx.machineId,
-      decision,
-      consentVersion: config.version,
-      source,
-    }).catch((err) => logger.warn({ err: err.message }, 'consent: push failed'));
-
-    // 3. Emit event for main flow to react
-    this.emit('decision', { decision, source, previousDecision });
+    // FIX-2026-08-26 Phase 2c-v2: delegate to handlers.recordDecision (shared core).
+    //   The constructor re-emits handlers' 'decision' event as our own, so this.emit('decision')
+    //   is no longer needed here.
+    const result = await handlers.recordDecision({ decision, port: config.webPort });
     this.decidedAt = new Date();
 
-    // 4. Redirect back to GET (so refresh works)
+    // Redirect back to GET (so refresh works) — banner reflects the user's decision
     const banner = decision === 'accepted'
       ? { kind: 'success', en: 'Consent accepted. Reloading…', th: 'ยอมรับแล้ว กำลังโหลดใหม่…' }
       : { kind: 'error', en: 'Consent declined. Bot will suspend — no new positions.', th: 'ไม่ยอมรับ บอทจะระงับ — จะไม่เปิด position ใหม่' };
-    const html = pageHtml({ sections: ctx.sections, currentDecision: decision, decisionBanner: banner });
+    const html = pageHtml({
+      sections: ctx.sections,
+      currentDecision: decision,
+      decisionBanner: banner,
+      actionBase: '/consent',
+    });
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
     res.end(html);
+    return result;
   }
 }
 

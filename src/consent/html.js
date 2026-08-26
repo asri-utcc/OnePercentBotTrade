@@ -40,7 +40,9 @@ function renderSections(sections) {
   }).join('');
 }
 
-function pageHtml({ sections, currentDecision, decisionBanner }) {
+function pageHtml({ sections, currentDecision, decisionBanner, actionBase = '/consent' }) {
+  const acceptAction = escapeHtml(actionBase + '/accept');
+  const declineAction = escapeHtml(actionBase + '/decline');
   const bannerHtml = decisionBanner ? `
     <div class="cs-banner ${escapeHtml(decisionBanner.kind)}">
       <span class="lang-en">${escapeHtml(decisionBanner.en)}</span>
@@ -136,11 +138,11 @@ function pageHtml({ sections, currentDecision, decisionBanner }) {
     ${renderSections(sections)}
 
     <div class="cs-actions">
-      <button type="submit" formaction="/consent/accept" class="cs-btn cs-btn-accept" id="cs-accept" disabled>
+      <button type="submit" formaction="${acceptAction}" class="cs-btn cs-btn-accept" id="cs-accept" disabled>
         <span class="lang-en">✅ I Accept</span>
         <span class="lang-th">✅ ยอมรับ</span>
       </button>
-      <button type="submit" formaction="/consent/decline" class="cs-btn cs-btn-decline" id="cs-decline" disabled>
+      <button type="submit" formaction="${declineAction}" class="cs-btn cs-btn-decline" id="cs-decline" disabled>
         <span class="lang-en">❌ I Decline</span>
         <span class="lang-th">❌ ไม่ยอมรับ</span>
       </button>
