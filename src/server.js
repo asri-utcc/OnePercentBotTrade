@@ -18,6 +18,8 @@ const binanceRateLimitConfig = require('./services/binanceRateLimitConfig'); // 
 const binanceRest = require('./binance/binanceRest'); // FIX-2026-08-21: apply capacity to live token-bucket
 const walletSnapshot = require('./services/walletSnapshot'); // FIX-2026-08-22: daily portfolio-value snapshot scheduler
 const autoReserve = require('./services/autoReserve'); // FIX-2026-08-24: auto reserve/release USDT scheduler
+const adminMonitor = require('./admin-monitor'); // FIX-2026-08-26: OnePercentBot-Admin heartbeat + command listener
+const eventBus = require('./services/eventBus');
 
 async function main() {
   logger.info({ env: config.env, port: config.port }, 'starting OnePercentBotTrade');
@@ -122,6 +124,24 @@ async function main() {
   //   - Default OFF — start() handles dormant mode (no interval if disabled)
   autoReserve.start();
 
+  // FIX-2026-08-26: OnePercentBot-Admin monitor — heartbeat (5min) + command poll (1min)
+  //   - ADMIN_ENABLED=true required (default OFF)
+  //   - Provides admin with machine health + accepts remote pause/resume/kill/force_close_all
+  //   - No-op if ADMIN_ENABLED != 'true' or ADMIN_LICENSE_KEY missing
+  try {
+    adminMonitor.start({
+      botManager,
+      eventBus,
+      getMetrics: () => ({
+        runningBots: botManager.listBots ? botManager.listBots().filter(b => b.running).length : 0,
+        activePositions: botManager.listBots ? botManager.listBots().reduce((acc, b) => acc + (b.position ? 1 : 0), 0) : 0,
+        uptime: Math.floor(process.uptime()),
+      }),
+    });
+  } catch (err) {
+    logger.warn({ err: err.message }, 'adminMonitor start failed (non-fatal)');
+  }
+
   // Graceful shutdown
   let shuttingDown = false;
   const shutdown = async (signal) => {
@@ -136,6 +156,7 @@ async function main() {
     try { autoDeleteBot.stop(); } catch (e) { /* ignore */ }
     try { walletSnapshot.stop(); } catch (e) { /* ignore */ }
     try { autoReserve.stop(); } catch (e) { /* ignore */ }
+    try { adminMonitor.stop(); } catch (e) { /* ignore */ }
     try { await botManager.flushActiveTimeOnShutdown(); } catch (e) { /* ignore */ }
     try { await botManager.stop(); } catch (e) { /* ignore */ }
     server.close(() => {
