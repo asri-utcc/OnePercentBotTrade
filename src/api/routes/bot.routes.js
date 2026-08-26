@@ -23,6 +23,7 @@ const trendlineForBot = require('../../core/trendlineForBot'); // FIX-2026-08-03
 const prediction = require('../../core/prediction'); // FIX-2026-08-05: upper-KC + predicted loss for AU prediction panel
 const dps = require('../../core/dynamicPositionSizing'); // FIX-2026-08-08 (rev2): DPS state reset helper
 const tradeStats = require('../../core/tradeStats'); // FIX-2026-08-20: aggregate today/month/all-time per bot (extracted for testability)
+const fxService = require('../../services/fxService'); // FIX-2026-08-26: per-position unrealized PnL THB (for machine-detail + admin machines view)
 const logger = require('../../utils/logger');
 const eventBus = require('../../services/eventBus');
 
@@ -392,7 +393,7 @@ router.get('/positions', requireAuth, async (req, res) => {
       .limit(200)
       .lean();
     if (trades.length === 0) {
-      return res.json({ asOf: new Date().toISOString(), count: 0, totalCostUsdt: 0, totalUnrealizedUsdt: 0, positions: [] });
+      return res.json({ asOf: new Date().toISOString(), count: 0, totalCostUsdt: 0, totalUnrealizedUsdt: 0, totalUnrealizedThb: 0, positions: [] });
     }
     const botIds = [...new Set(trades.map((t) => String(t.botId)))];
     // FIX-2026-08-05: include kcMult for upper-KC prediction (per-bot mult)
@@ -626,11 +627,28 @@ router.get('/positions', requireAuth, async (req, res) => {
     const positionsClean = positions.filter((p) => p !== null);
     const totalCost = positionsClean.reduce((s, p) => s + (p._costUsdt || 0), 0);
     const totalUnrealized = positionsClean.reduce((s, p) => s + (p._unrealizedUsdt || 0), 0);
+    // FIX-2026-08-26: per-position unrealized PnL in THB (for /machine-detail.html + admin machines tab)
+    //   - convertUsdtToThb returns null if FX rate unavailable — UI shows "—" rather than 0
+    //   - on null we keep _unrealizedThb: null (NOT 0) so frontend can distinguish "unknown" from "0 PnL"
+    //   - compute in parallel for all positions via Promise.all (single shared rate fetch inside fxService)
+    const unrealizedThbResults = await Promise.all(
+      positionsClean.map((p) => fxService.convertUsdtToThb(p._unrealizedUsdt || 0))
+    );
+    positionsClean.forEach((p, i) => {
+      p._unrealizedThb = Number.isFinite(unrealizedThbResults[i]) ? unrealizedThbResults[i] : null;
+    });
+    const totalUnrealizedThb = positionsClean.reduce(
+      (s, p) => s + (Number.isFinite(p._unrealizedThb) ? p._unrealizedThb : 0),
+      0,
+    );
     res.json({
       asOf: new Date().toISOString(),
       count: positionsClean.length,
       totalCostUsdt: totalCost,
       totalUnrealizedUsdt: totalUnrealized,
+      // FIX-2026-08-26: wrap-level THB totals for dashboard / admin machines tab
+      //   - 0 when all per-position THB are null (FX rate unavailable) — UI can detect via priceSources
+      totalUnrealizedThb: Number.isFinite(totalUnrealizedThb) ? totalUnrealizedThb : null,
       // FIX-2026-08-03: ?fresh=1 metadata — UI ใช้แสดง badge "Binance" vs "cache"
       fresh: freshMode,
       priceSources: {
@@ -644,7 +662,8 @@ router.get('/positions', requireAuth, async (req, res) => {
       // FIX-2026-08-08: orphan-filter metadata — UI/admin can see how many ghosts were dropped
       orphanFiltered: orphanTradeIds.length,
       orphanTradeIds,
-      positions: positionsClean.map(({ _costUsdt, _unrealizedUsdt, ...p }) => p),
+      // FIX-2026-08-26: keep _unrealizedUsdt + _unrealizedThb per position (used by machine-detail page + admin tab)
+      positions: positionsClean.map(({ _costUsdt, ...p }) => p),
     });
   } catch (err) {
     logger.error({ err: err.message }, 'list open positions failed');

@@ -146,6 +146,28 @@ async function getUsdtToThb({ forceRefresh = false } = {}) {
 }
 
 /**
+ * Convert a USDT amount to THB using the current cached rate.
+ *
+ * - Uses getUsdtToThb internally — single-flight, stale-while-revalidate semantics.
+ * - Returns null if amount is non-finite (NaN/Infinity) or no rate is available yet.
+ * - Does NOT throw — caller can default to USDT-only rendering on null.
+ *
+ * @param {number} amountUsdt
+ * @returns {Promise<number|null>} amount in THB, or null if conversion unavailable
+ */
+async function convertUsdtToThb(amountUsdt) {
+  if (typeof amountUsdt !== 'number' || !Number.isFinite(amountUsdt)) return null;
+  try {
+    const { rate } = await getUsdtToThb();
+    if (typeof rate !== 'number' || !Number.isFinite(rate) || rate <= 0) return null;
+    return amountUsdt * rate;
+  } catch (err) {
+    // No cache + all sources failed — surface null (UI falls back to USDT-only)
+    return null;
+  }
+}
+
+/**
  * Reset cache (useful for testing only).
  */
 function _resetCache() {
@@ -154,6 +176,7 @@ function _resetCache() {
 
 module.exports = {
   getUsdtToThb,
+  convertUsdtToThb,
   _resetCache,
   CACHE_TTL_MS,
 };

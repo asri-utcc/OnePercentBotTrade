@@ -49,7 +49,12 @@ jest.mock('../src/core/forceClose', () => ({
 jest.mock('../src/utils/logger', () => ({
   info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn(),
 }));
-jest.mock('../src/services/fxService', () => ({ getUsdtToThb: jest.fn() }));
+jest.mock('../src/services/fxService', () => ({
+  getUsdtToThb: jest.fn(),
+  // FIX-2026-08-26: convertUsdtToThb added for per-position THB unrealized PnL
+  //   - tests below override per-call to control return values
+  convertUsdtToThb: jest.fn(async (n) => (typeof n === 'number' && Number.isFinite(n) ? n * 35.5 : null)),
+}));
 jest.mock('../src/core/trendlineForBot', () => ({
   getTrendlineStatusForBots: jest.fn(() => ({})),
 }));
@@ -187,5 +192,84 @@ describe('GET /api/bots/positions — lifecycle enrichment (FIX-2026-08-22)', ()
     expect(byId[activeBotId].botDeletedAt).toBeNull();
     expect(byId[deletedBotId].botEnabled).toBe(false);
     expect(new Date(byId[deletedBotId].botDeletedAt).toISOString()).toBe(new Date('2026-08-19T01:00:00Z').toISOString());
+  });
+});
+
+/**
+ * FIX-2026-08-26: per-position unrealized PnL in USDT + THB
+ *   - Each position now exposes _unrealizedUsdt + _unrealizedThb
+ *   - Wrap-level totalUnrealizedThb + totalUnrealizedUsdt
+ *   - THB uses fxService.convertUsdtToThb → null when FX unavailable (NOT 0)
+ */
+describe('GET /api/bots/positions — per-position unrealized PnL (FIX-2026-08-26)', () => {
+  const baseBot = {
+    _id: 'b1', name: 'PnL', symbol: 'BTCUSDT', timeframe: '5m', enabled: true, retryMax: 3, kcMult: 1.2,
+  };
+  // buyPrice=100, qty=2, currentPrice via klineCache mock below (set per test)
+  const baseTrade = {
+    _id: 't1', botId: 'b1', symbol: 'BTCUSDT', timeframe: '5m', state: 'filled',
+    buyPrice: 100, buyQty: 2, buyQuoteQty: 200, buyOrderId: 'o1', retryCount: 0,
+  };
+
+  beforeEach(() => {
+    const fx = require('../src/services/fxService');
+    fx.convertUsdtToThb.mockClear();
+  });
+
+  test('exposes _unrealizedUsdt + _unrealizedThb per position (gain)', async () => {
+    const klineCache = require('../src/services/klineCache');
+    klineCache.getCurrent = jest.fn(() => ({ close: '110' })); // +10 per unit
+    const fx = require('../src/services/fxService');
+    fx.convertUsdtToThb.mockImplementation(async (n) => n * 35.5);
+    const { data } = await invokeGetPositions([baseBot], [baseTrade]);
+    const pos = data.positions[0];
+    // (110 - 100) * 2 = +20 USDT
+    expect(pos._unrealizedUsdt).toBeCloseTo(20, 6);
+    // +20 * 35.5 = 710 THB
+    expect(pos._unrealizedThb).toBeCloseTo(710, 6);
+    expect(data.totalUnrealizedUsdt).toBeCloseTo(20, 6);
+    expect(data.totalUnrealizedThb).toBeCloseTo(710, 6);
+  });
+
+  test('per-position THB = null when FX service returns null (rate unavailable)', async () => {
+    const klineCache = require('../src/services/klineCache');
+    klineCache.getCurrent = jest.fn(() => ({ close: '95' })); // -5 per unit
+    const fx = require('../src/services/fxService');
+    fx.convertUsdtToThb.mockImplementation(async () => null); // FX down
+    const { data } = await invokeGetPositions([baseBot], [baseTrade]);
+    const pos = data.positions[0];
+    expect(pos._unrealizedUsdt).toBeCloseTo(-10, 6); // USDT still computed
+    expect(pos._unrealizedThb).toBeNull();           // THB null
+    expect(data.totalUnrealizedUsdt).toBeCloseTo(-10, 6);
+    expect(data.totalUnrealizedThb).toBe(0); // sum skips null → 0
+  });
+
+  test('totalUnrealizedThb sums finite values only (mix of finite + null)', async () => {
+    const klineCache = require('../src/services/klineCache');
+    klineCache.getCurrent = jest.fn(() => ({ close: '110' }));
+    const fx = require('../src/services/fxService');
+    let call = 0;
+    fx.convertUsdtToThb.mockImplementation(async (n) => {
+      call += 1;
+      return call === 1 ? n * 35.5 : null; // first call succeeds, second fails
+    });
+    const trades = [
+      { ...baseTrade, _id: 't1' },
+      { ...baseTrade, _id: 't2' },
+    ];
+    const { data } = await invokeGetPositions([baseBot], trades);
+    expect(data.positions).toHaveLength(2);
+    expect(data.positions[0]._unrealizedThb).toBeCloseTo(710, 6);
+    expect(data.positions[1]._unrealizedThb).toBeNull();
+    // totalUnrealizedThb = 710 + 0 (null skipped) = 710
+    expect(data.totalUnrealizedThb).toBeCloseTo(710, 6);
+  });
+
+  test('empty positions array returns totalUnrealizedThb: 0 (regression)', async () => {
+    const { data } = await invokeGetPositions([], []);
+    expect(data.count).toBe(0);
+    expect(data.totalUnrealizedUsdt).toBe(0);
+    expect(data.totalUnrealizedThb).toBe(0);
+    expect(data.positions).toEqual([]);
   });
 });
