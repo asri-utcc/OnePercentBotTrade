@@ -58,6 +58,8 @@
           <span class="reserve-text" id="nav-reserve-text">0</span>
         </span>
         <span class="ws-status" id="ws-status"><span class="ws-dot"></span><span id="ws-status-label">offline</span></span>
+        <!-- FIX-2026-08-26 Phase 3a: Consent status pill — click → /consent, polls every 30s -->
+        <a class="consent-pill is-pending" id="nav-consent" href="/consent" title="คลิกเพื่อเปิดหน้า Consent">…</a>
         <!-- FIX-2026-08-26: bot version pill — surfaces the running version to the user -->
         <span class="version-pill" id="nav-version" title="Bot version ที่กำลังรันอยู่">v…</span>
         ${active !== 'login' ? `<button class="btn-lux btn-sm" id="logout-btn" type="button">Logout</button>` : ''}
@@ -120,6 +122,42 @@
     }).catch(() => {
       versionEl.textContent = 'v?';
     });
+  }
+
+  // FIX-2026-08-26 Phase 3a: Consent status pill — poll /api/consent/status every 30s
+  //   - show ✓ Accepted (green) / ✗ Declined (red) / ⚠ Pending (yellow) / ⚪ Disabled (gray)
+  //   - fail-open: on fetch error, show "—" — never block UI
+  const consentEl = document.getElementById('nav-consent');
+  if (consentEl) {
+    async function refreshConsentPill() {
+      try {
+        const r = await API.get('/api/consent/status');
+        const d = r && r.decision;
+        const enabled = !!(r && r.consentEnabled);
+        consentEl.classList.remove('is-accepted', 'is-declined', 'is-pending');
+        if (!enabled) {
+          consentEl.textContent = '⚪ —';
+          consentEl.title = 'Consent disabled in config';
+        } else if (d === 'accepted') {
+          consentEl.textContent = '✓ Consent';
+          consentEl.classList.add('is-accepted');
+          consentEl.title = 'Consent: Accepted · คลิกเพื่อดู';
+        } else if (d === 'declined') {
+          consentEl.textContent = '✗ Consent';
+          consentEl.classList.add('is-declined');
+          consentEl.title = 'Consent: Declined · บอทหยุดเทรดใหม่ · คลิกเพื่อเปลี่ยน';
+        } else {
+          consentEl.textContent = '⚠ Consent';
+          consentEl.classList.add('is-pending');
+          consentEl.title = 'Consent: Pending · คลิกเพื่อยอมรับ';
+        }
+      } catch (_) {
+        consentEl.textContent = '—';
+        consentEl.title = 'ไม่สามารถโหลดสถานะ consent (ลองใหม่)';
+      }
+    }
+    refreshConsentPill();
+    setInterval(refreshConsentPill, 30 * 1000); // 30s — lighter than login overlay's 3s
   }
 
   const usdtEl = document.getElementById('nav-balance-usdt');

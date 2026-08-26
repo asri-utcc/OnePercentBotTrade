@@ -140,6 +140,36 @@ a:hover { color: var(--gold-2); text-decoration: none; }
   font-family: var(--font-mono);
   cursor: default;
 }
+/* FIX-2026-08-26 Phase 3a: Consent status pill — shows current decision at a glance */
+.app-nav .consent-pill {
+  display: inline-flex; align-items: center; gap: 0.35rem;
+  padding: 0.35rem 0.65rem;
+  border: 1px solid var(--border-soft);
+  border-radius: 999px;
+  font-size: 0.78rem;
+  font-family: var(--font-mono);
+  cursor: pointer;
+  text-decoration: none;
+  background: rgba(255,255,255,0.03);
+  color: var(--text-muted-3, #888);
+  transition: background 0.15s ease;
+}
+.app-nav .consent-pill:hover {
+  background: rgba(255,255,255,0.07);
+  text-decoration: none;
+}
+.app-nav .consent-pill.is-accepted {
+  border-color: rgba(40, 167, 69, 0.5);
+  color: #4ade80;
+}
+.app-nav .consent-pill.is-declined {
+  border-color: rgba(220, 53, 69, 0.5);
+  color: #ff7b7b;
+}
+.app-nav .consent-pill.is-pending {
+  border-color: rgba(255, 193, 7, 0.5);
+  color: #fbbf24;
+}
 .app-nav .balance-pill {
   display: inline-flex; align-items: center; gap: 0.45rem;
   padding: 0.35rem 0.85rem 0.35rem 0.7rem;
