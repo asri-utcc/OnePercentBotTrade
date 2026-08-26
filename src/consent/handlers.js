@@ -66,11 +66,29 @@ function getStatus() {
 
 function getStatusPayload() {
   const decision = getStatus();
+  // FIX-2026-08-26 Phase 3a: enrich with decidedAt + source + previousDecision
+  //   for the Settings page "Consent" card (read-only audit metadata).
+  //   - decidedAt may be null when status='accepted' due to consentEnabled=false
+  //     (config.disabled fast-path), in which case the operator never decided anything
+  let decidedAt = null;
+  let source = null;
+  let previousDecision = null;
+  if (config.enabled) {
+    const r = storage.read();
+    if (r.status === 'decided') {
+      decidedAt = r.decidedAt || null;
+      source = r.source || null;
+      previousDecision = r.previousDecision || null;
+    }
+  }
   return {
     decision,
     consentVersion: config.version,
     adminMonitorEnabled: !!(adminConfig.enabled && adminConfig.licenseKey),
     consentEnabled: !!config.enabled,
+    decidedAt,
+    source,
+    previousDecision,
   };
 }
 

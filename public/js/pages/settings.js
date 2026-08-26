@@ -15,6 +15,8 @@ let adminCfg = null;   // FIX-2026-08-08 (rev2): DPS tunables
 let botDefaults = null; // FIX-2026-08-08 (rev3): Bot Defaults
 let rateLimit = null;  // FIX-2026-08-21: Binance API rate-limit capacity
 let autoReserveCfg = null; // FIX-2026-08-24: auto reserve/release USDT config
+let consentStatus = null;  // FIX-2026-08-26 Phase 3a: GET /api/consent/status for Settings page
+let licenseInfo = null;   // FIX-2026-08-26 Phase 3a: GET /api/license/info for Settings page
 
 async function init() {
   const me = await API.get('/api/auth/me').catch(() => null);
@@ -83,6 +85,19 @@ async function loadConfig() {
       console.warn('auto-reserve config load failed:', err.message);
       autoReserveCfg = { config: { enabled: false, poleCount: 3, usdtPerPole: 10, lossThresholdPct: 2, checkHours: 4, stepUsdt: 10 }, status: {} };
     }
+    // FIX-2026-08-26 Phase 3a: Consent + License status for Settings page
+    try {
+      consentStatus = await API.get('/api/consent/status');
+    } catch (err) {
+      console.warn('consent status load failed:', err.message);
+      consentStatus = { decision: null, consentVersion: null, consentEnabled: false };
+    }
+    try {
+      licenseInfo = await API.get('/api/license/info');
+    } catch (err) {
+      console.warn('license info load failed:', err.message);
+      licenseInfo = { license: null, lastValidatedAt: null, adminMonitorEnabled: false, machineId: '—' };
+    }
     render();
   } catch (err) {
     document.getElementById('settings-content').innerHTML =
@@ -124,6 +139,8 @@ function render() {
           <a href="#group-notify" class="lux-chip">📢 แจ้งเตือน</a>
           <a href="#group-trading" class="lux-chip">🛒 การซื้อขาย</a>
           <a href="#group-safety" class="lux-chip">🛡️ ความปลอดภัย</a>
+          <!-- FIX-2026-08-26 Phase 3a: Consent & License chip -->
+          <a href="#group-consent" class="lux-chip">📜 Consent &amp; License</a>
         </div>
 
         <!-- ════════ 🤖 กลุ่มที่ 1: บอท ════════ -->
@@ -157,6 +174,13 @@ function render() {
         <p class="text-muted-3 small mb-3">Auto-Buy BNB + safety toggles</p>
 
         ${renderBnbSection()}
+
+        <!-- ════════ 📜 กลุ่มที่ 5: Consent & License (FIX-2026-08-26) ════════ -->
+        <h5 id="group-consent" class="settings-group-title">📜 Consent &amp; License</h5>
+        <p class="text-muted-3 small mb-3">การยินยอมให้ดำเนินการ + รายละเอียด License</p>
+
+        ${renderConsentSection()}
+        ${renderLicenseSection()}
 
       </div>
     </div>
@@ -1151,6 +1175,170 @@ function renderBnbSection() {
   `);
 }
 
+// ─── 📜 Section: Consent status (FIX-2026-08-26) ──────────────────
+function renderConsentSection() {
+  const status = consentStatus || { decision: null, consentVersion: null, consentEnabled: false };
+  const decision = status.decision; // 'accepted' | 'declined' | null
+  const version = status.consentVersion || '—';
+  const decidedAt = status.decidedAt ? new Date(status.decidedAt).toLocaleString() : '—';
+  const source = status.source || '—'; // 'first_run' | 'settings_change'
+  const consentEnabled = !!status.consentEnabled;
+
+  let badge = '⚪ Pending';
+  let badgeClass = 'text-muted-3';
+  if (decision === 'accepted') { badge = '🟢 Accepted'; badgeClass = 'text-success'; }
+  else if (decision === 'declined') { badge = '🔴 Declined'; badgeClass = 'text-danger'; }
+  if (!consentEnabled) { badge = '⚪ Disabled'; badgeClass = 'text-muted-3'; }
+
+  return section('sec-consent', '📜', 'Consent — การยินยอมให้บอททำงาน', false, `
+    <div class="alert alert-info small mb-3">
+      <strong>📌 Consent คืออะไร:</strong> เอกสารสรุปความเสี่ยง + การเชื่อมต่อ + การโทรออก (phone-home)
+      ที่ผู้ใช้ต้องอ่านและยอมรับก่อนบอทเริ่มเทรด · บังคับใช้ครั้งเดียวต่อเครื่อง (เก็บใน local + admin DB)
+    </div>
+
+    <div class="row g-3">
+      <div class="col-md-3">
+        <label class="form-label">📊 สถานะปัจจุบัน</label>
+        <div class="fs-5 ${badgeClass}"><strong>${badge}</strong></div>
+      </div>
+      <div class="col-md-3">
+        <label class="form-label">📅 Document version</label>
+        <div><code>${escapeHtml(version)}</code></div>
+      </div>
+      <div class="col-md-3">
+        <label class="form-label">🕐 Decided at</label>
+        <div class="text-muted small">${escapeHtml(decidedAt)}</div>
+      </div>
+      <div class="col-md-3">
+        <label class="form-label">📝 Source</label>
+        <div class="text-muted small"><code>${escapeHtml(source)}</code></div>
+      </div>
+    </div>
+
+    <div class="mt-3 d-flex align-items-center flex-wrap">
+      <a href="/consent" class="btn btn-primary" id="btn-open-consent">📝 เปิดหน้า Consent</a>
+      <button type="button" class="btn btn-outline-info ms-2" id="btn-reload-consent">🔄 Refresh สถานะ</button>
+      <span class="ms-3 text-muted small" id="consent-status"></span>
+    </div>
+
+    <div class="text-muted small mt-3">
+      <strong>หมายเหตุ:</strong> การเปลี่ยน decision ต้องเปิดหน้า /consent แล้วเลือก Accept / Decline อีกครั้ง
+      · หากต้องการ reset consent (เช่น ทดสอบ first-run flow) ให้รัน <code>npm run consent:reset</code> ในโฟลเดอร์บอท
+    </div>
+  `);
+}
+
+// ─── 📜 Section: License details (FIX-2026-08-26) ──────────────────
+function renderLicenseSection() {
+  const info = licenseInfo || { license: null, lastValidatedAt: null, adminMonitorEnabled: false, machineId: '—' };
+  const lic = info.license || null;
+  const enabled = !!info.adminMonitorEnabled;
+  const machineId = info.machineId || '—';
+  const lastValidatedAt = info.lastValidatedAt ? new Date(info.lastValidatedAt).toLocaleString() : '—';
+
+  if (!enabled) {
+    return section('sec-license', '🪪', 'License — รายละเอียด License (Admin Monitor)', false, `
+      <div class="alert alert-warning small mb-3">
+        <strong>⚪ Admin Monitor ปิดอยู่</strong> — บอทเครื่องนี้ไม่ได้เชื่อมต่อกับ admin server
+        (<code>ADMIN_MONITOR_URL</code> หรือ <code>LICENSE_KEY</code> ว่าง) · ไม่มี License ให้แสดง
+      </div>
+      <div class="text-muted small">machineId: <code>${escapeHtml(machineId)}</code></div>
+    `);
+  }
+
+  if (!lic) {
+    return section('sec-license', '🪪', 'License — รายละเอียด License (Admin Monitor)', false, `
+      <div class="alert alert-warning small mb-3">
+        <strong>⏳ ยังไม่ได้ validate License</strong> — บอทยังไม่เคยติดต่อ admin server สำเร็จ
+        · กดปุ่ม <em>🔄 Refresh License</em> เพื่อลองใหม่
+      </div>
+      <div class="mt-3">
+        <button type="button" class="btn btn-primary" id="btn-refresh-license">🔄 Refresh License</button>
+        <span class="ms-2 text-muted small" id="license-status"></span>
+      </div>
+      <div class="text-muted small mt-3">machineId: <code>${escapeHtml(machineId)}</code></div>
+    `);
+  }
+
+  // Tier badge color
+  const tier = (lic.tier || 'unknown').toLowerCase();
+  const tierBadgeClass = {
+    'free': 'bg-secondary',
+    'pro': 'bg-primary',
+    'enterprise': 'bg-warning text-dark',
+  }[tier] || 'bg-secondary';
+
+  // Features chips
+  const features = lic.features || {};
+  const featureChips = Object.keys(features).length === 0
+    ? '<span class="text-muted small">—</span>'
+    : Object.entries(features).map(([k, v]) => {
+        const enabled = !!v;
+        return `<span class="badge ${enabled ? 'bg-success' : 'bg-light text-dark border'} me-1 mb-1">${enabled ? '✓' : '✗'} ${escapeHtml(k)}</span>`;
+      }).join(' ');
+
+  // Expires at
+  const expiresAt = lic.expiresAt ? new Date(lic.expiresAt).toLocaleString() : '—';
+  const maxBots = (lic.maxBots != null) ? lic.maxBots : '—';
+  const maxMachines = (lic.maxMachines != null) ? lic.maxMachines : '—';
+  const customerTag = lic.customerTag || '—';
+  const owner = lic.owner || '—';
+
+  return section('sec-license', '🪪', 'License — รายละเอียด License (Admin Monitor)', false, `
+    <div class="alert alert-info small mb-3">
+      <strong>📌 License นี้:</strong> ผูกกับ <code>${escapeHtml(machineId)}</code> (this machine)
+      · admin server ตรวจ license key + heartbeat ทุก 60s
+      · <code>lastValidatedAt</code> = admin ตอบกลับล่าสุดเมื่อไหร่
+    </div>
+
+    <div class="row g-3">
+      <div class="col-md-3">
+        <label class="form-label">🏷 Tier</label>
+        <div><span class="badge ${tierBadgeClass} fs-6">${escapeHtml(tier.toUpperCase())}</span></div>
+      </div>
+      <div class="col-md-3">
+        <label class="form-label">👤 Owner</label>
+        <div><code>${escapeHtml(owner)}</code></div>
+      </div>
+      <div class="col-md-3">
+        <label class="form-label">🏢 Customer Tag</label>
+        <div><code>${escapeHtml(customerTag)}</code></div>
+      </div>
+      <div class="col-md-3">
+        <label class="form-label">📅 Expires at</label>
+        <div class="text-muted small">${escapeHtml(expiresAt)}</div>
+      </div>
+      <div class="col-md-3">
+        <label class="form-label">🤖 Max bots</label>
+        <div><code>${escapeHtml(String(maxBots))}</code></div>
+      </div>
+      <div class="col-md-3">
+        <label class="form-label">🖥 Max machines</label>
+        <div><code>${escapeHtml(String(maxMachines))}</code></div>
+      </div>
+      <div class="col-md-6">
+        <label class="form-label">🕐 Last validated</label>
+        <div class="text-muted small">${escapeHtml(lastValidatedAt)}</div>
+      </div>
+    </div>
+
+    <div class="mt-3">
+      <label class="form-label">✨ Features</label>
+      <div>${featureChips}</div>
+    </div>
+
+    <div class="mt-3 d-flex align-items-center flex-wrap">
+      <button type="button" class="btn btn-outline-primary" id="btn-refresh-license">🔄 Refresh License</button>
+      <span class="ms-3 text-muted small" id="license-status"></span>
+    </div>
+
+    <div class="text-muted small mt-3">
+      <strong>หมายเหตุ:</strong> License key อยู่ใน <code>.env</code> (<code>LICENSE_KEY</code>) · การเปลี่ยน key
+      ต้อง restart bot · ถ้า license หมดอายุบอทจะหยุดเทรดใหม่ (positions เดิมยังจัดการต่อตาม TP/SL ปกติ)
+    </div>
+  `);
+}
+
 // ════════ Event handlers ════════
 function bindEvents() {
   // Telegram
@@ -1246,6 +1434,35 @@ function bindEvents() {
   if (impBdR) impBdR.onclick = () => importBotDefaultsFromFile('replace');
   const impBdM = document.getElementById('btn-import-bd-merge');
   if (impBdM) impBdM.onclick = () => importBotDefaultsFromFile('merge');
+
+  // FIX-2026-08-26 Phase 3a: Consent + License refresh buttons
+  const reloadConsent = document.getElementById('btn-reload-consent');
+  if (reloadConsent) reloadConsent.onclick = reloadConsentStatus;
+  const refreshLicense = document.getElementById('btn-refresh-license');
+  if (refreshLicense) refreshLicense.onclick = refreshLicenseInfo;
+}
+
+// FIX-2026-08-26 Phase 3a: reload consent status without full page reload
+async function reloadConsentStatus() {
+  try {
+    consentStatus = await API.get('/api/consent/status');
+    setStatus('consent-status', '✓ Refresh แล้ว');
+    render();
+  } catch (err) {
+    setStatus('consent-status', '✗ ' + err.message, true);
+  }
+}
+
+// FIX-2026-08-26 Phase 3a: trigger /api/license/refresh then re-render
+async function refreshLicenseInfo() {
+  try {
+    setStatus('license-status', '⏳ กำลัง validate...');
+    licenseInfo = await API.post('/api/license/refresh', {});
+    setStatus('license-status', '✓ License refreshed');
+    render();
+  } catch (err) {
+    setStatus('license-status', '✗ ' + (err.message || 'failed'), true);
+  }
 }
 
 // ════════ Telegram ════════

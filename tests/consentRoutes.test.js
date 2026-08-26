@@ -186,4 +186,18 @@ describe('consent routes (Phase 2c-v2)', () => {
     expect(r.status).toBe(302);
     expect(r.headers.location).toBe('/login.html');
   });
+
+  // FIX-2026-08-26 Phase 3a: status includes audit fields (decidedAt + source + previousDecision)
+  //   - write directly via storage to bypass the in-process 5-POST/min rate limit used by earlier tests
+  test('GET /api/consent/status after decision includes decidedAt + source', async () => {
+    if (fs.existsSync(TMP_FILE)) fs.unlinkSync(TMP_FILE);
+    handlers._resetEngagedForTest();
+    storage.write({ decision: 'accepted', source: 'first_run' });
+    const r = await request(server, 'GET', '/api/consent/status');
+    expect(r.status).toBe(200);
+    expect(r.body.decidedAt).toBeTruthy();
+    expect(new Date(r.body.decidedAt).toString()).not.toBe('Invalid Date');
+    expect(r.body.source).toBe('first_run');
+    expect(r.body.previousDecision).toBeNull();
+  });
 });

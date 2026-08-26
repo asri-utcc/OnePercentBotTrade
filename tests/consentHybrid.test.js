@@ -79,6 +79,34 @@ describe('consent/handlers — getStatusPayload()', () => {
     expect(p.decision).toBe('pending');
     expect(p.consentVersion).toBe(config.version);
   });
+
+  // FIX-2026-08-26 Phase 3a: getStatusPayload() includes decidedAt + source + previousDecision
+  //   for Settings page Consent card audit display
+  test('returns null audit fields when no decision on disk (pending)', () => {
+    const p = handlers.getStatusPayload();
+    expect(p.decidedAt).toBeNull();
+    expect(p.source).toBeNull();
+    expect(p.previousDecision).toBeNull();
+  });
+
+  test('returns decidedAt + source after a decision is written', async () => {
+    await handlers.recordDecision({ decision: 'accepted', port: 6015 });
+    const p = handlers.getStatusPayload();
+    expect(p.decision).toBe('accepted');
+    expect(p.decidedAt).toBeTruthy();
+    expect(new Date(p.decidedAt).toString()).not.toBe('Invalid Date');
+    expect(p.source).toBe('first_run');
+    expect(p.previousDecision).toBeNull();
+  });
+
+  test('source=first_run → settings_change when revised', async () => {
+    await handlers.recordDecision({ decision: 'accepted', port: 6015 });
+    await handlers.recordDecision({ decision: 'declined', port: 6015 });
+    const p = handlers.getStatusPayload();
+    expect(p.decision).toBe('declined');
+    expect(p.source).toBe('settings_change');
+    expect(p.previousDecision).toBe('accepted');
+  });
 });
 
 describe('consent/handlers — recordDecision()', () => {
