@@ -28,8 +28,13 @@ const path = require('path');
 
 const ADMIN_URL = process.env.ADMIN_URL || 'http://127.0.0.1:6016';
 const ADMIN_USERNAME = process.env.ADMIN_USERNAME || 'admin';
-const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'qMJfqtMnuEgeJ9q!Aa1';
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || process.env.TEST_ADMIN_PASSWORD || '';
 const LICENSE_KEY = process.env.ADMIN_LICENSE_KEY || process.env.TEST_LICENSE_KEY || '';
+
+if (!ADMIN_PASSWORD) {
+  console.error('ERROR: set TEST_ADMIN_PASSWORD (or ADMIN_PASSWORD) env var');
+  process.exit(1);
+}
 
 if (!LICENSE_KEY) {
   console.error('ERROR: set TEST_LICENSE_KEY (or ADMIN_LICENSE_KEY) env var');
