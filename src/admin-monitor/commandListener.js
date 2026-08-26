@@ -17,6 +17,7 @@ const crypto = require('crypto');
 const config = require('./config');
 const { getMachineId } = require('./machineId');
 const executor = require('./commandExecutor');
+const eventBus = require('../services/eventBus'); // FIX-2026-08-26 Phase 2f
 const rootLogger = require('../utils/logger');
 
 const logger = rootLogger.child ? rootLogger.child({ module: 'admin-monitor/listener' }) : rootLogger;
@@ -152,6 +153,8 @@ class CommandListener {
       const { commands } = await httpGet(url, { 'X-License-Key': config.licenseKey });
       this.lastPollAt = Date.now();
       this.lastError = null;
+      // FIX-2026-08-26 Phase 2f: notify phone-home monitor on success
+      try { eventBus.emit('admin:contact_success', { source: 'command_poll' }); } catch (e) { /* ignore */ }
 
       if (commands && commands.length > 0) {
         logger.info({ count: commands.length }, 'admin-monitor: fetched pending commands');

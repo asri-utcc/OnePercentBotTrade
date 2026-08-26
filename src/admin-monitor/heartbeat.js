@@ -18,6 +18,7 @@ const { URL } = require('url');
 const os = require('os');
 const config = require('./config');
 const { getMachineId, getHostInfo } = require('./machineId');
+const eventBus = require('../services/eventBus'); // FIX-2026-08-26 Phase 2f
 const rootLogger = require('../utils/logger');
 
 const logger = rootLogger.child ? rootLogger.child({ module: 'admin-monitor/heartbeat' }) : rootLogger;
@@ -168,6 +169,8 @@ class HeartbeatSender {
       this.lastSentAt = Date.now();
       this.lastError = null;
       this.lastResponse = res;
+      // FIX-2026-08-26 Phase 2f: notify phone-home monitor on success
+      try { eventBus.emit('admin:contact_success', { source: 'heartbeat', serverTime: res.serverTime }); } catch (e) { /* ignore */ }
       if (this.tickCount === 1 || this.tickCount % 12 === 0) {
         // Log first tick + every hour (12 ticks at 5min interval)
         logger.info({ tick: this.tickCount, serverTime: res.serverTime }, 'admin-monitor: heartbeat sent');

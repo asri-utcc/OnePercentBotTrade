@@ -20,6 +20,7 @@ const masterConfig = require('./masterConfig'); // FIX-2026-08-08: master toggle
 const walletReserve = require('../services/walletReserve'); // FIX-2026-08-19: USDT reserve (กั๊กเงิน) — ลด availableUsdt ก่อนตรวจ BUY
 const buyCommitment = require('../services/buyCommitment'); // FIX-2026-08-21: atomic in-process claim กัน race ระหว่างบอท (แก้ "กั๊กเงินหลุด")
 const telegramNotifier = require('../services/telegramNotifier');
+const phoneHomeMonitor = require('../admin-monitor/phoneHomeMonitor'); // FIX-2026-08-26 Phase 2f
 const logger = require('../utils/logger');
 const Bot = require('../db/models/Bot');
 const Trade = require('../db/models/Trade');
@@ -3631,6 +3632,25 @@ class Trader {
   // ─── BUY logic ─────────────────────────────────────
   async placeBuy(signalDoc, candle) {
     try {
+      // FIX-2026-08-26 Phase 2f: phone-home-down gate (position-safety clause)
+      //   - per user design 2026-08-26: if admin server unreachable for >48h,
+      //     bot PAUSES (no new BUYs). existing positions stay open.
+      //   - existing TP/SL logic on open positions continues normally (we only block NEW BUYs).
+      //   - phoneHomeMonitor.isPhoneHomeDown() returns false if admin-monitor is disabled
+      //     (so this gate is a no-op for users without phone-home enabled).
+      if (phoneHomeMonitor.isPhoneHomeDown()) {
+        const remaining = phoneHomeMonitor.getRemainingMs();
+        logger.warn({
+          botId: this.bot._id.toString(),
+          signalId: signalDoc._id.toString(),
+          lastContactAt: phoneHomeMonitor.getLastContactAt()
+            ? new Date(phoneHomeMonitor.getLastContactAt()).toISOString() : null,
+          reason: 'phone_home_down_48h',
+        }, 'trader: skip BUY — phone-home down (admin unreachable >48h); position-safety clause active');
+        await Signal.updateOne({ _id: signalDoc._id }, { outcome: 'skipped', note: 'phone_home_down' });
+        return;
+      }
+
       // FIX-2026-08-01 (audit H1/R4): CB fire-suppression gate
       //   - ถ้า CB เพิ่ง panic-close ภายใน CB_SUPPRESS_MS → skip BUY ทันที
       //   - กัน S1 BUY วางบน candle ที่เพิ่ง trigger panic-close (race เดิม: CB fire-and-forget

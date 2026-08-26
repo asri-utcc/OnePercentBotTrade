@@ -24,6 +24,7 @@ const heartbeat = require('./heartbeat');
 const commandListener = require('./commandListener');
 const licenseGate = require('./licenseGate');
 const snapshotSender = require('./snapshotSender');
+const phoneHomeMonitor = require('./phoneHomeMonitor'); // FIX-2026-08-26 Phase 2f
 const { getMachineId } = require('./machineId');
 const rootLogger = require('../utils/logger');
 
@@ -68,6 +69,8 @@ function start({ botManager, eventBus, getMetrics } = {}) {
   commandListener.start({ botManager, eventBus });
   licenseGate.start({ botManager });
   snapshotSender.start();
+  // FIX-2026-08-26 Phase 2f: phone-home monitor subscribes to admin:contact_success events
+  phoneHomeMonitor.start();
 }
 
 function stop() {
@@ -75,6 +78,7 @@ function stop() {
   commandListener.stop();
   licenseGate.stop();
   snapshotSender.stop();
+  phoneHomeMonitor.stop();
   logger.info('admin-monitor: stopped');
 }
 

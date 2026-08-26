@@ -25,6 +25,7 @@ const https = require('https');
 const { URL } = require('url');
 const config = require('./config');
 const { getMachineId } = require('./machineId');
+const eventBus = require('../services/eventBus'); // FIX-2026-08-26 Phase 2f
 const rootLogger = require('../utils/logger');
 
 const logger = rootLogger.child ? rootLogger.child({ module: 'admin-monitor/license-gate' }) : rootLogger;
@@ -100,6 +101,8 @@ async function validate({ throwOnFail = true } = {}) {
     );
     _lastValidLicense = res.license;
     _lastValidatedAt = Date.now();
+    // FIX-2026-08-26 Phase 2f: notify phone-home monitor on success
+    try { eventBus.emit('admin:contact_success', { source: 'license_validate' }); } catch (e) { /* ignore */ }
     logger.info({
       owner: res.license?.owner,
       tier: res.license?.tier,
