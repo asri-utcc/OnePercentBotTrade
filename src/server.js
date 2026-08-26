@@ -20,6 +20,7 @@ const walletSnapshot = require('./services/walletSnapshot'); // FIX-2026-08-22: 
 const autoReserve = require('./services/autoReserve'); // FIX-2026-08-24: auto reserve/release USDT scheduler
 const adminMonitor = require('./admin-monitor'); // FIX-2026-08-26: OnePercentBot-Admin heartbeat + command listener
 const eventBus = require('./services/eventBus');
+const consent = require('./consent'); // FIX-2026-08-26 Phase 2c: first-run consent gate (3 sections + admin DB + local file)
 
 async function main() {
   logger.info({ env: config.env, port: config.port }, 'starting OnePercentBotTrade');
@@ -51,6 +52,29 @@ async function main() {
       await adminMonitor.validateLicense();
     } catch (err) {
       logger.error({ err: err.message, code: err.code, status: err.status }, 'adminMonitor.validateLicense failed — botManager will NOT start');
+      return;
+    }
+
+    // FIX-2026-08-26 Phase 2c: Consent gate — runs AFTER license check, BEFORE botManager.start
+    //   - on first run: opens /consent page, BLOCKS until user Accept/Decline
+    //   - if accepted: returns decision='accepted' → caller proceeds
+    //   - if declined: returns decision='declined' → caller SKIPS botManager.start, keeps web server alive
+    //     (so user can change mind via settings page without restarting bot)
+    //   - position-safety clause: declined state means NO new positions; existing positions stay open
+    let consentDecision = 'accepted';
+    try {
+      const r = await consent.gateStartup();
+      consentDecision = r.decision;
+      logger.info({ decision: consentDecision }, 'consent: gate complete');
+    } catch (err) {
+      logger.error({ err: err.message }, 'consent: gate failed (treating as declined)');
+      consentDecision = 'declined';
+    }
+    if (consentDecision === 'declined') {
+      logger.warn('consent: declined — botManager.start() SKIPPED; web server stays open for settings');
+      // Don't return — keep the process alive so the web server stays up.
+      // The user can change their decision via /consent (settings page).
+      // When they accept, we can manually restart botManager (Phase 2f: position-safety).
       return;
     }
 
