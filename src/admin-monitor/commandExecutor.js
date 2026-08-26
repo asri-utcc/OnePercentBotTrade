@@ -90,6 +90,33 @@ const handlers = {
     ctx.eventBus?.emit?.('admin:license_revoked', payload);
     return { ok: true, action: 'revoked' };
   },
+
+  // FIX-2026-08-26 Phase 2e: notify user via Telegram about unauthorized state
+  //   - sends ad-hoc message to user's TG chat (if configured)
+  //   - admin can include 'message' (default contact info) + 'reason' (audit)
+  //   - never blocks on TG failure (returns ok:false)
+  async notify_unauthorized(payload, ctx) {
+    const reason = payload?.reason || 'unspecified';
+    const contactInfo = payload?.contactInfo || '082-2621774 (คุณ อัสรี)';
+    const customMessage = payload?.message || null;
+    const suspendAt = payload?.suspendAt || null; // ISO; when bot will be paused
+    const text = customMessage || [
+      '⚠️ Your OnePercentBot machine has been flagged as UNAUTHORIZED.',
+      `Reason: ${reason}`,
+      `Bot will pause new positions at: ${suspendAt || '(already past)'}`,
+      '',
+      'What to do:',
+      `1. Contact the developer: ${contactInfo}`,
+      '2. Investigate why your license was flagged',
+      '3. Resolve the issue within 24 hours to avoid suspension',
+      '',
+      'Your existing positions remain open and will be managed by TP/SL as usual.',
+      'The bot will only STOP opening NEW positions — your money stays yours.',
+    ].join('\n');
+    const telegramDirectNotify = require('../services/telegramDirectNotify');
+    const sent = await telegramDirectNotify.sendAdminMessage(text);
+    return { ok: true, action: 'notify_unauthorized', telegramSent: sent };
+  },
 };
 
 /**
