@@ -44,6 +44,16 @@ async function main() {
 
   // 4. Connect MongoDB in background (retry forever, doesn't block listen)
   db.connect().then(async () => {
+    // FIX-2026-08-26: License gate — if admin-monitor enabled, validate license FIRST
+    //   - throws on missing/invalid/revoked license → botManager.start() is skipped
+    //   - no-op if ADMIN_ENABLED != 'true' (preserves default behavior)
+    try {
+      await adminMonitor.validateLicense();
+    } catch (err) {
+      logger.error({ err: err.message, code: err.code, status: err.status }, 'adminMonitor.validateLicense failed — botManager will NOT start');
+      return;
+    }
+
     // 5. Start bot manager (after DB ready)
     try {
       await botManager.start();
