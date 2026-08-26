@@ -35,6 +35,10 @@ const config = {
   customerTag: process.env.ADMIN_CUSTOMER_TAG || '',
   heartbeatMs: _int(process.env.ADMIN_HEARTBEAT_MS, 300000),
   pollMs: _int(process.env.ADMIN_POLL_MS, 60000),
+  // FIX-2026-08-26: local bot URL (used by snapshotSender to fetch local snapshot)
+  //   Defaults to http://127.0.0.1:6015 (bot default port).
+  botUrl: process.env.ADMIN_BOT_URL || process.env.BOT_URL || 'http://127.0.0.1:6015',
+  snapshotMs: _int(process.env.ADMIN_SNAPSHOT_MS, 300000),
   botVersion: require(path.join(__dirname, '..', '..', 'package.json')).version,
 };
 

@@ -17,3 +17,5 @@ logs/
 .pm2/cookies.txt
 cookies.txt
 bots.json
+# FIX-2026-08-26: admin-monitor machine-id (host-specific runtime artifact)
+data/admin-machine-id.txt

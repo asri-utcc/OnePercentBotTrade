@@ -147,6 +147,8 @@ function createApp() {
   app.use('/api/coins', require('./api/routes/coin.routes')); // FIX-2026-08-01: coin info aggregator
 // FIX-2026-08-21: Trade Analysis aggregator (includes soft-deleted bots)
 app.use('/api/analysis', require('./api/routes/analysis.routes'));
+// FIX-2026-08-26: Admin Snapshot — read-only aggregated bot state for OnePercentBot-Admin
+app.use('/api/admin/snapshot', require('./api/routes/adminSnapshot.routes'));
 
   // Health
   app.get('/health', (req, res) => {

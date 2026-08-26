@@ -23,6 +23,7 @@ const config = require('./config');
 const heartbeat = require('./heartbeat');
 const commandListener = require('./commandListener');
 const licenseGate = require('./licenseGate');
+const snapshotSender = require('./snapshotSender');
 const { getMachineId } = require('./machineId');
 const rootLogger = require('../utils/logger');
 
@@ -66,12 +67,14 @@ function start({ botManager, eventBus, getMetrics } = {}) {
   heartbeat.start({ metricsGetter: getMetrics });
   commandListener.start({ botManager, eventBus });
   licenseGate.start({ botManager });
+  snapshotSender.start();
 }
 
 function stop() {
   heartbeat.stop();
   commandListener.stop();
   licenseGate.stop();
+  snapshotSender.stop();
   logger.info('admin-monitor: stopped');
 }
 
