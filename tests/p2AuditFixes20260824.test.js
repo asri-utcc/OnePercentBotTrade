@@ -252,7 +252,8 @@ describe('P2-R2-9: requireBotActionPassword extracted to shared middleware', () 
   test('middleware/auth.js exports both requireAuth + requireBotActionPassword', () => {
     expect(authMiddlewareSrc).toMatch(/function requireAuth\(req, res, next\)/);
     expect(authMiddlewareSrc).toMatch(/function requireBotActionPassword\(req, res, next\)/);
-    expect(authMiddlewareSrc).toMatch(/module\.exports\s*=\s*\{ requireAuth, requireBotActionPassword \}/);
+    // FIX-2026-08-27: also accepts requireAuthOrLicenseKey for admin-proxy (positions endpoint)
+    expect(authMiddlewareSrc).toMatch(/module\.exports\s*=\s*\{ requireAuth, requireAuthOrLicenseKey, requireBotActionPassword \}/);
   });
 
   test('middleware reads password from body/header/query + 503 if not configured', () => {
