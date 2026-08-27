@@ -10,6 +10,7 @@ const { requireAuth } = require('../middleware/auth');
 const AppConfig = require('../../db/models/AppConfig');
 const { encrypt, decrypt } = require('../../services/crypto');
 const notifier = require('../../services/telegramNotifier');
+const alertConfig = require('../../services/alertConfig'); // FIX-2026-08-27 Phase 3b-2: validate HH:mm + cbPanicMin
 const logger = require('../../utils/logger');
 
 const router = express.Router();
@@ -26,7 +27,7 @@ router.get('/config', requireAuth, async (req, res) => {
       telegramLogin: (cfg && cfg.telegramEvents && typeof cfg.telegramEvents.telegramLogin === 'boolean')
         ? cfg.telegramEvents.telegramLogin
         : true,
-      thresholds: (cfg && cfg.telegramThresholds) || {},
+      thresholds: alertConfig.getEffectiveThresholds(cfg && cfg.telegramThresholds),
       enabled: !!(cfg && cfg.telegramEnabled),
       hasToken: !!(cfg && cfg.telegramBotTokenEnc),
       // FIX-2026-08-08: CB Version (global setting — Feature #2)
@@ -63,7 +64,30 @@ router.put('/config', requireAuth, async (req, res) => {
       );
     }
     if (body.thresholds && typeof body.thresholds === 'object' && !Array.isArray(body.thresholds)) {
-      update.telegramThresholds = body.thresholds;
+      // FIX-2026-08-27 Phase 3b-2: validate new threshold fields
+      //   - existing fields (positionLossPct/Profit/Stuck/bnbLowBalanceUsdt) pass through
+      //   - cbPanicMinPositions: integer 1..100
+      //   - quietHoursEnabled: boolean
+      //   - quietHoursStart/End: HH:mm string (validated via alertConfig.parseHHmm)
+      const incoming = body.thresholds;
+      const cleaned = Object.assign({}, incoming);
+      if (incoming.cbPanicMinPositions != null) {
+        const n = Number(incoming.cbPanicMinPositions);
+        if (!Number.isFinite(n) || n < 1 || n > 100 || Math.floor(n) !== n) {
+          return res.status(400).json({ error: 'cbPanicMinPositions must be integer 1..100' });
+        }
+        cleaned.cbPanicMinPositions = n;
+      }
+      if (incoming.quietHoursEnabled != null && typeof incoming.quietHoursEnabled !== 'boolean') {
+        return res.status(400).json({ error: 'quietHoursEnabled must be boolean' });
+      }
+      if (incoming.quietHoursStart != null && alertConfig.parseHHmm(incoming.quietHoursStart) == null) {
+        return res.status(400).json({ error: 'quietHoursStart must be HH:mm (e.g. "22:00")' });
+      }
+      if (incoming.quietHoursEnd != null && alertConfig.parseHHmm(incoming.quietHoursEnd) == null) {
+        return res.status(400).json({ error: 'quietHoursEnd must be HH:mm (e.g. "07:00")' });
+      }
+      update.telegramThresholds = cleaned;
     }
     if (typeof body.enabled === 'boolean') update.telegramEnabled = body.enabled;
 

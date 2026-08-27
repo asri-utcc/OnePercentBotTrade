@@ -17,6 +17,7 @@ const { encrypt, decrypt } = require('./crypto');
 const fxService = require('./fxService'); // FIX-2026-07-26: USDT→THB สำหรับ sellFilled PnL THB
 const binanceRest = require('../binance/binanceRest'); // FIX-2026-07-27: USDT balance remain หลัง fill
 const symbolInfo = require('../binance/symbolInfo'); // FIX-2026-07-31: formatPrice ตาม tickSize (authoritative)
+const alertConfig = require('./alertConfig'); // FIX-2026-08-27 Phase 3b-2: custom alert thresholds (cbPanicMinPositions + quietHours)
 
 // ─── Defaults (mirror AppConfig schema) ───────────────
 const DEFAULT_EVENTS = {
@@ -92,6 +93,13 @@ const DEFAULT_THRESHOLDS = {
   // FIX-2026-08-05: BNB low-balance alert threshold (USDT value of BNB qty × BNB/USDT price)
   //   - ถ้า (bnbQty × bnbUsdtPrice) < threshold → แจ้งเตือน (default $0.50)
   bnbLowBalanceUsdt: 0.5,
+  // FIX-2026-08-27 Phase 3b-2: Custom Alert Thresholds (per-event filters)
+  //   - cbPanicMinPositions: suppress CB panic-close if closedCount < N (default 1 = always send)
+  //   - quietHours*: suppress ALL alerts during [start, end) window (default OFF)
+  cbPanicMinPositions: 1,
+  quietHoursEnabled: false,
+  quietHoursStart: '22:00',
+  quietHoursEnd: '07:00',
 };
 
 // Anti-spam: per-trade state เพื่อกัน flood
@@ -276,6 +284,29 @@ async function dispatch(eventKey, payload) {
   if (!cfg.enabled || !cfg.hasToken || !cfg.chatId) return false;
   if (!cfg.events[eventKey]) return false;
   if (!_checkCbDedup(eventKey, payload)) return false;
+  // FIX-2026-08-27 Phase 3b-2: per-event threshold filters (after dedup, before render)
+  //   - CB panic-close: suppress if closedCount < cbPanicMinPositions
+  //   - quiet hours: suppress ALL alerts during [start, end) window (default OFF)
+  //   - critical alerts (anti-tamper, login-locked) bypass via cbPanicMinPositions check
+  //     because they're not in CB_DEDUP_EVENTS set, so shouldAlertCbPanic is skipped
+  if (CB_DEDUP_EVENTS.has(eventKey)) {
+    if (!alertConfig.shouldAlertCbPanic(payload && payload.closedCount, cfg.thresholds)) {
+      logger.info({
+        eventKey, botId: payload && payload.botId,
+        closedCount: payload && payload.closedCount,
+        cbPanicMinPositions: cfg.thresholds.cbPanicMinPositions,
+      }, 'telegramNotifier: CB panic-close suppressed (below cbPanicMinPositions)');
+      return false;
+    }
+  }
+  if (alertConfig.isInQuietHours(new Date(), cfg.thresholds)) {
+    logger.info({
+      eventKey, botId: payload && payload.botId,
+      quietStart: cfg.thresholds.quietHoursStart,
+      quietEnd: cfg.thresholds.quietHoursEnd,
+    }, 'telegramNotifier: alert suppressed (quiet hours)');
+    return false;
+  }
   const result = renderMessage(eventKey, payload, cfg);
   if (!result) return false;
   // 2026-08-09: renderMessage อาจ return { text, parseMode } สำหรับ event ที่ต้องการ HTML

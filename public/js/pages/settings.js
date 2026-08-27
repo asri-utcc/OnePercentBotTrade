@@ -783,6 +783,42 @@ function renderTelegramThresholdsSection(th) {
       </div>
     </div>
 
+    <hr class="my-3" />
+    <h6 class="text-muted mb-2">🚨 Circuit-Breaker panic-close <small>(Phase 3b-2)</small></h6>
+    <div class="row g-3">
+      <div class="col-md-4">
+        <label class="form-label">CB panic min positions <span class="text-muted">(≥ แจ้งเตือน)</span></label>
+        <input type="number" class="form-control" id="th-cbPanicMin" value="${Number.isFinite(Number(th.cbPanicMinPositions)) ? Number(th.cbPanicMinPositions) : 1}" step="1" min="1" max="100" />
+        <small class="text-muted">เช่น <code>1</code> = แจ้งทุก panic-close · <code>3</code> = แจ้งเฉพาะ panic ≥ 3 ไม้ (ลด noise สำหรับ basic-tier)</small>
+      </div>
+    </div>
+
+    <hr class="my-3" />
+    <h6 class="text-muted mb-2">🌙 Quiet Hours <small>(Phase 3b-2)</small></h6>
+    <div class="row g-3 align-items-end">
+      <div class="col-md-3">
+        <div class="form-check form-switch">
+          <input class="form-check-input" type="checkbox" id="th-quietHoursEnabled" ${th.quietHoursEnabled === true ? 'checked' : ''} />
+          <label class="form-check-label" for="th-quietHoursEnabled"><strong>เปิด Quiet Hours</strong> — ระงับ alert ทุกประเภทในช่วงเวลาที่กำหนด</label>
+        </div>
+      </div>
+      <div class="col-md-2">
+        <label class="form-label">เริ่ม <span class="text-muted">(HH:mm)</span></label>
+        <input type="time" class="form-control" id="th-quietHoursStart" value="${typeof th.quietHoursStart === 'string' ? th.quietHoursStart : '22:00'}" />
+      </div>
+      <div class="col-md-2">
+        <label class="form-label">สิ้นสุด <span class="text-muted">(HH:mm)</span></label>
+        <input type="time" class="form-control" id="th-quietHoursEnd" value="${typeof th.quietHoursEnd === 'string' ? th.quietHoursEnd : '07:00'}" />
+      </div>
+      <div class="col-md-5">
+        <small class="text-muted">
+          เช่น <code>22:00–07:00</code> = ระงับทุกคืน (wrap midnight) ·
+          <code>09:00–17:00</code> = ระงับช่วงกลางวัน ·
+          ปิด = แจ้งตลอด 24 ชม. (default)
+        </small>
+      </div>
+    </div>
+
     <div class="mt-3">
       <button type="button" class="btn btn-primary" id="btn-save-thresholds">💾 บันทึก Thresholds</button>
       <span class="ms-2 text-muted small" id="thresholds-status"></span>
@@ -1551,11 +1587,17 @@ async function saveEvents() {
 }
 
 async function saveThresholds() {
+  const cbMin = parseInt(document.getElementById('th-cbPanicMin').value, 10);
   const thresholds = {
     positionLossPct:   parseFloat(document.getElementById('th-loss').value),
     positionProfitPct: parseFloat(document.getElementById('th-profit').value),
     positionStuckMin:  parseInt(document.getElementById('th-stuck').value, 10),
     bnbLowBalanceUsdt: parseFloat(document.getElementById('th-bnbLow').value),
+    // FIX-2026-08-27 Phase 3b-2: custom alert thresholds
+    cbPanicMinPositions: cbMin,
+    quietHoursEnabled:   document.getElementById('th-quietHoursEnabled').checked,
+    quietHoursStart:     document.getElementById('th-quietHoursStart').value || '22:00',
+    quietHoursEnd:       document.getElementById('th-quietHoursEnd').value || '07:00',
   };
   if (!Number.isFinite(thresholds.positionLossPct) || !Number.isFinite(thresholds.positionProfitPct) || !Number.isFinite(thresholds.positionStuckMin)) {
     setStatus('thresholds-status', '❌ ค่าต้องเป็นตัวเลข', true);
@@ -1563,6 +1605,10 @@ async function saveThresholds() {
   }
   if (!Number.isFinite(thresholds.bnbLowBalanceUsdt) || thresholds.bnbLowBalanceUsdt < 0.05) {
     setStatus('thresholds-status', '❌ BNB low threshold ต้อง ≥ 0.05 USDT', true);
+    return;
+  }
+  if (!Number.isFinite(cbMin) || cbMin < 1 || cbMin > 100 || Math.floor(cbMin) !== cbMin) {
+    setStatus('thresholds-status', '❌ CB panic min ต้องเป็นจำนวนเต็ม 1..100', true);
     return;
   }
   try {
