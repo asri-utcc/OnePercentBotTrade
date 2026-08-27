@@ -61,6 +61,24 @@ async function main() {
       return;
     }
 
+    // FIX-2026-08-27 Phase 3a C1: Anti-tamper check — runs after license validate
+    //   - if license.codeHash set: compare SHA-256 of src/**/*.js against it
+    //   - on mismatch: emit antiTamper:detected event (consumed by commandListener → notify_unauthorized)
+    //   - NON-FATAL: logs warn but does NOT block botManager.start() (admin already got alert via eventBus)
+    try {
+      const antiTamper = require('./services/antiTamper');
+      const licenseGate = require('./admin-monitor/licenseGate');
+      const license = licenseGate.lastLicense || {};
+      const check = await antiTamper.checkIntegrity({ licenseCodeHash: license.codeHash });
+      if (check.skipped) {
+        logger.info({ fileCount: check.fileCount }, 'anti-tamper: skipped (no license.codeHash set)');
+      } else if (!check.ok) {
+        logger.error({ fileCount: check.fileCount, manifestHash: check.manifestHash.slice(0, 16) }, 'anti-tamper: MISMATCH — admin will be notified');
+      }
+    } catch (err) {
+      logger.warn({ err: err.message }, 'anti-tamper: check failed (non-fatal)');
+    }
+
     // FIX-2026-08-26 Phase 2c: Consent gate — runs AFTER license check, BEFORE botManager.start
     //   - on first run: opens /consent page, BLOCKS until user Accept/Decline
     //   - if accepted: returns decision='accepted' → caller proceeds
