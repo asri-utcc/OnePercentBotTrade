@@ -4,37 +4,25 @@
  * FIX-2026-08-26: Admin command executor
  *
  * Receives commands from admin (via commandListener) and executes them locally.
+ * Signature verification is done in commandListener before reaching here.
  *
  * Supported commands:
  *   - pause:             stop opening new positions (existing positions still managed)
  *   - resume:            re-enable trading
  *   - kill:              graceful shutdown of bot
  *   - force_close_all:   close all open positions immediately (delegate to botManager)
- *   - show_message:      log a message (could be picked up by UI for toast)
+ *   - show_message:      notify user — emit admin:message (→ dashboard toast) + try Telegram
  *   - update_config:     apply a config patch (limited safe keys only)
  *   - revoke_license:    mark license as revoked locally + stop trading
  *
- * Each command is signed by admin (HMAC-SHA256). We verify before executing.
+ * FIX-2026-08-27: HMAC verification moved to commandListener (Bug B).
+ *   Executor trusts the listener to have already verified.
  */
 
-const crypto = require('crypto');
 const config = require('./config');
 const rootLogger = require('../utils/logger');
 
 const logger = rootLogger.child ? rootLogger.child({ module: 'admin-monitor/executor' }) : rootLogger;
-
-/**
- * Verify HMAC signature. Admin signs with shared JWT_SECRET; bot verifies.
- * Returns true if signature is valid.
- */
-function verifySignature({ commandId, type, payload, issuedAt, signature }) {
-  if (!config.licenseKey || !config.url) return false;
-  // We use the same JWT_SECRET as the admin (configured via shared env or hardcoded)
-  // For simplicity, the admin and bot share JWT_SECRET via the licenseKey-derived path.
-  // Actual signature verification is done in commandListener (which has admin's secret).
-  // Here we just trust the listener that already verified.
-  return true;
-}
 
 /**
  * Command handlers. Each takes (payload, ctx) and returns { ok, result }.
@@ -63,11 +51,39 @@ const handlers = {
     return { ok: true, action: 'force_close_all', closedCount: closed ?? null };
   },
 
+  /**
+   * FIX-2026-08-27 Bug A: surface admin messages to the user.
+   *   - emits 'admin:message' on eventBus → dashboardWs forwards to all dashboard WS clients
+   *     → frontend shows a toast (see public/js/ws-client.js)
+   *   - best-effort Telegram send via telegramDirectNotify (only fires if TG configured)
+   *   - never throws (telegram failure is logged, not raised)
+   */
   async show_message(payload, ctx) {
-    const message = payload?.message || '';
-    logger.info({ adminMessage: message }, 'admin: message for user');
-    ctx.eventBus?.emit?.('admin:message', { message, payload });
-    return { ok: true, message };
+    const message = String(payload?.message || '');
+    const level = (payload?.level === 'warn' || payload?.level === 'error') ? payload.level : 'info';
+    logger[level]({ adminMessage: message, payload }, 'admin: message for user');
+    ctx.eventBus?.emit?.('admin:message', {
+      message,
+      level,
+      source: 'admin',
+      ts: Date.now(),
+    });
+    // Telegram fallback: if configured, also push to user's TG chat
+    try {
+      const telegramDirectNotify = require('../services/telegramDirectNotify');
+      // Fire-and-forget; sendAdminMessage never throws
+      telegramDirectNotify
+        .sendAdminMessage(`📨 Admin: ${message}`)
+        .then((sent) => {
+          if (sent) logger.info({ messageLen: message.length }, 'admin:message → Telegram delivered');
+          else logger.info('admin:message → Telegram not configured or send failed (non-fatal)');
+        })
+        .catch((e) => logger.warn({ err: e.message }, 'admin:message → Telegram throw (non-fatal)'));
+    } catch (e) {
+      // require() itself failed (rare) — log and continue
+      logger.warn({ err: e.message }, 'admin:message → telegramDirectNotify require failed');
+    }
+    return { ok: true, message, telegramQueued: true };
   },
 
   async update_config(payload, ctx) {
@@ -121,22 +137,21 @@ const handlers = {
 
 /**
  * Execute a command. Throws on unsupported type.
+ *
+ * FIX-2026-08-27: signature verification is the listener's responsibility,
+ * not the executor's. We trust the listener.
  */
 async function execute(command, ctx = {}) {
-  const { commandId, type, payload, signature, issuedAt } = command;
+  const { commandId, type, payload } = command;
 
   if (!handlers[type]) {
     throw new Error(`Unknown command type: ${type}`);
   }
 
-  if (!verifySignature(command)) {
-    throw new Error('Invalid command signature');
-  }
-
   logger.info({
     commandId,
     type,
-    issuedAt: new Date(issuedAt).toISOString(),
+    hmacSource: config.commandHmacSource,
   }, 'admin-monitor: executing command');
 
   const result = await handlers[type](payload || {}, ctx);
@@ -144,4 +159,4 @@ async function execute(command, ctx = {}) {
   return result;
 }
 
-module.exports = { execute, handlers, verifySignature };
+module.exports = { execute, handlers };

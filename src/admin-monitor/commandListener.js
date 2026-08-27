@@ -7,7 +7,13 @@
  * Verifies HMAC signature, then dispatches to executor.
  * Reports execution result back to admin.
  *
- * Uses HMAC-SHA256 with shared JWT_SECRET (configured in both admin and bot .env).
+ * Uses HMAC-SHA256 with shared secret:
+ *   - ADMIN_COMMAND_HMAC_SECRET env (preferred), OR
+ *   - JWT_SECRET env, OR
+ *   - SHA-256(licenseKey + ':cmd-hmac:v1') derived deterministically
+ *
+ * The signature is over JSON.stringify({ commandId, type, payload, issuedAt })
+ * — must match admin's signCommand() formula exactly.
  */
 
 const http = require('http');
@@ -23,6 +29,46 @@ const rootLogger = require('../utils/logger');
 const logger = rootLogger.child ? rootLogger.child({ module: 'admin-monitor/listener' }) : rootLogger;
 
 const processStartTime = Date.now();
+
+/**
+ * FIX-2026-08-27 Bug B: Verify HMAC-SHA256 signature from admin.
+ *
+ * Returns:
+ *   { ok: true }   when signature matches
+ *   { ok: false, reason: <string> }  otherwise
+ *
+ * Uses crypto.timingSafeEqual to prevent timing attacks.
+ * If config.commandHmacSecret is null (licenseKey empty), all commands reject.
+ */
+function verifySignature(cmd) {
+  const { commandId, type, payload, issuedAt, signature } = cmd;
+  const secret = config.commandHmacSecret;
+  if (!secret) {
+    return { ok: false, reason: 'no_hmac_secret_configured' };
+  }
+  if (!signature || typeof signature !== 'string') {
+    return { ok: false, reason: 'missing_signature' };
+  }
+  const expected = crypto
+    .createHmac('sha256', secret)
+    .update(JSON.stringify({ commandId, type, payload, issuedAt }))
+    .digest('hex');
+  // timingSafeEqual requires equal-length buffers
+  let sigBuf, expBuf;
+  try {
+    sigBuf = Buffer.from(signature, 'hex');
+    expBuf = Buffer.from(expected, 'hex');
+  } catch (e) {
+    return { ok: false, reason: 'invalid_signature_encoding' };
+  }
+  if (sigBuf.length !== expBuf.length || sigBuf.length === 0) {
+    return { ok: false, reason: 'signature_length_mismatch' };
+  }
+  if (!crypto.timingSafeEqual(sigBuf, expBuf)) {
+    return { ok: false, reason: 'signature_mismatch' };
+  }
+  return { ok: true };
+}
 
 function httpGet(targetUrl, headers = {}) {
   return new Promise((resolve, reject) => {
@@ -194,6 +240,18 @@ class CommandListener {
 
   async _executeAndReport(cmd) {
     const { commandId, type } = cmd;
+    // FIX-2026-08-27 Bug B: verify HMAC signature BEFORE executing.
+    // Reject forged/tampered commands and report failure back to admin.
+    const sigResult = verifySignature(cmd);
+    if (!sigResult.ok) {
+      logger.warn({
+        commandId, type, reason: sigResult.reason,
+      }, 'admin-monitor: command signature verification failed — rejecting');
+      try {
+        await this._reportResult(commandId, 'failed', null, `signature_invalid:${sigResult.reason}`);
+      } catch (_) { /* swallow report failure */ }
+      return;
+    }
     try {
       const result = await executor.execute(cmd, this.ctx);
       await this._reportResult(commandId, 'completed', result, null);
