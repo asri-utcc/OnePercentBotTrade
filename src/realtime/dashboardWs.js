@@ -16,6 +16,9 @@ const EVENTS_TO_FORWARD = [
   'health:update',
   'rateLimit:update', // FIX-2026-08-23: live Binance API weight pill on navbar
   'autoReserve:adjusted', // FIX-2026-08-24: auto reserve/release USDT event → refresh wallet UI
+  // FIX-2026-08-27 Bug A: show_message cmd → toast on dashboard
+  //   Emitted by commandExecutor.show_message → all connected WS clients show toast.
+  'admin:message',
 ];
 
 /**
