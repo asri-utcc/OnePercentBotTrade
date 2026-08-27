@@ -170,4 +170,35 @@ describe('antiTamper.checkIntegrity (FIX-2026-08-27)', () => {
     const r = await antiTamper.checkIntegrity({ srcDir: '/fake/src', licenseCodeHash: null });
     expect(r.fileCount).toBe(1);
   });
+
+  test('getLastTamperState reflects last check (FIX-2026-08-27 C1c)', async () => {
+    setupTree({ '/fake/src/a.js': 'x' });
+    expect(antiTamper.getLastTamperState()).toBeNull();
+    await antiTamper.checkIntegrity({ srcDir: '/fake/src', licenseCodeHash: null });
+    const s = antiTamper.getLastTamperState();
+    expect(s).not.toBeNull();
+    expect(s.ok).toBe(true);
+    expect(s.skipped).toBe(true);
+    expect(s.manifestHash).toBeDefined();
+    expect(s.fileCount).toBe(1);
+  });
+
+  test('getLastTamperState captures mismatch', async () => {
+    setupTree({ '/fake/src/a.js': 'x' });
+    await antiTamper.checkIntegrity({ srcDir: '/fake/src', licenseCodeHash: 'wrong-hash' });
+    const s = antiTamper.getLastTamperState();
+    expect(s.ok).toBe(false);
+    expect(s.mismatches).toEqual(['a.js']);
+  });
+
+  test('cache hit updates lastTamperState without re-hashing', async () => {
+    setupTree({ '/fake/src/a.js': 'x' });
+    await antiTamper.checkIntegrity({ srcDir: '/fake/src', licenseCodeHash: null });
+    const readdirCount = fs.readdirSync.mock.calls.length;
+    // Second call within TTL: no new walk, but state still updates
+    await antiTamper.checkIntegrity({ srcDir: '/fake/src', licenseCodeHash: 'any-hash' });
+    expect(fs.readdirSync.mock.calls.length).toBe(readdirCount);
+    const s = antiTamper.getLastTamperState();
+    expect(s.ok).toBe(false); // because we passed a non-matching hash on the cached result
+  });
 });

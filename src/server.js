@@ -62,7 +62,7 @@ async function main() {
     }
 
     // FIX-2026-08-27 Phase 3a C1: Anti-tamper check — runs after license validate
-    //   - if license.codeHash set: compare SHA-256 of src/**/*.js against it
+    //   - if license.codeHash set: compare SHA-256 of src/ .js files against it
     //   - on mismatch: emit antiTamper:detected event (consumed by commandListener → notify_unauthorized)
     //   - NON-FATAL: logs warn but does NOT block botManager.start() (admin already got alert via eventBus)
     try {

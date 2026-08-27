@@ -154,6 +154,18 @@ class LicenseGate {
     const wasValid = !!_lastValidLicense;
     try {
       await validate({ throwOnFail: false });
+      // FIX-2026-08-27 Phase 3a C1: re-run anti-tamper check on license re-validate.
+      //   Catches: admin newly sets License.codeHash → bot reads it next revalidate →
+      //   compares current src/ manifest against it. Mismatch → antiTamper:detected.
+      //   No force=true: antiTamper's 5-min cache keeps this cheap (one hash per 5min
+      //   even though revalidate fires hourly).
+      try {
+        const antiTamper = require('../services/antiTamper');
+        const license = _lastValidLicense || {};
+        await antiTamper.checkIntegrity({ licenseCodeHash: license.codeHash });
+      } catch (e) {
+        logger.warn({ err: e.message }, 'license-gate: anti-tamper re-check failed (non-fatal)');
+      }
       // If we were invalid and now valid (admin re-issued), resume
       if (!wasValid && _botManager?.resume) {
         logger.warn('license-gate: license restored — resuming bot');

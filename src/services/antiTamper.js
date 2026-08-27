@@ -36,6 +36,7 @@ const IGNORE_FILES = new Set(['.DS_Store']);
 
 let _lastResult = null;
 let _lastHashedAt = 0;
+let _lastTamperState = null; // { ok, manifestHash, fileCount, mismatches, detectedAt } — set on every check
 
 function _shouldSkip(filePath) {
   const parts = filePath.split(path.sep);
@@ -106,7 +107,9 @@ async function _computeManifest(srcDir) {
 async function checkIntegrity({ srcDir, licenseCodeHash, force = false } = {}) {
   const now = Date.now();
   if (!force && _lastResult && (now - _lastHashedAt) < CACHE_TTL_MS) {
-    return _compare(_lastResult, licenseCodeHash);
+    const cmp = _compare(_lastResult, licenseCodeHash);
+    _updateLastState(cmp);
+    return cmp;
   }
 
   const root = srcDir || path.join(__dirname, '..'); // project/src
@@ -115,6 +118,7 @@ async function checkIntegrity({ srcDir, licenseCodeHash, force = false } = {}) {
   _lastHashedAt = now;
 
   const cmp = _compare(result, licenseCodeHash);
+  _updateLastState(cmp);
   if (!cmp.ok) {
     logger.warn({
       mismatches: cmp.mismatches ? cmp.mismatches.length : null,
@@ -135,6 +139,29 @@ async function checkIntegrity({ srcDir, licenseCodeHash, force = false } = {}) {
     logger.info({ manifestHash: result.manifestHash.slice(0, 16), fileCount: result.fileCount }, 'anti-tamper: integrity OK');
   }
   return cmp;
+}
+
+/**
+ * FIX-2026-08-27 Phase 3a C1c: store last tamper state for heartbeat to read.
+ *   On mismatch: { ok:false, manifestHash, fileCount, mismatches, detectedAt }
+ *   On skip (no codeHash): { ok:true, skipped:true, ... }
+ *   On OK: { ok:true, ... }
+ * Heartbeat reads `getLastTamperState()` and forwards tamperDetected flag
+ * to admin on every beat — admin sees live tamper status on Machines tab.
+ */
+function _updateLastState(cmp) {
+  _lastTamperState = {
+    ok: cmp.ok,
+    skipped: cmp.skipped || false,
+    manifestHash: cmp.manifestHash,
+    fileCount: cmp.fileCount,
+    mismatches: cmp.mismatches || null,
+    detectedAt: new Date().toISOString(),
+  };
+}
+
+function getLastTamperState() {
+  return _lastTamperState;
 }
 
 function _compare(result, expected) {
@@ -162,10 +189,12 @@ function _compare(result, expected) {
 function _resetCache() {
   _lastResult = null;
   _lastHashedAt = 0;
+  _lastTamperState = null;
 }
 
 module.exports = {
   checkIntegrity,
+  getLastTamperState, // FIX-2026-08-27 C1c: heartbeat reads this
   _resetCache,
   _computeManifest, // exposed for tests
   HASH_ALGO,

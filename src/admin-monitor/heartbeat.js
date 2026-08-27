@@ -100,6 +100,13 @@ async function sendOnce(metricsGetter) {
   const host = getHostInfo();
   const metrics = await buildMetrics(metricsGetter);
 
+  // FIX-2026-08-27 Phase 3a C1c: include tamper state if any
+  let tamper = null;
+  try {
+    const antiTamper = require('../services/antiTamper');
+    tamper = antiTamper.getLastTamperState();
+  } catch (e) { /* antiTamper not loaded yet */ }
+
   const payload = {
     machineId,
     hostname: host.hostname,
@@ -110,6 +117,15 @@ async function sendOnce(metricsGetter) {
     // FIX-2026-08-26: per-customer watermark. Echoed verbatim to admin; identifies
     //   which customer leaked the code if it spreads to unauthorized machines.
     customerTag: config.customerTag,
+    // FIX-2026-08-27 Phase 3a C1c: tamper status (null if check never ran)
+    tamper: tamper ? {
+      detected: tamper.ok === false,
+      skipped: tamper.skipped === true,
+      manifestHash: tamper.manifestHash || null,
+      fileCount: tamper.fileCount || null,
+      mismatchCount: Array.isArray(tamper.mismatches) ? tamper.mismatches.length : 0,
+      checkedAt: tamper.detectedAt,
+    } : null,
   };
 
   const headers = {
