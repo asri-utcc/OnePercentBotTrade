@@ -8,6 +8,7 @@ const Bot = require('../../db/models/Bot');
 const Trade = require('../../db/models/Trade');
 const config = require('../../../config');
 const { getBotDefaults, buildBotCreatePayload } = require('../../services/botDefaults'); // FIX-2026-08-09: share defaults source with autoAddBot
+const licenseService = require('../../services/licenseService'); // FIX-2026-08-27 Phase 3b-1: pass tier to buildBotCreatePayload
 const botManager = require('../../core/botManager');
 const symbolInfo = require('../../binance/symbolInfo');
 const forceClose = require('../../core/forceClose');
@@ -1088,6 +1089,7 @@ router.post('/', requireAuth, requireBotActionPassword, async (req, res) => {
       overrides: data,
       botDefaults,
       fallbacks: defaults,
+      tier: licenseService.getTier ? licenseService.getTier() : null, // sync; cached licenseGate.lastLicense.tier
     });
 
     // `enabled` / `status` เป็น flow control (ไม่ใช่ default) — ใส่ที่นี่

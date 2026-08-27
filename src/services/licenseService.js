@@ -152,7 +152,7 @@ async function snapshot({ additionalUsdt = 0 } = {}) {
   // Warm cache if cold (so withinMaxCapital uses fresh value)
   const total = await getTotalDeployedUsdt();
   return {
-    tier: _getLicense()?.tier || null,
+    tier: getTier(),
     maxCapital: getMaxCapital(),
     totalDeployedUsdt: total,
     withinMaxCapital: withinMaxCapital(additionalUsdt),
@@ -161,9 +161,22 @@ async function snapshot({ additionalUsdt = 0 } = {}) {
   };
 }
 
+/**
+ * Synchronous tier access — reads licenseGate.lastLicense.tier directly.
+ * Returns string ('basic' | 'pro' | 'enterprise') or null if no license.
+ * Used by hot paths (e.g. POST /api/bots → buildBotCreatePayload) where
+ * awaiting an async snapshot() would add latency to every bot creation.
+ */
+function getTier() {
+  const lic = _getLicense();
+  if (!lic || !lic.tier) return null;
+  return lic.tier;
+}
+
 module.exports = {
   isFeatureEnabled,
   getMaxCapital,
+  getTier,
   getTotalDeployedUsdt,
   getTotalDeployedUsdtCached,
   withinMaxCapital,

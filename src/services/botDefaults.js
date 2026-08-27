@@ -30,6 +30,7 @@
  */
 
 const AppConfig = require('../db/models/AppConfig');
+const { mergeTierWithDefaults } = require('./tierTemplates'); // FIX-2026-08-27 Phase 3b-1
 
 /**
  * Read AppConfig.botDefaults (object or empty {})
@@ -138,12 +139,21 @@ function pickInt(overrides, botDefaults, key, fallback) {
  * @param {Object} opts.overrides   - explicit field values (req.body for manual, scan result for auto)
  * @param {Object} opts.botDefaults - AppConfig.botDefaults (already loaded)
  * @param {Object} opts.fallbacks   - hardcoded safe defaults (config.defaults + schema defaults)
+ * @param {String|null} opts.tier   - License tier ('basic' | 'pro' | 'enterprise'); null/unknown = no preset
  * @returns {Object} payload for Bot.create
+ *
+ * Precedence per field (strongest first):
+ *   1. overrides (user explicit / scan result)
+ *   2. tierPreset (admin-set tier wins over user-global)  ← FIX-2026-08-27 Phase 3b-1
+ *   3. botDefaults (Settings section 1️⃣)
+ *   4. fallback (config.defaults)
  */
-function buildBotCreatePayload({ overrides = {}, botDefaults = {}, fallbacks = {} } = {}) {
+function buildBotCreatePayload({ overrides = {}, botDefaults = {}, fallbacks = {}, tier = null } = {}) {
   // Normalize overrides — caller อาจส่ง `data` ที่ field ไม่ครบ (เช่น POST ส่ง symbol แต่ไม่ส่ง kcMult)
   const o = overrides || {};
-  const b = botDefaults || {};
+  // Merge tier preset ON TOP of botDefaults — tier wins over user-global settings
+  // (rationale: tier is what admin set; user-global is fallback when tier doesn't specify)
+  const b = mergeTierWithDefaults(botDefaults, tier);
   const f = fallbacks || {};
 
   const symbol = (o.symbol || b.defaultSymbol || f.symbol || '').toString().toUpperCase();

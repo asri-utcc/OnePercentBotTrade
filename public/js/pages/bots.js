@@ -683,6 +683,9 @@ function setupEventHandlers() {
   //   - fetched from /api/admin/bot-defaults
   //   - ใช้เฉพาะ field ที่ user ยังไม่เคยแก้ใน session นี้ (กัน override หลัง user พิมพ์เอง)
   //   - ถ้า API fail → ใช้ HTML default (เดิม)
+  //
+  // FIX-2026-08-27 Phase 3b-1: also fetch /api/license/info → show tier badge + Apply preset button
+  //   - Bot's buildBotCreatePayload already uses tier server-side; this just previews it.
   async function applyBotDefaultsToNewBot() {
     if (window._botDefaultsApplied) return; // ใช้ครั้งเดียวต่อ session
     try {
@@ -750,6 +753,83 @@ function setupEventHandlers() {
       // fail-open — ใช้ HTML default (เดิม)
       console.warn('applyBotDefaultsToNewBot failed:', e.message);
     }
+    // Tier badge + Apply preset button — independent fetch (fail-open)
+    try {
+      const licResp = await API.get('/api/license/info');
+      const tier = (licResp && licResp.license && licResp.license.tier) || null;
+      window._currentTier = tier;
+      const badge = document.getElementById('nb-tier-badge');
+      const btn = document.getElementById('nb-apply-tier-preset');
+      if (badge) {
+        if (tier) {
+          badge.textContent = tier;
+          badge.className = 'tier-badge tier-' + tier;
+          badge.style.display = 'inline-block';
+        } else {
+          badge.textContent = 'no-license';
+          badge.className = 'tier-badge tier-none';
+          badge.style.display = 'inline-block';
+        }
+      }
+      if (btn) {
+        btn.style.display = tier ? 'inline-block' : 'none';
+        btn.textContent = 'Apply ' + (tier || '') + ' Preset';
+        btn.onclick = function () {
+          applyTierPresetToNewBot(tier);
+          if (typeof updateNewBotTotal === 'function') updateNewBotTotal();
+        };
+      }
+    } catch (e) {
+      // license info not available — hide badge silently
+      console.warn('applyBotDefaultsToNewBot: tier fetch failed:', e.message);
+    }
+  }
+
+  // FIX-2026-08-27 Phase 3b-1: Tier preset application (mirrors src/services/tierTemplates.js)
+  //   - Frontend mirror so user sees instant feedback before submit
+  //   - Server-side buildBotCreatePayload already applies tier on POST (single source of truth)
+  const TIER_PRESETS_FRONTEND = {
+    basic: {
+      capitalPerTrade: 5, maxTrades: 3, tpPercent: 0.281, retryMax: 1, retryTimeMin: 0.5,
+      cbv5Enabled: true, cbv5LockHours: 8, cbAutoUnlockEnabled: false, cbv3Enabled: false,
+      autoArmStopLossOnUKC: true, autoUpdateTp: false,
+      dcaEnabled: false, martingaleEnabled: false,
+    },
+    pro: {
+      capitalPerTrade: 10, maxTrades: 10, tpPercent: 0.5, retryMax: 3, retryTimeMin: 0.2,
+      cbv5Enabled: true, cbv5LockHours: 4, cbAutoUnlockEnabled: true, cbv3Enabled: true,
+      autoArmStopLossOnUKC: true, autoUpdateTp: true,
+      dcaEnabled: false, martingaleEnabled: false,
+    },
+    enterprise: {
+      capitalPerTrade: 25, maxTrades: 20, tpPercent: 1.0, retryMax: 8, retryTimeMin: 0.1,
+      cbv5Enabled: true, cbv5LockHours: 2, cbAutoUnlockEnabled: true, cbv3Enabled: true,
+      autoArmStopLossOnUKC: true, autoUpdateTp: true,
+      dcaEnabled: false, martingaleEnabled: false, stopLossOnUpperKC: true,
+    },
+  };
+  function applyTierPresetToNewBot(tier) {
+    const preset = (tier && TIER_PRESETS_FRONTEND[tier]) || null;
+    if (!preset) {
+      console.warn('No tier preset for:', tier);
+      return;
+    }
+    const set = (id, val) => { const el = document.getElementById(id); if (el != null && val != null) el.value = val; };
+    const setChecked = (id, val) => { const el = document.getElementById(id); if (el) el.checked = !!val; };
+    set('nb-capital', preset.capitalPerTrade);
+    set('nb-maxtrades', preset.maxTrades);
+    set('nb-tp', preset.tpPercent);
+    set('nb-retry', preset.retryTimeMin);
+    set('nb-retry-max', preset.retryMax);
+    set('nb-cbv5-lock-hours', preset.cbv5LockHours);
+    set('nb-cbv3-lock-hours', preset.cbv3LockHours);
+    setChecked('nb-cb-auto-unlock-enabled', preset.cbAutoUnlockEnabled);
+    setChecked('nb-cbv3-enabled', preset.cbv3Enabled);
+    setChecked('nb-cbv5-enabled', preset.cbv5Enabled);
+    setChecked('nb-auto-update-tp', preset.autoUpdateTp);
+    setChecked('nb-auto-arm-stop-loss-ukc', preset.autoArmStopLossOnUKC);
+    if (preset.stopLossOnUpperKC != null) setChecked('nb-stop-loss-upper-kc', preset.stopLossOnUpperKC);
+    if (preset.dcaEnabled != null) setChecked('nb-dca-enabled', preset.dcaEnabled);
   }
 
   // FIX-2026-08-14: Import/Export file-based for New Bot modal

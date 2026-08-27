@@ -4355,3 +4355,10 @@ small.text-muted {
 .master-config-modal-close { background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1); color: var(--text-2); width: 32px; height: 32px; border-radius: 8px; cursor: pointer; font-size: 1.1em; line-height: 1; }
 .master-config-modal-close:hover { background: rgba(255,77,109,0.2); color: #ff4d6d; }
 .master-config-modal-body { padding: 1rem 1.25rem; }
+
+/* FIX-2026-08-27 Phase 3b-1: tier badge in New Bot modal */
+.tier-badge { display: inline-block; padding: 2px 10px; border-radius: 10px; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; }
+.tier-badge.tier-basic     { background: rgba(156,163,175,0.25); color: #d1d5db; border: 1px solid rgba(156,163,175,0.5); }
+.tier-badge.tier-pro       { background: rgba(74,158,255,0.25);  color: #93c5fd; border: 1px solid rgba(74,158,255,0.5);  }
+.tier-badge.tier-enterprise{ background: rgba(168,85,247,0.25); color: #d8b4fe; border: 1px solid rgba(168,85,247,0.5); }
+.tier-badge.tier-none      { background: rgba(255,181,71,0.25); color: #ffd8a8; border: 1px solid rgba(255,181,71,0.5); }

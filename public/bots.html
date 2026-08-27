@@ -241,6 +241,13 @@
             <div>
               <h5 class="modal-title mb-0">สร้างบอทใหม่</h5>
               <div class="lux-modal-sub">ตั้งค่าตามลำดับจากพื้นฐาน → ซื้อ → ขาย → ระบบป้องกัน</div>
+              <!-- FIX-2026-08-27 Phase 3b-1: tier indicator + Apply preset button -->
+              <div style="margin-top:6px;font-size:12px;">
+                License tier: <span id="nb-tier-badge" class="tier-badge" style="display:none">—</span>
+                <button type="button" id="nb-apply-tier-preset" class="btn btn-sm btn-outline-light ms-2" style="display:none;font-size:11px;padding:2px 8px;">
+                  Apply Tier Preset
+                </button>
+              </div>
             </div>
           </div>
           <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>

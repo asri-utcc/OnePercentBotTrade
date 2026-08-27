@@ -31,6 +31,7 @@ const volatilityScanner = require('../core/volatilityScanner');
 const botManager = require('../core/botManager'); // FIX-2026-08-07: auto-enable บอทที่เพิ่งสร้าง (spawnTrader)
 const eventBus = require('./eventBus');
 const { getBotDefaults, buildBotCreatePayload } = require('./botDefaults'); // FIX-2026-08-09: share defaults source with manual POST /api/bots
+const licenseService = require('./licenseService'); // FIX-2026-08-27 Phase 3b-1: pass tier to buildBotCreatePayload
 const logger = require('../utils/logger');
 
 const DEFAULT_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
@@ -466,7 +467,7 @@ class AutoAddBot {
       tpPercent: Number.isFinite(rank.suggestedTpPct) ? rank.suggestedTpPct : undefined,
     };
 
-    const payload = buildBotCreatePayload({ overrides, botDefaults });
+    const payload = buildBotCreatePayload({ overrides, botDefaults, tier: licenseService.getTier ? licenseService.getTier() : null });
 
     // SAFETY: สร้างบอท disabled เสมอ — user (หรือ autoEnable flag) เปิดเองทีหลัง
     payload.enabled = false;
