@@ -16,6 +16,10 @@ tmp/
 logs/
 .pm2/cookies.txt
 cookies.txt
+admin_cookies.txt
 bots.json
 # FIX-2026-08-26: admin-monitor machine-id (host-specific runtime artifact)
 data/admin-machine-id.txt
+# FIX-2026-08-27: ad-hoc diagnostic scripts (not part of the bot core)
+diag*.js
+diag-*.js
