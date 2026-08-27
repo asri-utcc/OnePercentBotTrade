@@ -3,7 +3,7 @@
 const express = require('express');
 // FIX-2026-08-24 (P1 audit): bulk operations stagger — must match botManager.SPAWN_STAGGER_MS
 const SPAWN_STAGGER_MS = 300;
-const { requireAuth } = require('../middleware/auth');
+const { requireAuth, requireAuthOrLicenseKey } = require('../middleware/auth');
 const Bot = require('../../db/models/Bot');
 const Trade = require('../../db/models/Trade');
 const config = require('../../../config');
@@ -369,7 +369,7 @@ router.get('/safe-trade-trendline/:botId', requireAuth, async (req, res) => {
   }
 });
 
-router.get('/positions', requireAuth, async (req, res) => {
+router.get('/positions', requireAuthOrLicenseKey, async (req, res) => {
   try {
     // FIX-2026-08-03: ?fresh=1 — bypass klineCache (in-memory, may be stale when WS dropped)
     //   and fetch latest bookTicker per unique symbol directly from Binance REST.
