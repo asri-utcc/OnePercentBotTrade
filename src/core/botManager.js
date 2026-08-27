@@ -227,8 +227,17 @@ class BotManager {
     logger.info({ intervalMs: delistIntervalMs, baseMs: DELIST_SCHEDULE_INTERVAL_MS }, 'botManager: delist scheduler scheduled');
 
     // FIX-2026-07-24: start Telegram notifier (subscribe eventBus + periodic PnL scan)
-    const telegramNotifier = require('../services/telegramNotifier');
-    telegramNotifier.start().catch((e) => logger.warn({ err: e.message }, 'telegramNotifier start failed'));
+    // FIX-2026-08-27 Phase 3a C2: gate by License.features.telegram (premium feature toggle).
+    //   - If license missing or features.telegram === false → skip start (no token decrypt attempt,
+    //     no event subscriptions, no periodic scans — bot still trades, just no TG notifications).
+    //   - Settings page shows current feature state; admin can flip it on/off per license.
+    const licenseService = require('../services/licenseService');
+    if (licenseService.isFeatureEnabled('telegram')) {
+      const telegramNotifier = require('../services/telegramNotifier');
+      telegramNotifier.start().catch((e) => logger.warn({ err: e.message }, 'telegramNotifier start failed'));
+    } else {
+      logger.info('botManager: telegramNotifier skipped (License.features.telegram === false or no license)');
+    }
 
     // FIX-2026-07-14: sync Binance server time on startup (กัน -1021 timestamp drift)
     binanceRest.refreshServerTimeOffset()

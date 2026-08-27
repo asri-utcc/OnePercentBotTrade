@@ -65,6 +65,7 @@ const telegramNotifier = require('./telegramNotifier');
 // FIX-2026-08-08: Feature #2 — CBv3 version routing (mutually exclusive with CBv2)
 const cbVersion = require('../core/cbVersion');
 const cbv5MasterToggle = require('../core/cbv5MasterToggle'); // FIX-2026-08-12 (audit Q9): master CBv5 toggle
+const licenseService = require('./licenseService'); // FIX-2026-08-27 Phase 3a C2: License.features.cbv5 premium gate
 const volatilityScanner = require('../core/volatilityScanner'); // FIX-2026-08-08: corrected path (volatilityScanner.js lives in src/core/, not src/services/)
 // FIX-2026-08-09: shared CB pattern evaluator — single source of truth for klines/KC/isCBv2At
 //   - eliminates kline window inconsistency between trader (WS cache 500) and watchdog (REST 30)
@@ -1333,7 +1334,9 @@ class PositionWatchdog {
     // FIX-2026-08-12 (audit Q9): master gate — AppConfig.cbv5MasterEnabled
     //   - Audit found: watchdog Phase 5 had no master gate, only per-bot cbv5Enabled
     //   - User contract: master toggle should let user disable CBv5 globally
-    if (!(await cbv5MasterToggle.isMasterCbv5Enabled())) {
+    // FIX-2026-08-27 Phase 3a C2: also gate by License.features.cbv5 (premium tier).
+    //   - Admin can disable CBv5 for entire license without touching AppConfig.
+    if (!(await cbv5MasterToggle.isMasterCbv5Enabled()) || !licenseService.isFeatureEnabled('cbv5')) {
       stats.cbv5SkippedMaster = (stats.cbv5SkippedMaster || 0) + 1;
       return;
     }

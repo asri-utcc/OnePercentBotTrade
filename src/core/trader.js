@@ -21,6 +21,7 @@ const walletReserve = require('../services/walletReserve'); // FIX-2026-08-19: U
 const buyCommitment = require('../services/buyCommitment'); // FIX-2026-08-21: atomic in-process claim กัน race ระหว่างบอท (แก้ "กั๊กเงินหลุด")
 const telegramNotifier = require('../services/telegramNotifier');
 const phoneHomeMonitor = require('../admin-monitor/phoneHomeMonitor'); // FIX-2026-08-26 Phase 2f
+const licenseService = require('../services/licenseService'); // FIX-2026-08-27 Phase 3a C2: license features + max-capital gate
 const logger = require('../utils/logger');
 const Bot = require('../db/models/Bot');
 const Trade = require('../db/models/Trade');
@@ -3591,8 +3592,12 @@ class Trader {
     //   - FIX-2026-08-12 (audit Q11): use evaluateCbCooldown (DB + in-mem) to handle
     //     stale in-memory bot.cbv5LockedUntil if watchdog just wrote it.
     //     cbCooldownGate reads DB + backfills in-mem — same as placeBuy gate.
+    //   - FIX-2026-08-27 Phase 3a C2: License.features.cbv5 (premium license gate). If
+    //     admin disabled CBv5 for this license tier → skip CBv5 evaluation entirely.
+    //     Two independent gates: AppConfig.cbv5MasterEnabled (operator toggle) AND
+    //     License.features.cbv5 (admin tier control). Both must be true to run CBv5.
     const cbv5PreGate = await cbCooldownGate.evaluateCbCooldown(this, this.bot, 'v5', Date.now());
-    if (this.bot.cbv5Enabled !== false && !this._isDcaMode() && !cbv5PreGate.active && !this._hasActiveCbCooldownExceptV5() && await cbv5MasterToggle.isMasterCbv5Enabled()) {
+    if (this.bot.cbv5Enabled !== false && !this._isDcaMode() && !cbv5PreGate.active && !this._hasActiveCbCooldownExceptV5() && await cbv5MasterToggle.isMasterCbv5Enabled() && licenseService.isFeatureEnabled('cbv5')) {
       try {
         const evalResult = await cbPatternEvaluator.fetchAndEvaluateCBv5({
           bot: this.bot,
@@ -4069,6 +4074,29 @@ class Trader {
             }, 'trader: DPS size below minNotional — falling back to capitalPerTrade');
           }
         }
+      }
+
+      // FIX-2026-08-27 Phase 3a C2: License max-capital pre-check
+      //   - blocks new BUY if (sum of all enabled bots' deployed capital + this BUY size) > License.maxCapital
+      //   - fail-CLOSED (refuses BUY) when over cap — admin sets License.maxCapital to allow more
+      //   - getTotalDeployedUsdt() is cached 30s → first call warms, subsequent calls within 30s are sync
+      //   - we await here to ensure fresh read on cold cache (rare path: process restart or 30s+ idle)
+      //   - if withinMaxCapital returns false → log + update Signal outcome + early-return
+      await licenseService.getTotalDeployedUsdt();
+      if (!licenseService.withinMaxCapital(buyNotionalUSDT)) {
+        const cap = licenseService.getMaxCapital();
+        const total = licenseService.getTotalDeployedUsdtCached();
+        logger.warn({
+          botId: this.bot._id.toString(),
+          symbol: this.bot.symbol,
+          buyNotionalUSDT,
+          totalDeployedUsdt: total,
+          maxCapital: cap === Infinity ? 'unlimited' : cap,
+          tier: licenseService.snapshot ? null : null, // tier surfaced via snapshot() if needed
+        }, 'trader: skip BUY — License.maxCapital exceeded (would push total over cap)');
+        await Signal.updateOne({ _id: signalDoc._id }, { outcome: 'skipped', note: 'license_max_capital' });
+        this.buyInFlight = false; // FIX-2026-07-21: release on early-return
+        return;
       }
 
       const { qty } = symbolInfo.calcQtyFromCapital({

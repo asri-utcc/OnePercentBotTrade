@@ -207,7 +207,16 @@ async function main() {
   // FIX-2026-08-24: Auto Reserve / Release USDT — periodic adjuster
   //   - Reads AppConfig.autoReserve* every 60s, fires on BKK-aligned HH:00 (where HH % checkHours === 0)
   //   - Default OFF — start() handles dormant mode (no interval if disabled)
-  autoReserve.start();
+  // FIX-2026-08-27 Phase 3a C2: gate by License.features.autoReserve (premium feature, opt-in).
+  //   - Basic license defaults OFF; pro license can enable via admin License.features.autoReserve = true.
+  //   - When gated, manual PUT /api/wallet/auto-reserve/config will still PERSIST but the
+  //     scheduler won't run. Users see this state on /wallet.html (tier badge in next phase).
+  const licenseService = require('./services/licenseService');
+  if (licenseService.isFeatureEnabled('autoReserve')) {
+    autoReserve.start();
+  } else {
+    logger.info('server: autoReserve skipped (License.features.autoReserve === false or no license)');
+  }
 
   // FIX-2026-08-26: OnePercentBot-Admin monitor — heartbeat (5min) + command poll (1min)
   //   - ADMIN_ENABLED=true required (default OFF)
