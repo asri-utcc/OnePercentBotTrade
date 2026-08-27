@@ -4086,13 +4086,14 @@ class Trader {
       if (!licenseService.withinMaxCapital(buyNotionalUSDT)) {
         const cap = licenseService.getMaxCapital();
         const total = licenseService.getTotalDeployedUsdtCached();
+        const licenseGate = require('../admin-monitor/licenseGate');
         logger.warn({
           botId: this.bot._id.toString(),
           symbol: this.bot.symbol,
           buyNotionalUSDT,
           totalDeployedUsdt: total,
           maxCapital: cap === Infinity ? 'unlimited' : cap,
-          tier: licenseService.snapshot ? null : null, // tier surfaced via snapshot() if needed
+          tier: licenseGate.lastLicense ? licenseGate.lastLicense.tier : null,
         }, 'trader: skip BUY — License.maxCapital exceeded (would push total over cap)');
         await Signal.updateOne({ _id: signalDoc._id }, { outcome: 'skipped', note: 'license_max_capital' });
         this.buyInFlight = false; // FIX-2026-07-21: release on early-return
