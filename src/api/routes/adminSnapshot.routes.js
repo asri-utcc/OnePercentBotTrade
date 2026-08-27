@@ -125,6 +125,14 @@ router.get('/', async (req, res) => {
       allTimeTrades: allTime.totalTrades,
       allTimePnl: allTime.totalPnl,
       winRate: allTime.totalTrades > 0 ? allTime.totalWins / allTime.totalTrades : 0,
+      // FIX-2026-08-27 Phase 3a C3: deployed capital (USDT) for License enforcement.
+      //   sum(capitalPerTrade * maxTrades) over enabled, non-paused bots.
+      //   Used by admin dashboard widget to show progress bar vs License.maxCapital.
+      //   Note: licenseService.getTotalDeployedUsdt() is cached 30s; we recompute here
+      //   since adminSnapshot has its own cadence (~5min polling) — recomputation is fine.
+      totalDeployedUsdt: bots
+        .filter((b) => b.enabled && !b.pausedAt)
+        .reduce((a, b) => a + (Math.max(0, Number(b.capitalPerTrade) || 0) * Math.max(0, Number(b.maxTrades) || 0)), 0),
     };
 
     res.json({
