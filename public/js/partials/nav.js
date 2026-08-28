@@ -21,7 +21,7 @@
   const botId = window.NAV_BOT_ID || '';
   const detailLabel = window.NAV_DETAIL_LABEL || 'Bot Detail';
 
-  const links = [
+  const allLinks = [
     { key: 'bots',          href: '/bots.html',     label: '🤖 Bots' },
     { key: 'detail',        href: botId ? `/bot-detail.html?id=${botId}` : '/bots.html', label: '📊 Detail' },
     { key: 'chart-monitor', href: '/chart-monitor.html', label: '📊 Chart Monitor' }, // 2026-08-06: grid of mini-charts for running bots
@@ -43,6 +43,7 @@
     const cached = sessionStorage.getItem('__licenseFeatures');
     if (cached) _licenseFeatures = JSON.parse(cached);
   } catch (_) {}
+  let links = allLinks;
   if (_licenseFeatures && _licenseFeatures.chartMonitor === false) {
     links = links.filter((l) => l.key !== 'chart-monitor');
   }
