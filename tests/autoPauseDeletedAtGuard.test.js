@@ -134,6 +134,14 @@ jest.mock('../src/services/fxService', () => ({
   getUsdtToThb: jest.fn(() => Promise.resolve(35)),
   clearCache: jest.fn(),
 }));
+// FIX-2026-08-28 B6: license gate — default-ON for backward compat in tests
+jest.mock('../src/services/licenseService', () => ({
+  isFeatureEnabled: jest.fn().mockReturnValue(true),
+  getMaxCapital: jest.fn().mockReturnValue(Infinity),
+  withinMaxCapital: jest.fn().mockReturnValue(true),
+  invalidateDeployedCache: jest.fn(),
+  snapshot: jest.fn().mockResolvedValue({ tier: 'pro', maxCapital: Infinity, features: {} }),
+}));
 jest.mock('../config', () => ({
   binance: { recvWindow: 60000, useBnbForFees: true, makerRate: 0.00075 },
   fees: { normalMaker: 0.00075, bnbMaker: 0.00075, normalTaker: 0.001, bnbTaker: 0.001 },

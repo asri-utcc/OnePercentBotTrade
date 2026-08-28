@@ -25,17 +25,20 @@
  *         capitalPerTrade/maxTrades ของบอทเสมอ
  *   A6) กฎยิงซ้ำจาก streak เดิม (ชนะ 3 แล้วชนะไม้ที่ 4 → history ยัง [W,W,W] → +1 อีก)
  *       → แก้: cfg.resetHistoryOnFire (default true) เคลียร์ history เมื่อกฎยิง
- *   + dryRun mode: คำนวณ + แจ้งเตือน แต่ไม่เขียน size ลง DB (ใช้เฝ้าดูก่อนเปิดจริง)
- *   + bad-config guard: minSize > maxSize → skip แทน clamp เพี้ยน
- *
- * FIX-2026-08-08: design notes
- *   - effective size = dynamicSizeCurrent if set else capitalPerTrade
- *   - effective layers = dynamicLayersCurrent if set else maxTrades
- *   - persisted `dynamicSizeLastResults` = closed positions ล่าสุด (most recent first),
- *     cap = max(winStreakCount, bigWinCount, lossStreakCount)
- *   - **rule order matters**: เช็ค win-streak ก่อน (priority สูงสุด) → big-win → loss
- *     เมื่อหลายเงื่อนไขเข้าพร้อมกัน apply delta เดียวต่อ 1 eval
  */
+
+// FIX-2026-08-28 B6: gate DPS via license (basic tier = OFF)
+const licenseService = require('../services/licenseService');
+
+// ─────────────────────────────────────────────────────────────────────────────
+// FIX-2026-08-08: design notes
+//   - effective size = dynamicSizeCurrent if set else capitalPerTrade
+//   - effective layers = dynamicLayersCurrent if set else maxTrades
+//   - persisted `dynamicSizeLastResults` = closed positions ล่าสุด (most recent first),
+//     cap = max(winStreakCount, bigWinCount, lossStreakCount)
+//   - **rule order matters**: เช็ค win-streak ก่อน (priority สูงสุด) → big-win → loss
+//     เมื่อหลายเงื่อนไขเข้าพร้อมกัน apply delta เดียวต่อ 1 eval
+// ─────────────────────────────────────────────────────────────────────────────
 
 // ─────────────────────────────────────────────────────────────────────────────
 // DEFAULTS — ค่าเดิมทุกตัวก่อน rev2 (AppConfig ที่ยังไม่มี field เหล่านี้ = ทำงานเหมือนเดิมเป๊ะ)
@@ -221,6 +224,10 @@ function evaluate(bot, tradeResult, cfg) {
   if (!bot) return { changed: false, skipped: 'no-bot', reason: 'no-bot' };
   if (bot.dynamicSizeEnabled === false) {
     return { changed: false, skipped: 'disabled', reason: 'disabled' };
+  }
+  // FIX-2026-08-28 B6: license gate — basic tier disables DPS
+  if (!licenseService.isFeatureEnabled('dps')) {
+    return { changed: false, skipped: 'license-disabled', reason: 'license-disabled' };
   }
   // FIX-2026-08-08: master switch (AppConfig.masterDynamicSizeEnabled, default true)
   //   - trader hook stamps master state into bot._masterDynamicSizeEnabled

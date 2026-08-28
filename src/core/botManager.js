@@ -5,6 +5,7 @@ const { marketWs, userDataWs } = require('../binance/binanceWs');
 const symbolInfo = require('../binance/symbolInfo');
 const klineCache = require('../services/klineCache');
 const eventBus = require('../services/eventBus');
+const licenseService = require('../services/licenseService'); // FIX-2026-08-28 B6: gate autoPauseMinKc feature
 const logger = require('../utils/logger');
 const Bot = require('../db/models/Bot');
 const Trade = require('../db/models/Trade');
@@ -1156,6 +1157,11 @@ async function findBotIdsWithBuyInFlight() {
 //   - FIX-2026-08-22 (zombie): exclude soft-deleted bots (deletedAt: null) — กัน RESUME บอทที่ user ลบไปแล้ว
 //     (kaito/gps incident: บอทถูก auto-pause → user soft-delete → vol ฟื้น → auto-RESUME กลับมาเปิด BUY ใหม่)
 async function checkAutoPauseBots() {
+  // FIX-2026-08-28 B6: license gate — basic tier disables Auto Pause on minKC%
+  if (!licenseService.isFeatureEnabled('autoPauseMinKc')) {
+    logger.debug('botManager: checkAutoPauseBots skipped — license disables autoPauseMinKc');
+    return;
+  }
   let bots;
   try {
     bots = await Bot.find({ autoPauseEnabled: { $ne: false }, deletedAt: null }).lean();

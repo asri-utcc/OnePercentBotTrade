@@ -24,6 +24,13 @@
 
 const dps = require('../src/core/dynamicPositionSizing');
 
+// FIX-2026-08-28 B6: DPS gate via license — default-ON for backward compat in tests
+jest.mock('../src/services/licenseService', () => ({
+  isFeatureEnabled: jest.fn().mockReturnValue(true),
+  getMaxCapital: jest.fn().mockReturnValue(Infinity),
+  withinMaxCapital: jest.fn().mockReturnValue(true),
+}));
+
 // helpers ──────────────────────────────────────────────────────────────────
 const baseBot = (overrides = {}) => ({
   capitalPerTrade: 9,

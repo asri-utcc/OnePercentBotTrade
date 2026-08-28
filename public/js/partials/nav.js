@@ -34,7 +34,20 @@
     { key: 'wallet',        href: '/wallet.html',   label: '💼 Wallet' },            // 2026-08-19: holdings + USDT reserve
     { key: 'security',      href: '/password-sessions.html', label: '🔑 Security' }, // 2026-08-09: Password & Sessions Manager
     { key: 'settings',      href: '/settings.html', label: '⚙️ Settings' },          // FIX-2026-07-24
-  ].filter((l) => l.key !== 'detail' || botId); // hide detail if no botId
+  ];
+  // FIX-2026-08-28 B6: hide chart-monitor link when license disables it
+  //   - features fetched from /api/license/info (already exposed, no new endpoint)
+  //   - default ON if license missing (legacy compat) — see licenseService.isFeatureEnabled
+  let _licenseFeatures = window.__licenseFeatures || null;
+  try {
+    const cached = sessionStorage.getItem('__licenseFeatures');
+    if (cached) _licenseFeatures = JSON.parse(cached);
+  } catch (_) {}
+  if (_licenseFeatures && _licenseFeatures.chartMonitor === false) {
+    links = links.filter((l) => l.key !== 'chart-monitor');
+  }
+  // hide detail if no botId
+  links = links.filter((l) => l.key !== 'detail' || botId);
 
   const desktopHtml = `
     <div class="d-flex align-items-center gap-2 flex-wrap" style="max-width: 1400px; margin: 0 auto;">
@@ -327,6 +340,13 @@
   (async () => {
     setUsdtText('...');
     setThbText('');
+    // FIX-2026-08-28 B6: refresh license features for nav-link gating
+    API.get('/api/license/info').then((r) => {
+      if (r && r.license && r.license.features) {
+        window.__licenseFeatures = r.license.features;
+        try { sessionStorage.setItem('__licenseFeatures', JSON.stringify(r.license.features)); } catch (_) {}
+      }
+    }).catch(() => {});
     await refreshAll();
   })();
 

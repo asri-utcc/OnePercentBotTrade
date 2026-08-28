@@ -24,6 +24,7 @@ const volatilityScanner = require('./volatilityScanner');
 const indicators = require('./indicators');
 const fees = require('../binance/fees');
 const eventBus = require('../services/eventBus'); // FIX-2026-07-26: emit tp:low event for Telegram notifier
+const licenseService = require('../services/licenseService'); // FIX-2026-08-28 B6: gate autoUpdateTp via license
 
 // FIX-2026-07-26: TP low warning threshold (NET TP ต่ำกว่า threshold นี้ → แจ้งเตือน)
 const TP_LOW_PNL_THRESHOLD_PCT = 0.2;
@@ -334,6 +335,8 @@ function scheduleHourlyTpUpdate() {
   logger.info({ intervalMs: TP_TICK_INTERVAL_MS }, 'tpUpdater: hourly timer scheduled');
   tpUpdateTimer = setInterval(() => {
     if (tpUpdateInFlight) return;
+    // FIX-2026-08-28 B6: license gate — basic tier disables auto TP update
+    if (!licenseService.isFeatureEnabled('autoUpdateTp')) return;
     const now = new Date();
     if (!isTopOfHour(now)) return;
     if (lastFiredHour === now.getHours()) return; // กัน drift/run ซ้ำ

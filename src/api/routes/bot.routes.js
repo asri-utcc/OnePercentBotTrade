@@ -690,6 +690,14 @@ let _cmSignalsCache = null;
 const CM_SIGNALS_CACHE_MS = 30_000;
 const CM_SIGNALS_TOP_LIMIT = 50;
 router.get('/chart-monitor/signals', requireAuth, async (req, res) => {
+  // FIX-2026-08-28 B6: license gate — basic tier disables Chart Monitor
+  if (!licenseService.isFeatureEnabled('chartMonitor')) {
+    return res.status(403).json({
+      error: 'License นี้ปิดใช้งาน Chart Monitor — ติดต่อ admin',
+      code: 'LICENSE_FEATURE_DISABLED',
+      feature: 'chartMonitor',
+    });
+  }
   try {
     const forceRefresh = req.query.fresh === '1';
     if (!forceRefresh && _cmSignalsCache && (Date.now() - _cmSignalsCache.at) < CM_SIGNALS_CACHE_MS) {

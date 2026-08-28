@@ -1351,6 +1351,10 @@ class Trader {
       logger.debug({ botId: this.bot._id.toString() }, 'trader: cb skip — disabled');
       return;
     }
+    if (!licenseService.isFeatureEnabled('cb')) {
+      logger.debug({ botId: this.bot._id.toString() }, 'trader: cb skip — license disables circuit breakers');
+      return;
+    }
     // FIX-2026-08-02: DCA mode — disable CB panic-sell entirely
     //   - matches "no cut loss" philosophy of DCA stack strategy
     //   - ให้ layer accumulation ทำงานต่อ (ราคาจะลงเท่าไหร่ก็ตาม — BEP จะลดลงเรื่อยๆ)
@@ -1549,6 +1553,10 @@ class Trader {
     }
     if (this.bot.cbv2Enabled === false) {
       logger.debug({ botId: this.bot._id.toString() }, 'trader: cbv2 skip — disabled');
+      return;
+    }
+    if (!licenseService.isFeatureEnabled('cb')) {
+      logger.debug({ botId: this.bot._id.toString() }, 'trader: cbv2 skip — license disables circuit breakers');
       return;
     }
     // DCA mode — disable CBv2 entirely (mirror CB pattern)
@@ -1854,6 +1862,10 @@ class Trader {
     }
     if (this.bot.cbv3Enabled === false) {
       logger.debug({ botId: this.bot._id.toString() }, 'trader: cbv3 skip — disabled');
+      return;
+    }
+    if (!licenseService.isFeatureEnabled('cb')) {
+      logger.debug({ botId: this.bot._id.toString() }, 'trader: cbv3 skip — license disables circuit breakers');
       return;
     }
     if (this._isDcaMode()) {
@@ -2199,6 +2211,10 @@ class Trader {
     }
     if (this.bot.cbv5Enabled === false) {
       logger.debug({ botId: this.bot._id.toString() }, 'trader: cbv5 skip — disabled');
+      return;
+    }
+    if (!licenseService.isFeatureEnabled('cbv5')) {
+      logger.debug({ botId: this.bot._id.toString() }, 'trader: cbv5 skip — license disables CBv5');
       return;
     }
     if (this._isDcaMode()) {
@@ -3428,7 +3444,8 @@ class Trader {
     //   - PASS = lastClose > open (green ONLY — strict, FIX-2026-08-19) — แดง block ทันทีไม่สน EMA
     //   - FAIL-OPEN on Binance error (API outage ไม่ block การเทรด)
     //   - skip BUY ทันทีถ้า fail (don't waste signal slot)
-    if (this.bot.safeTradeEnabled !== false) {
+    // FIX-2026-08-28 B6: license gate — basic tier disables Safe Trade (#1) entirely
+    if (licenseService.isFeatureEnabled('safeTrade') && this.bot.safeTradeEnabled !== false) {
       try {
         const st = await signalEngine.checkSafeTrade(this.bot, binanceRest, indicators);
         if (st.skip) {
@@ -3472,7 +3489,7 @@ class Trader {
     //   - FAIL-OPEN on Binance error / warmup / insufficient data (mirror ST#1)
     //   - **ไม่แนะนำสำหรับ DCA bots** (DCA ซื้อ dip — filter นี้ block dip-buy → ขัดกับ DCA intent)
     //   - ทำงานคู่กับ ST#1: ST#1 = "ขาขึ้นบน super-upper TF" + ST#2 = "ราคายังอยู่เหนือ support บน upper-TF"
-    if (this.bot.safeTradeTrendlineEnabled === true) {
+    if (licenseService.isFeatureEnabled('safeTrade') && this.bot.safeTradeTrendlineEnabled === true) {
       try {
         const trendTF = volatilityScanner.TREND_TF_MAP && volatilityScanner.TREND_TF_MAP[this.bot.timeframe];
         const st2 = await signalEngine.checkSafeTradeTrendline(this.bot, trendTF, binanceRest);
@@ -3532,7 +3549,7 @@ class Trader {
     // FIX-2026-08-05: ST#3 disabled for DCA bots (UI warns "not recommended for DCA")
     //   - DCA intent = buy dips — filter = block dip-buys → ขัดกัน
     //   - Wizard layer-add ของ DCA ใช้ placeBuy path เดียวกัน → ต้อง bypass filter
-    if (this.bot.safeTradeNoTradeEnabled === true && !this._isDcaMode()) {
+    if (licenseService.isFeatureEnabled('safeTrade') && this.bot.safeTradeNoTradeEnabled === true && !this._isDcaMode()) {
       try {
         const trendTF = volatilityScanner.TREND_TF_MAP && volatilityScanner.TREND_TF_MAP[this.bot.timeframe];
         const st3 = await signalEngine.checkNoTradeOnUpperTF(this.bot, trendTF, binanceRest);

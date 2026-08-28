@@ -132,7 +132,8 @@ class AutoAddBot {
     }
     const intervalMin = Math.max(5, Number(cfg.autoAddBotIntervalMin) || 60);
     return {
-      enabled: cfg.autoAddBotEnabled === true,
+      // FIX-2026-08-28 B6: gate autoAddBot via license (basic tier = OFF)
+      enabled: cfg.autoAddBotEnabled === true && licenseService.isFeatureEnabled('autoAddBot'),
       intervalMs: intervalMin * 60 * 1000,
       minKcPct: Number(cfg.autoAddBotMinKcPct) || 2,
       maxPerRun: Math.max(1, Number(cfg.autoAddBotMaxPerRun) || 5),

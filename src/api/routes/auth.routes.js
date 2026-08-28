@@ -23,6 +23,8 @@ const loginAudit = require('../../utils/loginAudit');
 const LoginAttempt = require('../../db/models/LoginAttempt');
 // FIX-2026-08-10: shared client-IP extraction (CF-Connecting-IP + X-Real-IP + XFF)
 const { getClientIp } = require('../../utils/clientIp');
+// FIX-2026-08-28 B6: gate telegramLogin feature via license (basic tier = OFF)
+const licenseService = require('../../services/licenseService');
 
 // Brute-force protection สำหรับ /login (สำคัญมากถ้า expose port ออกเน็ต)
 const loginGuard = new LoginGuard({
@@ -146,7 +148,8 @@ router.get('/status', async (req, res) => {
       configDoc &&
       configDoc.telegramEnabled &&
       configDoc.telegramBotTokenEnc &&
-      (configDoc.telegramEvents?.telegramLogin !== false)
+      (configDoc.telegramEvents?.telegramLogin !== false) &&
+      licenseService.isFeatureEnabled('telegramLogin')
     );
     res.json({ setupCompleted, authenticated, telegramLoginEnabled });
   } catch (err) {
@@ -314,6 +317,10 @@ router.post('/login-telegram/request', authTgRequestLimiter, async (req, res) =>
     if (!cfg?.telegramEnabled || !cfg?.telegramBotTokenEnc) {
       loginAudit.logFailedLoginAttempt({ ip, method: 'telegram-otp', reason: 'telegram-disabled', userAgent });
       return res.status(400).json({ error: 'Telegram login ไม่พร้อมใช้งาน — bot ยังไม่ได้ตั้งค่า' });
+    }
+    if (!licenseService.isFeatureEnabled('telegramLogin')) {
+      loginAudit.logFailedLoginAttempt({ ip, method: 'telegram-otp', reason: 'license-disabled', userAgent });
+      return res.status(403).json({ error: 'License นี้ปิดใช้งาน Telegram login — ติดต่อ admin' });
     }
     if (cfg.telegramEvents?.telegramLogin === false) {
       loginAudit.logFailedLoginAttempt({ ip, method: 'telegram-otp', reason: 'telegram-event-disabled', userAgent });
