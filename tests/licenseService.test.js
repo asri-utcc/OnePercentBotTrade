@@ -194,7 +194,13 @@ describe('licenseService.snapshot (FIX-2026-08-27 C2)', () => {
       maxCapital: 10000,
       totalDeployedUsdt: 50,
       withinMaxCapital: true,
-      features: { telegram: true, autoReserve: false, cbv5: true },
+      // FIX-2026-08-28 B5: _getFeatures() now returns 11 keys (was 3). Legacy license
+      // without features.* fields defaults them ON for backward compat.
+      features: {
+        telegram: true, autoReserve: false, cbv5: true, safeTrade: true, cb: true,
+        telegramLogin: true, autoAddBot: false, autoUpdateTp: false, autoPauseMinKc: false,
+        chartMonitor: true, dps: true,
+      },
       hasLicense: true,
     });
   });

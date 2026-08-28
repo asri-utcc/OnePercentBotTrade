@@ -38,17 +38,45 @@ function _getLicense() {
   return licenseGate.lastLicense || null;
 }
 
+// FIX-2026-08-28 B5: 11 feature keys (was 3). Default-ON for backward-compat
+// (existing licenses without features.* still work). Default-OFF for new premium-only
+// flags (autoAddBot / autoUpdateTp / autoPauseMinKc) so legacy licenses don't silently
+// gain premium features.
 function _getFeatures() {
   const lic = _getLicense();
   if (!lic) {
     // No license → no features. Defensive default: lock everything.
-    return { telegram: false, autoReserve: false, cbv5: false };
+    return _allFeatures(false);
   }
   const f = lic.features || {};
   return {
-    telegram: f.telegram !== false,  // default ON (legacy licenses don't set features)
-    autoReserve: f.autoReserve === true, // default OFF (premium feature)
-    cbv5: f.cbv5 !== false,  // default ON (legacy licenses don't set features)
+    telegram: f.telegram !== false,
+    autoReserve: f.autoReserve === true,
+    cbv5: f.cbv5 !== false,
+    safeTrade: f.safeTrade !== false,
+    cb: f.cb !== false,
+    telegramLogin: f.telegramLogin !== false,
+    autoAddBot: f.autoAddBot === true,
+    autoUpdateTp: f.autoUpdateTp === true,
+    autoPauseMinKc: f.autoPauseMinKc === true,
+    chartMonitor: f.chartMonitor !== false,
+    dps: f.dps !== false,
+  };
+}
+
+function _allFeatures(on) {
+  return {
+    telegram: on,
+    autoReserve: on,
+    cbv5: on,
+    safeTrade: on,
+    cb: on,
+    telegramLogin: on,
+    autoAddBot: on,
+    autoUpdateTp: on,
+    autoPauseMinKc: on,
+    chartMonitor: on,
+    dps: on,
   };
 }
 
