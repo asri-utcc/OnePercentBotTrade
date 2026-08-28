@@ -92,17 +92,24 @@ function isFeatureEnabled(featureName) {
 
 /**
  * Returns the max total USDT this license allows across all bots+machines.
- *   - 0   → "no capital allowed" (effectively blocks all BUYs)
+ *   - 0   → "unlimited" (admin signals "no cap" by leaving maxCapital at 0)
  *   - >0  → capped at this value
- *   - Infinity → unlimited (when admin set License.maxCapital === 0/null AND tier === 'enterprise')
+ *   - Infinity → unlimited (same as 0, kept for legacy callers)
+ *
+ * FIX-2026-08-28 Phase 3b-5 D5: unlimited is signaled by `maxCapital === 0` regardless of tier name.
+ *   The previous rule (`lic.tier === 'enterprise'`) was tier-name coupled and silently blocked
+ *   every BUY on any tier with `maxCapital: 0` (notably `free+` trials, where the admin UI
+ *   already renders 0 as `∞ unlimited`). Tier names are now admin-editable data in the
+ *   TierTemplate collection, so the bot must not hardcode any of them. "Block this customer"
+ *   = revoke the license, not `maxCapital: 0`.
  */
 function getMaxCapital() {
   const lic = _getLicense();
   if (!lic) return 0; // no license → no capital
   const v = Number(lic.maxCapital);
   if (!Number.isFinite(v) || v <= 0) {
-    // 0/null on enterprise tier = unlimited; otherwise treat as no-cap.
-    return lic.tier === 'enterprise' ? Infinity : 0;
+    // 0 / null / absent / NaN / negative = unlimited for every tier.
+    return Infinity;
   }
   return v;
 }

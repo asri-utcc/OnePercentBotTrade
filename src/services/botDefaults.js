@@ -139,7 +139,7 @@ function pickInt(overrides, botDefaults, key, fallback) {
  * @param {Object} opts.overrides   - explicit field values (req.body for manual, scan result for auto)
  * @param {Object} opts.botDefaults - AppConfig.botDefaults (already loaded)
  * @param {Object} opts.fallbacks   - hardcoded safe defaults (config.defaults + schema defaults)
- * @param {String|null} opts.tier   - License tier ('basic' | 'pro' | 'enterprise'); null/unknown = no preset
+ * @param {String|null} opts.tier   - License tier key (admin-defined via TierTemplate); unknown = no preset
  * @returns {Object} payload for Bot.create
  *
  * Precedence per field (strongest first):

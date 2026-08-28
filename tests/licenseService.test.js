@@ -6,7 +6,7 @@
  *   Verifies:
  *   - isFeatureEnabled reflects license.features (telegram/autoReserve/cbv5)
  *   - Defaults: telegram=true, cbv5=true (legacy-safe), autoReserve=false
- *   - getMaxCapital: 0 when no license, number when set, Infinity when enterprise+0
+ *   - getMaxCapital: 0 when no license, number when set, Infinity when maxCapital===0 (every tier)
  *   - getTotalDeployedUsdt: sums capitalPerTrade*maxTrades, cached 30s
  *   - withinMaxCapital: false when over cap, true when under, true when unlimited
  *   - snapshot returns full status object
@@ -91,9 +91,19 @@ describe('licenseService.getMaxCapital (FIX-2026-08-27 C2)', () => {
     expect(licenseService.getMaxCapital()).toBe(50000);
   });
 
-  test('basic + 0 (no cap set) → 0 (not unlimited — basic tier never unlimited)', () => {
+  test('basic + 0 → Infinity (FIX-2026-08-28 D5: 0 = unlimited for every tier)', () => {
     licenseGate.lastLicense = { tier: 'basic', maxCapital: 0 };
-    expect(licenseService.getMaxCapital()).toBe(0);
+    expect(licenseService.getMaxCapital()).toBe(Infinity);
+  });
+
+  test('free+ + 0 → Infinity (regression guard for free+ trial BUY block — was 0 pre-D5)', () => {
+    licenseGate.lastLicense = { tier: 'free+', maxCapital: 0 };
+    expect(licenseService.getMaxCapital()).toBe(Infinity);
+  });
+
+  test('unknown tier "starter" + 0 → Infinity (dynamic-tier guard — never name-couple)', () => {
+    licenseGate.lastLicense = { tier: 'starter', maxCapital: 0 };
+    expect(licenseService.getMaxCapital()).toBe(Infinity);
   });
 });
 
