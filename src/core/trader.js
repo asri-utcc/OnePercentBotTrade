@@ -3247,19 +3247,6 @@ class Trader {
           break;
         }
       }
-      // DIAG-2026-08-28: log replay match attempt
-      if (this.bot.symbol === 'JUPUSDT' || this.bot.symbol === 'XPLUSDT') {
-        logger.info({
-          botId: this.bot._id.toString(),
-          symbol: this.bot.symbol,
-          candleCloseTime: candle.closeTime,
-          candleCTType: typeof candle.closeTime,
-          lastSigMs,
-          signalsFound: signals.length,
-          signalMatchedCT: signal ? signal.closeTime : null,
-          matchCheck: signals.find(s => s.closeTime === candle.closeTime) ? 'EXACT_CLOSE_TIME_FOUND' : 'NO_EXACT_MATCH',
-        }, 'DIAG: REPLAY match attempt');
-      }
       // FIX-2026-07-25: ถ้า candle นี้เป็น S1 base match แต่ถูก filter จาก XS1
       //   → บันทึก audit row เพื่อให้เห็นใน Trade & Signal History
       if (!signal) {
@@ -3351,28 +3338,6 @@ class Trader {
         return;
       }
       signal = live.signal;
-    }
-    // DIAG-2026-08-27: temporary debug for JUP/XPL signal-mismatch investigation
-    if (this.bot.symbol === 'JUPUSDT' || this.bot.symbol === 'XPLUSDT') {
-      const diag = signalEngine.detectS1Signals(klines, s1Opts);
-      const last10 = diag.signals.slice(-10).map(s => ({ idx: s.index, ct: s.closeTime, c: s.close }));
-      logger.info({
-        botId: this.bot._id.toString(),
-        symbol: this.bot.symbol,
-        candleCloseTime: candle.closeTime,
-        candleIdxInCache: klines.findIndex(k => k.closeTime === candle.closeTime),
-        klinesLen: klines.length,
-        firstKlineCT: klines[0] ? klines[0].closeTime : null,
-        lastKlineCT: klines.length ? klines[klines.length-1].closeTime : null,
-        s1Opts,
-        thisBotKcMult: this.bot.kcMult,
-        signalsFound: diag.signals.length,
-        last10SignalCTs: last10,
-        lastSignalCloseTime: this.bot.lastSignalCloseTime,
-        signalMatched: !!signal,
-        matchedCandleCT: signal ? signal.closeTime : null,
-        optsReplay: !!opts.replay,
-      }, 'DIAG: S1 detection probe');
     }
     if (!signal) {
       // FIX-2026-07-23: ไม่มี S1 signal แต่ candle ใหม่ — ยังต้องเช็ค stop-loss (อาจมี position ขาดทุนที่ต้องปิด)
