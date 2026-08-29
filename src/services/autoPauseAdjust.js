@@ -69,10 +69,26 @@ const DEFAULT_KC_STEP = 0.1;
 const DEFAULT_VOL_STEP = 100_000;
 
 // ─── Bot schema clamps (mirror src/db/models/Bot.js) ──────────────────────
+//   Used to validate that the bot's stored threshold is a sane number before applying delta.
+//   NOT used to bound the auto-adjust output — see ADJUST_* below.
 const KC_MIN = 0.1;
 const KC_MAX = 50;
 const VOL_MIN = 0;
 const VOL_MAX = 1_000_000_000;
+
+// ─── Auto-adjust operational bounds (FIX-2026-08-29 per user request) ─────
+//   The auto-adjust scheduler MUST NOT push thresholds beyond these bounds,
+//   regardless of what the bot's stored value is or what step size is configured.
+//   Schema bounds are looser (e.g. KC up to 50) — user wants the strategy to stay
+//   within a tighter operating range:
+//     - KC (autoPauseMinKcPct):     [0.8, 2.8]   %
+//     - Vol (autoPauseMin24hVolUsdt): [100_000, 2_800_000] USDT
+//   If a bot is already at the bound and the delta would push it past, the field
+//   stays at the bound (no change) and the bot is skipped if BOTH fields are unchanged.
+const ADJUST_KC_MIN = 0.8;
+const ADJUST_KC_MAX = 2.8;
+const ADJUST_VOL_MIN = 100_000;
+const ADJUST_VOL_MAX = 2_800_000;
 
 // ─── Pure helpers (exported for tests) ────────────────────────────────────
 function clampKc(v) {
@@ -87,6 +103,20 @@ function clampVol(v) {
   const n = parseFloat(v);
   if (!Number.isFinite(n)) return null;
   return Math.round(Math.min(VOL_MAX, Math.max(VOL_MIN, n)));
+}
+
+// Auto-adjust clamps (tighter than schema — see ADJUST_* constants above).
+// Applied AFTER schema clamp in runOnce() before the skip-unchanged check.
+function clampAdjustKc(v) {
+  const n = parseFloat(v);
+  if (!Number.isFinite(n)) return null;
+  return Math.round(Math.min(ADJUST_KC_MAX, Math.max(ADJUST_KC_MIN, n)) * 1e4) / 1e4;
+}
+
+function clampAdjustVol(v) {
+  const n = parseFloat(v);
+  if (!Number.isFinite(n)) return null;
+  return Math.round(Math.min(ADJUST_VOL_MAX, Math.max(ADJUST_VOL_MIN, n)));
 }
 
 /**
@@ -320,20 +350,27 @@ class AutoPauseAdjust {
         return stats;
       }
 
-      // 4. Compute new thresholds per bot (apply delta + clamp; skip no-op writes)
+      // 4. Compute new thresholds per bot (apply delta + schema clamp + operational clamp; skip no-op writes)
       const ops = [];
       let skippedClamped = 0;
       for (const doc of eligibleDocs) {
+        // schema-level clamp: ensure stored values are valid numbers (not null/NaN)
         const prevKc = clampKc(doc.autoPauseMinKcPct);
         const prevVol = clampVol(doc.autoPauseMin24hVolUsdt);
         if (prevKc == null || prevVol == null) {
           skippedClamped += 1;
           continue;
         }
+        // apply delta
         const rawNewKc = prevKc + decision.deltaKc;
         const rawNewVol = prevVol + decision.deltaVol;
-        const newKc = clampKc(rawNewKc);
-        const newVol = clampVol(rawNewVol);
+        // schema-level clamp first (sanity), then operational clamp (FIX-2026-08-29 user request)
+        const newKc = clampAdjustKc(rawNewKc);
+        const newVol = clampAdjustVol(rawNewVol);
+        if (newKc == null || newVol == null) {
+          skippedClamped += 1;
+          continue;
+        }
         // ถ้าทั้งคู่เท่าเดิม (ชน min/max) → skip ไม่เขียน
         if (newKc === prevKc && newVol === prevVol) {
           skippedClamped += 1;
@@ -426,6 +463,8 @@ module.exports.AutoPauseAdjust = AutoPauseAdjust; // class (for tests)
 module.exports.decideAdjustment = decideAdjustment;
 module.exports.clampKc = clampKc;
 module.exports.clampVol = clampVol;
+module.exports.clampAdjustKc = clampAdjustKc; // FIX-2026-08-29: tighter operational bounds
+module.exports.clampAdjustVol = clampAdjustVol; // FIX-2026-08-29: tighter operational bounds
 module.exports.DEFAULT_MIN_BOTS = DEFAULT_MIN_BOTS;
 module.exports.DEFAULT_MAX_BOTS = DEFAULT_MAX_BOTS;
 module.exports.DEFAULT_INTERVAL_MS = DEFAULT_INTERVAL_MS;
@@ -435,3 +474,7 @@ module.exports.KC_MIN = KC_MIN;
 module.exports.KC_MAX = KC_MAX;
 module.exports.VOL_MIN = VOL_MIN;
 module.exports.VOL_MAX = VOL_MAX;
+module.exports.ADJUST_KC_MIN = ADJUST_KC_MIN; // FIX-2026-08-29: user-requested clamp
+module.exports.ADJUST_KC_MAX = ADJUST_KC_MAX; // FIX-2026-08-29: user-requested clamp
+module.exports.ADJUST_VOL_MIN = ADJUST_VOL_MIN; // FIX-2026-08-29: user-requested clamp
+module.exports.ADJUST_VOL_MAX = ADJUST_VOL_MAX; // FIX-2026-08-29: user-requested clamp

@@ -172,6 +172,61 @@ describe('autoPauseAdjust — constants + clampers', () => {
   });
 });
 
+describe('autoPauseAdjust — ADJUST_* operational bounds (FIX-2026-08-29)', () => {
+  test('exports tighter ADJUST_KC bounds', () => {
+    expect(svc.ADJUST_KC_MIN).toBe(0.8);
+    expect(svc.ADJUST_KC_MAX).toBe(2.8);
+  });
+
+  test('exports tighter ADJUST_VOL bounds', () => {
+    expect(svc.ADJUST_VOL_MIN).toBe(100_000);
+    expect(svc.ADJUST_VOL_MAX).toBe(2_800_000);
+  });
+
+  test('clampAdjustKc — within ADJUST bounds returns same', () => {
+    expect(svc.clampAdjustKc(1.5)).toBe(1.5);
+    expect(svc.clampAdjustKc(0.8)).toBe(0.8);
+    expect(svc.clampAdjustKc(2.8)).toBe(2.8);
+  });
+
+  test('clampAdjustKc — above ADJUST_KC_MAX clamps to 2.8', () => {
+    expect(svc.clampAdjustKc(5)).toBe(2.8);
+    expect(svc.clampAdjustKc(50)).toBe(2.8);
+    expect(svc.clampAdjustKc(2.8001)).toBe(2.8);
+  });
+
+  test('clampAdjustKc — below ADJUST_KC_MIN clamps to 0.8', () => {
+    expect(svc.clampAdjustKc(0.5)).toBe(0.8);
+    expect(svc.clampAdjustKc(0)).toBe(0.8);
+  });
+
+  test('clampAdjustKc — NaN / non-finite → null', () => {
+    expect(svc.clampAdjustKc(NaN)).toBeNull();
+    expect(svc.clampAdjustKc('abc')).toBeNull();
+    expect(svc.clampAdjustKc(null)).toBeNull();
+  });
+
+  test('clampAdjustVol — within ADJUST bounds returns same', () => {
+    expect(svc.clampAdjustVol(500_000)).toBe(500_000);
+    expect(svc.clampAdjustVol(100_000)).toBe(100_000);
+    expect(svc.clampAdjustVol(2_800_000)).toBe(2_800_000);
+  });
+
+  test('clampAdjustVol — above ADJUST_VOL_MAX clamps to 2.8M', () => {
+    expect(svc.clampAdjustVol(5_000_000)).toBe(2_800_000);
+    expect(svc.clampAdjustVol(1_000_000_000)).toBe(2_800_000);
+  });
+
+  test('clampAdjustVol — below ADJUST_VOL_MIN clamps to 100k', () => {
+    expect(svc.clampAdjustVol(50_000)).toBe(100_000);
+    expect(svc.clampAdjustVol(0)).toBe(100_000);
+  });
+
+  test('clampAdjustVol — NaN → null', () => {
+    expect(svc.clampAdjustVol(NaN)).toBeNull();
+  });
+});
+
 describe('autoPauseAdjust.decideAdjustment — pure decision', () => {
   test('tighten: running > maxBots → positive deltas', () => {
     const d = svc.decideAdjustment({
@@ -473,11 +528,11 @@ describe('autoPauseAdjust.runOnce — clamp behavior', () => {
   });
   afterEach(() => svc.stop());
 
-  test('clamps KC at KC_MAX — only vol field updates (updatedBots=1)', async () => {
-    // Bot at KC=50 (max). Tighten +0.1 → clamps to 50 (no change). Vol updates fine.
+  test('clamps KC at ADJUST_KC_MAX (2.8) — only vol field updates (updatedBots=1)', async () => {
+    // Bot at KC=2.8 (ADJUST max). Tighten +0.1 → clamps to 2.8 (no change). Vol updates fine.
     setRunningBots(30);
     setEligibleBots([
-      { _id: 'b-max', autoPauseMinKcPct: 50, autoPauseMin24hVolUsdt: 500_000 },
+      { _id: 'b-max', autoPauseMinKcPct: 2.8, autoPauseMin24hVolUsdt: 1_500_000 },
     ]);
     mockBot.bulkWrite.mockResolvedValue({ modifiedCount: 1 });
 
@@ -486,14 +541,14 @@ describe('autoPauseAdjust.runOnce — clamp behavior', () => {
     expect(stats.updatedBots).toBe(1); // vol still changed → bot still written
 
     const ops = mockBot.bulkWrite.mock.calls[0][0];
-    expect(ops[0].updateOne.update.$set.autoPauseMinKcPct).toBe(50); // unchanged (clamped)
-    expect(ops[0].updateOne.update.$set.autoPauseMin24hVolUsdt).toBe(600_000); // +100k
+    expect(ops[0].updateOne.update.$set.autoPauseMinKcPct).toBe(2.8); // unchanged (clamped)
+    expect(ops[0].updateOne.update.$set.autoPauseMin24hVolUsdt).toBe(1_600_000); // +100k
   });
 
-  test('clamps VOL at VOL_MAX — only KC field updates (updatedBots=1)', async () => {
+  test('clamps VOL at ADJUST_VOL_MAX (2.8M) — only KC field updates (updatedBots=1)', async () => {
     setRunningBots(30);
     setEligibleBots([
-      { _id: 'b-volmax', autoPauseMinKcPct: 1.3, autoPauseMin24hVolUsdt: 1_000_000_000 },
+      { _id: 'b-volmax', autoPauseMinKcPct: 1.3, autoPauseMin24hVolUsdt: 2_800_000 },
     ]);
     mockBot.bulkWrite.mockResolvedValue({ modifiedCount: 1 });
 
@@ -503,13 +558,13 @@ describe('autoPauseAdjust.runOnce — clamp behavior', () => {
 
     const ops = mockBot.bulkWrite.mock.calls[0][0];
     expect(ops[0].updateOne.update.$set.autoPauseMinKcPct).toBeCloseTo(1.4);
-    expect(ops[0].updateOne.update.$set.autoPauseMin24hVolUsdt).toBe(1_000_000_000); // unchanged
+    expect(ops[0].updateOne.update.$set.autoPauseMin24hVolUsdt).toBe(2_800_000); // unchanged (clamped)
   });
 
-  test('skips bots where BOTH fields at clamp (no-op write)', async () => {
+  test('skips bots where BOTH fields at ADJUST clamps (no-op write)', async () => {
     setRunningBots(30);
     setEligibleBots([
-      { _id: 'b-both', autoPauseMinKcPct: 50, autoPauseMin24hVolUsdt: 1_000_000_000 },
+      { _id: 'b-both', autoPauseMinKcPct: 2.8, autoPauseMin24hVolUsdt: 2_800_000 },
     ]);
 
     const stats = await svc.runOnce({ source: 'manual' });
@@ -519,10 +574,10 @@ describe('autoPauseAdjust.runOnce — clamp behavior', () => {
     expect(mockBot.bulkWrite).not.toHaveBeenCalled(); // empty ops array → no bulkWrite
   });
 
-  test('skips bots at KC_MIN when loosening (only vol updates → updatedBots=1)', async () => {
+  test('skips bots at ADJUST_KC_MIN (0.8) when loosening (only vol updates → updatedBots=1)', async () => {
     setRunningBots(8);
     setEligibleBots([
-      { _id: 'b-kcmin', autoPauseMinKcPct: 0.1, autoPauseMin24hVolUsdt: 500_000 },
+      { _id: 'b-kcmin', autoPauseMinKcPct: 0.8, autoPauseMin24hVolUsdt: 500_000 },
     ]);
     mockBot.bulkWrite.mockResolvedValue({ modifiedCount: 1 });
 
@@ -531,7 +586,7 @@ describe('autoPauseAdjust.runOnce — clamp behavior', () => {
     expect(stats.updatedBots).toBe(1);
 
     const ops = mockBot.bulkWrite.mock.calls[0][0];
-    expect(ops[0].updateOne.update.$set.autoPauseMinKcPct).toBe(0.1); // unchanged (clamped)
+    expect(ops[0].updateOne.update.$set.autoPauseMinKcPct).toBe(0.8); // unchanged (clamped)
     expect(ops[0].updateOne.update.$set.autoPauseMin24hVolUsdt).toBe(400_000);
   });
 });
