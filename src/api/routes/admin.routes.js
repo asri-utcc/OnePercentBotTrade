@@ -287,6 +287,11 @@ router.get('/auto-pause-adjust', requireAuth, async (req, res) => {
         intervalMs: cfg ? cfg.autoPauseAdjustIntervalMs : autoPauseAdjust.DEFAULT_INTERVAL_MS,
         kcStep: cfg ? cfg.autoPauseAdjustKcStep : autoPauseAdjust.DEFAULT_KC_STEP,
         volStep: cfg ? cfg.autoPauseAdjustVolStep : autoPauseAdjust.DEFAULT_VOL_STEP,
+        // FIX-2026-08-30: configurable operational clamps
+        kcClampMin: cfg ? cfg.autoPauseAdjustKcClampMin : autoPauseAdjust.DEFAULT_ADJUST_KC_MIN,
+        kcClampMax: cfg ? cfg.autoPauseAdjustKcClampMax : autoPauseAdjust.DEFAULT_ADJUST_KC_MAX,
+        volClampMin: cfg ? cfg.autoPauseAdjustVolClampMin : autoPauseAdjust.DEFAULT_ADJUST_VOL_MIN,
+        volClampMax: cfg ? cfg.autoPauseAdjustVolClampMax : autoPauseAdjust.DEFAULT_ADJUST_VOL_MAX,
         lastRunAt: cfg ? cfg.autoPauseAdjustLastRunAt : null,
         lastStats: cfg ? cfg.autoPauseAdjustLastStats : null,
         lastError: cfg ? cfg.autoPauseAdjustLastError : null,
@@ -329,6 +334,25 @@ router.put('/auto-pause-adjust', requireAuth, async (req, res) => {
       const n = parseFloat(req.body.volStep);
       if (Number.isFinite(n)) set.autoPauseAdjustVolStep = Math.max(1_000, Math.min(100_000_000, n));
     }
+    // FIX-2026-08-30: configurable operational clamps (KC % and Vol USDT)
+    //   - KC: [0.1, 50]  (schema bounds — must be inside schema range)
+    //   - Vol: [0, 1_000_000_000]  (schema bounds)
+    if (req.body.kcClampMin !== undefined) {
+      const n = parseFloat(req.body.kcClampMin);
+      if (Number.isFinite(n)) set.autoPauseAdjustKcClampMin = Math.max(0.1, Math.min(50, n));
+    }
+    if (req.body.kcClampMax !== undefined) {
+      const n = parseFloat(req.body.kcClampMax);
+      if (Number.isFinite(n)) set.autoPauseAdjustKcClampMax = Math.max(0.1, Math.min(50, n));
+    }
+    if (req.body.volClampMin !== undefined) {
+      const n = parseFloat(req.body.volClampMin);
+      if (Number.isFinite(n)) set.autoPauseAdjustVolClampMin = Math.max(0, Math.min(1_000_000_000, n));
+    }
+    if (req.body.volClampMax !== undefined) {
+      const n = parseFloat(req.body.volClampMax);
+      if (Number.isFinite(n)) set.autoPauseAdjustVolClampMax = Math.max(0, Math.min(1_000_000_000, n));
+    }
     // cross-field: minBots must be < maxBots
     const merged = {
       minBots: set.autoPauseAdjustMinBots != null ? set.autoPauseAdjustMinBots : null,
@@ -336,6 +360,19 @@ router.put('/auto-pause-adjust', requireAuth, async (req, res) => {
     };
     if (merged.minBots != null && merged.maxBots != null && merged.minBots >= merged.maxBots) {
       return res.status(400).json({ error: `minBots (${merged.minBots}) ต้องน้อยกว่า maxBots (${merged.maxBots})` });
+    }
+    // FIX-2026-08-30: cross-field clamps — min must be < max
+    const mergedClamps = {
+      kcMin: set.autoPauseAdjustKcClampMin != null ? set.autoPauseAdjustKcClampMin : null,
+      kcMax: set.autoPauseAdjustKcClampMax != null ? set.autoPauseAdjustKcClampMax : null,
+      volMin: set.autoPauseAdjustVolClampMin != null ? set.autoPauseAdjustVolClampMin : null,
+      volMax: set.autoPauseAdjustVolClampMax != null ? set.autoPauseAdjustVolClampMax : null,
+    };
+    if (mergedClamps.kcMin != null && mergedClamps.kcMax != null && mergedClamps.kcMin >= mergedClamps.kcMax) {
+      return res.status(400).json({ error: `kcClampMin (${mergedClamps.kcMin}) ต้องน้อยกว่า kcClampMax (${mergedClamps.kcMax})` });
+    }
+    if (mergedClamps.volMin != null && mergedClamps.volMax != null && mergedClamps.volMin >= mergedClamps.volMax) {
+      return res.status(400).json({ error: `volClampMin (${mergedClamps.volMin}) ต้องน้อยกว่า volClampMax (${mergedClamps.volMax})` });
     }
     if (Object.keys(set).length === 0) {
       return res.status(400).json({ error: 'No valid fields to update' });
@@ -357,7 +394,11 @@ router.put('/auto-pause-adjust', requireAuth, async (req, res) => {
 
 // FIX-2026-08-29: enrich run-now response with counts + bounds so UI can show
 //   "why did nothing visibly change?" detail (running/eligible/optedOut + ADJUST_* bounds).
-const { ADJUST_KC_MIN, ADJUST_KC_MAX, ADJUST_VOL_MIN, ADJUST_VOL_MAX } = require('../../services/autoPauseAdjust');
+// FIX-2026-08-30: bounds now come from configured AppConfig (autoPauseAdjustKcClamp* / VolClamp*)
+//   with defaults fallback. UI shows whatever is currently in effect.
+const {
+  DEFAULT_ADJUST_KC_MIN, DEFAULT_ADJUST_KC_MAX, DEFAULT_ADJUST_VOL_MIN, DEFAULT_ADJUST_VOL_MAX,
+} = require('../../services/autoPauseAdjust');
 
 router.post('/auto-pause-adjust/run-now', requireAuth, async (req, res) => {
   try {
@@ -368,12 +409,22 @@ router.post('/auto-pause-adjust/run-now', requireAuth, async (req, res) => {
       Bot.countDocuments({ autoPauseEnabled: { $ne: false }, autoPauseAdjustEnabled: { $ne: false }, deletedAt: null }),
       Bot.countDocuments({ autoPauseEnabled: { $ne: false }, autoPauseAdjustEnabled: false, deletedAt: null }),
     ]);
+    // FIX-2026-08-30: prefer runOnce() reported bounds (already reflects configured values),
+    //   fall back to AppConfig snapshot, fall back to module defaults.
+    const liveBounds = (stats && stats.bounds) || {};
+    const cfg = await AppConfig.findOne({ key: 'singleton' }).lean();
+    const bounds = {
+      kcMin: Number.isFinite(liveBounds.kcMin) ? liveBounds.kcMin : (cfg && Number.isFinite(cfg.autoPauseAdjustKcClampMin) ? cfg.autoPauseAdjustKcClampMin : DEFAULT_ADJUST_KC_MIN),
+      kcMax: Number.isFinite(liveBounds.kcMax) ? liveBounds.kcMax : (cfg && Number.isFinite(cfg.autoPauseAdjustKcClampMax) ? cfg.autoPauseAdjustKcClampMax : DEFAULT_ADJUST_KC_MAX),
+      volMin: Number.isFinite(liveBounds.volMin) ? liveBounds.volMin : (cfg && Number.isFinite(cfg.autoPauseAdjustVolClampMin) ? cfg.autoPauseAdjustVolClampMin : DEFAULT_ADJUST_VOL_MIN),
+      volMax: Number.isFinite(liveBounds.volMax) ? liveBounds.volMax : (cfg && Number.isFinite(cfg.autoPauseAdjustVolClampMax) ? cfg.autoPauseAdjustVolClampMax : DEFAULT_ADJUST_VOL_MAX),
+    };
     logger.info({ stats }, 'admin: auto-pause-adjust run-now completed');
     res.json({
       ok: true,
       stats,
       counts: { runningBots, eligibleBots: eligibleDocs, optedOutBots: optedOutDocs },
-      bounds: { kcMin: ADJUST_KC_MIN, kcMax: ADJUST_KC_MAX, volMin: ADJUST_VOL_MIN, volMax: ADJUST_VOL_MAX },
+      bounds,
     });
   } catch (err) {
     logger.warn({ err: err.message }, 'admin: auto-pause-adjust run-now failed');

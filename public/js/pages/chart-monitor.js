@@ -1024,10 +1024,12 @@ async function openTodayPnlModal() {
 
     totalEl.innerHTML = `
       <div class="pnl-modal-summary-row">
+        <div class="pnl-modal-net-label">Net PnL <span class="pnl-modal-net-hint" title="ผลรวมสุทธิ: กำไร − ขาดทุน (Net = Gross Profit + Gross Loss)">✓ Net</span></div>
         <span class="pnl-modal-main-pnl ${totalSignCls}">${formatUsdtPnl(total)} <span class="unit">USDT</span></span>
         ${thb != null ? `<span class="pnl-modal-thb ${totalSignCls}">≈ ${thb >= 0 ? '+' : ''}฿${formatThbInlinePnl(thb)}</span>` : '<span class="muted">FX ไม่พร้อม</span>'}
       </div>
       <div class="pnl-modal-gl-row">
+        <span class="pnl-modal-gl-prefix" title="Gross Profit / Gross Loss — แยกตามทิศทางของไม้ (ไม่หักลบกัน)">แยกตามทิศทาง:</span>
         <span class="gl-pill is-bull" title="ผลรวมไม้ที่กำไร — ${totals.wins} ไม้">
           <span class="gl-label">กำไร</span>
           +${grossProfit.toFixed(4)} USDT

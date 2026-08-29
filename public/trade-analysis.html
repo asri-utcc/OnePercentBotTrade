@@ -315,6 +315,173 @@
     .ta-heat-cell.is-bull { box-shadow: inset 0 0 0 1px rgba(0,229,184,0.45); }
     .ta-heat-cell.is-bear { box-shadow: inset 0 0 0 1px rgba(255,77,109,0.45); }
 
+    /* ───── FIX-2026-08-30: Enhanced heatmap UI ───── */
+    .ta-heat-summary {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 8px;
+    }
+    .ta-heat-summary-tile {
+      padding: 10px 12px;
+      background: rgba(255,255,255,0.03);
+      border: 1px solid var(--border-soft);
+      border-radius: 8px;
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+    .ta-heat-summary-tile .label {
+      font-size: 0.66rem;
+      color: var(--text-3);
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+    .ta-heat-summary-tile .value {
+      font-size: 1.05rem;
+      font-weight: 700;
+      font-family: var(--font-mono, monospace);
+    }
+    .ta-heat-summary-tile .sub {
+      font-size: 0.7rem;
+      color: var(--text-2);
+    }
+    .ta-heat-summary-tile.is-bull .value { color: var(--bull-1); }
+    .ta-heat-summary-tile.is-bear .value { color: var(--bear-1); }
+
+    .ta-heat-layout {
+      display: grid;
+      grid-template-columns: 1fr 180px;
+      gap: 18px;
+      align-items: start;
+    }
+    @media (max-width: 920px) {
+      .ta-heat-layout { grid-template-columns: 1fr; }
+      .ta-heat-summary { grid-template-columns: repeat(2, 1fr); }
+    }
+    .ta-heat-x-label {
+      text-align: center;
+      font-size: 0.7rem;
+      color: var(--text-3);
+      margin-top: 4px;
+    }
+    .ta-heat-color-scale {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      font-size: 0.65rem;
+      color: var(--text-3);
+      font-family: var(--font-mono, monospace);
+    }
+    .ta-heat-scale-bar {
+      flex: 1;
+      height: 8px;
+      border-radius: 4px;
+      background: linear-gradient(90deg, rgba(255,77,109,0.85), rgba(255,77,109,0.05));
+    }
+    .ta-heat-scale-bar-bull {
+      background: linear-gradient(90deg, rgba(0,229,184,0.05), rgba(0,229,184,0.85));
+    }
+    .ta-heat-marginals {
+      padding: 10px;
+      background: rgba(255,255,255,0.02);
+      border: 1px solid var(--border-soft);
+      border-radius: 8px;
+    }
+    .ta-heat-marg-title {
+      font-size: 0.7rem;
+      color: var(--text-2);
+      font-weight: 600;
+      margin-bottom: 6px;
+    }
+    .ta-heat-marg-row {
+      display: grid;
+      grid-template-columns: 30px 1fr 56px;
+      gap: 4px;
+      align-items: center;
+      font-size: 0.7rem;
+      margin-bottom: 2px;
+    }
+    .ta-heat-marg-label {
+      color: var(--text-2);
+      font-family: var(--font-mono, monospace);
+    }
+    .ta-heat-marg-bar-wrap {
+      position: relative;
+      height: 8px;
+      background: rgba(255,255,255,0.04);
+      border-radius: 4px;
+      overflow: hidden;
+    }
+    .ta-heat-marg-bar {
+      position: absolute;
+      top: 0;
+      bottom: 0;
+      border-radius: 4px;
+    }
+    .ta-heat-marg-bar.is-bull { background: rgba(0,229,184,0.7); }
+    .ta-heat-marg-bar.is-bear { background: rgba(255,77,109,0.7); }
+    .ta-heat-marg-pnl {
+      font-family: var(--font-mono, monospace);
+      text-align: right;
+      font-weight: 600;
+    }
+    .ta-heat-marg-pnl.is-bull { color: var(--bull-1); }
+    .ta-heat-marg-pnl.is-bear { color: var(--bear-1); }
+    .ta-heat-marg-pnl.is-zero { color: var(--text-3); }
+
+    .ta-heat-cell.is-peak {
+      animation: ta-heat-pulse 1.6s ease-in-out infinite;
+    }
+    @keyframes ta-heat-pulse {
+      0%, 100% { box-shadow: inset 0 0 0 2px rgba(255,200,80,0.9), 0 0 8px rgba(255,200,80,0.4); }
+      50%      { box-shadow: inset 0 0 0 2px rgba(255,200,80,0.4), 0 0 16px rgba(255,200,80,0.7); }
+    }
+    .ta-heat-cell.is-active {
+      box-shadow: inset 0 0 0 2px rgba(255,255,255,0.95) !important;
+      transform: scale(1.18);
+      z-index: 5;
+    }
+
+    .ta-heat-detail {
+      margin-top: 12px;
+      padding: 12px 14px;
+      background: rgba(255,255,255,0.03);
+      border: 1px solid var(--border-mid);
+      border-radius: 8px;
+      display: grid;
+      grid-template-columns: repeat(5, 1fr);
+      gap: 10px;
+    }
+    @media (max-width: 700px) {
+      .ta-heat-detail { grid-template-columns: repeat(2, 1fr); }
+    }
+    .ta-heat-detail-cell {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+    .ta-heat-detail-cell .label {
+      font-size: 0.62rem;
+      color: var(--text-3);
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+    .ta-heat-detail-cell .value {
+      font-size: 0.95rem;
+      font-weight: 700;
+      font-family: var(--font-mono, monospace);
+    }
+    .ta-heat-detail-cell.is-bull .value { color: var(--bull-1); }
+    .ta-heat-detail-cell.is-bear .value { color: var(--bear-1); }
+    .ta-heat-detail-cell.is-info .value { color: var(--text-1); }
+    .ta-heat-detail-close {
+      font-size: 0.7rem;
+      color: var(--text-3);
+      cursor: pointer;
+      align-self: start;
+    }
+    .ta-heat-detail-close:hover { color: var(--text-1); }
+
     /* FIX-2026-08-29: improved empty-state for Optimal Config Finder (explain WHY) */
     .ta-empty-explained {
       padding: 1.25rem 1rem;
@@ -543,14 +710,38 @@
         <span class="text-muted-3" id="ta-heat-meta" style="font-size: 0.72rem;">—</span>
       </div>
       <div class="lux-body">
-        <div class="ta-heatmap" id="ta-heatmap">
-          <div></div>
+        <!-- FIX-2026-08-30: enhanced heatmap — summary tiles + heat grid + detail panel -->
+        <div class="ta-heat-summary" id="ta-heat-summary">
+          <div class="ta-empty">กำลังโหลด…</div>
         </div>
+        <div class="ta-heat-layout mt-3">
+          <div class="ta-heat-grid-wrap">
+            <div class="ta-heatmap" id="ta-heatmap">
+              <div></div>
+            </div>
+            <div class="ta-heat-x-label">Hour-of-day (เวลาตามเครื่อง server)</div>
+            <div class="ta-heat-color-scale mt-2">
+              <span class="ta-heat-scale-label">−10</span>
+              <div class="ta-heat-scale-bar"></div>
+              <span class="ta-heat-scale-label">0</span>
+              <div class="ta-heat-scale-bar ta-heat-scale-bar-bull"></div>
+              <span class="ta-heat-scale-label">+10 USDT</span>
+            </div>
+          </div>
+          <div class="ta-heat-marginals">
+            <div class="ta-heat-marg-title">📅 By day (รวม 24 �ม.)</div>
+            <div id="ta-heat-marg-day"></div>
+            <div class="ta-heat-marg-title mt-3">🕒 By hour (รวม 7 วัน)</div>
+            <div id="ta-heat-marg-hour"></div>
+          </div>
+        </div>
+        <div id="ta-heat-detail" class="ta-heat-detail" style="display:none;"></div>
         <div class="ta-meta-row mt-2">
           <span class="pill">🟢 = PnL บวก (ช่องเข้ม = กำไรเยอะ)</span>
           <span class="pill">🔴 = PnL ลบ (ช่องเข้ม = ขาดทุนเยอะ)</span>
-          <span class="pill">🕐 ใช้ดู: หา "ช่องเขียวเข้ม" = ช่วงเวลาทำเงิน, "ช่องแดงเข้ม" = ช่วงเวลาที่ควรหลีกเลี่ยง</span>
-          <span class="pill">cap ที่ ±10 USDT ต่อช่อง (สีจะไม่เข้มขึ้นเกินนี้)</span>
+          <span class="pill">🕐 หา "ช่องเขียวเข้ม" = ช่วงเวลาทำเงิน, "ช่องแดงเข้ม" = ช่วงเวลาที่ควรหลีกเลี่ยง</span>
+          <span class="pill">🖱 คลิกช่องเพื่อดูสถิติเจาะลึก</span>
+          <span class="pill">cap ±10 USDT ต่อช่อง</span>
         </div>
       </div>
     </div>
@@ -740,34 +931,6 @@
       </div>
     </div>
 
-    <!-- ─── Row 10: OPTIMAL CONFIG FINDER ──────────────────── -->
-    <div class="lux-card ta-section">
-      <div class="lux-header">
-        <h5>🔬 Optimal Config Finder — หา config กำไรสูง + ถือสั้น + แพ้น้อย</h5>
-        <span class="text-muted-3" id="ta-opt-meta" style="font-size: 0.72rem;">—</span>
-      </div>
-      <div class="lux-body">
-        <p style="color: var(--text-3); font-size: 0.78rem; margin: 0 0 0.5rem;">
-          จัดกลุ่มเทรดตาม <b>timeframe × TP% bucket × KC× bucket × Safe-trade combo × CB combo</b>
-          แล้วให้คะแนน: <code>score = avgPnl × (WR/100) × √count / log(1 + holdMin)</code> — คะแนนสูง = กำไรดี × WR สูง × ถือสั้น × sample เยอะพอ
-        </p>
-        <div class="ta-grid-2">
-          <div>
-            <h6 style="font-size: 0.78rem; color: var(--bull-1); text-transform: uppercase; letter-spacing: 0.06em;">🏆 Top Configs (ควรใช้)</h6>
-            <div id="ta-opt-best-body">
-              <div class="ta-empty">กำลังโหลด…</div>
-            </div>
-          </div>
-          <div>
-            <h6 style="font-size: 0.78rem; color: var(--bear-1); text-transform: uppercase; letter-spacing: 0.06em;">⛔ Avoid Configs (ควรหลีกเลี่ยง)</h6>
-            <div id="ta-opt-worst-body">
-              <div class="ta-empty">กำลังโหลด…</div>
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
-
     <div class="text-muted-3 text-center mt-4" id="ta-footer-ts" style="font-size: 0.72rem;">
       —
     </div>
@@ -779,6 +942,6 @@
   <script>window.NAV_ACTIVE = 'analysis';</script>
   <script src="/js/partials/nav.js"></script>
   <script src="/js/partials/rateLimitGauge.js"></script>
-  <script src="/js/pages/trade-analysis.js?v=2026-08-29-fix1"></script>
+  <script src="/js/pages/trade-analysis.js?v=2026-08-30-fix1"></script>
 </body>
 </html>

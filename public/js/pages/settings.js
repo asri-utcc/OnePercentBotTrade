@@ -1008,10 +1008,14 @@ function renderAutoPauseAdjustSection() {
   const lastStats = cfg.lastStats || null;
   const tickCount = status.tickCount != null ? status.tickCount : 0;
   const inFlight = status.inFlight ? '⏳ in-flight' : '';
-  // intervalMs → human friendly (1m/5m/15m/30m/1h/2h/6h/12h/24h)
-  const intervalMs = Number(cfg.intervalMs) || 3600000;
+  // intervalMs → human friendly (15m/30m/1h/2h/3h/4h/6h/12h/24h)
+  // FIX-2026-08-30: default is now 30min (was 1h) per user request
+  const intervalMs = Number(cfg.intervalMs) || (30 * 60 * 1000);
   const intervalHours = intervalMs / (60 * 60 * 1000);
+  const intervalMinutes = Math.round(intervalMs / (60 * 1000));
   const intervalOptions = [
+    { ms: 15 * 60 * 1000, label: '15 นาที' },
+    { ms: 30 * 60 * 1000, label: '30 นาที' },
     { ms: 60 * 60 * 1000, label: '1 ชม.' },
     { ms: 2 * 60 * 60 * 1000, label: '2 ชม.' },
     { ms: 3 * 60 * 60 * 1000, label: '3 ชม.' },
@@ -1068,6 +1072,36 @@ function renderAutoPauseAdjustSection() {
       </div>
     </div>
 
+    <div class="alert alert-warning small mt-3 mb-2">
+      <strong>🔒 Operational clamps (FIX-2026-08-30)</strong> — กำหนดขอบเขตที่ Auto-adjust �ะปรับ thresholds ไม่ให้เกินช่วงนี้:
+      <br />• KC clamp: <code>[KcClampMin, KcClampMax]</code>% — ถ้า bot ชนขอบเ�ตนี้แล้ว ระบบจะ skip (ไม่เขียน no-op)
+      <br />• Vol clamp: <code>[VolClampMin, VolClampMax]</code> USDT — เหมือนกันสำหรับ Min 24h Vol
+      <br />⚠️ ต้องให้ <code>kcClampMin &lt; kcClampMax</code> และ <code>volClampMin &lt; volClampMax</code>
+    </div>
+
+    <div class="row g-3 mt-1">
+      <div class="col-md-3">
+        <label class="form-label">🔻 KC clamp min (%)</label>
+        <input type="number" class="form-control" id="apa-kc-clamp-min" value="${cfg.kcClampMin ?? 0.8}" step="0.1" min="0.1" max="50" />
+        <small class="text-muted">Min-%KC ขั้นต่ำ (default 0.8)</small>
+      </div>
+      <div class="col-md-3">
+        <label class="form-label">� KC clamp max (%)</label>
+        <input type="number" class="form-control" id="apa-kc-clamp-max" value="${cfg.kcClampMax ?? 2.8}" step="0.1" min="0.1" max="50" />
+        <small class="text-muted">Min-%KC สูงสุด (default 2.8)</small>
+      </div>
+      <div class="col-md-3">
+        <label class="form-label">🔻 Vol clamp min (USDT)</label>
+        <input type="number" class="form-control" id="apa-vol-clamp-min" value="${cfg.volClampMin ?? 100000}" step="10000" min="0" max="1000000000" />
+        <small class="text-muted">Min 24h Vol ขั้นต่ำ (default 100K)</small>
+      </div>
+      <div class="col-md-3">
+        <label class="form-label">🔺 Vol clamp max (USDT)</label>
+        <input type="number" class="form-control" id="apa-vol-clamp-max" value="${cfg.volClampMax ?? 2800000}" step="100000" min="0" max="1000000000" />
+        <small class="text-muted">Min 24h Vol สูงสุด (default 2.8M)</small>
+      </div>
+    </div>
+
     <div class="mt-3">
       <button type="button" class="btn btn-primary" id="btn-save-apa">💾 บันทึก Auto-adjust</button>
       <button type="button" class="btn btn-outline-warning ms-2" id="btn-trigger-apa">🖐 Run now</button>
@@ -1075,7 +1109,8 @@ function renderAutoPauseAdjustSection() {
     </div>
 
     <div class="text-muted small mt-3">
-      <strong>สถานะ:</strong> ${enabled ? '🟢 enabled' : '⚪ disabled'} · interval=${escapeHtml(String(intervalHours))}h · minBots=${cfg.minBots ?? 15} · maxBots=${cfg.maxBots ?? 25} · kcStep=${cfg.kcStep ?? 0.1} · volStep=${cfg.volStep ?? 100000} ${inFlight}
+      <strong>สถานะ:</strong> ${enabled ? '🟢 enabled' : '⚪ disabled'} · interval=${escapeHtml(intervalMinutes < 60 ? intervalMinutes + ' นาที' : intervalHours + 'h')} · minBots=${cfg.minBots ?? 15} · maxBots=${cfg.maxBots ?? 25} · kcStep=${cfg.kcStep ?? 0.1} · volStep=${cfg.volStep ?? 100000} ${inFlight}
+      <br /><strong>Clamps (FIX-2026-08-30):</strong> KC [${cfg.kcClampMin ?? 0.8}, ${cfg.kcClampMax ?? 2.8}]% · Vol [${(cfg.volClampMin ?? 100000).toLocaleString()}, ${(cfg.volClampMax ?? 2800000).toLocaleString()}] USDT
       <br /><strong>Counts:</strong> running=${counts.running ?? '?'} · eligible=${counts.eligible ?? '?'} · optedOut=${counts.optedOut ?? '?'}
       <br /><strong>Last fire:</strong> ${lastRunAt} · tickCount=${tickCount}
       ${lastStats ? `<br /><strong>Last stats:</strong> outcome=${escapeHtml(lastStats.outcome || '—')} · action=${escapeHtml(lastStats.action || '—')} · running=${lastStats.runningBots ?? '?'} · updated=${lastStats.updatedBots ?? 0} · prevKcAvg=${lastStats.prevKcAvg != null ? Number(lastStats.prevKcAvg).toFixed(2) : '?'} · newKcAvg=${lastStats.newKcAvg != null ? Number(lastStats.newKcAvg).toFixed(2) : '?'}` : ''}
@@ -2390,6 +2425,11 @@ async function saveAutoPauseAdjust() {
   const intervalMs = parseInt(document.getElementById('apa-interval').value, 10);
   const kcStep = parseFloat(document.getElementById('apa-kcstep').value);
   const volStep = parseFloat(document.getElementById('apa-volstep').value);
+  // FIX-2026-08-30: configurable operational clamps (KC % and Vol USDT)
+  const kcClampMin = parseFloat(document.getElementById('apa-kc-clamp-min').value);
+  const kcClampMax = parseFloat(document.getElementById('apa-kc-clamp-max').value);
+  const volClampMin = parseFloat(document.getElementById('apa-vol-clamp-min').value);
+  const volClampMax = parseFloat(document.getElementById('apa-vol-clamp-max').value);
   // validate (mirror backend clamp)
   if (!Number.isFinite(minBots) || minBots < 1 || minBots > 1000) { setStatus('apa-status', '❌ minBots ต้องอยู่ระหว่าง 1..1000', true); return; }
   if (!Number.isFinite(maxBots) || maxBots < 1 || maxBots > 1000) { setStatus('apa-status', '❌ maxBots ต้องอยู่ระหว่าง 1..1000', true); return; }
@@ -2397,8 +2437,18 @@ async function saveAutoPauseAdjust() {
   if (!Number.isFinite(intervalMs) || intervalMs < 60_000 || intervalMs > 24 * 60 * 60 * 1000) { setStatus('apa-status', '❌ intervalMs ต้องอยู่ระหว่าง 60000..86400000', true); return; }
   if (!Number.isFinite(kcStep) || kcStep < 0.01 || kcStep > 5) { setStatus('apa-status', '❌ kcStep ต้องอยู่ระหว่าง 0.01..5', true); return; }
   if (!Number.isFinite(volStep) || volStep < 1000 || volStep > 100_000_000) { setStatus('apa-status', '❌ volStep ต้องอยู่ระหว่าง 1000..100000000', true); return; }
+  // FIX-2026-08-30: clamps validation (mirrors backend clamp)
+  if (!Number.isFinite(kcClampMin) || kcClampMin < 0.1 || kcClampMin > 50) { setStatus('apa-status', '❌ kcClampMin ต้องอยู่ระหว่าง 0.1..50', true); return; }
+  if (!Number.isFinite(kcClampMax) || kcClampMax < 0.1 || kcClampMax > 50) { setStatus('apa-status', '❌ kcClampMax ต้องอยู่ระหว่าง 0.1..50', true); return; }
+  if (kcClampMin >= kcClampMax) { setStatus('apa-status', '❌ kcClampMin ต้องน้อยกว่า kcClampMax', true); return; }
+  if (!Number.isFinite(volClampMin) || volClampMin < 0 || volClampMin > 1_000_000_000) { setStatus('apa-status', '❌ volClampMin ต้องอยู่ระหว่าง 0..1000000000', true); return; }
+  if (!Number.isFinite(volClampMax) || volClampMax < 0 || volClampMax > 1_000_000_000) { setStatus('apa-status', '❌ volClampMax ต้องอยู่ระหว่าง 0..1000000000', true); return; }
+  if (volClampMin >= volClampMax) { setStatus('apa-status', '❌ volClampMin ต้องน้อยกว่า volClampMax', true); return; }
   try {
-    const resp = await API.put('/api/admin/auto-pause-adjust', { enabled, minBots, maxBots, intervalMs, kcStep, volStep });
+    const resp = await API.put('/api/admin/auto-pause-adjust', {
+      enabled, minBots, maxBots, intervalMs, kcStep, volStep,
+      kcClampMin, kcClampMax, volClampMin, volClampMax,
+    });
     setStatus('apa-status', '✅ บันทึกแล้ว · scheduler ' + (enabled ? '▶️ running' : '⏹ stopped') + ' (reloadConfig applied)');
     await loadConfig();
   } catch (err) {

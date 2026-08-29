@@ -430,7 +430,7 @@ function buildDuration(trades) {
   }
   const avgMs = count ? Math.round(totalMs / count) : 0;
   return {
-    avgHoldMs: avgMs,
+    avgHoldMs: avgMs, avgHoldMin: avgMs ? Math.round((avgMs) / 60_000) : 0,
     avgHoldLabel: count ? humanizeMs(avgMs) : '—',
     count,
     buckets,
@@ -596,7 +596,7 @@ function buildHoldVsProfit(trades) {
     losses: 0,
     pnl: 0,
     avgPnl: 0,
-    avgHoldMs: 0,
+    avgHoldMs: 0, avgHoldMin: 0,
     winRate: 0,
   }));
   let totalHoldMs = 0, holdCount = 0;
@@ -627,24 +627,24 @@ function buildHoldVsProfit(trades) {
 
     // extremes
     if (!longestOverall || ms > longestOverall.ms) {
-      longestOverall = { tradeId: t._id, symbol: t.symbol, botId: t.botId, ms, pnl, sellReason: t.sellReason, sellFilledAt: t.sellFilledAt };
+      longestOverall = { tradeId: t._id, symbol: t.symbol, botId: t.botId, ms, holdMin: Math.round(ms / 60_000), pnl, sellReason: t.sellReason, sellFilledAt: t.sellFilledAt };
     }
     if (pnl > 0) {
       if (!longestProfitable || ms > longestProfitable.ms) {
-        longestProfitable = { tradeId: t._id, symbol: t.symbol, botId: t.botId, ms, pnl, sellReason: t.sellReason, sellFilledAt: t.sellFilledAt };
+        longestProfitable = { tradeId: t._id, symbol: t.symbol, botId: t.botId, ms, holdMin: Math.round(ms / 60_000), pnl, sellReason: t.sellReason, sellFilledAt: t.sellFilledAt };
       }
       if (!shortestProfitable || ms < shortestProfitable.ms) {
-        shortestProfitable = { tradeId: t._id, symbol: t.symbol, botId: t.botId, ms, pnl, sellReason: t.sellReason, sellFilledAt: t.sellFilledAt };
+        shortestProfitable = { tradeId: t._id, symbol: t.symbol, botId: t.botId, ms, holdMin: Math.round(ms / 60_000), pnl, sellReason: t.sellReason, sellFilledAt: t.sellFilledAt };
       }
       if (!biggestProfitHoldMs || pnl > biggestProfitHoldMs.pnl) {
-        biggestProfitHoldMs = { tradeId: t._id, symbol: t.symbol, botId: t.botId, ms, pnl, sellReason: t.sellReason, sellFilledAt: t.sellFilledAt };
+        biggestProfitHoldMs = { tradeId: t._id, symbol: t.symbol, botId: t.botId, ms, holdMin: Math.round(ms / 60_000), pnl, sellReason: t.sellReason, sellFilledAt: t.sellFilledAt };
       }
     } else if (pnl < 0) {
       if (!biggestLossHoldMs || pnl < biggestLossHoldMs.pnl) {
-        biggestLossHoldMs = { tradeId: t._id, symbol: t.symbol, botId: t.botId, ms, pnl, sellReason: t.sellReason, sellFilledAt: t.sellFilledAt };
+        biggestLossHoldMs = { tradeId: t._id, symbol: t.symbol, botId: t.botId, ms, holdMin: Math.round(ms / 60_000), pnl, sellReason: t.sellReason, sellFilledAt: t.sellFilledAt };
       }
       if (!fastestLoss || ms < fastestLoss.ms) {
-        fastestLoss = { tradeId: t._id, symbol: t.symbol, botId: t.botId, ms, pnl, sellReason: t.sellReason, sellFilledAt: t.sellFilledAt };
+        fastestLoss = { tradeId: t._id, symbol: t.symbol, botId: t.botId, ms, holdMin: Math.round(ms / 60_000), pnl, sellReason: t.sellReason, sellFilledAt: t.sellFilledAt };
       }
     }
   }
@@ -654,6 +654,7 @@ function buildHoldVsProfit(trades) {
     if (b.count > 0) {
       // recompute avgHold for bucket from individual trades is more accurate but costly — we use bucket midpoint approximation
       b.avgHoldMs = Math.round((b.minMs + (Number.isFinite(b.maxMs) ? b.maxMs : b.minMs + 24 * 60 * 60_000)) / 2);
+      b.avgHoldMin = Math.round(b.avgHoldMs / 60_000);
       b.avgPnl = Number((b.pnl / b.count).toFixed(4));
       b.winRate = Number(((b.wins / b.count) * 100).toFixed(2));
     }
@@ -661,10 +662,13 @@ function buildHoldVsProfit(trades) {
 
   return {
     avgHoldMs: holdCount ? Math.round(totalHoldMs / holdCount) : 0,
+    avgHoldMin: holdCount ? Math.round(Math.round(totalHoldMs / holdCount) / 60_000) : 0,
     avgHoldLabel: holdCount ? humanizeMs(Math.round(totalHoldMs / holdCount)) : '—',
     avgHoldWinningMs: winCount ? Math.round(winHoldMs / winCount) : 0,
+    avgHoldWinningMin: winCount ? Math.round(Math.round(winHoldMs / winCount) / 60_000) : 0,
     avgHoldWinningLabel: winCount ? humanizeMs(Math.round(winHoldMs / winCount)) : '—',
     avgHoldLosingMs: lossCount ? Math.round(lossHoldMs / lossCount) : 0,
+    avgHoldLosingMin: lossCount ? Math.round(Math.round(lossHoldMs / lossCount) / 60_000) : 0,
     avgHoldLosingLabel: lossCount ? humanizeMs(Math.round(lossHoldMs / lossCount)) : '—',
     count: holdCount,
     buckets,
@@ -697,7 +701,7 @@ function buildTpSlDeep(trades) {
       return {
         count: 0, totalPnl: 0, winRate: 0,
         avgPnl: 0, minPnl: 0, maxPnl: 0,
-        avgHoldMs: 0, avgHoldLabel: '—',
+        avgHoldMs: 0, avgHoldMin: 0, avgHoldLabel: '—',
         maxHoldAtExtreme: 0,
         extreme: null,
       };
@@ -736,8 +740,10 @@ function buildTpSlDeep(trades) {
       minPnl: Number(minPnl.toFixed(4)),
       maxPnl: Number(maxPnl.toFixed(4)),
       avgHoldMs: avgHold,
+      avgHoldMin: avgHold ? Math.round(avgHold / 60_000) : 0,
       avgHoldLabel: countWithHold ? humanizeMs(avgHold) : '—',
       maxHoldAtExtreme: maxHoldMs,
+      maxHoldMin: maxHoldMs ? Math.round(maxHoldMs / 60_000) : 0,
       maxHoldAtExtremeLabel: maxHoldMs ? humanizeMs(maxHoldMs) : '—',
       extreme: extreme ? {
         tradeId: extreme._id,
@@ -745,6 +751,7 @@ function buildTpSlDeep(trades) {
         botId: extreme.botId,
         pnl: Number(extreme.realizedPnl) || 0,
         ms: maxHoldMs,
+          holdMin: maxHoldMs ? Math.round(maxHoldMs / 60_000) : 0,
           sellReason: extreme.sellReason,
           sellFilledAt: extreme.sellFilledAt,
         } : null,
@@ -756,6 +763,9 @@ function buildTpSlDeep(trades) {
     sl: summarizeReasons(SL_REASONS, { side: 'loss' }),
     cb: summarizeReasons(CB_REASONS, { side: 'loss' }),
     manual: summarizeReasons(MANUAL_REASONS, { side: 'loss' }),
+    // FIX-2026-08-30: top-level aggregates so UI can show totals without iterating
+    count: trades.length,
+    tpRate: trades.length ? Number(((trades.filter((t) => TP_REASONS.includes(t.sellReason)).length / trades.length) * 100).toFixed(2)) : 0,
   };
 }
 

@@ -64,9 +64,17 @@ try { licenseService = require('./licenseService'); } catch (_) { /* ignore */ }
 // ─── Defaults (mirror AppConfig schema) ───────────────────────────────────
 const DEFAULT_MIN_BOTS = 15;
 const DEFAULT_MAX_BOTS = 25;
-const DEFAULT_INTERVAL_MS = 60 * 60 * 1000; // 1h
+// FIX-2026-08-30: per user request — change check interval default 1h → 30min
+const DEFAULT_INTERVAL_MS = 30 * 60 * 1000; // 30min
 const DEFAULT_KC_STEP = 0.1;
 const DEFAULT_VOL_STEP = 100_000;
+// FIX-2026-08-30: configurable clamp defaults (was hardcoded ADJUST_* constants —
+//   user wants the operational bounds adjustable via Settings UI).
+//   Defaults match the previous hardcoded ADJUST_* values so behavior is unchanged for existing configs.
+const DEFAULT_ADJUST_KC_MIN = 0.8;
+const DEFAULT_ADJUST_KC_MAX = 2.8;
+const DEFAULT_ADJUST_VOL_MIN = 100_000;
+const DEFAULT_ADJUST_VOL_MAX = 2_800_000;
 
 // ─── Bot schema clamps (mirror src/db/models/Bot.js) ──────────────────────
 //   Used to validate that the bot's stored threshold is a sane number before applying delta.
@@ -85,6 +93,9 @@ const VOL_MAX = 1_000_000_000;
 //     - Vol (autoPauseMin24hVolUsdt): [100_000, 2_800_000] USDT
 //   If a bot is already at the bound and the delta would push it past, the field
 //   stays at the bound (no change) and the bot is skipped if BOTH fields are unchanged.
+//   FIX-2026-08-30: these are now configurable via Settings UI (autoPauseAdjustKcClamp*
+//   and autoPauseAdjustVolClamp* in AppConfig). The constants below serve as the
+//   default fallback when no config is present.
 const ADJUST_KC_MIN = 0.8;
 const ADJUST_KC_MAX = 2.8;
 const ADJUST_VOL_MIN = 100_000;
@@ -107,16 +118,22 @@ function clampVol(v) {
 
 // Auto-adjust clamps (tighter than schema — see ADJUST_* constants above).
 // Applied AFTER schema clamp in runOnce() before the skip-unchanged check.
-function clampAdjustKc(v) {
+// FIX-2026-08-30: accept bounds arg (default to constants) so user can tighten/loosen
+//   the operational range from the Settings UI without redeploy.
+function clampAdjustKc(v, bounds) {
   const n = parseFloat(v);
   if (!Number.isFinite(n)) return null;
-  return Math.round(Math.min(ADJUST_KC_MAX, Math.max(ADJUST_KC_MIN, n)) * 1e4) / 1e4;
+  const lo = (bounds && Number.isFinite(bounds.kcMin)) ? bounds.kcMin : ADJUST_KC_MIN;
+  const hi = (bounds && Number.isFinite(bounds.kcMax)) ? bounds.kcMax : ADJUST_KC_MAX;
+  return Math.round(Math.min(hi, Math.max(lo, n)) * 1e4) / 1e4;
 }
 
-function clampAdjustVol(v) {
+function clampAdjustVol(v, bounds) {
   const n = parseFloat(v);
   if (!Number.isFinite(n)) return null;
-  return Math.round(Math.min(ADJUST_VOL_MAX, Math.max(ADJUST_VOL_MIN, n)));
+  const lo = (bounds && Number.isFinite(bounds.volMin)) ? bounds.volMin : ADJUST_VOL_MIN;
+  const hi = (bounds && Number.isFinite(bounds.volMax)) ? bounds.volMax : ADJUST_VOL_MAX;
+  return Math.round(Math.min(hi, Math.max(lo, n)));
 }
 
 /**
@@ -175,6 +192,11 @@ class AutoPauseAdjust {
       intervalMs: DEFAULT_INTERVAL_MS,
       kcStep: DEFAULT_KC_STEP,
       volStep: DEFAULT_VOL_STEP,
+      // FIX-2026-08-30: configurable operational clamps
+      kcClampMin: DEFAULT_ADJUST_KC_MIN,
+      kcClampMax: DEFAULT_ADJUST_KC_MAX,
+      volClampMin: DEFAULT_ADJUST_VOL_MIN,
+      volClampMax: DEFAULT_ADJUST_VOL_MAX,
     };
   }
 
@@ -238,6 +260,10 @@ class AutoPauseAdjust {
         intervalMs: DEFAULT_INTERVAL_MS,
         kcStep: DEFAULT_KC_STEP,
         volStep: DEFAULT_VOL_STEP,
+        kcClampMin: DEFAULT_ADJUST_KC_MIN,
+        kcClampMax: DEFAULT_ADJUST_KC_MAX,
+        volClampMin: DEFAULT_ADJUST_VOL_MIN,
+        volClampMax: DEFAULT_ADJUST_VOL_MAX,
       };
       return;
     }
@@ -248,6 +274,11 @@ class AutoPauseAdjust {
       intervalMs: Number.isFinite(cfg.autoPauseAdjustIntervalMs) ? cfg.autoPauseAdjustIntervalMs : DEFAULT_INTERVAL_MS,
       kcStep: Number.isFinite(cfg.autoPauseAdjustKcStep) ? cfg.autoPauseAdjustKcStep : DEFAULT_KC_STEP,
       volStep: Number.isFinite(cfg.autoPauseAdjustVolStep) ? cfg.autoPauseAdjustVolStep : DEFAULT_VOL_STEP,
+      // FIX-2026-08-30: configurable operational clamps (read from AppConfig; fall back to defaults)
+      kcClampMin: Number.isFinite(cfg.autoPauseAdjustKcClampMin) ? cfg.autoPauseAdjustKcClampMin : DEFAULT_ADJUST_KC_MIN,
+      kcClampMax: Number.isFinite(cfg.autoPauseAdjustKcClampMax) ? cfg.autoPauseAdjustKcClampMax : DEFAULT_ADJUST_KC_MAX,
+      volClampMin: Number.isFinite(cfg.autoPauseAdjustVolClampMin) ? cfg.autoPauseAdjustVolClampMin : DEFAULT_ADJUST_VOL_MIN,
+      volClampMax: Number.isFinite(cfg.autoPauseAdjustVolClampMax) ? cfg.autoPauseAdjustVolClampMax : DEFAULT_ADJUST_VOL_MAX,
     };
   }
 
@@ -321,6 +352,13 @@ class AutoPauseAdjust {
           updatedBots: 0,
           reason: decision.reason,
           ranAt: startedAt,
+          // FIX-2026-08-30: include bounds even in no-op path so UI shows live clamps
+          bounds: {
+            kcMin: this._config.kcClampMin,
+            kcMax: this._config.kcClampMax,
+            volMin: this._config.volClampMin,
+            volMax: this._config.volClampMax,
+          },
         };
         await this._persistSchedulerTelemetry(stats, null);
         return stats;
@@ -351,6 +389,13 @@ class AutoPauseAdjust {
       }
 
       // 4. Compute new thresholds per bot (apply delta + schema clamp + operational clamp; skip no-op writes)
+      // FIX-2026-08-30: thread configurable bounds through clampAdjust* calls
+      const bounds = {
+        kcMin: this._config.kcClampMin,
+        kcMax: this._config.kcClampMax,
+        volMin: this._config.volClampMin,
+        volMax: this._config.volClampMax,
+      };
       const ops = [];
       let skippedClamped = 0;
       for (const doc of eligibleDocs) {
@@ -365,8 +410,8 @@ class AutoPauseAdjust {
         const rawNewKc = prevKc + decision.deltaKc;
         const rawNewVol = prevVol + decision.deltaVol;
         // schema-level clamp first (sanity), then operational clamp (FIX-2026-08-29 user request)
-        const newKc = clampAdjustKc(rawNewKc);
-        const newVol = clampAdjustVol(rawNewVol);
+        const newKc = clampAdjustKc(rawNewKc, bounds);
+        const newVol = clampAdjustVol(rawNewVol, bounds);
         if (newKc == null || newVol == null) {
           skippedClamped += 1;
           continue;
@@ -420,6 +465,8 @@ class AutoPauseAdjust {
         deltaVol: decision.deltaVol,
         reason: decision.reason,
         ranAt: startedAt,
+        // FIX-2026-08-30: include configured bounds so run-now response shows live values
+        bounds: { ...bounds },
       };
       await this._persistSchedulerTelemetry(stats, null);
 
@@ -470,6 +517,10 @@ module.exports.DEFAULT_MAX_BOTS = DEFAULT_MAX_BOTS;
 module.exports.DEFAULT_INTERVAL_MS = DEFAULT_INTERVAL_MS;
 module.exports.DEFAULT_KC_STEP = DEFAULT_KC_STEP;
 module.exports.DEFAULT_VOL_STEP = DEFAULT_VOL_STEP;
+module.exports.DEFAULT_ADJUST_KC_MIN = DEFAULT_ADJUST_KC_MIN; // FIX-2026-08-30: configurable defaults
+module.exports.DEFAULT_ADJUST_KC_MAX = DEFAULT_ADJUST_KC_MAX;
+module.exports.DEFAULT_ADJUST_VOL_MIN = DEFAULT_ADJUST_VOL_MIN;
+module.exports.DEFAULT_ADJUST_VOL_MAX = DEFAULT_ADJUST_VOL_MAX;
 module.exports.KC_MIN = KC_MIN;
 module.exports.KC_MAX = KC_MAX;
 module.exports.VOL_MIN = VOL_MIN;

@@ -3596,6 +3596,26 @@ small.text-muted {
 .pnl-modal-total .is-bull { color: #00e5b8; font-weight: 700; }
 .pnl-modal-total .is-bear { color: #ff4d6d; font-weight: 700; }
 .pnl-modal-total .muted { color: var(--text-3); font-size: 0.9em; }
+/* FIX-2026-08-30: clarify Net vs Gross (user feedback) */
+.pnl-modal-total .pnl-modal-net-label {
+  display: inline-flex; align-items: center; gap: 0.35rem;
+  font-size: 0.78em; font-weight: 600; color: var(--text-3);
+  text-transform: uppercase; letter-spacing: 0.04em;
+  padding: 0.12rem 0.55rem; border-radius: 999px;
+  background: rgba(120, 120, 200, 0.08); border: 1px solid rgba(120, 120, 200, 0.25);
+  margin-right: 0.25rem;
+}
+.pnl-modal-total .pnl-modal-net-hint {
+  color: #88c0d0; font-weight: 700; cursor: help;
+  border-bottom: 1px dotted rgba(120, 180, 220, 0.4);
+}
+.pnl-modal-total .pnl-modal-gl-prefix {
+  font-size: 0.78em; color: var(--text-3); font-weight: 500;
+  margin-right: 0.15rem; cursor: help; user-select: none;
+}
+.pnl-modal-total .pnl-modal-summary-row {
+  align-items: baseline;
+}
 /* FIX-2026-08-01: hero PnL block (main number + THB sub) */
 .pnl-modal-main-pnl {
   font-family: var(--font-mono); font-size: 1.85rem; font-weight: 800;

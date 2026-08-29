@@ -118,9 +118,15 @@ describe('autoPauseAdjust — constants + clampers', () => {
   test('exports expected defaults', () => {
     expect(svc.DEFAULT_MIN_BOTS).toBe(15);
     expect(svc.DEFAULT_MAX_BOTS).toBe(25);
-    expect(svc.DEFAULT_INTERVAL_MS).toBe(60 * 60 * 1000);
+    // FIX-2026-08-30: default interval changed from 1h → 30min per user request
+    expect(svc.DEFAULT_INTERVAL_MS).toBe(30 * 60 * 1000);
     expect(svc.DEFAULT_KC_STEP).toBe(0.1);
     expect(svc.DEFAULT_VOL_STEP).toBe(100_000);
+    // FIX-2026-08-30: configurable clamp defaults (mirror ADJUST_* for legacy behavior)
+    expect(svc.DEFAULT_ADJUST_KC_MIN).toBe(0.8);
+    expect(svc.DEFAULT_ADJUST_KC_MAX).toBe(2.8);
+    expect(svc.DEFAULT_ADJUST_VOL_MIN).toBe(100_000);
+    expect(svc.DEFAULT_ADJUST_VOL_MAX).toBe(2_800_000);
   });
 
   test('exports schema-bound constants', () => {
@@ -224,6 +230,48 @@ describe('autoPauseAdjust — ADJUST_* operational bounds (FIX-2026-08-29)', () 
 
   test('clampAdjustVol — NaN → null', () => {
     expect(svc.clampAdjustVol(NaN)).toBeNull();
+  });
+
+  // FIX-2026-08-30: configurable clamps — bounds arg overrides defaults
+  test('clampAdjustKc — custom bounds tighten the range', () => {
+    const tight = { kcMin: 1.0, kcMax: 2.0 };
+    expect(svc.clampAdjustKc(1.5, tight)).toBe(1.5);
+    expect(svc.clampAdjustKc(0.9, tight)).toBe(1.0);
+    expect(svc.clampAdjustKc(2.1, tight)).toBe(2.0);
+  });
+
+  test('clampAdjustKc — custom bounds widen the range', () => {
+    const wide = { kcMin: 0.3, kcMax: 5.0 };
+    expect(svc.clampAdjustKc(0.5, wide)).toBe(0.5);
+    expect(svc.clampAdjustKc(4.5, wide)).toBe(4.5);
+  });
+
+  test('clampAdjustKc — missing bounds arg falls back to defaults', () => {
+    // No bounds arg → uses ADJUST_KC_MIN/MAX (defaults 0.8/2.8)
+    expect(svc.clampAdjustKc(1.5)).toBe(1.5);
+    expect(svc.clampAdjustKc(5)).toBe(2.8);
+    expect(svc.clampAdjustKc(0.5)).toBe(0.8);
+  });
+
+  test('clampAdjustVol — custom bounds tighten the range', () => {
+    const tight = { volMin: 200_000, volMax: 1_500_000 };
+    expect(svc.clampAdjustVol(800_000, tight)).toBe(800_000);
+    expect(svc.clampAdjustVol(100_000, tight)).toBe(200_000);
+    expect(svc.clampAdjustVol(2_000_000, tight)).toBe(1_500_000);
+  });
+
+  test('clampAdjustVol — missing bounds arg falls back to defaults', () => {
+    expect(svc.clampAdjustVol(500_000)).toBe(500_000);
+    expect(svc.clampAdjustVol(5_000_000)).toBe(2_800_000);
+    expect(svc.clampAdjustVol(50_000)).toBe(100_000);
+  });
+
+  test('clampAdjustKc — partial bounds object (only min) keeps default max', () => {
+    const partial = { kcMin: 1.5 };
+    expect(svc.clampAdjustKc(1.5, partial)).toBe(1.5);
+    expect(svc.clampAdjustKc(2.0, partial)).toBe(2.0);
+    expect(svc.clampAdjustKc(0.5, partial)).toBe(1.5);
+    expect(svc.clampAdjustKc(5, partial)).toBe(2.8); // default ADJUST_KC_MAX
   });
 });
 
@@ -353,6 +401,35 @@ describe('autoPauseAdjust — singleton service', () => {
     setMasterConfig({ autoPauseAdjustEnabled: false });
     await svc.reloadConfig();
     expect(svc.getStatus().timerInstalled).toBe(false);
+    svc.stop();
+  });
+
+  // FIX-2026-08-30: configurable clamps via _loadConfig
+  test('_loadConfig picks up configured clamps', async () => {
+    setMasterConfig({
+      autoPauseAdjustEnabled: true,
+      autoPauseAdjustKcClampMin: 1.0,
+      autoPauseAdjustKcClampMax: 2.0,
+      autoPauseAdjustVolClampMin: 200_000,
+      autoPauseAdjustVolClampMax: 1_500_000,
+    });
+    await svc.start();
+    const cfg = svc.getStatus().config;
+    expect(cfg.kcClampMin).toBe(1.0);
+    expect(cfg.kcClampMax).toBe(2.0);
+    expect(cfg.volClampMin).toBe(200_000);
+    expect(cfg.volClampMax).toBe(1_500_000);
+    svc.stop();
+  });
+
+  test('_loadConfig falls back to defaults when clamp fields missing', async () => {
+    setMasterConfig({ autoPauseAdjustEnabled: true });
+    await svc.start();
+    const cfg = svc.getStatus().config;
+    expect(cfg.kcClampMin).toBe(svc.DEFAULT_ADJUST_KC_MIN);
+    expect(cfg.kcClampMax).toBe(svc.DEFAULT_ADJUST_KC_MAX);
+    expect(cfg.volClampMin).toBe(svc.DEFAULT_ADJUST_VOL_MIN);
+    expect(cfg.volClampMax).toBe(svc.DEFAULT_ADJUST_VOL_MAX);
     svc.stop();
   });
 });
@@ -588,6 +665,75 @@ describe('autoPauseAdjust.runOnce — clamp behavior', () => {
     const ops = mockBot.bulkWrite.mock.calls[0][0];
     expect(ops[0].updateOne.update.$set.autoPauseMinKcPct).toBe(0.8); // unchanged (clamped)
     expect(ops[0].updateOne.update.$set.autoPauseMin24hVolUsdt).toBe(400_000);
+  });
+
+  // FIX-2026-08-30: configurable clamps — runOnce respects configured bounds
+  test('runOnce uses configured kcClampMax (1.5) instead of default 2.8', async () => {
+    // Tighter clamp: kcMax=1.5 (was 2.8). Bot at KC=1.5 should be no-op now.
+    setMasterConfig({
+      autoPauseAdjustEnabled: true,
+      autoPauseAdjustKcClampMin: 0.5,
+      autoPauseAdjustKcClampMax: 1.5,
+    });
+    await svc.reloadConfig();
+    setRunningBots(30);
+    setEligibleBots([
+      { _id: 'b-tight', autoPauseMinKcPct: 1.5, autoPauseMin24hVolUsdt: 500_000 },
+    ]);
+    mockBot.bulkWrite.mockResolvedValue({ modifiedCount: 1 });
+
+    const stats = await svc.runOnce({ source: 'manual' });
+    expect(stats.action).toBe('tighten');
+    expect(stats.bounds.kcMax).toBe(1.5);
+    // KC clamped at 1.5 (no change), Vol updates fine → bot still written
+    expect(stats.updatedBots).toBe(1);
+    expect(stats.skippedClamped).toBe(0);
+
+    const ops = mockBot.bulkWrite.mock.calls[0][0];
+    expect(ops[0].updateOne.update.$set.autoPauseMinKcPct).toBe(1.5); // unchanged (tighter clamp)
+    expect(ops[0].updateOne.update.$set.autoPauseMin24hVolUsdt).toBe(600_000); // +100k
+  });
+
+  test('runOnce uses configured volClampMin (300k) instead of default 100k', async () => {
+    // Higher vol floor: volMin=300k. Bot at Vol=300k should be no-op when loosening.
+    setMasterConfig({
+      autoPauseAdjustEnabled: true,
+      autoPauseAdjustVolClampMin: 300_000,
+      autoPauseAdjustVolClampMax: 3_000_000,
+    });
+    await svc.reloadConfig();
+    setRunningBots(8);
+    setEligibleBots([
+      { _id: 'b-volmin', autoPauseMinKcPct: 1.3, autoPauseMin24hVolUsdt: 300_000 },
+    ]);
+    mockBot.bulkWrite.mockResolvedValue({ modifiedCount: 1 });
+
+    const stats = await svc.runOnce({ source: 'manual' });
+    expect(stats.action).toBe('loosen');
+    expect(stats.bounds.volMin).toBe(300_000);
+    expect(stats.updatedBots).toBe(1); // KC updates → bot still written
+
+    const ops = mockBot.bulkWrite.mock.calls[0][0];
+    expect(ops[0].updateOne.update.$set.autoPauseMinKcPct).toBeCloseTo(1.2);
+    expect(ops[0].updateOne.update.$set.autoPauseMin24hVolUsdt).toBe(300_000); // unchanged (raised clamp)
+  });
+
+  test('runOnce.stats.bounds reflects currently configured clamps', async () => {
+    setMasterConfig({
+      autoPauseAdjustEnabled: true,
+      autoPauseAdjustKcClampMin: 0.9,
+      autoPauseAdjustKcClampMax: 2.4,
+      autoPauseAdjustVolClampMin: 150_000,
+      autoPauseAdjustVolClampMax: 2_500_000,
+    });
+    await svc.reloadConfig();
+    setRunningBots(20); // in-range → action none
+
+    const stats = await svc.runOnce({ source: 'manual' });
+    expect(stats.action).toBeNull();
+    expect(stats.bounds).toEqual({
+      kcMin: 0.9, kcMax: 2.4, volMin: 150_000, volMax: 2_500_000,
+    });
   });
 });
 
