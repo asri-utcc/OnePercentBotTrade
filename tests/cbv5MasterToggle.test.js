@@ -46,10 +46,14 @@ describe('tradeStates — shared force-close state sets', () => {
     expect(FORCE_OPEN_STATES).toContain('stopping');
   });
 
-  test('ATOMIC_FORCE_CLOSE_STATES is 7 states (excludes placed)', () => {
-    expect(ATOMIC_FORCE_CLOSE_STATES.length).toBe(7);
+  // FIX-2026-08-29 (P0 audit): ATOMIC_FORCE_CLOSE_STATES shrunk from 7 → 5 states.
+  //   - Removed 'stopping': predicate still matched on second claim → double-sell race.
+  //   - Removed 'partial_sell_wait': violates SELL partial-fill FREEZE policy (no cancel/replace).
+  test('ATOMIC_FORCE_CLOSE_STATES is 5 states (excludes placed + stopping + partial_sell_wait)', () => {
+    expect(ATOMIC_FORCE_CLOSE_STATES.length).toBe(5);
     expect(ATOMIC_FORCE_CLOSE_STATES).not.toContain('placed');
-    expect(ATOMIC_FORCE_CLOSE_STATES).toContain('stopping');
+    expect(ATOMIC_FORCE_CLOSE_STATES).not.toContain('stopping');
+    expect(ATOMIC_FORCE_CLOSE_STATES).not.toContain('partial_sell_wait');
     expect(ATOMIC_FORCE_CLOSE_STATES).toContain('filled');
   });
 
@@ -59,9 +63,11 @@ describe('tradeStates — shared force-close state sets', () => {
     }
   });
 
-  test('only difference between sets is "placed" (manual force-close of pending BUY)', () => {
+  // FIX-2026-08-29: diff is now 3 states (placed + stopping + partial_sell_wait) — manual
+  //   force-close covers all of these (cancel pending BUY + manual override SELL partial-fill).
+  test('difference between sets: placed + stopping + partial_sell_wait (manual force-close covers)', () => {
     const diff = FORCE_OPEN_STATES.filter(s => !ATOMIC_FORCE_CLOSE_STATES.includes(s));
-    expect(diff).toEqual(['placed']);
+    expect(diff.sort()).toEqual(['partial_sell_wait', 'placed', 'stopping']);
   });
 
   test('both sets are frozen (immutable shared constants)', () => {

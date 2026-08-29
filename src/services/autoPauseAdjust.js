@@ -199,9 +199,7 @@ class AutoPauseAdjust {
     // FIX-2026-08-29: removed .lean() — test mocks return plain object (no chain).
     //   Production Mongoose findOne returns a Query; .lean() was a perf opt for read-only
     //   config, but here we need to stay compatible with the jest mock.
-    if (process.env.DEBUG_AUTOPAUSE_ADJUST) console.log('[loadConfig] before findOne');
     const cfg = await AppConfig.findOne({ key: 'singleton' });
-    if (process.env.DEBUG_AUTOPAUSE_ADJUST) console.log('[loadConfig] after findOne, cfg=', cfg);
     if (!cfg) {
       this._config = {
         enabled: false,
@@ -247,33 +245,27 @@ class AutoPauseAdjust {
    * @returns {Promise<Object>} stats — { skipped, runningBots, eligibleBots, action, updatedBots, reason, error }
    */
   async runOnce({ source = 'periodic' } = {}) {
-    if (process.env.DEBUG_AUTOPAUSE_ADJUST) console.log('[runOnce] start, source=', source, 'inFlight=', this._inFlight);
     if (this._inFlight) {
       logger.info({ source }, 'autoPauseAdjust: tick skipped (in-flight)');
       return { skipped: 'in-flight' };
     }
     this._inFlight = true;
-    if (process.env.DEBUG_AUTOPAUSE_ADJUST) console.log('[runOnce] past inFlight check');
     const startedAt = new Date();
     try {
       // Reload config in case user changed settings between ticks (cheap, single doc)
       await this._loadConfig();
-      if (process.env.DEBUG_AUTOPAUSE_ADJUST) console.log('[runOnce] past loadConfig, enabled=', this._config.enabled);
 
       if (!this._config.enabled) {
         return { skipped: 'disabled' };
       }
-      if (process.env.DEBUG_AUTOPAUSE_ADJUST) console.log('[runOnce] past enabled check');
 
       // License gate
 
       // License gate — ถ้า license ไม่อนุญาต autoPause feature ก็ไม่ adjust
       if (licenseService && typeof licenseService.isFeatureEnabled === 'function'
           && !licenseService.isFeatureEnabled('autoPauseMinKc')) {
-        if (process.env.DEBUG_AUTOPAUSE_ADJUST) console.log('[runOnce] license DISABLED, returning');
         return { skipped: 'license-disabled' };
       }
-      if (process.env.DEBUG_AUTOPAUSE_ADJUST) console.log('[runOnce] past license check');
 
       // 1. Count running bots (enabled && autoPauseEnabled && !deletedAt)
       const runningBots = await Bot.countDocuments({
@@ -281,7 +273,6 @@ class AutoPauseAdjust {
         autoPauseEnabled: { $ne: false },
         deletedAt: null,
       });
-      if (process.env.DEBUG_AUTOPAUSE_ADJUST) console.log('[runOnce] past countDocuments, runningBots=', runningBots);
 
       // 2. Decide
       const decision = decideAdjustment({
@@ -291,7 +282,6 @@ class AutoPauseAdjust {
         kcStep: this._config.kcStep,
         volStep: this._config.volStep,
       });
-      if (process.env.DEBUG_AUTOPAUSE_ADJUST) console.log('[runOnce] past decide, action=', decision.action);
 
       if (decision.action === 'none') {
         const stats = {
@@ -315,7 +305,6 @@ class AutoPauseAdjust {
         },
         { _id: 1, autoPauseMinKcPct: 1, autoPauseMin24hVolUsdt: 1 }
       ).lean();
-      if (process.env.DEBUG_AUTOPAUSE_ADJUST) console.log('[runOnce] past find, eligibleDocs=', JSON.stringify(eligibleDocs));
 
       if (!eligibleDocs || eligibleDocs.length === 0) {
         const stats = {
@@ -378,11 +367,8 @@ class AutoPauseAdjust {
 
       // 5. Bulk write (atomic per-doc, ordered:false — ไม่ block เมื่อ doc นึงพัง)
       let updatedBots = 0;
-      if (process.env.DEBUG_AUTOPAUSE_ADJUST) console.log('[runOnce] before bulkWrite, ops.length=', ops.length);
       if (ops.length > 0) {
-        if (process.env.DEBUG_AUTOPAUSE_ADJUST) console.log('[runOnce] CALLING bulkWrite NOW');
         const result = await Bot.bulkWrite(ops, { ordered: false });
-        if (process.env.DEBUG_AUTOPAUSE_ADJUST) console.log('[runOnce] bulkWrite resolved, modifiedCount=', result.modifiedCount);
         updatedBots = (result && (result.modifiedCount || result.nModified)) || ops.length;
       }
 
@@ -409,7 +395,6 @@ class AutoPauseAdjust {
       logger.info({ stats }, 'autoPauseAdjust: tick done');
       return stats;
     } catch (err) {
-      if (process.env.DEBUG_AUTOPAUSE_ADJUST) console.log('[runOnce] CATCH:', err.message, err.stack);
       logger.warn({ err: err.message, source }, 'autoPauseAdjust: tick error');
       try {
         await this._persistSchedulerTelemetry({ source, ranAt: startedAt }, err.message);

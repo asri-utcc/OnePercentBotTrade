@@ -18,41 +18,49 @@ async function loadSymbol(symbol, { force = false } = {}) {
   if (loadingPromises.has(symbol)) return loadingPromises.get(symbol);
 
   const p = (async () => {
-    const info = await binanceRest.getExchangeInfo({ symbol });
-    const s = info.symbols && info.symbols[0];
-    if (!s) throw new Error(`Symbol not found on Binance: ${symbol}`);
+    try {
+      const info = await binanceRest.getExchangeInfo({ symbol });
+      const s = info.symbols && info.symbols[0];
+      if (!s) throw new Error(`Symbol not found on Binance: ${symbol}`);
 
-    const lotSize = pickFilter(s, 'LOT_SIZE');
-    const priceFilter = pickFilter(s, 'PRICE_FILTER');
-    const notional = pickFilter(s, 'NOTIONAL') || pickFilter(s, 'MIN_NOTIONAL');
+      const lotSize = pickFilter(s, 'LOT_SIZE');
+      const priceFilter = pickFilter(s, 'PRICE_FILTER');
+      const notional = pickFilter(s, 'NOTIONAL') || pickFilter(s, 'MIN_NOTIONAL');
 
-    const parsed = {
-      symbol: s.symbol,
-      baseAsset: s.baseAsset,
-      quoteAsset: s.quoteAsset,
-      status: s.status,
-      isSpotTradingAllowed: s.isSpotTradingAllowed,
-      lotSize: lotSize && {
-        minQty: new Decimal(lotSize.minQty),
-        maxQty: new Decimal(lotSize.maxQty),
-        stepSize: new Decimal(lotSize.stepSize),
-      },
-      priceFilter: priceFilter && {
-        minPrice: new Decimal(priceFilter.minPrice),
-        maxPrice: new Decimal(priceFilter.maxPrice),
-        tickSize: new Decimal(priceFilter.tickSize),
-      },
-      notional: notional && {
-        minNotional: new Decimal(notional.minNotional || notional.minNotionalValue || '0'),
-        applyToMarket: notional.applyToMarket !== false,
-      },
-      raw: s,
-    };
+      const parsed = {
+        symbol: s.symbol,
+        baseAsset: s.baseAsset,
+        quoteAsset: s.quoteAsset,
+        status: s.status,
+        isSpotTradingAllowed: s.isSpotTradingAllowed,
+        lotSize: lotSize && {
+          minQty: new Decimal(lotSize.minQty),
+          maxQty: new Decimal(lotSize.maxQty),
+          stepSize: new Decimal(lotSize.stepSize),
+        },
+        priceFilter: priceFilter && {
+          minPrice: new Decimal(priceFilter.minPrice),
+          maxPrice: new Decimal(priceFilter.maxPrice),
+          tickSize: new Decimal(priceFilter.tickSize),
+        },
+        notional: notional && {
+          minNotional: new Decimal(notional.minNotional || notional.minNotionalValue || '0'),
+          applyToMarket: notional.applyToMarket !== false,
+        },
+        raw: s,
+      };
 
-    cache.set(symbol, parsed);
-    loadingPromises.delete(symbol);
-    logger.info({ symbol, baseAsset: parsed.baseAsset, quoteAsset: parsed.quoteAsset }, 'symbol info loaded');
-    return parsed;
+      cache.set(symbol, parsed);
+      logger.info({ symbol, baseAsset: parsed.baseAsset, quoteAsset: parsed.quoteAsset }, 'symbol info loaded');
+      return parsed;
+    } finally {
+      // FIX-2026-08-29 (P0 audit): was inside success branch only — on failure (429/CIRCUIT_OPEN/
+      //   timeout/Symbol not found) the rejected promise stayed in loadingPromises forever and
+      //   every future loadSymbol(force:true) returned the same rejected promise from the cache
+      //   check at L18 (which runs before any force logic). Now: always clear in finally so the
+      //   next call retries from scratch.
+      loadingPromises.delete(symbol);
+    }
   })();
 
   loadingPromises.set(symbol, p);
@@ -105,7 +113,11 @@ function floorPrice(price, tickSize) {
 // ตรวจว่า order ผ่าน LOT_SIZE / PRICE_FILTER / NOTIONAL / DELIST หรือไม่
 // FIX-2026-08-06: เพิ่ม delist gate — ถ้า symbol อยู่ใน /sapi/v1/spot/delist-schedule
 //   และ delistTime - now <= 7 วัน → reject (defense-in-depth นอกเหนือจาก trader pre-flight)
-function validateOrder({ symbol, price, qty }) {
+// FIX-2026-08-29 (P0 audit): added `opts` parameter. Was undeclared ReferenceError on L162 →
+//   'use strict' threw instead of returning {ok:false} for MARKET orders with no price. P2 audit
+//   "fix" shipped the dead branch without ever executing validateOrder, so callers always hit the
+//   ReferenceError before the conservative-price fallback ever ran.
+function validateOrder({ symbol, price, qty }, opts = {}) {
   const info = getCached(symbol);
   if (!info) {
     return { ok: false, reason: 'symbol info not loaded' };

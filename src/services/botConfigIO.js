@@ -52,6 +52,8 @@ const BOOLEAN_FIELDS = new Set([
   'dynamicSizeEnabled',
   'safeTradeEnabled', 'safeTradeTrendlineEnabled', 'safeTradeNoTradeEnabled',
   'autoPauseEnabled',
+  // FIX-2026-08-29: auto-pause threshold auto-adjust per-bot opt-in (added to ALLOWED_TEMPLATE_FIELDS)
+  'autoPauseAdjustEnabled',
   'autoArmStopLossOnUKC', 'slUkcTriggerOnProfit',
   'tpTrendEnabled', 'autoUpdateTp', 'stopLossOnUpperKC',
 ]);

@@ -2687,7 +2687,9 @@ class Trader {
     if (trade.sellOrderId) {
       try {
         await binanceRest.cancelOrder({
-          symbol: this.bot.symbol,
+          // FIX-2026-08-29 (P1 audit): use trade.symbol instead of this.bot.symbol for multi-symbol safety.
+          //   forceClose.js:106 uses trade.symbol correctly. The cancel here was inconsistent.
+          symbol: trade.symbol,
           orderId: trade.sellOrderId,
         });
         logger.info({
@@ -2789,6 +2791,19 @@ class Trader {
                 });
                 return;
               }
+              // FIX-2026-08-29 (P0 audit): race-recovery updateOne lost (modifiedCount=0) — this means
+              //   WS handleSellFilled already moved state from 'stopping' to 'sold'. If we fall through
+              //   to the MARKET SELL block below, we'd place a SECOND MARKET SELL on an asset that was
+              //   already sold on Binance → DOUBLE-SELL (real loss of capital).
+              //   - The SELL was already FILLED (we're inside `if (fresh.status === 'FILLED')` branch)
+              //   - The DB just doesn't reflect our write because someone else won the race
+              //   - Safe exit: just return. The race winner already wrote 'sold' + Bot.$inc.
+              logger.warn({
+                tradeId: trade._id.toString(),
+                orderId: fresh.orderId,
+                reason: 'race_recovery_update_lost',
+              }, 'trader: _forceCloseTradeNow — race-recovery updateOne lost, SELL already FILLED on Binance — aborting to avoid double-sell');
+              return;
             }
           } catch (_) { /* fall through to MARKET */ }
         }
@@ -2848,10 +2863,20 @@ class Trader {
         tradeId: claim._id.toString(),
         reason: effectiveReason,
       }, 'trader: _forceCloseTradeNow — MARKET SELL failed, fallback to holding retry');
-      await Trade.updateOne(
-        { _id: claim._id },
+      // FIX-2026-08-29 (P0 audit): add `state: 'stopping'` guard to filter.
+      //   - Was: `updateOne({ _id })` unconditional → could clobber 'sold' if WS handleSellFilled
+      //     raced between _emergencyMarketSell return and this update.
+      //   - The qty/buyPrice invalid path at L2829 already uses the proper guard; mirror here.
+      const rollback = await Trade.updateOne(
+        { _id: claim._id, state: 'stopping' },
         { state: 'holding', error: `${effectiveReason}: MARKET SELL failed — will retry` }
       );
+      if (rollback.modifiedCount === 0) {
+        logger.warn({
+          tradeId: claim._id.toString(),
+          reason: effectiveReason,
+        }, 'trader: _forceCloseTradeNow — rollback state=holding skipped (state already moved on by WS path)');
+      }
       await Bot.updateOne({ _id: this.bot._id }, { status: 'holding' });
       eventBus.emit('bot:status', { botId: this.bot._id, status: 'holding' });
       eventBus.emit('trade:update', {
@@ -2866,8 +2891,11 @@ class Trader {
 
     // FIX-2026-08-02: DCA stack — stamp stackClosedAt + sellReasonSource
     if (isStack) {
-      await Trade.updateOne(
-        { _id: claim._id },
+      // FIX-2026-08-29 (P1 audit): guard `state: { $in: ['sold'] }` so we don't overwrite an
+      //   already-stamped record if WS handleSellFilled raced and set the audit trail first.
+      //   The updateOne will no-op on a race-lost path; modifiedCount tells us whether it won.
+      const stamp = await Trade.updateOne(
+        { _id: claim._id, state: { $in: ['sold'] } },
         {
           stackClosedAt: new Date(),
           sellReason: stackReason,
@@ -2876,6 +2904,11 @@ class Trader {
           sellReasonSource: '_forceCloseTradeNow_dca',
         }
       );
+      if (stamp.modifiedCount === 0) {
+        logger.debug({
+          tradeId: claim._id.toString(),
+        }, 'trader: _forceCloseTradeNow — DCA stack stamp no-op (state moved on by WS)');
+      }
     }
   }
 
@@ -4172,15 +4205,46 @@ class Trader {
           return;
         }
         // Atomic claim — sync increment prevents concurrent bot from over-spending
-        buyCommitment.claimBuy(requiredWithBuffer);
+        // FIX-2026-08-29 (P0 audit): pass `availableForNewBuy` as maxAllowed cap so concurrent
+        //   race-losers (another bot reading the same getAccount snapshot) fail the claim
+        //   instead of both succeeding. Without the cap, two bots reading the same balance
+        //   would both pass the `availableForNewBuy >= requiredWithBuffer` check (both saw
+        //   the same committed=0) and both call claimBuy — both returned true (no-op) —
+        //   both placed BUYs — committed total exceeded reserve.
+        const claimed = buyCommitment.claimBuy(requiredWithBuffer, availableForNewBuy);
+        if (!claimed) {
+          // Race lost — another bot claimed in the gap between our getAccount() and our claim.
+          // Fail-closed: skip signal + release buyInFlight + clear bot status.
+          const reason = `buyCommitment race-lost: another bot claimed in window (committed=${(buyCommitment.getCommitted()).toFixed(4)} + required=${requiredWithBuffer.toFixed(4)} > available=${availableForNewBuy.toFixed(4)})`;
+          logger.warn({ botId: this.bot._id.toString(), availableForNewBuy, requiredWithBuffer, committed: buyCommitment.getCommitted() }, 'trader: balance check claim race-lost — skipping BUY to protect reserve');
+          await Signal.updateOne({ _id: signalDoc._id }, { outcome: 'skipped', note: reason });
+          this.buyInFlight = false;
+          await this.failSignal(signalDoc, reason);
+          return;
+        }
         claimedBuy = true;
-        logger.debug({ botId: this.bot._id.toString(), freeUsdt, reserveUsdt, committed, requiredWithBuffer }, 'trader: balance check ok (claim acquired)');
+        logger.debug({ botId: this.bot._id.toString(), freeUsdt, reserveUsdt, committed: buyCommitment.getCommitted(), requiredWithBuffer }, 'trader: balance check ok (claim acquired)');
       } catch (balErr) {
-        // FIX-2026-08-21: เปลี่ยนจาก fail-open → fail-closed ตอน check fail
-        //   - เดิม log warning แล้ว proceed (ไม่ claim → เสี่ยง race ระหว่างบอท)
-        //   - ใหม่ fail signal เพื่อกัน race (Binance API hiccup ไม่ควรทำให้ reserve �ลุด)
+        // FIX-2026-08-21: fail-closed on balance check fail
+        //   - กัน race ระหว่างบอท (Binance API hiccup ไม่ควรทำให้ reserve หลุด)
         const reason = `balance pre-check failed (fail-closed): ${balErr.message}`;
         logger.warn({ err: balErr.message, botId: this.bot._id.toString() }, 'trader: balance pre-check failed — aborting BUY to protect reserve');
+        // FIX-2026-08-29 (P0 audit): release buyCommitment if claim succeeded before the throw.
+        //   - claimedBuy flag becomes true at L4189 AFTER claimBuy() succeeds. If anything throws
+        //     after that (e.g. logger.debug formatter, downstream DB call) the inner catch fires
+        //     WITHOUT releasing the claim. The outer catch at L4473 only fires for code outside
+        //     this inner try block — so the leak path was unreachable from there.
+        //   - Without this fix: committed counter inflates monotonically until "in-flight committed
+        //     54 / free 59 USDT" symptom appears and blocks new BUYs across all bots.
+        if (claimedBuy) {
+          try {
+            buyCommitment.releaseBuy(requiredWithBuffer);
+            claimedBuy = false;
+            logger.info({ botId: this.bot._id.toString(), releasedUsdt: requiredWithBuffer.toFixed(4) }, 'trader: balance-check failed post-claim — buyCommitment released');
+          } catch (releaseErr) {
+            logger.error({ err: releaseErr.message, botId: this.bot._id.toString() }, 'trader: balance-check post-claim release failed (claim leak risk)');
+          }
+        }
         await Signal.updateOne({ _id: signalDoc._id }, { outcome: 'skipped', note: reason });
         this.buyInFlight = false;
         await this.failSignal(signalDoc, reason);
@@ -5668,6 +5732,20 @@ class Trader {
       return true;
     } catch (err) {
       logger.error({ err: err.message, stack: err.stack }, 'trader: _emergencyMarketSell error');
+      // FIX-2026-08-29 (P0 audit): clear sellInFlight on outer-catch error path. Without this,
+      //   if the throw happens AFTER placeClaim set sellInFlight=true (L5436-5441) but BEFORE
+      //   the inner cleanup at L5497-5502, sellInFlight stays true forever. Every subsequent
+      //   force-close / cancel-replace call hits `sellInFlight: { $ne: true }` filter at L5433
+      //   → claim fails → "another path already placing SELL, abort" warning → trade permanently
+      //   stranded in 'stopping'. Mirror the inner-failure cleanup.
+      try {
+        await Trade.updateOne(
+          { _id: trade._id, sellInFlight: true },
+          { $set: { sellInFlight: false, sellInFlightAt: null } }
+        );
+      } catch (cleanupErr) {
+        logger.error({ err: cleanupErr.message, tradeId: trade._id.toString() }, 'trader: _emergencyMarketSell outer-catch cleanup (sellInFlight reset) failed');
+      }
       return false;
     }
   }
@@ -8180,6 +8258,15 @@ class Trader {
 
   // FIX-2026-07-30: poll SELL order status — mirror checkPartialFill (BUY side)
   async checkSellPartialFill(tradeIdStr) {
+    // FIX-2026-08-29 (P0 audit): add running guard — the BUY-side `checkPartialFill` already
+    //   guards with `if (!this.running) return` but the SELL side was missing this check.
+    //   - Without it: stop() clears the timer via clearTimeout, but if the timer fires between
+    //     clearTimeout and the eventBus.off(), this code runs on a stopped bot and:
+    //       (a) writes DB rows (Trade.findById, Bot.updateOne),
+    //       (b) emits bot:status (flipping bot status back to 'selling'/'holding'),
+    //       (c) issues Binance REST calls via binanceRest.getOrder.
+    //   - Mirror the BUY-side fix from BUG-6 (FIX-2026-07-31).
+    if (!this.running) return;
     const fresh = await Trade.findById(tradeIdStr);
     if (!fresh) return;
     if (this.bot._id.toString() !== fresh.botId.toString()) return;
