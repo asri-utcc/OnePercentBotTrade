@@ -507,7 +507,7 @@ router.put('/bot-defaults', requireAuth, async (req, res) => {
       'cbv5Enabled', 'cbv5StrictBreak', 'cbv5UseVolume',
       'cbAutoUnlockEnabled', 'dynamicSizeEnabled',
       'safeTradeEnabled', 'safeTradeTrendlineEnabled', 'safeTradeNoTradeEnabled',
-      'autoPauseEnabled', 'autoArmStopLossOnUKC',
+      'autoPauseEnabled', 'autoPauseAdjustEnabled', 'autoArmStopLossOnUKC',
       'slUkcTriggerOnProfit', 'tpTrendEnabled', 'autoUpdateTp', 'stopLossOnUpperKC',
     ];
     const NUMBER_FIELDS = [

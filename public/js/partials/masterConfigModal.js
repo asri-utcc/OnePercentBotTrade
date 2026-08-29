@@ -583,7 +583,6 @@
       level: 'error', okLabel: 'Overwrite',
     });
     if (!ok) return;
-    if (!ok) return;
 
     status.textContent = '⏳ กำลังส่ง…';
     status.style.color = 'var(--text-3)';
@@ -648,7 +647,6 @@
       message: `ยืนยัน${verb} ${toggleableBotIds.length} บอท?${skipNote}`,
       level: 'warn', okLabel: verb,
     });
-    if (!ok) return;
     if (!ok) return;
 
     status.textContent = `⏳ กำลัง${verb}…`;
@@ -716,7 +714,6 @@
 บอทที่ restore แล้วจะกลับมาทำงานตามปกติ (แต่จะยังไม่ถูก Start อัตโนมัติ — ใช้ปุ่ม "▶️ Start" แยกต่างหาก)`,
       level: 'warn', okLabel: '↩️ Restore',
     });
-    if (!ok) return;
     if (!ok) return;
 
     status.textContent = '⏳ กำลัง Restore…';
