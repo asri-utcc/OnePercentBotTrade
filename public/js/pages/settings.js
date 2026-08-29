@@ -15,6 +15,7 @@ let adminCfg = null;   // FIX-2026-08-08 (rev2): DPS tunables
 let botDefaults = null; // FIX-2026-08-08 (rev3): Bot Defaults
 let rateLimit = null;  // FIX-2026-08-21: Binance API rate-limit capacity
 let autoReserveCfg = null; // FIX-2026-08-24: auto reserve/release USDT config
+let autoPauseAdjustCfg = null; // FIX-2026-08-29: auto-pause threshold auto-adjust config
 let consentStatus = null;  // FIX-2026-08-26 Phase 3a: GET /api/consent/status for Settings page
 let licenseInfo = null;   // FIX-2026-08-26 Phase 3a: GET /api/license/info for Settings page
 
@@ -84,6 +85,18 @@ async function loadConfig() {
     } catch (err) {
       console.warn('auto-reserve config load failed:', err.message);
       autoReserveCfg = { config: { enabled: false, poleCount: 3, usdtPerPole: 10, lossThresholdPct: 2, checkHours: 4, stepUsdt: 10 }, status: {} };
+    }
+    // FIX-2026-08-29: Auto-pause threshold auto-adjust (master settings)
+    try {
+      autoPauseAdjustCfg = await API.get('/api/admin/auto-pause-adjust');
+    } catch (err) {
+      console.warn('auto-pause-adjust config load failed:', err.message);
+      autoPauseAdjustCfg = {
+        ok: false,
+        settings: { enabled: false, minBots: 15, maxBots: 25, intervalMs: 3600000, kcStep: 0.1, volStep: 100000, lastRunAt: null, lastStats: null, lastError: null },
+        status: {},
+        counts: { running: 0, eligible: 0, optedOut: 0 },
+      };
     }
     // FIX-2026-08-26 Phase 3a: Consent + License status for Settings page
     try {
@@ -165,6 +178,7 @@ function render() {
 
         ${renderRateLimitSection()}
         ${renderAutoReserveSection()}
+        ${renderAutoPauseAdjustSection()}
         ${renderCbVersionSection()}
         ${renderDpsSection()}
         ${renderDailyTargetSection()}
@@ -961,6 +975,92 @@ function renderAutoReserveSection() {
   `);
 }
 
+// ─── 🛒 Section: Auto-adjust Auto-pause thresholds (FIX-2026-08-29) ───
+function renderAutoPauseAdjustSection() {
+  const cfg = (autoPauseAdjustCfg && autoPauseAdjustCfg.settings) || {};
+  const status = (autoPauseAdjustCfg && autoPauseAdjustCfg.status) || {};
+  const counts = (autoPauseAdjustCfg && autoPauseAdjustCfg.counts) || {};
+  const enabled = !!cfg.enabled;
+  const lastRunAt = cfg.lastRunAt ? new Date(cfg.lastRunAt).toLocaleString() : '—';
+  const lastStats = cfg.lastStats || null;
+  const tickCount = status.tickCount != null ? status.tickCount : 0;
+  const inFlight = status.inFlight ? '⏳ in-flight' : '';
+  // intervalMs → human friendly (1m/5m/15m/30m/1h/2h/6h/12h/24h)
+  const intervalMs = Number(cfg.intervalMs) || 3600000;
+  const intervalHours = intervalMs / (60 * 60 * 1000);
+  const intervalOptions = [
+    { ms: 60 * 60 * 1000, label: '1 ชม.' },
+    { ms: 2 * 60 * 60 * 1000, label: '2 ชม.' },
+    { ms: 3 * 60 * 60 * 1000, label: '3 ชม.' },
+    { ms: 4 * 60 * 60 * 1000, label: '4 ชม.' },
+    { ms: 6 * 60 * 60 * 1000, label: '6 ชม.' },
+    { ms: 12 * 60 * 60 * 1000, label: '12 ชม.' },
+    { ms: 24 * 60 * 60 * 1000, label: '24 ชม.' },
+  ];
+  return section('sec-auto-pause-adjust', '🔧', 'Auto-adjust Auto-pause thresholds — ปรับ KC/Vol ตามจำนวนบอทที่รัน', false, `
+    <div class="alert alert-info small mb-3">
+      <strong>📌 วิธีทำงาน:</strong> ทุก <code>intervalMs</code> ระบบจะนับจำนวน running bots (ที่เปิดใช้ Auto-pause):
+      <br />• ถ้า <code>running &gt; maxBots</code> → <strong>tighten</strong> thresholds (<code>+kcStep%</code>, <code>+volStep</code> USDT) — บอทที่ %KC/Vol ต่ำจะถูก pause เพิ่ม
+      <br />• ถ้า <code>running &lt; minBots</code> → <strong>loosen</strong> thresholds (<code>-kcStep%</code>, <code>-volStep</code> USDT) — บอทที่ pause อยู่จะ resume กลับมา
+      <br />• ถ้าอยู่ในช่วง <code>[minBots, maxBots]</code> → no-op
+      <br />⚠️ <strong>ปรับเฉพาะบอทที่ <code>autoPauseAdjustEnabled=true</code></strong> (per-bot opt-out — default ON)
+    </div>
+
+    <div class="mb-3">
+      <label class="form-check form-switch">
+        <input type="checkbox" class="form-check-input" id="apa-enabled" ${enabled ? 'checked' : ''} />
+        <span class="form-check-label"><strong>เปิด Auto-adjust</strong> — ระบบจะปรับ Min-%KC และ Min 24h Vol thresholds อัตโนมัติ</span>
+      </label>
+    </div>
+
+    <div class="row g-3">
+      <div class="col-md-3">
+        <label class="form-label">🔻 Min bots (loosen ถ้า &lt;)</label>
+        <input type="number" class="form-control" id="apa-min" value="${cfg.minBots ?? 15}" step="1" min="1" max="1000" />
+        <small class="text-muted">running &lt; นี้ → loosen (default 15)</small>
+      </div>
+      <div class="col-md-3">
+        <label class="form-label">🔺 Max bots (tighten ถ้า &gt;)</label>
+        <input type="number" class="form-control" id="apa-max" value="${cfg.maxBots ?? 25}" step="1" min="1" max="1000" />
+        <small class="text-muted">running &gt; นี้ → tighten (default 25)</small>
+      </div>
+      <div class="col-md-3">
+        <label class="form-label">⏱ Check interval</label>
+        <select class="form-select" id="apa-interval">
+          ${intervalOptions.map((o) => `<option value="${o.ms}" ${intervalMs === o.ms ? 'selected' : ''}>${o.label}</option>`).join('')}
+        </select>
+        <small class="text-muted">default 1 ชม. · หลังปรับระบบจะ tick ทันที (first-fire)</small>
+      </div>
+      <div class="col-md-3">
+        <label class="form-label">📏 KC step (%)</label>
+        <input type="number" class="form-control" id="apa-kcstep" value="${cfg.kcStep ?? 0.1}" step="0.05" min="0.01" max="5" />
+        <small class="text-muted">ปรับ Min-%KC ครั้งละกี่ % (default 0.1)</small>
+      </div>
+    </div>
+    <div class="row g-3 mt-1">
+      <div class="col-md-3">
+        <label class="form-label">💵 Vol step (USDT)</label>
+        <input type="number" class="form-control" id="apa-volstep" value="${cfg.volStep ?? 100000}" step="10000" min="1000" max="100000000" />
+        <small class="text-muted">ปรับ Min 24h Vol ครั้งละกี่ USDT (default 100K)</small>
+      </div>
+    </div>
+
+    <div class="mt-3">
+      <button type="button" class="btn btn-primary" id="btn-save-apa">💾 บันทึก Auto-adjust</button>
+      <button type="button" class="btn btn-outline-warning ms-2" id="btn-trigger-apa">🖐 Run now</button>
+      <span class="ms-2 text-muted small" id="apa-status"></span>
+    </div>
+
+    <div class="text-muted small mt-3">
+      <strong>สถานะ:</strong> ${enabled ? '🟢 enabled' : '⚪ disabled'} · interval=${escapeHtml(String(intervalHours))}h · minBots=${cfg.minBots ?? 15} · maxBots=${cfg.maxBots ?? 25} · kcStep=${cfg.kcStep ?? 0.1} · volStep=${cfg.volStep ?? 100000} ${inFlight}
+      <br /><strong>Counts:</strong> running=${counts.running ?? '?'} · eligible=${counts.eligible ?? '?'} · optedOut=${counts.optedOut ?? '?'}
+      <br /><strong>Last fire:</strong> ${lastRunAt} · tickCount=${tickCount}
+      ${lastStats ? `<br /><strong>Last stats:</strong> outcome=${escapeHtml(lastStats.outcome || '—')} · action=${escapeHtml(lastStats.action || '—')} · running=${lastStats.runningBots ?? '?'} · updated=${lastStats.updatedBots ?? 0} · prevKcAvg=${lastStats.prevKcAvg != null ? Number(lastStats.prevKcAvg).toFixed(2) : '?'} · newKcAvg=${lastStats.newKcAvg != null ? Number(lastStats.newKcAvg).toFixed(2) : '?'}` : ''}
+      ${cfg.lastError ? `<br /><strong>Last error:</strong> <span class="text-danger">${escapeHtml(cfg.lastError)}</span>` : ''}
+    </div>
+  `);
+}
+
 // ─── 🛒 Section: CB Version ──────────────────────────────────────
 function renderCbVersionSection() {
   return section('sec-cb-ver', '⚡', 'CB Version (v2 vs v3)', false, `
@@ -1429,6 +1529,12 @@ function bindEvents() {
   const tar = document.getElementById('btn-trigger-ar');
   if (tar) tar.onclick = triggerAutoReserve;
 
+  // FIX-2026-08-29: Auto-adjust Auto-pause thresholds
+  const sapa = document.getElementById('btn-save-apa');
+  if (sapa) sapa.onclick = saveAutoPauseAdjust;
+  const tapa = document.getElementById('btn-trigger-apa');
+  if (tapa) tapa.onclick = triggerAutoPauseAdjust;
+
   // Auto Delete
   const sadb = document.getElementById('btn-save-adb');
   if (sadb) sadb.onclick = saveAutoDeleteBot;
@@ -1514,7 +1620,13 @@ async function setTelegramToken() {
 }
 
 async function clearTelegramToken() {
-  if (!confirm('ลบ Telegram token และ disable การแจ้งเตือน?')) return;
+  const ok = await AdminModalAlert.confirm({
+    title: '🗑️ ลบ Telegram Token',
+    message: 'ลบ Telegram token และ disable การแจ้งเตือน?',
+    level: 'warn',
+    okLabel: '✕ ลบ',
+  });
+  if (!ok) return;
   try {
     await API.del('/api/telegram/token');
     setStatus('test-status', '✅ ลบ token แล้ว');
@@ -1636,14 +1748,17 @@ async function saveAutoBuyBnb() {
   if (!Number.isFinite(gaugeTargetUsdt) || gaugeTargetUsdt < 1 || gaugeTargetUsdt > 100) { setStatus('bnb-status', '❌ Gauge target ต้องอยู่ระหว่าง 1–100 USDT', true); return; }
 
   if (enabled && !(bnbCfg && bnbCfg.enabled)) {
-    const ok = confirm(
-      '⚠️ จะเปิด Auto-Buy BNB ใช่หรือไม่?\n\n' +
-      'ระบบจะ MARKET BUY BNB/USDT ด้วยเงินจริงอัตโนมัติ ' +
-      'เมื่อ BNB value < threshold (' + thresholdUsdt + ' USDT)\n\n' +
-      'TopUp: ' + topUpUsdt + ' USDT · Interval: ' + checkIntervalMin + ' นาที\n' +
-      'Daily cap: ' + maxUsdtPerDay + ' USDT\n\n' +
-      'แน่ใจหรือไม่?'
-    );
+    const ok = await AdminModalAlert.confirm({
+      title: '⚠️ เปิด Auto-Buy BNB',
+      message: '⚠️ จะเปิด Auto-Buy BNB ใช่หรือไม่?\n\n' +
+        'ระบบจะ MARKET BUY BNB/USDT ด้วยเงินจริงอัตโนมัติ ' +
+        'เมื่อ BNB value < threshold (' + thresholdUsdt + ' USDT)\n\n' +
+        'TopUp: ' + topUpUsdt + ' USDT · Interval: ' + checkIntervalMin + ' นาที\n' +
+        'Daily cap: ' + maxUsdtPerDay + ' USDT\n\n' +
+        'แน่ใจหรือไม่?',
+      level: 'warn',
+      okLabel: 'เปิด Auto-Buy',
+    });
     if (!ok) {
       document.getElementById('bnb-enabled').checked = false;
       return;
@@ -1660,7 +1775,13 @@ async function saveAutoBuyBnb() {
 }
 
 async function triggerAutoBuyBnb() {
-  if (!confirm('⚠️ จะสั่งซื้อ BNB/USDT MARKET BUY ทันที?\n\nสำหรับ top-up BNB แบบ manual (bypass enabled flag)\n\nค่าเงินจริง — แน่ใจหรือไม่?')) return;
+  const ok = await AdminModalAlert.confirm({
+    title: '⚠️ Manual BNB Buy',
+    message: '⚠️ จะสั่งซื้อ BNB/USDT MARKET BUY ทันที?\n\nสำหรับ top-up BNB แบบ manual (bypass enabled flag)\n\n💰 ค่าเงินจริง — แน่ใจหรือไม่?',
+    level: 'warn',
+    okLabel: '🛒 Buy Now',
+  });
+  if (!ok) return;
   setStatus('bnb-status', '⏳ กำลังส่งคำสั่ง...');
   try {
     const result = await API.post('/api/bnb-auto-buy/trigger', {});
@@ -1738,13 +1859,16 @@ async function saveAutoAddBot() {
   if (!Number.isFinite(scanMinVol) || scanMinVol < 0) { setStatus('aab-status', '❌ Min 24h Vol ต้อง ≥ 0', true); return; }
 
   if (enabled && autoAddBotCfg && !autoAddBotCfg.enabled) {
-    const ok = confirm(
-      '⚠️ จะเปิด Auto Add New Bot ใช่หรือไม่?\n\n' +
-      'ระบบจะสแกน + สร้างบอทใหม่อัตโนมัติทุก ' + intervalMin + ' นาที\n' +
-      'Max ' + maxPerRun + ' บอทต่อรอบ · Min %KC > ' + minKcPct + '\n' +
-      'Name prefix: ' + namePrefix + ' (เช่น BTC' + namePrefix + ')\n\n' +
-      (autoEnable ? '▶️ Auto-enable: ON — บอทที่สร้างจะเริ่มเทรดทันที' : '⏸ Auto-enable: OFF — บอทจะอยู่ในสถานะ DISABLED')
-    );
+    const ok = await AdminModalAlert.confirm({
+      title: '⚠️ เปิด Auto Add Bot',
+      message: '⚠️ จะเปิด Auto Add New Bot ใช่หรือไม่?\n\n' +
+        'ระบบจะสแกน + สร้างบอทใหม่อัตโนมัติทุก ' + intervalMin + ' นาที\n' +
+        'Max ' + maxPerRun + ' บอทต่อรอบ · Min %KC > ' + minKcPct + '\n' +
+        'Name prefix: ' + namePrefix + ' (เช่น BTC' + namePrefix + ')\n\n' +
+        (autoEnable ? '▶️ Auto-enable: ON — บอทที่สร้างจะเริ่มเทรดทันที' : '⏸ Auto-enable: OFF — บอทจะอยู่ในสถานะ DISABLED'),
+      level: 'warn',
+      okLabel: 'เปิด Auto Add',
+    });
     if (!ok) { document.getElementById('aab-enabled').checked = false; return; }
   }
 
@@ -1760,7 +1884,13 @@ async function saveAutoAddBot() {
 }
 
 async function triggerAutoAddBot() {
-  if (!confirm('⚠️ จะ Run Auto Add Bot ทันที (bypass enabled flag)?\n\nระบบจะสแกน + filter + create บอทใหม่ทันที\nหรือ restore + activate บอท soft-deleted ที่ symbol ตรงเกณ�์ (ถ้า Auto-restore เปิดอยู่)\nบอทจะอยู่ในสถานะ DISABLED — ต้องเปิดเอง')) return;
+  const ok = await AdminModalAlert.confirm({
+    title: '⚠️ Run Auto Add Bot Now',
+    message: '⚠️ จะ Run Auto Add Bot ทันที (bypass enabled flag)?\n\nระบบจะสแกน + filter + create บอทใหม่ทันที\nหรือ restore + activate บอท soft-deleted ที่ symbol ตรงเกณฑ์ (ถ้า Auto-restore เปิดอยู่)\nบอทจะอยู่ในสถานะ DISABLED — ต้องเปิดเอง',
+    level: 'warn',
+    okLabel: '▶️ Run Now',
+  });
+  if (!ok) return;
   setStatus('aab-status', '⏳ กำลังสแกน...');
   try {
     const resp = await API.post('/api/auto-add-bot/run', {});
@@ -1836,12 +1966,15 @@ async function saveAutoReserveConfig() {
           cancelLabel: 'ยกเลิก',
           requirePassword: false,
         })
-      : confirm(
-          `🤖 Auto Reserve จะปรับ USDT Reserve อัตโนมัติทุก ๆ ${checkHours} ชั่วโมง\n\n` +
-          `เป้า: ${poleCount} ไม้ × ${usdtPerPole} = ${poleCount * usdtPerPole} USDT\n` +
-          `ทุกครั้งจะกั๊ก/ปล่อยครั้งละ ${stepUsdt} USDT\n\n` +
-          `⚠️ ถ้าเปิดแล้ว ระบบจะรันทันทีหลังบันทึก\n\nต้องการเปิดหรือไม่?`
-        );
+      : await AdminModalAlert.confirm({
+          title: '🤖 เปิด Auto Reserve',
+          message: `🤖 Auto Reserve จะปรับ USDT Reserve อัตโนมัติทุก ๆ ${checkHours} ชั่วโมง\n\n` +
+            `เป้า: ${poleCount} ไม้ × ${usdtPerPole} = ${poleCount * usdtPerPole} USDT\n` +
+            `ทุกครั้งจะกั๊ก/ปล่อยครั้งละ ${stepUsdt} USDT\n\n` +
+            `⚠️ ถ้าเปิดแล้ว ระบบจะรันทันทีหลังบันทึก\n\nต้องการเปิดหรือไม่?`,
+          level: 'warn',
+          okLabel: 'เปิด Auto Reserve',
+        });
     if (!ok) { document.getElementById('ar-enabled').checked = false; return; }
   }
 
@@ -1867,7 +2000,12 @@ async function triggerAutoReserve() {
         cancelLabel: 'ยกเลิก',
         requirePassword: false,
       })
-    : confirm('🤖 จะรัน Auto Reserve ทันที (bypass checkHours + enabled flag)?\n\nระบบจะคำนวณ usable + loss poles แล้วปรับ reserve ทันที');
+    : await AdminModalAlert.confirm({
+      title: '🤖 Run Auto Reserve Now',
+      message: '🤖 จะรัน Auto Reserve ทันที (bypass checkHours + enabled flag)?\n\nระบบจะคำนวณ usable + loss poles แล้วปรับ reserve ทันที',
+      level: 'warn',
+      okLabel: '▶️ Run Now',
+    });
   if (!proceed) return;
   setStatus('ar-status', '⏳ กำลังรัน...');
   try {
@@ -1887,6 +2025,69 @@ async function triggerAutoReserve() {
     await loadConfig();
   } catch (err) {
     setStatus('ar-status', '❌ ' + (err.body && err.body.error ? err.body.error : err.message), true);
+  }
+}
+
+// ════════ Auto-adjust Auto-pause thresholds (FIX-2026-08-29) ════════
+async function saveAutoPauseAdjust() {
+  const enabled = !!document.getElementById('apa-enabled').checked;
+  const minBots = parseInt(document.getElementById('apa-min').value, 10);
+  const maxBots = parseInt(document.getElementById('apa-max').value, 10);
+  const intervalMs = parseInt(document.getElementById('apa-interval').value, 10);
+  const kcStep = parseFloat(document.getElementById('apa-kcstep').value);
+  const volStep = parseFloat(document.getElementById('apa-volstep').value);
+  // validate (mirror backend clamp)
+  if (!Number.isFinite(minBots) || minBots < 1 || minBots > 1000) { setStatus('apa-status', '❌ minBots ต้องอยู่ระหว่าง 1..1000', true); return; }
+  if (!Number.isFinite(maxBots) || maxBots < 1 || maxBots > 1000) { setStatus('apa-status', '❌ maxBots ต้องอยู่ระหว่าง 1..1000', true); return; }
+  if (minBots >= maxBots) { setStatus('apa-status', '❌ minBots ต้องน้อยกว่า maxBots', true); return; }
+  if (!Number.isFinite(intervalMs) || intervalMs < 60_000 || intervalMs > 24 * 60 * 60 * 1000) { setStatus('apa-status', '❌ intervalMs ต้องอยู่ระหว่าง 60000..86400000', true); return; }
+  if (!Number.isFinite(kcStep) || kcStep < 0.01 || kcStep > 5) { setStatus('apa-status', '❌ kcStep ต้องอยู่ระหว่าง 0.01..5', true); return; }
+  if (!Number.isFinite(volStep) || volStep < 1000 || volStep > 100_000_000) { setStatus('apa-status', '❌ volStep ต้องอยู่ระหว่าง 1000..100000000', true); return; }
+  try {
+    const resp = await API.put('/api/admin/auto-pause-adjust', { enabled, minBots, maxBots, intervalMs, kcStep, volStep });
+    setStatus('apa-status', '✅ บันทึกแล้ว · scheduler ' + (enabled ? '▶️ running' : '⏹ stopped') + ' (reloadConfig applied)');
+    await loadConfig();
+  } catch (err) {
+    setStatus('apa-status', '❌ ' + (err.body && err.body.error ? err.body.error : err.message), true);
+  }
+}
+
+async function triggerAutoPauseAdjust() {
+  const proceed = window.LUX_CONFIRM
+    ? await window.LUX_CONFIRM({
+        title: 'Run Auto-adjust ทันที',
+        message:
+          '🔧 จะรัน Auto-adjust Auto-pause thresholds ทันที (bypass intervalMs)\n\n' +
+          'ระบบจะนับ running bots แล้วปรับ Min-%KC/Min-Vol thresholds ของบอทที่ autoPauseAdjustEnabled=true ทันที',
+        confirmLabel: 'รันเลย',
+        cancelLabel: 'ยกเลิก',
+        requirePassword: false,
+      })
+    : await AdminModalAlert.confirm({
+      title: '🔧 Run Auto-adjust Now',
+      message: '🔧 จะรัน Auto-adjust Auto-pause thresholds ทันที (bypass intervalMs)?\n\nระบบจะนับ running bots แล้วปรับ Min-%KC/Min-Vol thresholds ของบอทที่ autoPauseAdjustEnabled=true ทันที',
+      level: 'warn',
+      okLabel: '▶️ Run Now',
+    });
+  if (!proceed) return;
+  setStatus('apa-status', '⏳ กำลังรัน...');
+  try {
+    const resp = await API.post('/api/admin/auto-pause-adjust/run-now', {});
+    const s = (resp && resp.stats) || {};
+    if (s.outcome === 'failed_apply') { setStatus('apa-status', '❌ apply failed: ' + (s.error || 'unknown'), true); }
+    else if (s.skipped) { setStatus('apa-status', '⏸ ' + s.skipped); }
+    else if (s.action === 'tighten') {
+      setStatus('apa-status', `🔺 TIGHTEN · running=${s.runningBots} > max=${s.maxBots} · Δkc=+${s.deltaKc} · Δvol=+${s.deltaVol} · updated=${s.updatedBots} bots · clamped ${s.clampedKc}/${s.clampedVol}`);
+    }
+    else if (s.action === 'loosen') {
+      setStatus('apa-status', `🔻 LOOSEN · running=${s.runningBots} < min=${s.minBots} · Δkc=${s.deltaKc} · Δvol=${s.deltaVol} · updated=${s.updatedBots} bots · clamped ${s.clampedKc}/${s.clampedVol}`);
+    }
+    else {
+      setStatus('apa-status', `ℹ️ no action · running=${s.runningBots ?? '?'} ในช่วง [${s.minBots ?? '?'}, ${s.maxBots ?? '?'}] (reason: ${s.reason || 'in_range'})`);
+    }
+    await loadConfig();
+  } catch (err) {
+    setStatus('apa-status', '❌ ' + (err.body && err.body.error ? err.body.error : err.message), true);
   }
 }
 
@@ -1996,7 +2197,13 @@ async function saveDpsConfig() {
 }
 
 async function resetDpsStateAll() {
-  if (!confirm('เคลียร์ DPS state ทุกบอท?')) return;
+  const ok = await AdminModalAlert.confirm({
+    title: '🔄 เคลียร์ DPS State',
+    message: 'เคลียร์ DPS state ทุกบอท?\n\n(ระบบจะ reset state และ re-evaluate ใหม่ในรอบถัดไป)',
+    level: 'warn',
+    okLabel: '🔄 Reset',
+  });
+  if (!ok) return;
   setStatus('dps-status', '⏳ กำลัง reset…');
   try {
     const resp = await API.post('/api/admin/dps-reset-all', {});
@@ -2050,6 +2257,7 @@ const BD_RECOMMENDED = {
   autoPauseEnabled: true,
   autoPauseMinKcPct: 2,
   autoPauseMin24hVolUsdt: 1_000_000,
+  autoPauseAdjustEnabled: true, // FIX-2026-08-29: per-bot opt-in for auto-adjust (default ON)
   autoArmStopLossOnUKC: true,
   autoArmLossPct: 6.3,
   autoArmAgeHours: 4,
@@ -2107,6 +2315,7 @@ async function saveBotDefaults() {
     safeTradeTrendlineEnabled: isChecked('bd-safe-trade-trendline-enabled'),
     safeTradeNoTradeEnabled: isChecked('bd-safe-trade-no-trade-enabled'),
     autoPauseEnabled: isChecked('bd-auto-pause-enabled'),
+    autoPauseAdjustEnabled: isChecked('bd-auto-pause-adjust-enabled'), // FIX-2026-08-29: per-bot opt-in for auto-adjust (mirror botDefaults)
     autoPauseMinKcPct: num('bd-auto-pause-min-kc'),
     autoPauseMin24hVolUsdt: num('bd-auto-pause-min-24h-vol'),
     autoArmStopLossOnUKC: isChecked('bd-auto-arm-stop-loss-ukc'),
@@ -2156,7 +2365,13 @@ async function saveBotDefaults() {
 }
 
 async function resetBotDefaults() {
-  if (!confirm('↩️ Reset Bot Defaults เป็นค่าแนะนำ (recommended)?\n\nค่าที่ตั้งไว้จะถูกเขียนทับด้วยค่า default')) return;
+  const ok = await AdminModalAlert.confirm({
+    title: '↩️ Reset Bot Defaults',
+    message: '↩️ Reset Bot Defaults เป็นค่าแนะนำ (recommended)?\n\nค่าที่ตั้งไว้จะถูกเขียนทับด้วยค่า default',
+    level: 'warn',
+    okLabel: '↩️ Reset',
+  });
+  if (!ok) return;
   setStatus('bd-status', '⏳ กำลัง reset...');
   try {
     await API.put('/api/admin/bot-defaults', BD_RECOMMENDED);
@@ -2190,7 +2405,12 @@ async function exportBotDefaultsToFile() {
 
 async function importBotDefaultsFromFile(mode) {
   if (!window.botConfigIO) { setStatus('bd-status', '❌ botConfigIO module ไม่โหลด', true); return; }
-  if (mode === 'replace' && !window.confirm('Import จะทับค่า Bot Defaults ทั้งหมด — แน่ใจมั้ย?')) return;
+  if (mode === 'replace' && !(await AdminModalAlert.confirm({
+    title: '📥 Import Bot Defaults',
+    message: 'Import จะทับค่า Bot Defaults ทั้งหมด — แน่ใจมั้ย?',
+    level: 'warn',
+    okLabel: '📥 Replace All',
+  }))) return;
   setStatus('bd-status', '⏳ กำลังเลือกไฟล์…');
   const file = await window.botConfigIO.pickJsonFile();
   if (!file) { setStatus('bd-status', 'ยกเลิก'); return; }

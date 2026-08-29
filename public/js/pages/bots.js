@@ -737,6 +737,9 @@ function setupEventHandlers() {
       setChecked('nb-safe-trade-trendline-enabled', d.safeTradeTrendlineEnabled);
       setChecked('nb-safe-trade-no-trade-enabled', d.safeTradeNoTradeEnabled);
       setChecked('nb-auto-pause-enabled', d.autoPauseEnabled);
+      // FIX-2026-08-29: per-bot opt-in for auto-adjust (default ON — match botDefaults)
+      const nbAdjEl = document.getElementById('nb-auto-pause-adjust-enabled');
+      if (nbAdjEl) nbAdjEl.checked = d.autoPauseAdjustEnabled !== false;
       setChecked('nb-auto-arm-stop-loss-ukc', d.autoArmStopLossOnUKC);
       setChecked('nb-sl-ukc-trigger-on-profit', d.slUkcTriggerOnProfit);
       setChecked('nb-tp-trend-enabled', d.tpTrendEnabled);
@@ -849,7 +852,12 @@ function setupEventHandlers() {
 
   async function importConfigToNewBot(mode) {
     if (!window.botConfigIO) { setNbIoStatus('❌ botConfigIO module ไม่โหลด', 'danger'); return; }
-    if (mode === 'replace' && !window.confirm('Import จะทับฟอร์ม (ยกเว้น symbol · เลือก symbol เอง) — แน่ใจมั้ย?')) return;
+    if (mode === 'replace' && !(await AdminModalAlert.confirm({
+      title: '📥 Import Config',
+      message: 'Import จะทับฟอร์ม (ยกเว้น symbol · เลือก symbol เอง) — แน่ใจมั้ย?',
+      level: 'warn',
+      okLabel: '📥 Replace',
+    }))) return;
     setNbIoStatus('⏳ กำลังเลือกไฟล์…');
     const file = await window.botConfigIO.pickJsonFile();
     if (!file) { setNbIoStatus('ยกเลิก', 'warn'); return; }
@@ -2248,6 +2256,8 @@ async function createBot() {
     autoPauseEnabled: document.getElementById('nb-auto-pause-enabled').checked, // FIX-2026-08-01: per-bot auto-pause on low Min-%KC (default ON)
     autoPauseMinKcPct: parseFloat(document.getElementById('nb-auto-pause-min-kc').value) || 2, // FIX-2026-08-01: auto-pause threshold %
     autoPauseMin24hVolUsdt: parseFloat(document.getElementById('nb-auto-pause-min-24h-vol').value) || 1000000, // FIX-2026-08-10: 24h volume guard (USDT, default 1M)
+    // FIX-2026-08-29: per-bot opt-in for auto-adjust (default ON; absent on legacy DOM → true)
+    autoPauseAdjustEnabled: (() => { const e = document.getElementById('nb-auto-pause-adjust-enabled'); return e ? e.checked : true; })(),
     autoArmStopLossOnUKC: document.getElementById('nb-auto-arm-stop-loss-ukc').checked, // FIX-2026-07-31 (F1): per-bot auto-arm SL-on-UKC toggle (default true)
     autoArmLossPct: parseFloat(document.getElementById('nb-auto-arm-loss-pct').value) || 10, // FIX-2026-08-03 / EXT-2026-08-20: F1 loss threshold (1..99, default 10)
     autoArmAgeHours: parseFloat(document.getElementById('nb-auto-arm-age-hours').value) || 4, // FIX-2026-08-03 / EXT-2026-08-20: F1 age threshold (0.5..999, default 4)
@@ -2276,7 +2286,7 @@ async function createBot() {
     if (warn) {
       // แสดง warning ใน toast/alert zone (ถ้ามี) หรือ console
       console.warn('createBot auto-enable warning:', warn);
-      try { alert(warn.trim()); } catch (_) { /* ignore */ }
+      try { await AdminModalAlert.show({ title: '⚠️ Warning', message: warn.trim(), level: 'warn' }); } catch (_) { /* ignore */ }
     }
   } catch (err) {
     errEl.textContent = err.message;
@@ -2466,7 +2476,7 @@ async function saveApiKeys() {
     bootstrap.Modal.getInstance(document.getElementById('apiKeysModal')).hide();
     await loadApiKeysStatus();
     await loadBalance();
-    alert('บันทึก API keys แล้ว — กรุณา restart server เพื่อให้ User Data Stream ทำงาน');
+    await AdminModalAlert.alert('บันทึก API keys แล้ว — กรุณา restart server เพื่อให้ User Data Stream ทำงาน', 'success');
   } catch (err) {
     document.getElementById('ak-error').textContent = err.message;
   }

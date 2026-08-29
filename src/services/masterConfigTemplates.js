@@ -28,6 +28,8 @@ const ALLOWED_TEMPLATE_FIELDS = [
   's1OnlyDown', 'xs1Enabled', 'cbEnabled', 'cbv2Enabled', 'cbv2LockHours', 'safeTradeEnabled',
   'safeTradeTrendlineEnabled', 'safeTradeNoTradeEnabled',
   'autoPauseEnabled', 'autoPauseMinKcPct', 'autoPauseMin24hVolUsdt',
+  // FIX-2026-08-29: auto-pause threshold auto-adjust per-bot opt-in
+  'autoPauseAdjustEnabled',
   'suggestTpWindow', 'autoArmStopLossOnUKC', 'autoArmLossPct', 'autoArmAgeHours', 'slUkcTriggerOnProfit',
   'tpTrendMultiplier', 'tpTrendEnabled',
   'dcaEnabled', 'dcaMaxLayers',

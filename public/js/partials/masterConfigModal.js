@@ -76,6 +76,8 @@
     { id: 'mc-tpTrendEnabled', key: 'tpTrendEnabled', section: 'tp', order: 40, label: '📈 ขยาย TP ตามแนวโน้ม (Trend ×N)' },
     { id: 'mc-dynamicSizeEnabled', key: 'dynamicSizeEnabled', section: 'automation', order: 10, label: '📊 Dynamic Position Sizing (DPS)' },
     { id: 'mc-autoPauseEnabled', key: 'autoPauseEnabled', section: 'automation', order: 20, label: '⏸️ หยุดบอทเมื่อ Min-%KC หรือ 24h Vol ต่ำ' },
+    // FIX-2026-08-29: per-bot opt-in for auto-pause threshold auto-adjust (default ON)
+    { id: 'mc-autoPauseAdjustEnabled', key: 'autoPauseAdjustEnabled', section: 'automation', order: 25, label: '🔧 ให้ Auto-adjust threshold ของบอทนี้' },
     { id: 'mc-stopLossOnUpperKC', key: 'stopLossOnUpperKC', section: 'risk', order: 10, label: '🛑 Stop Loss เมื่อแท่งปิดเหนือ Upper-KC' },
     { id: 'mc-autoArmStopLossOnUKC', key: 'autoArmStopLossOnUKC', section: 'risk', order: 20, label: '🛡️ เปิดใช้ SL-UKC อัตโนมัติเมื่อขาดทุนนาน' },
     { id: 'mc-slUkcTriggerOnProfit', key: 'slUkcTriggerOnProfit', section: 'risk', order: 50, label: '💰 ให้ SL-UKC ปิด Position ที่กำไรด้วย' },
@@ -511,7 +513,7 @@
   //   - returns stats object, displayed in modal
   async function forceRunAutoDelete() {
     const status = document.getElementById('mc-master-status');
-    if (!window.confirm('▶ Force run Auto Delete Bot 1 cycle? จะสแกนบอททั้งหมดและ soft-delete ตาม threshold')) return;
+    if (!(await AdminModalAlert.confirm({ title: '▶ Force Run Auto Delete Bot', message: 'Force run Auto Delete Bot 1 cycle? จะสแกนบอททั้งหมดและ soft-delete ตาม threshold', level: 'warn', okLabel: '▶ Run' }))) return;
     status.textContent = '⏳ กำลังรัน…';
     status.style.color = 'var(--text-3)';
     try {
@@ -697,7 +699,14 @@
       return;
     }
     const skipNote = skipped > 0 ? '\n\n(ข้าม ' + skipped + ' บอทที่ยังไม่ได้ลบ)' : '';
-    const ok = window.confirm(`↩️ ยืนยัน Restore ${restoreIds.length} บอท?${skipNote}\n\nบอทที่ restore แล้วจะกลับมา�ำงานตามปกติ (แต่จะยังไม่ถูก Start อัตโนมัติ — ใ�้ปุ่ม "▶️ Start" แยกต่างหา�)`);
+    const ok = await AdminModalAlert.confirm({
+      title: '↩️ Restore Bots',
+      message: `ยืนยัน Restore ${restoreIds.length} บอท?${skipNote}
+
+บอทที่ restore แล้วจะกลับมาทำงานตามปกติ (แต่จะยังไม่ถูก Start อัตโนมัติ — ใช้ปุ่ม "▶️ Start" แยกต่างหาก)`,
+      level: 'warn', okLabel: '↩️ Restore',
+    });
+    if (!ok) return;
     if (!ok) return;
 
     status.textContent = '⏳ กำลัง Restore…';
@@ -813,7 +822,11 @@
       else payload[k] = v;
     }
     const fieldCount = Object.keys(payload).length;
-    if (!window.confirm(`📋 จะตั้งค่า ${fieldCount} fields เป็นค่าเริ่มต้นของบอทใหม่ (Bot Defaults)?\n\nใช้กับ "+ New Bot" และ "Auto Add Bot" ในครั้งถัดไป`)) return;
+    if (!(await AdminModalAlert.confirm({
+      title: '📋 Save as Bot Defaults',
+      message: `จะตั้งค่า ${fieldCount} fields เป็นค่าเริ่มต้นของบอทใหม่ (Bot Defaults)?\n\nใช้กับ "+ New Bot" และ "Auto Add Bot" ในครั้งถัดไป`,
+      level: 'warn', okLabel: 'Save as Defaults',
+    }))) return;
 
     const status = document.getElementById('mc-status');
     if (status) {
@@ -846,9 +859,13 @@
     return false;
   }
 
-  function promptForName(title, defaultValue) {
-    const v = window.prompt(title, defaultValue || '');
-    if (v == null) return null;
+  async function promptForName(title, defaultValue) {
+    const v = await AdminModalAlert.prompt({
+      title: title || 'กรอกชื่อ',
+      defaultValue: defaultValue || '',
+      placeholder: 'ตั้งชื่อ',
+      level: 'info', okLabel: 'ตกลง',
+    });
     return v;
   }
 
@@ -875,7 +892,11 @@
         setTemplateStatus('⚠️ template ที่เลือกไม่อยู่ในรายการ — กด refresh', 'warn');
         return;
       }
-      if (!window.confirm(`⚠️ จะ overwrite settings ของ template "${existing.name}" ใ่มั้ย? (ชื่อเดิม)`)) return;
+      if (!(await AdminModalAlert.confirm({
+        title: '⚠️ Overwrite Template',
+        message: `จะ overwrite settings ของ template "${existing.name}" ใช่มั้ย? (ชื่อเดิม)`,
+        level: 'warn', okLabel: 'Overwrite',
+      }))) return;
       setTemplateStatus('⏳ กำลัง save…');
       try {
         const resp = await API.put(`/api/admin/master-config-templates/${encodeURIComponent(selectedId)}`, { settings });
@@ -902,7 +923,11 @@
   async function onTemplateLoad() {
     const id = getSelectedTemplateId();
     if (!id) { setTemplateStatus('⚠️ เลือก template ก่อน', 'warn'); return; }
-    if (isFormDirty() && !window.confirm('ท่านมีการเปลี่ยนแปลงที่ยังไม่ได้บันทึก — แน่ใจมั้ยที่จะ Load (จะทับฟอร์ม)?')) return;
+    if (isFormDirty() && !(await AdminModalAlert.confirm({
+      title: '⚠️ Load Template',
+      message: 'ท่านมีการเปลี่ยนแปลงที่ยังไม่ได้บันทึก — แน่ใจมั้ยที่จะ Load (จะทับฟอร์ม)?',
+      level: 'warn', okLabel: 'Load ทับ',
+    }))) return;
     setTemplateStatus('⏳ กำลัง load…');
     try {
       const resp = await API.get(`/api/admin/master-config-templates/${encodeURIComponent(id)}`);
@@ -985,7 +1010,11 @@
     if (!id) { setTemplateStatus('⚠️ เลือก template ก่อน', 'warn'); return; }
     const existing = cachedTemplates.find((t) => t.id === id);
     if (!existing) { setTemplateStatus('⚠️ template หายไปจากรายการ', 'warn'); return; }
-    if (!window.confirm(`🗑️ ลบ template "${existing.name}" ใช่มั้ย? การกระทำนี้ไม่สามาร undo ได้`)) return;
+    if (!(await AdminModalAlert.confirm({
+      title: '🗑️ Delete Template',
+      message: `ลบ template "${existing.name}" ใช่มั้ย? การกระทำนี้ไม่สามาร undo ได้`,
+      level: 'error', okLabel: '🗑️ ลบ',
+    }))) return;
     setTemplateStatus('⏳ กำลังลบ…');
     try {
       await API.delete(`/api/admin/master-config-templates/${encodeURIComponent(id)}`);
@@ -1038,7 +1067,11 @@
       setTemplateStatus('❌ botConfigIO module ไม่โหลด', 'danger');
       return;
     }
-    if (mode === 'replace' && isFormDirty() && !window.confirm('ท่านมีการเปลี่ยนแปลงที่ยังไม่ได้บันทึก — แน่ใจมั้ยที่จะ Import (จะทับฟอร์ม)?')) return;
+    if (mode === 'replace' && isFormDirty() && !(await AdminModalAlert.confirm({
+      title: '⚠️ Import (Replace Mode)',
+      message: 'ท่านมีการเปลี่ยนแปลงที่ยังไม่ได้บันทึก — แน่ใจมั้ยที่จะ Import (จะทับฟอร์ม)?',
+      level: 'warn', okLabel: 'Import ทับ',
+    }))) return;
     setTemplateStatus('⏳ กำลังเลือกไฟล์…');
     const file = await window.botConfigIO.pickJsonFile();
     if (!file) { setTemplateStatus('ยกเลิก', 'warn'); return; }

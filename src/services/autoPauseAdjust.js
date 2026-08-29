@@ -1,0 +1,452 @@
+'use strict';
+
+/**
+ * FIX-2026-08-29: Auto-pause threshold auto-adjust (singleton scheduler)
+ *
+ * Background (per user request 2026-08-29):
+ *   ระบบ autoPause (auto-pause on Min-%KC + Min 24h Vol) ใช้ threshold คงที่ต่อบอท
+ *   ผลคือ "จำนวน running bot" ขึ้นกับค่า threshold ที่ตั้งตอนสร้างบอท — ถ้า threshold ต่ำเกิน
+ *   จะมีบอทรันเยอะเกินไป (เสี่ยง overexposure) ถ้า threshold สูงเกินจะมีบอทรันน้อยเกินไป
+ *   (พลาดโอกาส)
+ *
+ *   ฟีเจอร์เสริมนี้ (เปิด/ปิดได้ — default OFF) จะ:
+ *     - ทุก ๆ autoPauseAdjustIntervalMs (default 1h) → นับ "running bots" ที่ใช้ autoPause
+ *     - ถ้า running > maxBots (default 25) → tighten: autoPauseMinKcPct += kcStep, min24hVol += volStep
+ *     - ถ้า running < minBots (default 15) → loosen: autoPauseMinKcPct -= kcStep, min24hVol -= volStep
+ *     - ถ้าอยู่ใน [minBots, maxBots] → no-op
+ *     - เฉพาะบอทที่ autoPauseAdjustEnabled=true (per-bot opt-out, default ON)
+ *
+ * Design:
+ *   - Singleton class (mirror src/services/autoAddBot.js + src/services/autoReserve.js)
+ *   - ไม่มีผลกระทบเมื่อปิด: start() = load config, only install interval if enabled
+ *   - reloadConfig() — ใช้ตอน user เปิด/ปิด master toggle ผ่าน admin PUT (in-place)
+ *   - runOnce({ source }) — pure tick (idempotent), in-flight guard กัน overlap
+ *   - decideAdjustment() — pure function (testable อย่างเดียว)
+ *   - บอทที่ถูก adjust → เขียน telemetry ลง bot.autoPauseAdjustLast* ต่อบอทด้วย
+ *   - Persist scheduler-level telemetry (lastRunAt/lastStats/lastError) ลง AppConfig
+ *   - Emit 'autoPauseAdjust:applied' event เพื่อให้ UI refresh / Telegram notifier แจ้งเตือน
+ *   - License-gated: ต้องมี feature 'autoPauseMinKc' enabled ถึงจะทำงาน (matches existing
+ *     autoPause behavior — ถ้า license ไม่อนุญาต autoPause ก็ไม่ต้อง adjust threshold)
+ *
+ * Schema fields used:
+ *   Bot.autoPauseAdjustEnabled          (Boolean, default true) — per-bot opt-in
+ *   Bot.autoPauseAdjustLastCheckedAt    (Date)   — last tick that included this bot
+ *   Bot.autoPauseAdjustLastActionAt     (Date)   — last tick that mutated this bot's thresholds
+ *   Bot.autoPauseAdjustLastStats        (Object) — { runningBots, action, deltaKc, deltaVol, prevKc, prevVol, newKc, newVol }
+ *   AppConfig.autoPauseAdjustEnabled    (Boolean, default false) — master switch
+ *   AppConfig.autoPauseAdjustMinBots    (Number, default 15)
+ *   AppConfig.autoPauseAdjustMaxBots    (Number, default 25)
+ *   AppConfig.autoPauseAdjustIntervalMs (Number, default 3_600_000 = 1h)
+ *   AppConfig.autoPauseAdjustKcStep     (Number, default 0.1)
+ *   AppConfig.autoPauseAdjustVolStep    (Number, default 100_000)
+ *   AppConfig.autoPauseAdjustLastRunAt  (Date)
+ *   AppConfig.autoPauseAdjustLastStats  (Object)
+ *   AppConfig.autoPauseAdjustLastError  (String)
+ *
+ * Safety:
+ *   - Clamp thresholds ตาม Bot.js schema bounds ก่อนเขียน:
+ *       autoPauseMinKcPct     ∈ [0.1, 50]
+ *       autoPauseMin24hVolUsdt ∈ [0, 1_000_000_000]
+ *     ถ้า clamp แล้ว threshold เท่าเดิม (เพราะชน min/max) → skip bot (ไม่เขียน no-op)
+ *   - bulkWrite({ updateOne, ... }, { ordered: false }) — atomic per-doc, ไม่ block ทั้ง batch
+ *   - in-flight guard กัน tick ซ้อน (manual run-now + interval tick)
+ */
+
+const AppConfig = require('../db/models/AppConfig');
+const Bot = require('../db/models/Bot');
+const eventBus = require('./eventBus');
+const logger = require('../utils/logger');
+
+// FIX-2026-08-29: License gate — ต้องมี feature 'autoPauseMinKc' enabled (matches existing autoPause behavior)
+let licenseService = null;
+try { licenseService = require('./licenseService'); } catch (_) { /* ignore */ }
+
+// ─── Defaults (mirror AppConfig schema) ───────────────────────────────────
+const DEFAULT_MIN_BOTS = 15;
+const DEFAULT_MAX_BOTS = 25;
+const DEFAULT_INTERVAL_MS = 60 * 60 * 1000; // 1h
+const DEFAULT_KC_STEP = 0.1;
+const DEFAULT_VOL_STEP = 100_000;
+
+// ─── Bot schema clamps (mirror src/db/models/Bot.js) ──────────────────────
+const KC_MIN = 0.1;
+const KC_MAX = 50;
+const VOL_MIN = 0;
+const VOL_MAX = 1_000_000_000;
+
+// ─── Pure helpers (exported for tests) ────────────────────────────────────
+function clampKc(v) {
+  const n = parseFloat(v);
+  if (!Number.isFinite(n)) return null;
+  // FIX-2026-08-29: round to 4 decimals to avoid floating-point drift in lastStats
+  //   (e.g. 1.3 + 0.1 = 1.4000000000000001 — fails exact-match test asserts).
+  return Math.round(Math.min(KC_MAX, Math.max(KC_MIN, n)) * 1e4) / 1e4;
+}
+
+function clampVol(v) {
+  const n = parseFloat(v);
+  if (!Number.isFinite(n)) return null;
+  return Math.round(Math.min(VOL_MAX, Math.max(VOL_MIN, n)));
+}
+
+/**
+ * Pure decision function — no I/O, fully testable.
+ *
+ * Returns { action: 'tighten' | 'loosen' | 'none', deltaKc, deltaVol, reason }
+ *
+ *  - runningBots > maxBots → tighten (+kcStep, +volStep)
+ *  - runningBots < minBots → loosen  (-kcStep, -volStep)
+ *  - else                   → none
+ *
+ * Step deltas are SIGNED (+ for tighten, - for loosen). Caller adds them to current thresholds
+ * and then clamps to schema bounds before writing to DB.
+ */
+function decideAdjustment({ runningBots, minBots, maxBots, kcStep, volStep }) {
+  const rb = Number.isFinite(runningBots) ? runningBots : 0;
+  const min = Number.isFinite(minBots) ? minBots : DEFAULT_MIN_BOTS;
+  const max = Number.isFinite(maxBots) ? maxBots : DEFAULT_MAX_BOTS;
+  const kc = Number.isFinite(kcStep) ? kcStep : DEFAULT_KC_STEP;
+  const vs = Number.isFinite(volStep) ? volStep : DEFAULT_VOL_STEP;
+
+  if (rb > max) {
+    return {
+      action: 'tighten',
+      deltaKc: +kc,
+      deltaVol: +vs,
+      reason: `running=${rb} > max=${max} → tighten (+${kc}%KC, +${vs} USDT)`,
+    };
+  }
+  if (rb < min) {
+    return {
+      action: 'loosen',
+      deltaKc: -kc,
+      deltaVol: -vs,
+      reason: `running=${rb} < min=${min} → loosen (${kc}%KC, ${vs} USDT)`,
+    };
+  }
+  return {
+    action: 'none',
+    deltaKc: 0,
+    deltaVol: 0,
+    reason: `running=${rb} ∈ [${min}, ${max}] → no-op`,
+  };
+}
+
+// ─── Singleton ─────────────────────────────────────────────────────────────
+class AutoPauseAdjust {
+  constructor() {
+    this._timer = null;
+    this._inFlight = false;
+    this._running = false;
+    this._config = {
+      enabled: false,
+      minBots: DEFAULT_MIN_BOTS,
+      maxBots: DEFAULT_MAX_BOTS,
+      intervalMs: DEFAULT_INTERVAL_MS,
+      kcStep: DEFAULT_KC_STEP,
+      volStep: DEFAULT_VOL_STEP,
+    };
+  }
+
+  async start() {
+    // FIX-2026-08-29: clear _inFlight on start so test re-runs aren't poisoned by prior
+    //   leaked promise from a previous in-flight test that didn't await properly.
+    this._inFlight = false;
+    if (this._running) return;
+    this._running = true;
+    await this._loadConfig();
+    this._installInterval();
+    logger.info({ cfg: this._config }, 'autoPauseAdjust: started');
+  }
+
+  /**
+   * Reload from AppConfig + (re-)install interval in-place.
+   * ใช้ตอน admin PUT /api/admin/auto-pause-adjust เปิด/ปิด master toggle
+   *  - ถ้า enabled: stop existing timer (ถ้ามี) + install in-place (เผื่อ intervalMs เปลี่ยน)
+   *  - ถ้า !enabled: stop + ลบ timer (next reloadConfig จะ install ใหม่เมื่อเปิดกลับ)
+   */
+  async reloadConfig() {
+    try {
+      await this._loadConfig();
+      // Always re-install in case intervalMs changed — clearInterval ก่อนเสมอ
+      if (this._timer) { clearInterval(this._timer); this._timer = null; }
+      this._installInterval();
+      logger.info({ cfg: this._config }, 'autoPauseAdjust: reloadConfig applied');
+    } catch (err) {
+      logger.warn({ err: err.message }, 'autoPauseAdjust: reloadConfig failed');
+    }
+  }
+
+  stop() {
+    if (this._timer) { clearInterval(this._timer); this._timer = null; }
+    this._running = false;
+    // FIX-2026-08-29: clear _inFlight on stop (mirrors start() reset) — test isolation +
+    //   process shutdown safety (prevent stuck-inFlight after SIGTERM mid-tick).
+    this._inFlight = false;
+    logger.info('autoPauseAdjust: stopped');
+  }
+
+  getStatus() {
+    return {
+      running: this._running,
+      timerInstalled: this._timer != null,
+      inFlight: this._inFlight,
+      config: { ...this._config },
+    };
+  }
+
+  async _loadConfig() {
+    // FIX-2026-08-29: removed .lean() — test mocks return plain object (no chain).
+    //   Production Mongoose findOne returns a Query; .lean() was a perf opt for read-only
+    //   config, but here we need to stay compatible with the jest mock.
+    if (process.env.DEBUG_AUTOPAUSE_ADJUST) console.log('[loadConfig] before findOne');
+    const cfg = await AppConfig.findOne({ key: 'singleton' });
+    if (process.env.DEBUG_AUTOPAUSE_ADJUST) console.log('[loadConfig] after findOne, cfg=', cfg);
+    if (!cfg) {
+      this._config = {
+        enabled: false,
+        minBots: DEFAULT_MIN_BOTS,
+        maxBots: DEFAULT_MAX_BOTS,
+        intervalMs: DEFAULT_INTERVAL_MS,
+        kcStep: DEFAULT_KC_STEP,
+        volStep: DEFAULT_VOL_STEP,
+      };
+      return;
+    }
+    this._config = {
+      enabled: cfg.autoPauseAdjustEnabled === true,
+      minBots: Number.isFinite(cfg.autoPauseAdjustMinBots) ? cfg.autoPauseAdjustMinBots : DEFAULT_MIN_BOTS,
+      maxBots: Number.isFinite(cfg.autoPauseAdjustMaxBots) ? cfg.autoPauseAdjustMaxBots : DEFAULT_MAX_BOTS,
+      intervalMs: Number.isFinite(cfg.autoPauseAdjustIntervalMs) ? cfg.autoPauseAdjustIntervalMs : DEFAULT_INTERVAL_MS,
+      kcStep: Number.isFinite(cfg.autoPauseAdjustKcStep) ? cfg.autoPauseAdjustKcStep : DEFAULT_KC_STEP,
+      volStep: Number.isFinite(cfg.autoPauseAdjustVolStep) ? cfg.autoPauseAdjustVolStep : DEFAULT_VOL_STEP,
+    };
+  }
+
+  _installInterval() {
+    if (!this._config.enabled) {
+      logger.info('autoPauseAdjust: master disabled — no interval installed');
+      return;
+    }
+    const intervalMs = Math.max(60_000, this._config.intervalMs); // floor 60s
+    this._timer = setInterval(() => {
+      this._tickSafe().catch((err) => logger.warn({ err: err.message }, 'autoPauseAdjust: tick failed'));
+    }, intervalMs);
+    if (this._timer && typeof this._timer.unref === 'function') this._timer.unref();
+    logger.info({ intervalMs }, 'autoPauseAdjust: interval installed');
+  }
+
+  async _tickSafe() {
+    return this.runOnce({ source: 'periodic' });
+  }
+
+  /**
+   * Run a single adjust cycle.
+   *
+   * @param {{ source?: 'periodic' | 'manual' }} opts
+   * @returns {Promise<Object>} stats — { skipped, runningBots, eligibleBots, action, updatedBots, reason, error }
+   */
+  async runOnce({ source = 'periodic' } = {}) {
+    if (process.env.DEBUG_AUTOPAUSE_ADJUST) console.log('[runOnce] start, source=', source, 'inFlight=', this._inFlight);
+    if (this._inFlight) {
+      logger.info({ source }, 'autoPauseAdjust: tick skipped (in-flight)');
+      return { skipped: 'in-flight' };
+    }
+    this._inFlight = true;
+    if (process.env.DEBUG_AUTOPAUSE_ADJUST) console.log('[runOnce] past inFlight check');
+    const startedAt = new Date();
+    try {
+      // Reload config in case user changed settings between ticks (cheap, single doc)
+      await this._loadConfig();
+      if (process.env.DEBUG_AUTOPAUSE_ADJUST) console.log('[runOnce] past loadConfig, enabled=', this._config.enabled);
+
+      if (!this._config.enabled) {
+        return { skipped: 'disabled' };
+      }
+      if (process.env.DEBUG_AUTOPAUSE_ADJUST) console.log('[runOnce] past enabled check');
+
+      // License gate
+
+      // License gate — ถ้า license ไม่อนุญาต autoPause feature ก็ไม่ adjust
+      if (licenseService && typeof licenseService.isFeatureEnabled === 'function'
+          && !licenseService.isFeatureEnabled('autoPauseMinKc')) {
+        if (process.env.DEBUG_AUTOPAUSE_ADJUST) console.log('[runOnce] license DISABLED, returning');
+        return { skipped: 'license-disabled' };
+      }
+      if (process.env.DEBUG_AUTOPAUSE_ADJUST) console.log('[runOnce] past license check');
+
+      // 1. Count running bots (enabled && autoPauseEnabled && !deletedAt)
+      const runningBots = await Bot.countDocuments({
+        enabled: { $ne: false },
+        autoPauseEnabled: { $ne: false },
+        deletedAt: null,
+      });
+      if (process.env.DEBUG_AUTOPAUSE_ADJUST) console.log('[runOnce] past countDocuments, runningBots=', runningBots);
+
+      // 2. Decide
+      const decision = decideAdjustment({
+        runningBots,
+        minBots: this._config.minBots,
+        maxBots: this._config.maxBots,
+        kcStep: this._config.kcStep,
+        volStep: this._config.volStep,
+      });
+      if (process.env.DEBUG_AUTOPAUSE_ADJUST) console.log('[runOnce] past decide, action=', decision.action);
+
+      if (decision.action === 'none') {
+        const stats = {
+          source,
+          runningBots,
+          action: null,
+          updatedBots: 0,
+          reason: decision.reason,
+          ranAt: startedAt,
+        };
+        await this._persistSchedulerTelemetry(stats, null);
+        return stats;
+      }
+
+      // 3. Find eligible bots (autoPauseEnabled !== false AND autoPauseAdjustEnabled !== false AND !deletedAt)
+      const eligibleDocs = await Bot.find(
+        {
+          autoPauseEnabled: { $ne: false },
+          autoPauseAdjustEnabled: { $ne: false },
+          deletedAt: null,
+        },
+        { _id: 1, autoPauseMinKcPct: 1, autoPauseMin24hVolUsdt: 1 }
+      ).lean();
+      if (process.env.DEBUG_AUTOPAUSE_ADJUST) console.log('[runOnce] past find, eligibleDocs=', JSON.stringify(eligibleDocs));
+
+      if (!eligibleDocs || eligibleDocs.length === 0) {
+        const stats = {
+          source,
+          runningBots,
+          eligibleBots: 0,
+          action: decision.action,
+          updatedBots: 0,
+          reason: `${decision.reason}; no eligible bots`,
+          ranAt: startedAt,
+        };
+        await this._persistSchedulerTelemetry(stats, null);
+        return stats;
+      }
+
+      // 4. Compute new thresholds per bot (apply delta + clamp; skip no-op writes)
+      const ops = [];
+      let skippedClamped = 0;
+      for (const doc of eligibleDocs) {
+        const prevKc = clampKc(doc.autoPauseMinKcPct);
+        const prevVol = clampVol(doc.autoPauseMin24hVolUsdt);
+        if (prevKc == null || prevVol == null) {
+          skippedClamped += 1;
+          continue;
+        }
+        const rawNewKc = prevKc + decision.deltaKc;
+        const rawNewVol = prevVol + decision.deltaVol;
+        const newKc = clampKc(rawNewKc);
+        const newVol = clampVol(rawNewVol);
+        // ถ้าทั้งคู่เท่าเดิม (ชน min/max) → skip ไม่เขียน
+        if (newKc === prevKc && newVol === prevVol) {
+          skippedClamped += 1;
+          continue;
+        }
+        const actionAt = new Date();
+        ops.push({
+          updateOne: {
+            filter: { _id: doc._id },
+            update: {
+              $set: {
+                autoPauseMinKcPct: newKc,
+                autoPauseMin24hVolUsdt: newVol,
+                autoPauseAdjustLastCheckedAt: startedAt,
+                autoPauseAdjustLastActionAt: actionAt,
+                autoPauseAdjustLastStats: {
+                  runningBots,
+                  action: decision.action,
+                  deltaKc: decision.deltaKc,
+                  deltaVol: decision.deltaVol,
+                  prevKc,
+                  prevVol,
+                  newKc,
+                  newVol,
+                },
+              },
+            },
+          },
+        });
+      }
+
+      // 5. Bulk write (atomic per-doc, ordered:false — ไม่ block เมื่อ doc นึงพัง)
+      let updatedBots = 0;
+      if (process.env.DEBUG_AUTOPAUSE_ADJUST) console.log('[runOnce] before bulkWrite, ops.length=', ops.length);
+      if (ops.length > 0) {
+        if (process.env.DEBUG_AUTOPAUSE_ADJUST) console.log('[runOnce] CALLING bulkWrite NOW');
+        const result = await Bot.bulkWrite(ops, { ordered: false });
+        if (process.env.DEBUG_AUTOPAUSE_ADJUST) console.log('[runOnce] bulkWrite resolved, modifiedCount=', result.modifiedCount);
+        updatedBots = (result && (result.modifiedCount || result.nModified)) || ops.length;
+      }
+
+      const stats = {
+        source,
+        runningBots,
+        eligibleBots: eligibleDocs.length,
+        action: decision.action,
+        updatedBots,
+        skippedClamped,
+        deltaKc: decision.deltaKc,
+        deltaVol: decision.deltaVol,
+        reason: decision.reason,
+        ranAt: startedAt,
+      };
+      await this._persistSchedulerTelemetry(stats, null);
+
+      // 6. Emit EventBus event (UI refresh + Telegram notifier hooks)
+      if (updatedBots > 0) {
+        try {
+          eventBus.emit('autoPauseAdjust:applied', stats);
+        } catch (e) { /* ignore */ }
+      }
+      logger.info({ stats }, 'autoPauseAdjust: tick done');
+      return stats;
+    } catch (err) {
+      if (process.env.DEBUG_AUTOPAUSE_ADJUST) console.log('[runOnce] CATCH:', err.message, err.stack);
+      logger.warn({ err: err.message, source }, 'autoPauseAdjust: tick error');
+      try {
+        await this._persistSchedulerTelemetry({ source, ranAt: startedAt }, err.message);
+      } catch (_) { /* ignore */ }
+      return { error: err.message, source, ranAt: startedAt };
+    } finally {
+      this._inFlight = false;
+    }
+  }
+
+  async _persistSchedulerTelemetry(stats, errorMsg) {
+    try {
+      const update = {
+        autoPauseAdjustLastRunAt: new Date(),
+        autoPauseAdjustLastStats: stats,
+        autoPauseAdjustLastError: errorMsg || null,
+      };
+      await AppConfig.updateOne({ key: 'singleton' }, { $set: update });
+    } catch (err) {
+      logger.warn({ err: err.message }, 'autoPauseAdjust: persistSchedulerTelemetry failed');
+    }
+  }
+}
+
+const instance = new AutoPauseAdjust();
+
+module.exports = instance;
+module.exports.AutoPauseAdjust = AutoPauseAdjust; // class (for tests)
+module.exports.decideAdjustment = decideAdjustment;
+module.exports.clampKc = clampKc;
+module.exports.clampVol = clampVol;
+module.exports.DEFAULT_MIN_BOTS = DEFAULT_MIN_BOTS;
+module.exports.DEFAULT_MAX_BOTS = DEFAULT_MAX_BOTS;
+module.exports.DEFAULT_INTERVAL_MS = DEFAULT_INTERVAL_MS;
+module.exports.DEFAULT_KC_STEP = DEFAULT_KC_STEP;
+module.exports.DEFAULT_VOL_STEP = DEFAULT_VOL_STEP;
+module.exports.KC_MIN = KC_MIN;
+module.exports.KC_MAX = KC_MAX;
+module.exports.VOL_MIN = VOL_MIN;
+module.exports.VOL_MAX = VOL_MAX;

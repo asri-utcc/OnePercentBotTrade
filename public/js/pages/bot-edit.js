@@ -216,6 +216,11 @@ function render() {
                       <small class="text-muted">pause เมื่อ 24h quote-volume ต่ำกว่า; resume ต้องผ่านทั้ง 2 เงื่อนไข</small>
                     </div>
                   </div>
+                  <div class="form-check form-switch mt-2">
+                    <input type="checkbox" class="form-check-input" id="f-auto-pause-adjust-enabled" ${bot.autoPauseAdjustEnabled !== false ? 'checked' : ''} />
+                    <label class="form-check-label" for="f-auto-pause-adjust-enabled">🔧 <strong>ให้ Auto-adjust threshold</strong> (เมื่อ master เปิด)</label>
+                    <small class="text-muted d-block mt-1">ระบบจะปรับ KC/Vol thresholds อัตโนมัติตามจำนวนบอทที่รัน — uncheck เพื่อ opt-out</small>
+                  </div>
                 </div>
               </div>
             </div>
@@ -789,7 +794,7 @@ function render() {
   async function importConfigFromFile(mode) {
     if (!window.botConfigIO) { setIoStatus('❌ botConfigIO module ไม่โหลด', 'danger'); return; }
     if (!bot) { setIoStatus('❌ ยังโหลดบอทไม่เสร็จ', 'danger'); return; }
-    if (mode === 'replace' && !window.confirm('Import จะทับฟอร์มทั้งหมด (ยกเว้น symbol ที่ล็อกไว้) — แน่ใจมั้ย?')) return;
+    if (mode === 'replace' && !(await AdminModalAlert.confirm({ title: '⚠️ Import (Replace Mode)', message: 'Import จะทับฟอร์มทั้งหมด (ยกเว้น symbol ที่ล็อกไว้) — แน่ใจมั้ย?', level: 'warn', okLabel: 'Import' }))) return;
     setIoStatus('⏳ กำลังเลือกไฟล์…');
     const file = await window.botConfigIO.pickJsonFile();
     if (!file) { setIoStatus('ยกเลิก', 'warn'); return; }
@@ -1162,6 +1167,7 @@ async function save(e) {
     autoPauseEnabled: document.getElementById('f-auto-pause-enabled').checked, // FIX-2026-08-01: per-bot auto-pause on low Min-%KC (default ON)
     autoPauseMinKcPct: parseFloat(document.getElementById('f-auto-pause-min-kc').value) || 2, // FIX-2026-08-01: auto-pause threshold %
     autoPauseMin24hVolUsdt: parseFloat(document.getElementById('f-auto-pause-min-24h-vol').value) || 1000000, // FIX-2026-08-10: 24h volume guard (USDT, default 1M)
+    autoPauseAdjustEnabled: document.getElementById('f-auto-pause-adjust-enabled').checked, // FIX-2026-08-29: per-bot opt-in for auto-adjust (default ON)
     autoArmStopLossOnUKC: document.getElementById('f-auto-arm-stop-loss-ukc').checked, // FIX-2026-07-31 (F1): per-bot auto-arm SL-on-UKC toggle (default true)
     autoArmLossPct: parseFloat(document.getElementById('f-auto-arm-loss-pct').value) || 10, // FIX-2026-08-03 / EXT-2026-08-20: per-bot F1 loss threshold (1..99, default 10)
     autoArmAgeHours: parseFloat(document.getElementById('f-auto-arm-age-hours').value) || 4, // FIX-2026-08-03 / EXT-2026-08-20: per-bot F1 age threshold (0.5..999, default 4)
@@ -1184,7 +1190,7 @@ async function save(e) {
   };
   try {
     await API.put(`/api/bots/${botId}`, data);
-    alert('บันทึกแล้ว');
+    await AdminModalAlert.show({ title: '✅ บันทึกแล้ว', message: 'บันทึกการตั้งค่าบอทเรียบร้อย', level: 'success' });
     await loadBot();
   } catch (err) {
     document.getElementById('f-error').textContent = err.message;
@@ -1195,7 +1201,13 @@ async function save(e) {
 //   - try ก่อนแบบไม่ใส่ password → ถ้า 403 → prompt แล้ว retry (mirror callBotWithPassword pattern)
 //   - ใช้ body.password แทน header X-Bot-Action-Password (ตรงกับ standard pattern ใน luxConfirm.callBotWithPassword)
 window.unlockCBv2Now = async (id) => {
-  if (!confirm('ปลด CBv2 cooldown ตอนนี้? (ต้องใช้ BOT_ACTION_PASSWORD)')) return;
+  const ok = await AdminModalAlert.confirm({
+    title: '🔓 ปลด CBv2 Cooldown',
+    message: 'ปลด CBv2 cooldown ตอนนี้?\n\n(ต้องใช้ BOT_ACTION_PASSWORD)',
+    level: 'warn',
+    okLabel: '🔓 ปลด Cooldown',
+  });
+  if (!ok) return;
   const btn = document.getElementById('btn-unlock-cbv2');
   if (btn) { btn.disabled = true; btn.textContent = '⏳ กำลังปลด cooldown...'; }
   try {
@@ -1205,18 +1217,24 @@ window.unlockCBv2Now = async (id) => {
       resp = await API.post(`/api/bots/${id}/unlock-cbv2`, {});
     } catch (err) {
       if (!err || (err.status !== 403 && err.status !== 503)) throw err;
-      const pw = prompt('กรอก BOT_ACTION_PASSWORD:');
+      const pw = await AdminModalAlert.prompt({
+        title: '🔐 BOT_ACTION_PASSWORD',
+        message: 'กรอก BOT_ACTION_PASSWORD:',
+        level: 'warn',
+        okLabel: 'ยืนยัน',
+        inputType: 'password',
+      });
       if (!pw) throw new Error('ยกเลิก (ไม่ได้ใส่รหัส)');
       // retry — ใส่ password ใน body (backend รับ req.body.password)
       resp = await API.post(`/api/bots/${id}/unlock-cbv2`, { password: pw });
     }
-    alert('ปลด CBv2 cooldown เรียบร้อย — S1 BUY กลับมาทำงานตามปกติ');
+    await AdminModalAlert.show({ title: '✅ สำเร็จ', message: 'ปลด CBv2 cooldown เรียบร้อย — S1 BUY กลับมาทำงานตามปกติ', level: 'success' });
     if (resp && resp.bot) {
       // refresh the page to clear the cooldown banner
       location.reload();
     }
   } catch (err) {
-    alert('ปลด cooldown ล้มเหลว: ' + (err.response?.data?.error || err.body?.error || err.message));
+    await AdminModalAlert.show({ title: '⛔ ล้มเหลว', message: 'ปลด cooldown ล้มเหลว: ' + (err.response?.data?.error || err.body?.error || err.message), level: 'error' });
     if (btn) { btn.disabled = false; btn.textContent = '🔓 ปลด cooldown ตอนนี้'; }
   }
 };

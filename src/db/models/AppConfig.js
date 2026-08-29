@@ -339,6 +339,30 @@ const appConfigSchema = new mongoose.Schema(
     //   - validation/clamp: PUT /api/admin/rate-limit (admin.routes.js)
     // ═══════════════════════════════════════════════════════════════════════
     binanceRateLimitPerMin: { type: Number, default: 6000, min: 500, max: 120000 },
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // FIX-2026-08-29: Auto-pause threshold auto-adjust (master settings)
+    //   - enabled: master switch (default false — user must opt-in)
+    //   - target min/max running bot count window:
+    //     running bots ที่ autoPauseEnabled !== false + deletedAt == null + enabled !== false
+    //   - intervalMs: scheduler tick period (default 1h = 3600000)
+    //   - kcStep / volStep: amount to adjust per action (default 0.1 / 100000)
+    //     ถ้า running > max → tighten (+kcStep, +volStep)
+    //     ถ้า running < min → loosen (-kcStep, -volStep)
+    //     ถ้าในช่วง → no-op
+    //   - clamp bounds: autoPauseMinKcPct ∈ [0.1, 50], autoPauseMin24hVolUsdt ∈ [0, 1e9]
+    //   - lastRunAt / lastStats / lastError: telemetry (persist across restart)
+    //   - engine: src/services/autoPauseAdjust.js (singleton scheduler)
+    // ═══════════════════════════════════════════════════════════════════════
+    autoPauseAdjustEnabled:    { type: Boolean, default: false },
+    autoPauseAdjustMinBots:    { type: Number,  default: 15, min: 1, max: 1000 },
+    autoPauseAdjustMaxBots:    { type: Number,  default: 25, min: 1, max: 1000 },
+    autoPauseAdjustIntervalMs: { type: Number,  default: 60 * 60 * 1000, min: 60_000, max: 24 * 60 * 60 * 1000 },
+    autoPauseAdjustKcStep:     { type: Number,  default: 0.1, min: 0.01, max: 5 },
+    autoPauseAdjustVolStep:    { type: Number,  default: 100_000, min: 1_000, max: 100_000_000 },
+    autoPauseAdjustLastRunAt:  { type: Date,    default: null },
+    autoPauseAdjustLastStats:  { type: Object,  default: null },
+    autoPauseAdjustLastError:  { type: String,  default: null },
   },
   { timestamps: true }
 );

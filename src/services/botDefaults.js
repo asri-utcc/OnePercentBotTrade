@@ -218,6 +218,12 @@ function buildBotCreatePayload({ overrides = {}, botDefaults = {}, fallbacks = {
     autoPauseMinKcPct: pickScalar(o, b, 'autoPauseMinKcPct', 2, { clamp: [0.1, 50] }),
     // FIX-2026-08-10: 24h volume guard (paired with autoPauseMinKcPct)
     autoPauseMin24hVolUsdt: pickScalar(o, b, 'autoPauseMin24hVolUsdt', 1_000_000, { clamp: [0, 1_000_000_000] }),
+    // FIX-2026-08-29: Auto-adjust thresholds opt-in (per-bot)
+    autoPauseAdjustEnabled: pickBool(o, b, 'autoPauseAdjustEnabled', true),
+    // FIX-2026-08-29: per-bot opt-in for auto-pause threshold auto-adjust (default ON)
+    //   - ถ้า master AppConfig.autoPauseAdjustEnabled=true → scheduler ปรับ KC/Vol thresholds ของบอทนี้
+    //   - false: บอทนี้ไม่ถูกปรับ (per-bot opt-out แม้ master เปิดอยู่)
+    autoPauseAdjustEnabled: pickBool(o, b, 'autoPauseAdjustEnabled', true),
 
     // ── Auto-arm SL-UKC (F1) ──
     autoArmStopLossOnUKC: pickBool(o, b, 'autoArmStopLossOnUKC', true),

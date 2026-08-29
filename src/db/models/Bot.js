@@ -171,6 +171,17 @@ const botSchema = new mongoose.Schema(
     //   → checkAutoPauseBots() skip pause เพื่อกัน orphan position (trader.stop() ฆ่า SELL-placement handler)
     //   cleared เมื่อ pause/resume สำเร็จ
     autoPauseSkipReason: { type: String, default: null, index: true }, // 'buy_in_flight' | null
+    // FIX-2026-08-29: Auto-pause threshold auto-adjust (opt-in per bot, default ON)
+    //   - เมื่อ master autoPauseAdjustEnabled=true → scheduler นับจำนวน running bots
+    //     ที่ autoPauseEnabled !== false; ถ้า > max → เพิ่ม autoPauseMinKcPct/vol threshold
+    //     (บอทที่ %KC ต่ำ/24hVol ต่ำจะถูก pause เพิ่ม); ถ้า < min → ลด threshold (resume ได้มากขึ้น)
+    //   - false: บอทนี้ไม่ถูกปรับ threshold (per-bot opt-out)
+    //   - ใช้ร่วมกับ autoPauseEnabled: ถ้า autoPauseEnabled=false บอทไม่มี threshold ให้ปรับ
+    autoPauseAdjustEnabled: { type: Boolean, default: true },
+    // FIX-2026-08-29: telemetry — last action timestamp + last stats (UI roll-up)
+    autoPauseAdjustLastCheckedAt: { type: Date, default: null },
+    autoPauseAdjustLastActionAt: { type: Date, default: null },
+    autoPauseAdjustLastStats: { type: Object, default: null }, // { runningBots, action: 'tighten'|'loosen'|null, deltaKc, deltaVol, prevKc, prevVol, newKc, newVol }
     // FIX-2026-07-31: auto-arm SL-on-UKC for stuck losing positions (per-bot toggle, default true)
     //   - เมื่อ position ขาดทุน > autoArmLossPct + เปิดมา > autoArmAgeHours → trader set trade.useStopLossOnUKC=true
     //   - _checkStopLossOnUpperKC จะยอม trigger เฉพาะ trade ที่มี flag นี้

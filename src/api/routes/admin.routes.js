@@ -20,6 +20,7 @@ const Bot = require('../../db/models/Bot');
 const masterConfig = require('../../core/masterConfig');
 const cbVersion = require('../../core/cbVersion');
 const autoDeleteBot = require('../../services/autoDeleteBot');
+const autoPauseAdjust = require('../../services/autoPauseAdjust');
 const eventBus = require('../../services/eventBus');
 const masterConfigTemplates = require('../../services/masterConfigTemplates');
 const logger = require('../../utils/logger');
@@ -244,6 +245,121 @@ router.put('/rate-limit', requireAuth, async (req, res) => {
     });
   } catch (err) {
     logger.warn({ err: err.message, body: req.body }, 'admin: PUT rate-limit failed');
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════
+// FIX-2026-08-29: Auto-pause threshold auto-adjust (master settings + run-now)
+//   - GET /api/admin/auto-pause-adjust
+//       → return current AppConfig.autoPauseAdjust* + scheduler status + lastStats
+//       → include live count of "running" bots (enabled && autoPauseEnabled && !deletedAt)
+//       → include count of opted-out bots (autoPauseAdjustEnabled=false but eligible otherwise)
+//   - PUT /api/admin/auto-pause-adjust
+//       → update AppConfig fields (clamp on save)
+//       → call autoPauseAdjust.reloadConfig() to install/clear interval in-place
+//   - POST /api/admin/auto-pause-adjust/run-now
+//       → force-tick the scheduler (manual run, bypasses interval)
+//       → returns runOnce stats for instant UI feedback
+//   - requireAuth (admin-level — same as other master config endpoints)
+// ═══════════════════════════════════════════════════════════════════════
+router.get('/auto-pause-adjust', requireAuth, async (req, res) => {
+  try {
+    const cfg = await AppConfig.findOne({ key: 'singleton' }).lean();
+    const [
+      runningBots,
+      eligibleBots,
+      optedOutBots,
+    ] = await Promise.all([
+      Bot.countDocuments({ enabled: { $ne: false }, autoPauseEnabled: { $ne: false }, deletedAt: null }),
+      Bot.countDocuments({ autoPauseEnabled: { $ne: false }, autoPauseAdjustEnabled: { $ne: false }, deletedAt: null }),
+      Bot.countDocuments({ autoPauseEnabled: { $ne: false }, autoPauseAdjustEnabled: false, deletedAt: null }),
+    ]);
+    const status = autoPauseAdjust.getStatus();
+    res.json({
+      ok: true,
+      settings: {
+        enabled: cfg ? cfg.autoPauseAdjustEnabled === true : false,
+        minBots: cfg ? cfg.autoPauseAdjustMinBots : autoPauseAdjust.DEFAULT_MIN_BOTS,
+        maxBots: cfg ? cfg.autoPauseAdjustMaxBots : autoPauseAdjust.DEFAULT_MAX_BOTS,
+        intervalMs: cfg ? cfg.autoPauseAdjustIntervalMs : autoPauseAdjust.DEFAULT_INTERVAL_MS,
+        kcStep: cfg ? cfg.autoPauseAdjustKcStep : autoPauseAdjust.DEFAULT_KC_STEP,
+        volStep: cfg ? cfg.autoPauseAdjustVolStep : autoPauseAdjust.DEFAULT_VOL_STEP,
+        lastRunAt: cfg ? cfg.autoPauseAdjustLastRunAt : null,
+        lastStats: cfg ? cfg.autoPauseAdjustLastStats : null,
+        lastError: cfg ? cfg.autoPauseAdjustLastError : null,
+      },
+      status,
+      counts: {
+        running: runningBots,
+        eligible: eligibleBots,
+        optedOut: optedOutBots,
+      },
+    });
+  } catch (err) {
+    logger.warn({ err: err.message }, 'admin: GET auto-pause-adjust failed');
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.put('/auto-pause-adjust', requireAuth, async (req, res) => {
+  try {
+    const set = {};
+    // FIX-2026-08-29: validate + clamp each field
+    if (req.body.enabled !== undefined) set.autoPauseAdjustEnabled = !!req.body.enabled;
+    if (req.body.minBots !== undefined) {
+      const n = parseFloat(req.body.minBots);
+      if (Number.isFinite(n)) set.autoPauseAdjustMinBots = Math.max(1, Math.min(1000, n));
+    }
+    if (req.body.maxBots !== undefined) {
+      const n = parseFloat(req.body.maxBots);
+      if (Number.isFinite(n)) set.autoPauseAdjustMaxBots = Math.max(1, Math.min(1000, n));
+    }
+    if (req.body.intervalMs !== undefined) {
+      const n = parseFloat(req.body.intervalMs);
+      if (Number.isFinite(n)) set.autoPauseAdjustIntervalMs = Math.max(60_000, Math.min(24 * 60 * 60 * 1000, n));
+    }
+    if (req.body.kcStep !== undefined) {
+      const n = parseFloat(req.body.kcStep);
+      if (Number.isFinite(n)) set.autoPauseAdjustKcStep = Math.max(0.01, Math.min(5, n));
+    }
+    if (req.body.volStep !== undefined) {
+      const n = parseFloat(req.body.volStep);
+      if (Number.isFinite(n)) set.autoPauseAdjustVolStep = Math.max(1_000, Math.min(100_000_000, n));
+    }
+    // cross-field: minBots must be < maxBots
+    const merged = {
+      minBots: set.autoPauseAdjustMinBots != null ? set.autoPauseAdjustMinBots : null,
+      maxBots: set.autoPauseAdjustMaxBots != null ? set.autoPauseAdjustMaxBots : null,
+    };
+    if (merged.minBots != null && merged.maxBots != null && merged.minBots >= merged.maxBots) {
+      return res.status(400).json({ error: `minBots (${merged.minBots}) ต้องน้อยกว่า maxBots (${merged.maxBots})` });
+    }
+    if (Object.keys(set).length === 0) {
+      return res.status(400).json({ error: 'No valid fields to update' });
+    }
+    const updated = await AppConfig.findOneAndUpdate(
+      { key: 'singleton' },
+      { $set: set },
+      { new: true, upsert: true }
+    ).lean();
+    // apply in-place: reload config (install/clear interval based on enabled)
+    await autoPauseAdjust.reloadConfig();
+    logger.info({ set }, 'admin: auto-pause-adjust settings updated');
+    res.json({ ok: true, config: updated });
+  } catch (err) {
+    logger.warn({ err: err.message, body: req.body }, 'admin: PUT auto-pause-adjust failed');
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.post('/auto-pause-adjust/run-now', requireAuth, async (req, res) => {
+  try {
+    const stats = await autoPauseAdjust.runOnce({ source: 'manual' });
+    logger.info({ stats }, 'admin: auto-pause-adjust run-now completed');
+    res.json({ ok: true, stats });
+  } catch (err) {
+    logger.warn({ err: err.message }, 'admin: auto-pause-adjust run-now failed');
     res.status(500).json({ error: err.message });
   }
 });

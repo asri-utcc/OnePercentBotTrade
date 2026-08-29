@@ -6,6 +6,10 @@ const symbolInfo = require('../binance/symbolInfo');
 const klineCache = require('../services/klineCache');
 const eventBus = require('../services/eventBus');
 const licenseService = require('../services/licenseService'); // FIX-2026-08-28 B6: gate autoPauseMinKc feature
+// FIX-2026-08-29: Auto-pause threshold auto-adjust (per-running-bot count)
+//   - singleton scheduler — start/stop hooked here; reloadConfig via admin PUT
+//   - master switch + tuning params live on AppConfig.autoPauseAdjust*
+const autoPauseAdjust = require('../services/autoPauseAdjust');
 const logger = require('../utils/logger');
 const Bot = require('../db/models/Bot');
 const Trade = require('../db/models/Trade');
@@ -189,6 +193,12 @@ class BotManager {
     // FIX-2026-07-23: schedule TP auto-updater (recompute TP% top-of-hour สำหรับบอทที่ autoUpdateTp=true)
     tpUpdater.scheduleHourlyTpUpdate();
 
+    // FIX-2026-08-29: Auto-pause threshold auto-adjust (singleton scheduler, configurable interval)
+    //   - reads AppConfig.autoPauseAdjustEnabled + tuning params; only installs interval if enabled
+    //   - adjust Min-%KC + Min 24h Vol based on running-bot count to keep it within target window
+    //   - safe to start when disabled — no-op until user opts in via Settings / admin PUT
+    autoPauseAdjust.start().catch((err) => logger.warn({ err: err.message }, 'botManager: autoPauseAdjust start failed'));
+
     // FIX-2026-08-01: auto-pause scanner (ทุก 5 นาที: pause/resume ตาม Min-%KC 30 bars)
     // FIX-2026-08-06 (BANK incident): bind this → BotManager instance
     //   - checkAutoPauseBots เป็น standalone function (declared outside class) ที่ใช้ this.traders / this._resetStaleReplayCursorOnEnable / this.spawnTrader
@@ -262,6 +272,8 @@ class BotManager {
     _trendlineStatusCache.clear();
     // FIX-2026-08-06: หยุด delist scheduler
     if (delistSchedulerTimer) { clearInterval(delistSchedulerTimer); delistSchedulerTimer = null; }
+    // FIX-2026-08-29: หยุด auto-pause adjust scheduler
+    try { autoPauseAdjust.stop(); } catch (_) { /* ignore */ }
     // FIX-2026-07-24: หยุด Telegram notifier (clear listeners + timers)
     try { require('../services/telegramNotifier').stop(); } catch (e) { /* ignore */ }
     for (const [id, trader] of this.traders.entries()) {
@@ -349,13 +361,17 @@ class BotManager {
     const id = botId.toString();
     const prev = this._spawningLocks.get(id) || Promise.resolve();
     const next = prev.then(() => fn(), () => fn()); // run even if previous failed
-    // store a no-throw tail so the chain doesn't break if fn rejects
-    this._spawningLocks.set(id, next.catch(() => {}));
+    // FIX-2026-08-29 (P0 audit): capture the no-throw tail ONCE and store the same reference —
+    //   previous code allocated a new `next.catch(() => {})` on each side of the comparison, so
+    //   the strict equality was always false and the Map delete was unreachable. Net effect:
+    //   _spawningLocks grew one unreachable stale promise per spawn call indefinitely.
+    const tail = next.catch(() => {});
+    this._spawningLocks.set(id, tail);
     try {
       await next;
     } finally {
       // only delete if we're still the tail of the chain
-      if (this._spawningLocks.get(id) && this._spawningLocks.get(id) === next.catch(() => {})) {
+      if (this._spawningLocks.get(id) === tail) {
         this._spawningLocks.delete(id);
       }
     }
