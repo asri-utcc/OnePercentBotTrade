@@ -32,7 +32,9 @@ const RECONCILE_INTERVAL_MS = 5 * 60 * 1000;
 //   - ถ้า ≥ threshold (และเคยถูก auto-pause) → auto-resume (vol_recovered)
 //   - ตรวจเฉพาะบอทที่ autoPauseEnabled !== false (default true)
 // FIX-2026-08-04: 5min → 10min (auto-pause check เป็น read-only volatility scan — ไม่กระทบ bot operations)
-const AUTO_PAUSE_INTERVAL_MS = 10 * 60 * 1000;
+// FIX-2026-08-29: 10min → 20min (per user request — ลด Binance weight และ hysteresis risk; autoPauseAdjust
+//   threshold scheduler ทำงาน hourly อยู่แล้ว, 20 นาที scan เพียงพอสำหรับ pause/resume ตาม Min-%KC/Min-Vol)
+const AUTO_PAUSE_INTERVAL_MS = 20 * 60 * 1000;
 let autoPauseTimer = null;
 // FIX-2026-08-22: BUY-in-flight states — if a bot has any trade in these states,
 //   auto-pause must NOT fire (pausing would orphan the BUY position because
@@ -199,7 +201,8 @@ class BotManager {
     //   - safe to start when disabled — no-op until user opts in via Settings / admin PUT
     autoPauseAdjust.start().catch((err) => logger.warn({ err: err.message }, 'botManager: autoPauseAdjust start failed'));
 
-    // FIX-2026-08-01: auto-pause scanner (ทุก 5 นาที: pause/resume ตาม Min-%KC 30 bars)
+    // FIX-2026-08-01: auto-pause scanner (ทุก 20 นาที: pause/resume ตาม Min-%KC 30 bars)
+    // FIX-2026-08-29: interval 10min → 20min (see AUTO_PAUSE_INTERVAL_MS comment above)
     // FIX-2026-08-06 (BANK incident): bind this → BotManager instance
     //   - checkAutoPauseBots เป็น standalone function (declared outside class) ที่ใช้ this.traders / this._resetStaleReplayCursorOnEnable / this.spawnTrader
     //   - ถ้าเรียกเป็น free function `this` = undefined (strict mode) → auto-resume crash ทุกครั้งที่ cursor > 30 min

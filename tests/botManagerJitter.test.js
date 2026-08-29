@@ -114,13 +114,13 @@ jest.mock('../src/services/binanceDelistMonitor', () => ({
 jest.mock('../config', () => ({
   binance: { recvWindow: 60000, useBnbForFees: true, makerRate: 0.00075 },
   fees: { normalMaker: 0.00075, bnbMaker: 0.00075, normalTaker: 0.001, bnbTaker: 0.001 },
-  intervals: { reconcile: 300000, autoPause: 600000, delistScheduler: 300000, trendline: 600000 },
+  intervals: { reconcile: 300000, autoPause: 1200000, delistScheduler: 300000, trendline: 600000 },
 }));
 
 const botManager = require('../src/core/botManager');
 
 const RECONCILE_BASE = 5 * 60 * 1000;        // botManager line 23
-const AUTO_PAUSE_BASE = 10 * 60 * 1000;       // botManager line 30
+const AUTO_PAUSE_BASE = 20 * 60 * 1000;       // botManager line 37 (FIX-2026-08-29: 10min → 20min)
 const TRENDLINE_BASE = 10 * 60 * 1000;        // botManager line 64
 const DELIST_BASE = 5 * 60 * 1000;            // botManager line 50
 const TOLERANCE = 0.1; // ±10%

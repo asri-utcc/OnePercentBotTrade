@@ -142,7 +142,7 @@ jest.mock('../src/services/fxService', () => ({
 jest.mock('../config', () => ({
   binance: { recvWindow: 60000, useBnbForFees: true, makerRate: 0.00075 },
   fees: { normalMaker: 0.00075, bnbMaker: 0.00075, normalTaker: 0.001, bnbTaker: 0.001 },
-  intervals: { reconcile: 300000, autoPause: 600000, delistScheduler: 300000 },
+  intervals: { reconcile: 300000, autoPause: 1200000, delistScheduler: 300000 },
 }));
 
 const botManager = require('../src/core/botManager');
