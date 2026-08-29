@@ -269,15 +269,26 @@ function buildBySellReason(trades) {
 
 function buildByHour(trades) {
   const buckets = Array.from({ length: 24 }, (_, h) => ({ hour: h, label: HOUR_LABELS[h], count: 0, wins: 0, losses: 0, pnl: 0 }));
+  // FIX-2026-08-29: also build the (dow × hour) CROSS-CUT matrix for the heatmap
+  // so the frontend doesn't need to do an independence approximation. Each cell is
+  // { pnl, count, wins, losses } — count/wins/losses enable density-based shading later.
+  const matrix = Array.from({ length: 7 }, () => Array.from({ length: 24 }, () => ({ pnl: 0, count: 0, wins: 0, losses: 0 })));
   for (const t of trades) {
     if (!t.sellFilledAt) continue;
+    const d = new Date(t.sellFilledAt).getDay();
     const h = new Date(t.sellFilledAt).getHours();
     const v = Number(t.realizedPnl) || 0;
     buckets[h].count += 1;
     buckets[h].pnl = Number((buckets[h].pnl + v).toFixed(4));
     if (v > 0) buckets[h].wins += 1;
     else if (v < 0) buckets[h].losses += 1;
+    // Cross-cut
+    matrix[d][h].count += 1;
+    matrix[d][h].pnl = Number((matrix[d][h].pnl + v).toFixed(4));
+    if (v > 0) matrix[d][h].wins += 1;
+    else if (v < 0) matrix[d][h].losses += 1;
   }
+  buckets.matrix = matrix;
   return buckets;
 }
 

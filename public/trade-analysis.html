@@ -226,6 +226,105 @@
 
     /* Optimal config table tweaks */
     .ta-grid-2 h6 { margin: 0 0 0.4rem; }
+
+    /* ───── FIX-2026-08-29: Conclusion section overhaul ───── */
+    .ta-verdict {
+      display: flex; align-items: center; gap: 1rem;
+      padding: 0.85rem 1rem;
+      border-radius: 10px;
+      margin-bottom: 0.85rem;
+      border: 1px solid var(--border-soft);
+      background: rgba(255,255,255,0.025);
+    }
+    .ta-verdict-icon { font-size: 1.65rem; line-height: 1; }
+    .ta-verdict-text { font-weight: 700; font-size: 1.0rem; flex: 1; }
+    .ta-verdict-count { color: var(--text-3); font-size: 0.78rem; font-family: var(--font-mono, monospace); }
+    .ta-verdict-good   { border-color: rgba(0,229,184,0.45); background: rgba(0,229,184,0.06); }
+    .ta-verdict-good .ta-verdict-text { color: var(--bull-1); }
+    .ta-verdict-watch  { border-color: rgba(255,181,71,0.45); background: rgba(255,181,71,0.06); }
+    .ta-verdict-watch .ta-verdict-text { color: var(--warn-1); }
+    .ta-verdict-risk   { border-color: rgba(255,77,109,0.45); background: rgba(255,77,109,0.06); }
+    .ta-verdict-risk .ta-verdict-text { color: var(--bear-1); }
+
+    .ta-insights-grid { display: flex; flex-direction: column; gap: 0.65rem; }
+    .ta-insight-group {
+      border: 1px solid var(--border-soft);
+      border-radius: 8px;
+      background: rgba(255,255,255,0.02);
+      overflow: hidden;
+    }
+    .ta-insight-header {
+      display: flex; align-items: center; gap: 0.5rem;
+      padding: 0.45rem 0.7rem;
+      font-size: 0.78rem;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+    .ta-insight-header .ta-insight-dot {
+      width: 8px; height: 8px; border-radius: 50%;
+    }
+    .ta-insight-header-good   { background: rgba(0,229,184,0.10); color: var(--bull-1); }
+    .ta-insight-header-good .ta-insight-dot { background: var(--bull-1); }
+    .ta-insight-header-watch  { background: rgba(255,181,71,0.10); color: var(--warn-1); }
+    .ta-insight-header-watch .ta-insight-dot { background: var(--warn-1); }
+    .ta-insight-header-risk   { background: rgba(255,77,109,0.10); color: var(--bear-1); }
+    .ta-insight-header-risk .ta-insight-dot { background: var(--bear-1); }
+    .ta-insight-count {
+      margin-left: auto;
+      background: rgba(255,255,255,0.10);
+      padding: 0.05rem 0.45rem;
+      border-radius: 999px;
+      font-size: 0.7rem;
+      font-family: var(--font-mono, monospace);
+    }
+    .ta-insight-list { padding: 0.45rem 0.7rem 0.65rem; display: flex; flex-direction: column; gap: 0.35rem; }
+    .ta-insight-item {
+      display: flex; align-items: flex-start; gap: 0.5rem;
+      font-size: 0.82rem;
+      line-height: 1.45;
+      color: var(--text-1);
+      padding: 0.25rem 0;
+    }
+    .ta-insight-icon { flex: 0 0 1.2rem; text-align: center; }
+    .ta-insight-text { flex: 1; }
+    .ta-insight-good { /* subtle */ }
+    .ta-insight-watch .ta-insight-text { color: var(--warn-1); }
+    .ta-insight-risk  .ta-insight-text { color: var(--bear-1); font-weight: 600; }
+
+    /* ───── FIX-2026-08-29: Heatmap axes + clearer cells ───── */
+    .ta-heatmap {
+      grid-template-columns: 36px repeat(24, 1fr) !important;
+    }
+    .ta-heat-corner { /* top-left empty cell */ }
+    .ta-heat-hour-label {
+      color: var(--text-3);
+      text-align: center;
+      font-family: var(--font-mono, monospace);
+      font-size: 0.65rem;
+      padding: 0 1px;
+    }
+    .ta-heat-hour-label.is-minor { opacity: 0.25; }
+    .ta-heat-day-label {
+      color: var(--text-2);
+      font-weight: 600;
+      text-align: right;
+      padding-right: 6px;
+      font-size: 0.72rem;
+    }
+    .ta-heat-cell.is-bull { box-shadow: inset 0 0 0 1px rgba(0,229,184,0.45); }
+    .ta-heat-cell.is-bear { box-shadow: inset 0 0 0 1px rgba(255,77,109,0.45); }
+
+    /* FIX-2026-08-29: improved empty-state for Optimal Config Finder (explain WHY) */
+    .ta-empty-explained {
+      padding: 1.25rem 1rem;
+      font-size: 0.85rem;
+      line-height: 1.55;
+      color: var(--text-2);
+      background: rgba(255,255,255,0.025);
+      border: 1px dashed var(--border-mid);
+      border-radius: 8px;
+    }
   </style>
 </head>
 <body>
@@ -448,9 +547,10 @@
           <div></div>
         </div>
         <div class="ta-meta-row mt-2">
-          <span class="pill">🟢 = PnL บวก</span>
-          <span class="pill">🔴 = PnL ลบ</span>
-          <span class="pill">ความเข้ม = ขนาดของ PnL (cap ที่ ±10 USDT)</span>
+          <span class="pill">🟢 = PnL บวก (ช่องเข้ม = กำไรเยอะ)</span>
+          <span class="pill">🔴 = PnL ลบ (ช่องเข้ม = ขาดทุนเยอะ)</span>
+          <span class="pill">🕐 ใช้ดู: หา "ช่องเขียวเข้ม" = ช่วงเวลาทำเงิน, "ช่องแดงเข้ม" = ช่วงเวลาที่ควรหลีกเลี่ยง</span>
+          <span class="pill">cap ที่ ±10 USDT ต่อช่อง (สีจะไม่เข้มขึ้นเกินนี้)</span>
         </div>
       </div>
     </div>
@@ -679,6 +779,6 @@
   <script>window.NAV_ACTIVE = 'analysis';</script>
   <script src="/js/partials/nav.js"></script>
   <script src="/js/partials/rateLimitGauge.js"></script>
-  <script src="/js/pages/trade-analysis.js"></script>
+  <script src="/js/pages/trade-analysis.js?v=2026-08-29-fix1"></script>
 </body>
 </html>

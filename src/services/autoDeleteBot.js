@@ -125,12 +125,24 @@ async function tick() {
           continue;
         }
         // FIX-2026-08-08: compute downtime
-        //   - prefer disabledAt (last time bot was disabled) — anchor for "how long has it been off?"
-        //   - fallback 1: enabledAt (rare — bot re-enabled mid-evaluation)
-        //   - fallback 2: createdAt (brand-new bot never enabled — ยังไม่มีประวัติ disable)
-        const lastActiveMs = b.disabledAt
-          ? new Date(b.disabledAt).getTime()
-          : (b.enabledAt ? new Date(b.enabledAt).getTime() : new Date(b.createdAt).getTime());
+        //   - FIX-2026-08-29: use MOST RECENT of (disabledAt, lastSignalAt, enabledAt, createdAt)
+        //     Reason: comment line 9 originally listed lastSignalAt as an option but the code
+        //     only checked disabledAt. This caused bots that had traded yesterday
+        //     (lastSignalAt=yesterday) but were disabled long ago (disabledAt=30d ago) to be
+        //     deleted anyway — because the older disabledAt won. A bot that placed orders
+        //     yesterday is by definition NOT stale.
+        //   - anchor priority (newest wins):
+        //       1. lastSignalAt — when bot last placed a signal/order (most reliable activity proxy)
+        //       2. disabledAt   — when bot was last disabled
+        //       3. enabledAt    — when bot was last enabled
+        //       4. createdAt    — last resort (brand-new never-enabled bot)
+        const candidates2 = [
+          b.lastSignalAt ? new Date(b.lastSignalAt).getTime() : 0,
+          b.disabledAt ? new Date(b.disabledAt).getTime() : 0,
+          b.enabledAt ? new Date(b.enabledAt).getTime() : 0,
+          b.createdAt ? new Date(b.createdAt).getTime() : 0,
+        ].filter((t) => t > 0);
+        const lastActiveMs = candidates2.length > 0 ? Math.max(...candidates2) : Date.now();
         // FIX-2026-08-08: ignore freshly-disabled bots (< 1 hour) — give minute to recover
         const elapsedMs = Date.now() - lastActiveMs;
         if (elapsedMs < 60 * 60 * 1000) {

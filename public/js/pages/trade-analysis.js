@@ -120,20 +120,80 @@ function renderConclusion(c) {
   const el = document.getElementById('ta-conclusion');
   if (!el) return;
   if (!c || !c.lines || !c.lines.length) {
-    el.innerHTML = '<div class="ta-empty">ไม่มีข้อมูล</div>';
+    el.innerHTML = '<div class="ta-empty">ไม่มีข้อมูลเพียงพอสำหรับสรุปผล</div>';
     return;
   }
-  el.innerHTML = c.lines.map((line) => {
-    // warn lines are identified server-side by prefix (e.g. ⚠️) — keep simple:
-    const isWarn = line.startsWith('⚠️') || line.startsWith('🔴') || line.startsWith('⛔');
-    return `<div class="ta-line ${isWarn ? 'is-warn' : ''}">${escapeHtml(line)}</div>`;
-  }).join('');
-  // Append warnings explicitly (if not already shown)
-  if (c.warnings && c.warnings.length) {
-    const warnHtml = c.warnings.map((w) => `<div class="ta-line is-warn">${escapeHtml(w)}</div>`).join('');
-    el.insertAdjacentHTML('beforeend', warnHtml);
+
+  // FIX-2026-08-29 UX: smarter insight categorization — each line gets a category badge
+  // by detecting keywords / leading emoji, and we group them into 3 buckets:
+  //   - 🟢 Good news  (green border, ✅ icon)
+  //   - 🟡 Watch-out  (amber border, ⚠️ icon)
+  //   - 🔴 Risk       (red border, 🚨 icon)
+  // This makes the section scannable at a glance instead of a wall of identical text rows.
+  const categorize = (line) => {
+    if (/^(🚨|⛔|🔴|หยุด|ล้ม|ขาดทุนหนัก|ลบเยอะ|เสี่ยงสูง|ติดลบลึก)/.test(line)) return 'risk';
+    if (/^(⚠️|🔻|ระวัง|ต่ำกว่า|ลดลง|ชะลอ|อ่อน|แย่)/.test(line)) return 'watch';
+    if (/^(✅|🎯|🏆|📈|💎|🚀|ดี|แข็ง|กำไรสูง|ชนะ)/.test(line)) return 'good';
+    // Default: keyword scan
+    if (/ขาดทุน|ลบ|เสี่ยง|ล้ม|ติดลบ|panic|cb/i.test(line)) return 'risk';
+    if (/ควร|ปรับ|ระวัง|ต่ำ|อ่อน/i.test(line)) return 'watch';
+    return 'good';
+  };
+
+  const ICONS = { good: '✅', watch: '⚠️', risk: '🚨' };
+  const LABELS = { good: 'ข่าวดี', watch: 'จับตา', risk: 'ความเสี่ยง' };
+
+  // Group lines by category while preserving order within each group
+  const buckets = { good: [], watch: [], risk: [] };
+  for (const line of c.lines) {
+    buckets[categorize(line)].push(line);
   }
-  setText('ta-conclusion-meta', `${c.lines.length + (c.warnings?.length || 0)} insights`);
+  // Append warnings to risk bucket
+  if (c.warnings && c.warnings.length) {
+    for (const w of c.warnings) buckets.risk.push(w);
+  }
+
+  const sectionHtml = (key, rows) => {
+    if (!rows.length) return '';
+    const items = rows.map((line) => `
+      <div class="ta-insight-item ta-insight-${key}">
+        <div class="ta-insight-icon">${ICONS[key]}</div>
+        <div class="ta-insight-text">${escapeHtml(line.replace(/^[⚠️🚨✅🔴⛔🔻]+\s*/, ''))}</div>
+      </div>`).join('');
+    return `
+      <div class="ta-insight-group">
+        <div class="ta-insight-header ta-insight-header-${key}">
+          <span class="ta-insight-dot"></span>
+          ${LABELS[key]}
+          <span class="ta-insight-count">${rows.length}</span>
+        </div>
+        <div class="ta-insight-list">${items}</div>
+      </div>`;
+  };
+
+  // Order: risk first (most attention), then watch, then good (positive reinforcement)
+  const ordered = ['risk', 'watch', 'good']
+    .map((k) => sectionHtml(k, buckets[k]))
+    .filter(Boolean)
+    .join('');
+
+  // Top-line verdict summary
+  const totalCount = c.lines.length + (c.warnings?.length || 0);
+  const verdict = buckets.risk.length > buckets.good.length
+    ? { tone: 'risk', label: '⚠️ ระวัง: มีจุดที่ต้องเฝ้าดู' }
+    : buckets.good.length > buckets.risk.length * 2
+      ? { tone: 'good', label: '✅ ภาพรวมดี — ทำต่อตามแผน' }
+      : { tone: 'watch', label: '⚖️ สมดุล — ปรับจูนต่อได้' };
+
+  el.innerHTML = `
+    <div class="ta-verdict ta-verdict-${verdict.tone}">
+      <div class="ta-verdict-icon">${verdict.tone === 'good' ? '🎯' : verdict.tone === 'watch' ? '⚖️' : '🚨'}</div>
+      <div class="ta-verdict-text">${verdict.label}</div>
+      <div class="ta-verdict-count">${totalCount} insights · ${buckets.good.length} ดี · ${buckets.watch.length} จับตา · ${buckets.risk.length} เสี่ยง</div>
+    </div>
+    <div class="ta-insights-grid">${ordered}</div>`;
+
+  setText('ta-conclusion-meta', `${totalCount} insights`);
 }
 
 function escapeHtml(s) {
@@ -339,53 +399,78 @@ function renderBySellReason(bySr) {
 function renderHeatmap(byHour, byDow) {
   const el = document.getElementById('ta-heatmap');
   if (!el) return;
-  const max = 10; // cap at ±10 USDT for color intensity
-  // build 7x24 matrix
-  const m = Array.from({ length: 7 }, () => new Array(24).fill(null));
-  // byHour is 24 buckets with total pnl per hour (across all days)
-  // byDow is 7 buckets with total pnl per day (across all hours)
-  // for a true heatmap we need (dow × hour) — but we don't have that cross-cut
-  // approximation: scale byHour pnl by day-of-week frequency ratio
-  const totalHourPnl = byHour.reduce((a, h) => a + h.pnl, 0);
-  const totalDowPnl = byDow.reduce((a, d) => a + d.pnl, 0);
-  for (let d = 0; d < 7; d++) {
-    for (let h = 0; h < 24; h++) {
-      // estimate: avg(hour pnl across all days) * dow factor
-      const hourCount = byHour[h].count || 0;
-      const dowCount = byDow[d].count || 0;
-      // approximation — not perfect, but gives a useful visual signal
-      if (hourCount === 0 || dowCount === 0) {
-        m[d][h] = 0;
-        continue;
+  if (!byHour || !byDow) {
+    el.innerHTML = '<div class="ta-empty" style="grid-column: 1 / -1;">ไม่มีข้อมูล</div>';
+    return;
+  }
+
+  const max = 10; // cap at +/-10 USDT for color intensity
+  // FIX-2026-08-29: use REAL (hour x dow) cross-cut matrix from backend when present.
+  // The backend exposes byHour.matrix[7][24] = { pnl, count } per cell.
+  // Falls back to legacy independence approximation only when matrix missing.
+  const hasCrossCut = byHour.matrix && Array.isArray(byHour.matrix) && byHour.matrix.length === 7
+    && Array.isArray(byHour.matrix[0]) && byHour.matrix[0].length === 24;
+  const m = Array.from({ length: 7 }, () => new Array(24).fill(0));
+  if (hasCrossCut) {
+    for (let d = 0; d < 7; d++) for (let h = 0; h < 24; h++) {
+      m[d][h] = Number((byHour.matrix[d][h] && byHour.matrix[d][h].pnl) || 0);
+    }
+  } else {
+    const totalHourCount = byHour.reduce((a, x) => a + (x.count || 0), 0) || 1;
+    const totalDowCount = byDow.reduce((a, x) => a + (x.count || 0), 0) || 1;
+    for (let d = 0; d < 7; d++) {
+      for (let h = 0; h < 24; h++) {
+        const hc = (byHour[h] && byHour[h].count) || 0;
+        const dc = (byDow[d] && byDow[d].count) || 0;
+        if (hc === 0 || dc === 0) { m[d][h] = 0; continue; }
+        const hourShare = hc / totalHourCount;
+        const dowShare = dc / totalDowCount;
+        m[d][h] = (byHour[h].pnl * hourShare) * dowShare * (hc / Math.max(1, hc));
       }
-      const hourShare = hourCount / Math.max(1, byHour.reduce((a, x) => a + x.count, 0));
-      const dowShare = dowCount / Math.max(1, byDow.reduce((a, x) => a + x.count, 0));
-      // expected trades in this cell ≈ total × hourShare × dowShare (independence assumption)
-      const expectedCount = Math.max(1, byHour.reduce((a, x) => a + x.count, 0)) * hourShare * dowShare;
-      // distribute hour pnl proportional to expected count
-      m[d][h] = (byHour[h].pnl * hourShare) * (dowShare) * (expectedCount / Math.max(1, hourCount));
     }
   }
-  let html = `<div></div>`;
-  for (let h = 0; h < 24; h++) html += `<div class="ta-heat-label" style="text-align:center;">${h}</div>`;
-  const dayLabels = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+
+  const dayLabels = ['อา', 'จ', 'อ', 'พ', 'พฤ', 'ศ', 'ส'];
+  const dayFull = ['อาทิตย์', 'จันทร์', 'อังคาร', 'พุธ', 'พฤหัสฯ', 'ศุกร์', 'เสาร์'];
+
+  // Header row: hour labels every 3 hours for readability
+  let html = '<div class="ta-heat-corner"></div>';
+  for (let h = 0; h < 24; h++) {
+    const show = h % 3 === 0;
+    html += '<div class="ta-heat-hour-label' + (show ? '' : ' is-minor') + '">' + (show ? String(h).padStart(2, '0') : '') + '</div>';
+  }
+
   for (let d = 0; d < 7; d++) {
-    html += `<div class="ta-heat-label">${dayLabels[d]}</div>`;
+    html += '<div class="ta-heat-day-label" title="' + dayFull[d] + '">' + dayLabels[d] + '</div>';
     for (let h = 0; h < 24; h++) {
       const v = m[d][h];
       let bg = 'rgba(255,255,255,0.04)';
+      let cls = '';
       if (v > 0.01) {
         const a = Math.min(0.85, (Math.min(v, max) / max) * 0.85 + 0.15);
-        bg = `rgba(0,229,184,${a})`;
+        bg = 'rgba(0,229,184,' + a + ')';
+        cls = 'is-bull';
       } else if (v < -0.01) {
         const a = Math.min(0.85, (Math.min(Math.abs(v), max) / max) * 0.85 + 0.15);
-        bg = `rgba(255,77,109,${a})`;
+        bg = 'rgba(255,77,109,' + a + ')';
+        cls = 'is-bear';
       }
-      html += `<div class="ta-heat-cell" style="background:${bg};" data-tip="${dayLabels[d]} ${String(h).padStart(2,'0')}:00\\nPnL ≈ ${fmtPnl(v, { sign: true })} USDT\\n(intensity-capped)"></div>`;
+      html += '<div class="ta-heat-cell ' + cls + '" style="background:' + bg + ';"'
+        + ' data-tip="' + dayFull[d] + ' ' + String(h).padStart(2,'0') + ':00&#10;📊 PnL ≈ ' + fmtPnl(v, { sign: true }) + ' USDT&#10;(cap ±' + max + ', สีเข้ม = |PnL| สูง)"></div>';
     }
   }
   el.innerHTML = html;
-  setText('ta-heat-meta', 'แต่ละช่อง = PnL โดยประมาณจากการกระจายตัวของ hour × day-of-week');
+
+  // Best/worst slot one-liner summary
+  let bestSlot = { d: 0, h: 0, v: 0 };
+  let worstSlot = { d: 0, h: 0, v: 0 };
+  for (let d = 0; d < 7; d++) for (let h = 0; h < 24; h++) {
+    if (m[d][h] > bestSlot.v) bestSlot = { d, h, v: m[d][h] };
+    if (m[d][h] < worstSlot.v) worstSlot = { d, h, v: m[d][h] };
+  }
+  const slotLabel = (s) => s ? (dayFull[s.d] + ' ' + String(s.h).padStart(2, '0') + ':00 (' + fmtPnl(s.v, { sign: true }) + ' USDT)') : '—';
+
+  setText('ta-heat-meta', (hasCrossCut ? '✅ ข้อมูลจริง' : '⚠️ ประมาณการ') + ' · 7×24 · 🟢ดีสุด: ' + slotLabel(bestSlot) + ' · 🔴แย่สุด: ' + slotLabel(worstSlot));
 }
 
 function renderHoldDuration(dur) {
@@ -568,13 +653,34 @@ function renderTpSlDeep(ts) {
 
 // ─── Optimal Config Finder ──────────────────────────────────
 function renderOptimalConfigs(opt) {
-  if (!opt) return;
-  setText('ta-opt-meta', `${opt.best.length} top · ${opt.worst.length} avoid · score = avgPnl × WR × √n / log(1+holdMin)`);
   const bestEl = document.getElementById('ta-opt-best-body');
   const worstEl = document.getElementById('ta-opt-worst-body');
   if (!bestEl || !worstEl) return;
-  const renderTable = (rows) => {
-    if (!rows || !rows.length) return '<div class="ta-empty">ไม่มีข้อมูล</div>';
+
+  // FIX-2026-08-29: ALWAYS render something (was previously stuck on 'กำลังโหลด...'
+  // when `opt` was undefined, AND when present the row builder referenced wrong
+  // field names — backend uses `tf/tpBucket/kcBucket/safeTrade/cb/avgHoldMs` but
+  // the renderer was reading `r.timeframe/r.tpPctBucket/...` so every cell errored
+  // out before innerHTML was set, leaving the placeholders intact).
+  const best = (opt && Array.isArray(opt.best)) ? opt.best : [];
+  const worst = (opt && Array.isArray(opt.worst)) ? opt.worst : [];
+  const allGroupCount = (opt && opt.allGroupCount) || 0;
+  const reliableCount = (opt && opt.reliableCount) || 0;
+
+  setText('ta-opt-meta',
+    `${best.length} top · ${worst.length} avoid · ${allGroupCount} กลุ่มทั้งหมด (${reliableCount} reliable ≥5 ไม้) · score = avgPnl × WR × √n / log(1+holdMin)`);
+
+  const renderTable = (rows, kind) => {
+    if (!rows || !rows.length) {
+      const msg = (opt == null)
+        ? '⚠️ ไม่สามารถโหลดข้อมูลได้ — ลองรีเฟรซ'
+        : (allGroupCount === 0)
+          ? 'ยังไม่มีเทรดเพียงพอสำหรับจัดกลุ่ม config'
+          : (reliableCount === 0)
+            ? `มี ${allGroupCount} กลุ่ม แต่ทุกกลุ่มมีไม้น้อยกว่า 5 ไม้ (threshold ของ "reliable")`
+            : 'ไม่มีข้อมูล';
+      return `<div class="ta-empty ta-empty-explained">${msg}</div>`;
+    }
     const header = `
       <div class="ta-bar-row" style="font-weight:600;color:var(--text-3);font-size:0.7rem;text-transform:uppercase;letter-spacing:0.05em;border-bottom:1px solid var(--border-1);">
         <div class="ta-bar-label">Config</div>
@@ -582,24 +688,39 @@ function renderOptimalConfigs(opt) {
         <div class="ta-bar-num">PnL</div>
         <div class="ta-bar-wr">WR · n · hold · score</div>
       </div>`;
-    const max = Math.max(...rows.map((r) => Math.abs(r.pnl)));
+    const max = Math.max(...rows.map((r) => Math.abs(r.pnl || 0)));
     const body = rows.map((r) => {
-      const w = barWidth(r.pnl, max);
-      const cls = r.pnl > 0 ? 'is-bull' : r.pnl < 0 ? 'is-bear' : 'is-muted';
-      const numCls = r.pnl > 0 ? 'is-bull' : r.pnl < 0 ? 'is-bear' : '';
-      const config = `${escapeHtml(r.timeframe)} · TP ${escapeHtml(r.tpPctBucket)} · KC×${escapeHtml(r.kcMultBucket)} · ${escapeHtml(r.safeTradeLabel)} · ${escapeHtml(r.cbLabel)}`;
+      const pnl = Number(r.pnl || 0);
+      const w = max > 0 ? barWidth(pnl, max) : 0;
+      const cls = pnl > 0 ? 'is-bull' : pnl < 0 ? 'is-bear' : 'is-muted';
+      const numCls = pnl > 0 ? 'is-bull' : pnl < 0 ? 'is-bear' : '';
+      // FIX-2026-08-29: map backend field names correctly (tf/tpBucket/kcBucket/safeTrade/cb/avgHoldMs)
+      const tf = r.tf || r.timeframe || '?';
+      const tpBucket = r.tpBucket || r.tpPctBucket || '?';
+      const kcBucket = r.kcBucket || r.kcMultBucket || '?';
+      const safeTrade = r.safeTrade || r.safeTradeLabel || 'none';
+      const cb = r.cb || r.cbLabel || 'off';
+      // avgHoldMin derived from avgHoldMs (backend stores ms)
+      const avgHoldMin = r.avgHoldMin != null
+        ? r.avgHoldMin
+        : (r.avgHoldMs != null ? r.avgHoldMs / 60000 : null);
+      const winRate = Number(r.winRate || 0);
+      const count = Number(r.count || 0);
+      const score = Number(r.score || 0);
+      const config = `${escapeHtml(tf)} · TP ${escapeHtml(tpBucket)} · KC×${escapeHtml(kcBucket)} · ${escapeHtml(safeTrade)} · ${escapeHtml(cb)}`;
+      const holdStr = avgHoldMin != null ? fmtHoldShort(avgHoldMin) : '—';
       return `
       <div class="ta-bar-row">
-        <div class="ta-bar-label" title="${config} (sample ${r.count})" style="font-family:var(--font-mono);font-size:0.72rem;">${config}</div>
+        <div class="ta-bar-label" title="${config} (sample ${count})" style="font-family:var(--font-mono);font-size:0.72rem;">${config}</div>
         <div class="ta-bar-track"><div class="ta-bar-fill ${cls}" style="width:${w}%"></div></div>
-        <div class="ta-bar-num ${numCls}">${fmtPnl(r.pnl, { sign: true })}</div>
-        <div class="ta-bar-wr" style="font-size:0.7rem;">${r.winRate.toFixed(0)}% · ${r.count} · ${fmtHoldShort(r.avgHoldMin)} · <b>${r.score.toFixed(2)}</b></div>
+        <div class="ta-bar-num ${numCls}">${fmtPnl(pnl, { sign: true })}</div>
+        <div class="ta-bar-wr" style="font-size:0.7rem;">${winRate.toFixed(0)}% · ${count} · ${holdStr} · <b>${score.toFixed(2)}</b></div>
       </div>`;
     }).join('');
     return header + body;
   };
-  bestEl.innerHTML = renderTable(opt.best);
-  worstEl.innerHTML = renderTable(opt.worst);
+  bestEl.innerHTML = renderTable(best, 'best');
+  worstEl.innerHTML = renderTable(worst, 'worst');
 }
 
 // ─── Main render + fetch ────────────────────────────────────
