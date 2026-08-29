@@ -219,3 +219,144 @@ const AdminModalAlert = {
 window.WSClient = WSClient;
 window.AdminToast = AdminToast;
 window.AdminModalAlert = AdminModalAlert;
+
+/**
+ * FIX-2026-08-28 UX (extension): AdminModalAlert.confirm() and AdminModalAlert.prompt()
+ * mirror native confirm()/prompt() but render styled modals (not browser-native dialogs).
+ *
+ * - confirm(): resolves true (OK) or false (Cancel/Esc/click-outside). The OK button
+ *   color matches `level` (error/warn/info). Async — callers must `await`.
+ * - prompt(): resolves the entered string (OK) or null (Cancel/Esc). Submit on Enter.
+ *
+ * These are the canonical replacements for `confirm()` / `prompt()` going forward.
+ */
+AdminModalAlert._buildBackdrop = function () {
+  const backdrop = document.createElement('div');
+  backdrop.style.cssText = [
+    'position:fixed', 'inset:0', 'background:rgba(0,0,0,0.75)',
+    'z-index:100100', 'display:flex', 'align-items:center', 'justify-content:center',
+  ].join(';');
+  return backdrop;
+};
+
+AdminModalAlert._buildBox = function ({ title, message, level = 'warn', okLabel = 'OK', cancelLabel = null, withInput = false, defaultValue = '', inputPlaceholder = '', inputType = 'text' }) {
+  const box = document.createElement('div');
+  const borderColor = level === 'error' ? '#ef4444' : level === 'success' ? '#16a34a' : level === 'info' ? '#3b82f6' : '#f59e0b';
+  box.style.cssText = [
+    'background:#1a1f29', 'border:1px solid ' + borderColor,
+    'border-radius:12px', 'width:480px', 'max-width:92vw',
+    'padding:24px', 'box-shadow:0 16px 48px rgba(0,0,0,0.5)',
+  ].join(';');
+
+  const t = document.createElement('h4');
+  t.style.cssText = 'margin:0 0 8px;font-size:16px;color:#e6e6e6;';
+  t.textContent = title;
+  box.appendChild(t);
+
+  const m = document.createElement('div');
+  m.style.cssText = 'color:#cbd5e1;font-size:14px;line-height:1.5;margin:8px 0 16px;white-space:pre-wrap;word-break:break-word;';
+  m.textContent = message;
+  box.appendChild(m);
+
+  let inputEl = null;
+  if (withInput) {
+    inputEl = document.createElement('input');
+    inputEl.type = inputType;
+    inputEl.placeholder = inputPlaceholder;
+    inputEl.value = defaultValue;
+    inputEl.style.cssText = 'width:100%;padding:10px 12px;border:1px solid #2d3748;border-radius:6px;background:#0f1218;color:#e6e6e6;font-size:14px;margin-bottom:16px;box-sizing:border-box;';
+    box.appendChild(inputEl);
+  }
+
+  const actions = document.createElement('div');
+  actions.style.cssText = 'display:flex;gap:8px;justify-content:flex-end;';
+
+  let cancelBtn = null;
+  if (cancelLabel) {
+    cancelBtn = document.createElement('button');
+    cancelBtn.textContent = cancelLabel;
+    cancelBtn.style.cssText = 'background:#374151;color:#fff;border:0;padding:8px 18px;border-radius:6px;cursor:pointer;font-size:14px;font-weight:500;';
+    actions.appendChild(cancelBtn);
+  }
+
+  const ok = document.createElement('button');
+  ok.textContent = okLabel;
+  const okBg = level === 'error' ? '#ef4444' : level === 'success' ? '#16a34a' : level === 'info' ? '#3b82f6' : '#4a9eff';
+  ok.style.cssText = 'background:' + okBg + ';color:#fff;border:0;padding:8px 18px;border-radius:6px;cursor:pointer;font-size:14px;font-weight:600;';
+  actions.appendChild(ok);
+  box.appendChild(actions);
+  return { box, okBtn: ok, cancelBtn, inputEl };
+};
+
+AdminModalAlert.confirm = function ({ title = 'Confirm', message = '', level = 'warn', okLabel = 'Confirm', cancelLabel = 'Cancel' } = {}) {
+  return new Promise((resolve) => {
+    const backdrop = this._buildBackdrop();
+    const { box, okBtn, cancelBtn } = this._buildBox({ title, message, level, okLabel, cancelLabel });
+    backdrop.appendChild(box);
+    document.body.appendChild(backdrop);
+    let closed = false;
+    const cleanup = (v) => {
+      if (closed) return;
+      closed = true;
+      document.removeEventListener('keydown', onKey);
+      backdrop.remove();
+      resolve(v);
+    };
+    const onKey = (e) => {
+      if (e.key === 'Escape') { e.preventDefault(); cleanup(false); }
+      else if (e.key === 'Enter') { e.preventDefault(); cleanup(true); }
+    };
+    okBtn.addEventListener('click', () => cleanup(true));
+    if (cancelBtn) cancelBtn.addEventListener('click', () => cleanup(false));
+    backdrop.addEventListener('click', (e) => { if (e.target === backdrop) cleanup(false); });
+    document.addEventListener('keydown', onKey);
+    setTimeout(() => okBtn.focus(), 50);
+  });
+};
+
+AdminModalAlert.prompt = function ({ title = 'Input', message = '', level = 'info', okLabel = 'OK', cancelLabel = 'Cancel', defaultValue = '', placeholder = '', inputType = 'text' } = {}) {
+  return new Promise((resolve) => {
+    const backdrop = this._buildBackdrop();
+    const { box, okBtn, cancelBtn, inputEl } = this._buildBox({ title, message, level, okLabel, cancelLabel, withInput: true, defaultValue, inputPlaceholder: placeholder, inputType });
+    backdrop.appendChild(box);
+    document.body.appendChild(backdrop);
+    let closed = false;
+    const cleanup = (v) => {
+      if (closed) return;
+      closed = true;
+      document.removeEventListener('keydown', onKey);
+      backdrop.remove();
+      resolve(v);
+    };
+    const onKey = (e) => {
+      if (e.key === 'Escape') { e.preventDefault(); cleanup(null); }
+      else if (e.key === 'Enter' && document.activeElement === inputEl) { e.preventDefault(); cleanup(inputEl.value); }
+    };
+    okBtn.addEventListener('click', () => cleanup(inputEl.value));
+    if (cancelBtn) cancelBtn.addEventListener('click', () => cleanup(null));
+    backdrop.addEventListener('click', (e) => { if (e.target === backdrop) cleanup(null); });
+    document.addEventListener('keydown', onKey);
+    setTimeout(() => { inputEl.focus(); inputEl.select(); }, 50);
+  });
+};
+
+/**
+ * FIX-2026-08-28 UX: AdminModalAlert.alert(text, level) — Promise<void> wrapper around show()
+ * for sites previously using native alert(). Returns when the user dismisses.
+ */
+AdminModalAlert.alert = function (text, level = 'warn') {
+  return new Promise((resolve) => {
+    const orig = this.show.bind(this);
+    // Patch close to resolve the promise: monkey-patch the OK button via DOM event listener.
+    const title = level === 'error' ? '⛔ Error' : level === 'success' ? '✅ Success' : level === 'info' ? 'ℹ️ Info' : '⚠️ Notice';
+    // Reuse the modal flow but watch for backdrop removal to resolve.
+    const observer = new MutationObserver(() => {
+      if (!document.getElementById('admin-modal-alert-backdrop')) {
+        observer.disconnect();
+        resolve();
+      }
+    });
+    observer.observe(document.body, { childList: true, subtree: false });
+    orig({ title, message: String(text == null ? '' : text), level });
+  });
+};
