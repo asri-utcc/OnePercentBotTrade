@@ -42,6 +42,7 @@ function _getLicense() {
 // (existing licenses without features.* still work). Default-OFF for new premium-only
 // flags (autoAddBot / autoUpdateTp / autoPauseMinKc) so legacy licenses don't silently
 // gain premium features.
+// FIX-2026-08-29: +1 key (configBackup) for Config Backup/Restore feature. Default ON.
 function _getFeatures() {
   const lic = _getLicense();
   if (!lic) {
@@ -61,6 +62,7 @@ function _getFeatures() {
     autoPauseMinKc: f.autoPauseMinKc === true,
     chartMonitor: f.chartMonitor !== false,
     dps: f.dps !== false,
+    configBackup: f.configBackup !== false,
   };
 }
 
@@ -77,6 +79,7 @@ function _allFeatures(on) {
     autoPauseMinKc: on,
     chartMonitor: on,
     dps: on,
+    configBackup: on,
   };
 }
 

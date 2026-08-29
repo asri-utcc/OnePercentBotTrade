@@ -18,6 +18,7 @@ let autoReserveCfg = null; // FIX-2026-08-24: auto reserve/release USDT config
 let autoPauseAdjustCfg = null; // FIX-2026-08-29: auto-pause threshold auto-adjust config
 let consentStatus = null;  // FIX-2026-08-26 Phase 3a: GET /api/consent/status for Settings page
 let licenseInfo = null;   // FIX-2026-08-26 Phase 3a: GET /api/license/info for Settings page
+let configBackupPreview = null; // FIX-2026-08-29: GET /api/admin/config/backup/preview
 
 async function init() {
   const me = await API.get('/api/auth/me').catch(() => null);
@@ -105,6 +106,13 @@ async function loadConfig() {
       console.warn('consent status load failed:', err.message);
       consentStatus = { decision: null, consentVersion: null, consentEnabled: false };
     }
+    // FIX-2026-08-29: Config Backup preview (counts/sizes per section)
+    try {
+      configBackupPreview = await API.get('/api/admin/config/backup/preview');
+    } catch (err) {
+      console.warn('config-backup preview load failed:', err.message);
+      configBackupPreview = { ok: false, error: err.message, counts: {}, warnings: [] };
+    }
     try {
       licenseInfo = await API.get('/api/license/info');
     } catch (err) {
@@ -154,6 +162,8 @@ function render() {
           <a href="#group-safety" class="lux-chip">🛡️ ความปลอดภัย</a>
           <!-- FIX-2026-08-26 Phase 3a: Consent & License chip -->
           <a href="#group-consent" class="lux-chip">📜 Consent &amp; License</a>
+          <!-- FIX-2026-08-29: Config Backup & Restore chip -->
+          <a href="#group-data" class="lux-chip">💾 Backup &amp; Restore</a>
         </div>
 
         <!-- ════════ 🤖 กลุ่มที่ 1: บอท ════════ -->
@@ -195,6 +205,12 @@ function render() {
 
         ${renderConsentSection()}
         ${renderLicenseSection()}
+
+        <!-- ════════ 💾 กลุ่มที่ 6: Backup & Restore (FIX-2026-08-29) ════════ -->
+        <h5 id="group-data" class="settings-group-title">💾 Backup &amp; Restore</h5>
+        <p class="text-muted-3 small mb-3">สำรองและกู้คืนการตั้งค่าทั้งระบบเป็นไฟล์ .json</p>
+
+        ${renderConfigBackupSection()}
 
       </div>
     </div>
@@ -1475,6 +1491,267 @@ function renderLicenseSection() {
   `);
 }
 
+// ─── 💾 Config Backup & Restore (FIX-2026-08-29) ────────────────────────
+function renderConfigBackupSection() {
+  const preview = configBackupPreview || { ok: false, counts: {}, warnings: [] };
+  const counts = preview.counts || {};
+  const c = (n) => (counts[n] && Number.isFinite(counts[n].count)) ? counts[n].count : 0;
+  const sizeKB = (n) => {
+    const b = (counts[n] && Number.isFinite(counts[n].sizeBytes)) ? counts[n].sizeBytes : 0;
+    if (b < 1024) return `${b} B`;
+    if (b < 1024 * 1024) return `${(b / 1024).toFixed(1)} KB`;
+    return `${(b / 1024 / 1024).toFixed(2)} MB`;
+  };
+  const present = (n) => !!(counts[n] && counts[n].present);
+  const encryptionWarn = preview.encryptionAvailable === false
+    ? '<div class="alert alert-danger small mb-3">⚠️ <strong>ENCRYPTION_KEY ไม่พร้อม</strong> — encrypted blobs (apiKeys, telegram token) จะถูกเขียนแต่ไม่สามารถ decrypt ได้ตอน restore</div>'
+    : '';
+  const licenseWarn = '<div class="alert alert-secondary small mb-3">ℹ️ License section: backup เป็น metadata เท่านั้น · restore = no-op (license admin-issued)</div>';
+  return section('sec-config-backup', '💾', 'Config Backup & Restore — สำรอง/กู้คืนการตั้งค่าทั้งระบบ', false, `
+    <div class="alert alert-info small mb-3">
+      <strong>📌 วิธีใช้:</strong> สำรอง config เป็นไฟล์ <code>.json</code> หรือกู้คืนจากไฟล์
+      · เลือกได้ว่าจะ backup/restore เฉพาะส่วน (api keys / telegram / app config / positions / bots / license / others)
+      · ⚠️ <strong>Encryption caveat:</strong> apiKeys + telegram token ถูกเข้ารหัส AES-256-GCM — restore บนเครื่องอื่นต้องใช้ <code>ENCRYPTION_KEY</code> เดียวกันใน <code>.env</code>
+    </div>
+    ${encryptionWarn}
+    ${licenseWarn}
+    <div class="row g-3">
+      <div class="col-md-6">
+        <button type="button" class="lux-btn lux-btn-primary w-100" id="cfg-backup-btn">
+          📥 Backup → Download .json
+        </button>
+      </div>
+      <div class="col-md-6">
+        <button type="button" class="lux-btn lux-btn-warning w-100" id="cfg-restore-btn">
+          📤 Restore from .json
+        </button>
+      </div>
+    </div>
+    <div class="row g-2 mt-2 text-muted-3 small">
+      <div class="col-md-4"><strong>📊 Sections (live counts):</strong></div>
+      <div class="col-md-8">
+        <span class="badge bg-secondary me-1">🔑 apiKeys ${present('apiKeys') ? '✓' : '—'}</span>
+        <span class="badge bg-secondary me-1">📨 telegram ${present('telegram') ? '✓' : '—'}</span>
+        <span class="badge bg-secondary me-1">⚙️ appConfig ${c('appConfig') > 0 ? Object.keys(counts.appConfig.data || {}).length + ' fields' : '—'}</span>
+        <span class="badge bg-info me-1">📦 positions ${c('positions')} open</span>
+        <span class="badge bg-info me-1">🤖 bots ${c('bots')} (${counts.bots && counts.bots.enabled || 0} enabled)</span>
+        <span class="badge bg-secondary me-1">🪪 license ${present('license') ? '✓' : '—'}</span>
+      </div>
+    </div>
+    <div id="cfg-backup-status" class="ms-2 small mt-2"></div>
+    <div class="text-muted-3 small mt-3">
+      🛡️ <strong>Pre-restore safety:</strong> ก่อน restore ทุกครั้ง ระบบจะ snapshot config ปัจจุบันไปยัง <code>data/configbackup-pre-restore-{ISO}.json</code> อัตโนมัติ (Windows-safe path)
+      · ถ้า restore ล้มเหลว สามารถกู้คืนจาก snapshot นั้นได้
+    </div>
+  `);
+}
+
+function buildBackupFilename(sections) {
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+  const tag = (sections && sections.length === 7) ? 'all' : (sections || []).map((s) => s.slice(0, 3)).join('-');
+  return `onepct-backup-${tag}-${stamp}.json`;
+}
+
+async function openBackupModal() {
+  const preview = configBackupPreview || { ok: false, counts: {} };
+  const counts = preview.counts || {};
+  const sections = ['apiKeys', 'telegram', 'appConfig', 'positions', 'bots', 'license', 'others'];
+  const labels = {
+    apiKeys: '🔑 apiKeys (Binance API key/secret)',
+    telegram: '📨 telegram (token + chatId + events + thresholds)',
+    appConfig: '⚙️ appConfig (master toggles + botDefaults + masterConfigTemplates)',
+    positions: '📦 positions (open trades only)',
+    bots: '🤖 bots (full Bot collection)',
+    license: '🪪 license (metadata only — restore skipped)',
+    others: '🔮 others (placeholder)',
+  };
+  const checkboxes = sections.map((s) => {
+    const info = counts[s] || {};
+    const present = !!info.present;
+    const count = info.count != null ? info.count : 0;
+    const sz = info.sizeBytes || 0;
+    const sizeLabel = sz > 0 ? ` · ${(sz / 1024).toFixed(1)} KB` : '';
+    const countLabel = (s === 'bots' || s === 'positions') ? `${count} ${s === 'bots' ? 'บอท' : 'trades'} · ` : '';
+    const readonlyNote = (s === 'license') ? ' · restore=skip' : '';
+    return `
+      <div class="form-check mb-2">
+        <input class="form-check-input" type="checkbox" id="cfg-sec-${s}" value="${s}" ${(s === 'license' || s === 'others') ? 'checked' : 'checked'}>
+        <label class="form-check-label" for="cfg-sec-${s}">
+          <strong>${labels[s]}</strong>
+          <span class="text-muted small">· ${present ? `present · ${countLabel}size ${sizeLabel}${sizeLabel}${readonlyNote}` : 'empty'}</span>
+        </label>
+      </div>`;
+  }).join('');
+
+  const html = `
+    <div class="mb-3">
+      <h6 class="mb-2">📥 เลือก sections ที่จะ backup:</h6>
+      ${checkboxes}
+    </div>
+    <div class="alert alert-info small">
+      ระบบจะสร้างไฟล์ <code>.json</code> พร้อม metadata (เวลา, machineId, encryption note) แล้ว download ลงเครื่อง
+    </div>
+  `;
+  // Use AdminModalAlert.confirmHtml — renders innerHTML + OK/Cancel buttons
+  const proceed = await AdminModalAlert.confirmHtml({
+    title: '📥 Backup Config — เลือก sections',
+    html,
+    level: 'info',
+    okLabel: '📥 Download',
+    cancelLabel: 'ยกเลิก',
+    wideBox: true,
+  });
+  if (!proceed) return;
+  const selected = sections.filter((s) => document.getElementById(`cfg-sec-${s}`)?.checked);
+  if (selected.length === 0) {
+    await AdminModalAlert.alert('ต้องเลือกอย่างน้อย 1 section', 'warn');
+    return;
+  }
+  setStatus('cfg-backup-status', '⏳ กำลังสร้าง backup...');
+  try {
+    const resp = await API.post('/api/admin/config/backup', { sections: selected });
+    const payload = resp.payload || resp;
+    const filename = buildBackupFilename(selected);
+    if (window.botConfigIO && typeof window.botConfigIO.triggerDownload === 'function') {
+      window.botConfigIO.triggerDownload(filename, payload);
+    } else {
+      // fallback: create blob + click
+      const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = filename; a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 100);
+    }
+    const sizeKB = resp.sizeBytes ? `${(resp.sizeBytes / 1024).toFixed(1)} KB` : `${(JSON.stringify(payload).length / 1024).toFixed(1)} KB`;
+    setStatus('cfg-backup-status', `✅ Downloaded ${filename} · ${sizeKB}`);
+    await AdminModalAlert.alert(`✅ Backup สำเร็จ!\n\n${filename}\n${sizeKB}\n\nsections: ${selected.join(', ')}`, 'success');
+    // reload preview
+    configBackupPreview = await API.get('/api/admin/config/backup/preview').catch(() => configBackupPreview);
+    render();
+  } catch (err) {
+    setStatus('cfg-backup-status', '❌ ' + (err.body && err.body.error ? err.body.error : err.message), true);
+    await AdminModalAlert.alert('❌ Backup ล้มเหลว: ' + (err.body && err.body.error ? err.body.error : err.message), 'error');
+  }
+}
+
+async function openRestoreModal() {
+  if (!window.botConfigIO || typeof window.botConfigIO.pickJsonFile !== 'function') {
+    await AdminModalAlert.alert('❌ ต้องโหลด botConfigIO.js ก่อน (รีเฟรชหน้านี้)', 'error');
+    return;
+  }
+  const file = await window.botConfigIO.pickJsonFile();
+  if (!file) return;
+  if (file.size > 10 * 1024 * 1024) {
+    await AdminModalAlert.alert(`❌ ไฟล์ใหญ่เกิน 10 MiB (${(file.size / 1024 / 1024).toFixed(2)} MB)`, 'error');
+    return;
+  }
+  // Read + parse
+  const text = await file.text();
+  let payload;
+  try { payload = JSON.parse(text); }
+  catch (err) {
+    await AdminModalAlert.alert('❌ ไฟล์ไม่ใช่ JSON: ' + err.message, 'error');
+    return;
+  }
+  // Validate
+  if (payload.version !== 'onepercentbot-config-backup-1') {
+    await AdminModalAlert.alert(`❌ version ไม่ตรงกัน: ${payload.version || 'missing'} (ต้องการ onepercentbot-config-backup-1)`, 'error');
+    return;
+  }
+  const available = Object.keys(payload.sections || {}).filter((k) => payload.sections[k] && payload.sections[k].present !== false);
+
+  // Get diff preview from server
+  let diff;
+  try {
+    diff = await API.post('/api/admin/config/restore/preview', { payload, sections: available });
+  } catch (err) {
+    await AdminModalAlert.alert('❌ preview ล้มเหลว: ' + (err.body && err.body.error ? err.body.error : err.message), 'error');
+    return;
+  }
+
+  const sections = ['apiKeys', 'telegram', 'appConfig', 'positions', 'bots', 'license', 'others'].filter((s) => available.includes(s));
+  const checkboxes = sections.map((s) => {
+    const sec = payload.sections[s] || {};
+    const info = diff.sections[s] || {};
+    const desc = (s === 'positions') ? `${(sec.data || []).length} trades` :
+                 (s === 'bots') ? `${(sec.data || []).length} บอท` :
+                 (s === 'license') ? 'metadata only (restore skipped)' :
+                 (s === 'others') ? 'placeholder' : 'config fields';
+    const diffLabel = (info.willCreate != null) ? `· will create ${info.willCreate}` :
+                      (info.fieldsToChange != null) ? `· ${info.fieldsToChange} fields` :
+                      (info.willSkip ? `· ${info.willSkip}` : '');
+    return `
+      <div class="form-check mb-2">
+        <input class="form-check-input" type="checkbox" id="cfg-restore-sec-${s}" value="${s}" ${s === 'license' || s === 'others' ? 'disabled' : 'checked'}>
+        <label class="form-check-label" for="cfg-restore-sec-${s}">
+          <strong>${s}</strong> · ${desc} <span class="text-muted small">${diffLabel}</span>
+          ${s === 'license' ? '<span class="badge bg-secondary ms-1">readonly</span>' : ''}
+        </label>
+      </div>`;
+  }).join('');
+
+  const machineWarn = (payload.machineId && payload.encryption && payload.encryption.note) ?
+    `<div class="alert alert-warning small mt-2">⚠️ ${escapeHtml(payload.encryption.note)}<br>backup machineId: <code>${escapeHtml(String(payload.machineId).slice(0, 16))}</code>...</div>` : '';
+
+  const html = `
+    <div class="mb-3">
+      <h6 class="mb-2">📤 Restore sections จาก <code>${escapeHtml(file.name)}</code>:</h6>
+      ${checkboxes}
+      ${machineWarn}
+    </div>
+    <div class="mb-3">
+      <label class="form-label"><strong>Mode:</strong></label>
+      <select class="form-select" id="cfg-restore-mode">
+        <option value="merge" selected>Merge — fill empty fields only (safe)</option>
+        <option value="replace">Replace — overwrite all fields (irreversible)</option>
+      </select>
+      <small class="text-muted">Merge แนะนำสำหรับ restore ปกติ · Replace ใช้เมื่อต้องการ overwrite ทั้งหมด</small>
+    </div>
+    <div class="alert alert-warning small">
+      ⚠️ ก่อน restore ระบบจะ snapshot config ปัจจุบันไป <code>data/configbackup-pre-restore-{ISO}.json</code> อัตโนมัติ
+    </div>
+  `;
+  const proceed = await AdminModalAlert.confirmHtml({
+    title: '📤 Restore Config — เลือก sections + mode',
+    html,
+    level: 'warn',
+    okLabel: '📤 Restore',
+    cancelLabel: 'ยกเลิก',
+    wideBox: true,
+  });
+  if (!proceed) return;
+  const selected = sections.filter((s) => {
+    const cb = document.getElementById(`cfg-restore-sec-${s}`);
+    return cb && cb.checked && !cb.disabled;
+  });
+  if (selected.length === 0) {
+    await AdminModalAlert.alert('ต้องเลือกอย่างน้อย 1 section', 'warn');
+    return;
+  }
+  const mode = document.getElementById('cfg-restore-mode').value;
+  setStatus('cfg-backup-status', `⏳ กำลัง restore ${selected.length} sections (mode=${mode})...`);
+  try {
+    const result = await API.post('/api/admin/config/restore', { payload, sections: selected, mode, dryRun: false });
+    const lines = [];
+    lines.push(`✅ Restore เสร็จ (mode=${result.mode || mode})`);
+    if (result.preRestore && result.preRestore.path) {
+      lines.push(`🛡️ pre-restore snapshot: ${result.preRestore.path} (${(result.preRestore.sizeBytes / 1024).toFixed(1)} KB)`);
+    }
+    const results = result.results || {};
+    for (const [name, r] of Object.entries(results)) {
+      if (r.error) lines.push(`❌ ${name}: ${r.error}`);
+      else if (r.skipped && typeof r.skipped === 'string') lines.push(`⏸ ${name}: ${r.skipped}`);
+      else lines.push(`✅ ${name}: changed=${r.changed || 0} created=${r.created || 0} updated=${r.updated || 0} skipped=${r.skipped || 0}`);
+    }
+    await AdminModalAlert.alert(lines.join('\n'), results && Object.values(results).some((r) => r.error) ? 'warn' : 'success');
+    setStatus('cfg-backup-status', `✅ Restore เสร็จ · ${selected.length} sections`);
+    await loadConfig();
+  } catch (err) {
+    setStatus('cfg-backup-status', '❌ ' + (err.body && err.body.error ? err.body.error : err.message), true);
+    await AdminModalAlert.alert('❌ Restore ล้มเหลว: ' + (err.body && err.body.error ? err.body.error : err.message), 'error');
+  }
+}
+
 // ════════ Event handlers ════════
 function bindEvents() {
   // Telegram
@@ -1534,6 +1811,12 @@ function bindEvents() {
   if (sapa) sapa.onclick = saveAutoPauseAdjust;
   const tapa = document.getElementById('btn-trigger-apa');
   if (tapa) tapa.onclick = triggerAutoPauseAdjust;
+
+  // FIX-2026-08-29: Config Backup & Restore
+  const cbBackup = document.getElementById('cfg-backup-btn');
+  if (cbBackup) cbBackup.onclick = openBackupModal;
+  const cbRestore = document.getElementById('cfg-restore-btn');
+  if (cbRestore) cbRestore.onclick = openRestoreModal;
 
   // Auto Delete
   const sadb = document.getElementById('btn-save-adb');
@@ -2074,20 +2357,40 @@ async function triggerAutoPauseAdjust() {
   try {
     const resp = await API.post('/api/admin/auto-pause-adjust/run-now', {});
     const s = (resp && resp.stats) || {};
-    if (s.outcome === 'failed_apply') { setStatus('apa-status', '❌ apply failed: ' + (s.error || 'unknown'), true); }
-    else if (s.skipped) { setStatus('apa-status', '⏸ ' + s.skipped); }
-    else if (s.action === 'tighten') {
-      setStatus('apa-status', `🔺 TIGHTEN · running=${s.runningBots} > max=${s.maxBots} · Δkc=+${s.deltaKc} · Δvol=+${s.deltaVol} · updated=${s.updatedBots} bots · clamped ${s.clampedKc}/${s.clampedVol}`);
+    const c = (resp && resp.counts) || {};
+    const b = (resp && resp.bounds) || {};
+    // FIX-2026-08-29: build a prominent modal summary so user clearly sees whether
+    // the system did work even when no bots were updated (e.g. running already in-range).
+    const lines = [];
+    lines.push(`📊 running = ${s.runningBots ?? c.runningBots ?? '?'} (eligible=${c.eligibleBots ?? '?'}, opted-out=${c.optedOutBots ?? '?'})`);
+    if (b.kcMin != null) lines.push(`📏 bounds: KC [${b.kcMin}, ${b.kcMax}]% · Vol [${b.volMin?.toLocaleString()}, ${b.volMax?.toLocaleString()}] USDT`);
+    if (s.outcome === 'failed_apply') {
+      lines.push(`❌ apply failed: ${s.error || 'unknown'}`);
+    } else if (s.skipped) {
+      lines.push(`⏸ skipped: ${s.skipped}${s.skipped === 'license-disabled' ? ' (ต้องเปิด autoPauseMinKc feature ใน license)' : ''}`);
+    } else if (s.action === 'tighten') {
+      lines.push(`🔺 TIGHTEN · running ${s.runningBots} > max ${s.maxBots}`);
+      lines.push(`Δ kc = +${s.deltaKc}% · Δ vol = +${(s.deltaVol || 0).toLocaleString()} USDT`);
+      lines.push(`✅ updated ${s.updatedBots} bot(s)${s.skippedClamped ? ` · skipped-clamped ${s.skippedClamped}` : ''}`);
+    } else if (s.action === 'loosen') {
+      lines.push(`🔻 LOOSEN · running ${s.runningBots} < min ${s.minBots}`);
+      lines.push(`Δ kc = ${s.deltaKc}% · Δ vol = ${(s.deltaVol || 0).toLocaleString()} USDT`);
+      lines.push(`✅ updated ${s.updatedBots} bot(s)${s.skippedClamped ? ` · skipped-clamped ${s.skippedClamped}` : ''}`);
+      if ((s.updatedBots || 0) === 0) {
+        lines.push(`💡 0 bot updated — eligible bots อาจอยู่ที่ KC=${b.kcMin}% / Vol=${b.volMin?.toLocaleString()} bounds แล้ว (ลองลด minBots/maxBots หรือ loosen steps)`);
+      }
+    } else {
+      lines.push(`ℹ️ no action — running ${s.runningBots ?? '?'} ∈ [${s.minBots ?? '?'}, ${s.maxBots ?? '?'}]`);
+      lines.push(`💡 ถ้าอยากเห็นการเปลี่ยนแปลง: ลด minBots ให้น้อยกว่า running (→ LOOSEN) หรือเพิ่ม maxBots ให้น้อยกว่า running (→ TIGHTEN)`);
     }
-    else if (s.action === 'loosen') {
-      setStatus('apa-status', `🔻 LOOSEN · running=${s.runningBots} < min=${s.minBots} · Δkc=${s.deltaKc} · Δvol=${s.deltaVol} · updated=${s.updatedBots} bots · clamped ${s.clampedKc}/${s.clampedVol}`);
-    }
-    else {
-      setStatus('apa-status', `ℹ️ no action · running=${s.runningBots ?? '?'} ในช่วง [${s.minBots ?? '?'}, ${s.maxBots ?? '?'}] (reason: ${s.reason || 'in_range'})`);
-    }
+    const level = (s.outcome === 'failed_apply' || s.error) ? 'error'
+      : (s.skipped ? 'warn' : (s.updatedBots > 0 ? 'success' : 'info'));
+    await AdminModalAlert.alert(lines.join('\n'), level);
+    setStatus('apa-status', lines[0] + (lines[1] ? ' — ' + lines[1] : ''));
     await loadConfig();
   } catch (err) {
     setStatus('apa-status', '❌ ' + (err.body && err.body.error ? err.body.error : err.message), true);
+    await AdminModalAlert.alert('❌ Run now failed: ' + (err.body && err.body.error ? err.body.error : err.message), 'error');
   }
 }
 

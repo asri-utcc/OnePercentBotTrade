@@ -209,7 +209,7 @@ describe('licenseService.snapshot (FIX-2026-08-27 C2)', () => {
       features: {
         telegram: true, autoReserve: false, cbv5: true, safeTrade: true, cb: true,
         telegramLogin: true, autoAddBot: false, autoUpdateTp: false, autoPauseMinKc: false,
-        chartMonitor: true, dps: true,
+        chartMonitor: true, dps: true, configBackup: true,
       },
       hasLicense: true,
     });

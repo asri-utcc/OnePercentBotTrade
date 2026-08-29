@@ -341,6 +341,59 @@ AdminModalAlert.prompt = function ({ title = 'Input', message = '', level = 'inf
 };
 
 /**
+ * FIX-2026-08-29: AdminModalAlert.confirmHtml({ title, html, level, okLabel, cancelLabel })
+ *   Like .confirm() but the `html` message is set via innerHTML (allowing checkboxes, badges,
+ *   inline styling). Use sparingly — caller is responsible for sanitizing any user-derived
+ *   content (file names from upload are passed through escapeHtml).
+ *   Returns Promise<boolean>.
+ */
+AdminModalAlert.confirmHtml = function ({ title = 'Confirm', html = '', level = 'warn', okLabel = 'OK', cancelLabel = 'Cancel', wideBox = false } = {}) {
+  return new Promise((resolve) => {
+    const backdrop = this._buildBackdrop();
+    const { box, okBtn, cancelBtn } = this._buildBox({ title, message: '', level, okLabel, cancelLabel });
+    // Override width for rich modals
+    if (wideBox) {
+      box.style.width = '640px';
+      box.style.maxWidth = '95vw';
+    }
+    // Replace the (currently empty) message div with our HTML
+    const m = box.querySelector('div');
+    if (m) {
+      m.innerHTML = html;
+      m.style.maxHeight = '60vh';
+      m.style.overflowY = 'auto';
+      m.style.textAlign = 'left';
+    }
+    backdrop.appendChild(box);
+    document.body.appendChild(backdrop);
+    let closed = false;
+    const cleanup = (v) => {
+      if (closed) return;
+      closed = true;
+      document.removeEventListener('keydown', onKey);
+      backdrop.remove();
+      resolve(v);
+    };
+    const onKey = (e) => {
+      if (e.key === 'Escape') { e.preventDefault(); cleanup(false); }
+      else if (e.key === 'Enter') {
+        // Don't auto-submit if focus is on a checkbox/select/input
+        const tag = (document.activeElement && document.activeElement.tagName) || '';
+        if (tag !== 'INPUT' && tag !== 'SELECT' && tag !== 'TEXTAREA') {
+          e.preventDefault();
+          cleanup(true);
+        }
+      }
+    };
+    okBtn.addEventListener('click', () => cleanup(true));
+    if (cancelBtn) cancelBtn.addEventListener('click', () => cleanup(false));
+    backdrop.addEventListener('click', (e) => { if (e.target === backdrop) cleanup(false); });
+    document.addEventListener('keydown', onKey);
+    setTimeout(() => okBtn.focus(), 50);
+  });
+};
+
+/**
  * FIX-2026-08-28 UX: AdminModalAlert.alert(text, level) — Promise<void> wrapper around show()
  * for sites previously using native alert(). Returns when the user dismisses.
  */

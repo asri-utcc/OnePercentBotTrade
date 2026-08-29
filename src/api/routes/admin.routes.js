@@ -21,6 +21,8 @@ const masterConfig = require('../../core/masterConfig');
 const cbVersion = require('../../core/cbVersion');
 const autoDeleteBot = require('../../services/autoDeleteBot');
 const autoPauseAdjust = require('../../services/autoPauseAdjust');
+const configBackup = require('../../services/configBackup');
+const licenseService = require('../../services/licenseService');
 const eventBus = require('../../services/eventBus');
 const masterConfigTemplates = require('../../services/masterConfigTemplates');
 const logger = require('../../utils/logger');
@@ -353,11 +355,26 @@ router.put('/auto-pause-adjust', requireAuth, async (req, res) => {
   }
 });
 
+// FIX-2026-08-29: enrich run-now response with counts + bounds so UI can show
+//   "why did nothing visibly change?" detail (running/eligible/optedOut + ADJUST_* bounds).
+const { ADJUST_KC_MIN, ADJUST_KC_MAX, ADJUST_VOL_MIN, ADJUST_VOL_MAX } = require('../../services/autoPauseAdjust');
+
 router.post('/auto-pause-adjust/run-now', requireAuth, async (req, res) => {
   try {
     const stats = await autoPauseAdjust.runOnce({ source: 'manual' });
+    // Counts snapshot (so UI can show "X eligible / Y opted out / Z running")
+    const [runningBots, eligibleDocs, optedOutDocs] = await Promise.all([
+      Bot.countDocuments({ enabled: { $ne: false }, autoPauseEnabled: { $ne: false }, deletedAt: null }),
+      Bot.countDocuments({ autoPauseEnabled: { $ne: false }, autoPauseAdjustEnabled: { $ne: false }, deletedAt: null }),
+      Bot.countDocuments({ autoPauseEnabled: { $ne: false }, autoPauseAdjustEnabled: false, deletedAt: null }),
+    ]);
     logger.info({ stats }, 'admin: auto-pause-adjust run-now completed');
-    res.json({ ok: true, stats });
+    res.json({
+      ok: true,
+      stats,
+      counts: { runningBots, eligibleBots: eligibleDocs, optedOutBots: optedOutDocs },
+      bounds: { kcMin: ADJUST_KC_MIN, kcMax: ADJUST_KC_MAX, volMin: ADJUST_VOL_MIN, volMax: ADJUST_VOL_MAX },
+    });
   } catch (err) {
     logger.warn({ err: err.message }, 'admin: auto-pause-adjust run-now failed');
     res.status(500).json({ error: err.message });
@@ -777,6 +794,109 @@ router.delete('/master-config-templates/:id', requireAuth, async (req, res) => {
     res.json({ ok: true, remaining });
   } catch (err) {
     logger.warn({ err: err.message }, 'admin: DELETE master-config-templates/:id failed');
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── Config Backup & Restore (FIX-2026-08-29) ──────────────────────────
+// 4 routes — all requireAuth only (per 2026-08-24 admin policy).
+// License gate: features.configBackup (default ON for legacy licenses).
+// Sections: apiKeys, telegram, appConfig, positions, bots, license (readonly), others.
+
+function _checkConfigBackupLicense(res) {
+  if (!licenseService.isFeatureEnabled('configBackup')) {
+    res.status(403).json({ error: 'feature-disabled', feature: 'configBackup' });
+    return false;
+  }
+  return true;
+}
+
+router.get('/config/backup/preview', requireAuth, async (req, res) => {
+  if (!_checkConfigBackupLicense(res)) return;
+  try {
+    const preview = await configBackup.previewBackupPayload();
+    logger.info({ totalSize: preview.totalSizeBytes }, 'admin: GET config/backup/preview');
+    res.json(preview);
+  } catch (err) {
+    logger.warn({ err: err.message }, 'admin: GET config/backup/preview failed');
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.post('/config/backup', requireAuth, async (req, res) => {
+  if (!_checkConfigBackupLicense(res)) return;
+  try {
+    const sectionsRaw = req.body && req.body.sections;
+    if (sectionsRaw !== undefined && !Array.isArray(sectionsRaw)) {
+      return res.status(400).json({ error: 'sections must be an array or omitted' });
+    }
+    const sections = Array.isArray(sectionsRaw) ? sectionsRaw : null;
+    const payload = await configBackup.buildBackupPayload({ sections: sections || undefined });
+    const sizeBytes = Buffer.byteLength(JSON.stringify(payload), 'utf8');
+    if (sizeBytes > configBackup.MAX_BACKUP_BYTES) {
+      return res.status(413).json({ error: `backup too large: ${sizeBytes} bytes (max ${configBackup.MAX_BACKUP_BYTES})` });
+    }
+    logger.info({ sections: sections || 'all', sizeBytes }, 'admin: POST config/backup');
+    res.json({ ok: true, payload, sizeBytes });
+  } catch (err) {
+    if (err.status === 400) return res.status(400).json({ error: err.message });
+    logger.warn({ err: err.message }, 'admin: POST config/backup failed');
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.post('/config/restore/preview', requireAuth, async (req, res) => {
+  if (!_checkConfigBackupLicense(res)) return;
+  try {
+    const payload = req.body && req.body.payload;
+    const sectionsRaw = req.body && req.body.sections;
+    if (sectionsRaw !== undefined && !Array.isArray(sectionsRaw)) {
+      return res.status(400).json({ error: 'sections must be an array or omitted' });
+    }
+    const sections = Array.isArray(sectionsRaw) ? sectionsRaw : null;
+    if (!payload) return res.status(400).json({ error: 'missing payload' });
+    const v = configBackup.parseBackupPayload(payload);
+    if (!v.ok) return res.status(400).json({ error: v.error });
+    const preview = await configBackup.previewRestorePayload(v.payload, sections || undefined);
+    logger.info({ sections: sections || 'all' }, 'admin: POST config/restore/preview');
+    res.json(preview);
+  } catch (err) {
+    logger.warn({ err: err.message }, 'admin: POST config/restore/preview failed');
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.post('/config/restore', requireAuth, async (req, res) => {
+  if (!_checkConfigBackupLicense(res)) return;
+  try {
+    const payload = req.body && req.body.payload;
+    const sectionsRaw = req.body && req.body.sections;
+    if (sectionsRaw !== undefined && !Array.isArray(sectionsRaw)) {
+      return res.status(400).json({ error: 'sections must be an array or omitted' });
+    }
+    const sections = Array.isArray(sectionsRaw) ? sectionsRaw : null;
+    const mode = (req.body && req.body.mode) || 'merge';
+    const dryRun = !!(req.body && req.body.dryRun);
+    if (!payload) return res.status(400).json({ error: 'missing payload' });
+    if (mode !== 'replace' && mode !== 'merge') {
+      return res.status(400).json({ error: `mode must be 'replace' or 'merge' (got '${mode}')` });
+    }
+    const v = configBackup.parseBackupPayload(payload);
+    if (!v.ok) return res.status(400).json({ error: v.error });
+    const result = await configBackup.applyRestore({
+      payload: v.payload,
+      sections: sections || undefined,
+      mode,
+      dryRun,
+    });
+    if (!dryRun) {
+      try { eventBus.emit('admin:config-restored', { sections: sections || 'all', mode, machineId: v.payload.machineId }); } catch (_) { /* ignore */ }
+    }
+    logger.info({ sections: sections || 'all', mode, dryRun, results: result.results }, 'admin: POST config/restore');
+    res.json(result);
+  } catch (err) {
+    if (err.status === 400) return res.status(400).json({ error: err.message });
+    logger.warn({ err: err.message }, 'admin: POST config/restore failed');
     res.status(500).json({ error: err.message });
   }
 });
