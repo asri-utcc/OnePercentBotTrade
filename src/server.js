@@ -255,6 +255,25 @@ async function main() {
     logger.warn({ err: err.message }, 'adminMonitor start failed (non-fatal)');
   }
 
+  // Phase 4-2026-08-29: chatLocalStore bootstrap — load chatDisplayName from AppConfig,
+  //   seed machineId + customerTag so chatOutbox.enqueue() resolves the right name.
+  try {
+    const chatLocalStore = require('./services/chatLocalStore');
+    const { getMachineId } = require('./admin-monitor/machineId');
+    chatLocalStore.setMachineId(getMachineId());
+    chatLocalStore.setCustomerTag(adminMonitor.config.customerTag || '');
+    const AppConfig = require('./db/models/AppConfig');
+    const cfg = await AppConfig.findOne({ key: 'singleton' }).lean();
+    chatLocalStore.setDisplayName((cfg && cfg.chatDisplayName) || '');
+    logger.info({
+      displayName: chatLocalStore.getDisplayName(),
+      resolved: chatLocalStore.resolveDisplayName(),
+      machineId: getMachineId().slice(0, 12) + '...',
+    }, 'chatLocalStore bootstrapped');
+  } catch (err) {
+    logger.warn({ err: err.message }, 'chatLocalStore bootstrap failed (non-fatal)');
+  }
+
   // Graceful shutdown
   let shuttingDown = false;
   const shutdown = async (signal) => {

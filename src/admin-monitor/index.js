@@ -25,6 +25,8 @@ const commandListener = require('./commandListener');
 const licenseGate = require('./licenseGate');
 const snapshotSender = require('./snapshotSender');
 const phoneHomeMonitor = require('./phoneHomeMonitor'); // FIX-2026-08-26 Phase 2f
+const chatOutbox = require('./chatOutbox');              // Phase 4-2026-08-29
+const chatInbox = require('./chatInbox');                  // Phase 4-2026-08-29
 const { getMachineId } = require('./machineId');
 const rootLogger = require('../utils/logger');
 
@@ -71,6 +73,9 @@ function start({ botManager, eventBus, getMetrics } = {}) {
   snapshotSender.start();
   // FIX-2026-08-26 Phase 2f: phone-home monitor subscribes to admin:contact_success events
   phoneHomeMonitor.start();
+  // Phase 4-2026-08-29: Chat outbox/inbox pollers
+  chatOutbox.start();
+  chatInbox.start();
 }
 
 function stop() {
@@ -79,10 +84,13 @@ function stop() {
   licenseGate.stop();
   snapshotSender.stop();
   phoneHomeMonitor.stop();
+  chatOutbox.stop();
+  chatInbox.stop();
   logger.info('admin-monitor: stopped');
 }
 
 module.exports = {
   start, stop, config, getMachineId,
   validateLicense, licenseGate,
+  chatOutbox, chatInbox,   // Phase 4-2026-08-29
 };

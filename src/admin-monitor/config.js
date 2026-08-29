@@ -68,6 +68,13 @@ const config = {
   botUrl: process.env.ADMIN_BOT_URL || process.env.BOT_URL || 'http://127.0.0.1:6015',
   snapshotMs: _int(process.env.ADMIN_SNAPSHOT_MS, 300000),
   botVersion: require(path.join(__dirname, '..', '..', 'package.json')).version,
+  // Phase 4-2026-08-29: Chat system polling
+  //   - chatOutboxMs: how often to drain local outbox (default 3000 = 3s)
+  //   - chatInboxMs:  how often to poll admin for new messages (default 5000 = 5s)
+  //   - chatOutboxBatch: max messages POSTed per tick (default 10)
+  chatOutboxMs:    _int(process.env.ADMIN_CHAT_OUTBOX_MS, 3000),
+  chatInboxMs:     _int(process.env.ADMIN_CHAT_INBOX_MS, 5000),
+  chatOutboxBatch: _int(process.env.ADMIN_CHAT_OUTBOX_BATCH, 10),
   // FIX-2026-08-27: HMAC secret for command signature verification (Bug B).
   // Null only if licenseKey empty (verifySignature rejects all commands then).
   commandHmacSecret: _envSecret,

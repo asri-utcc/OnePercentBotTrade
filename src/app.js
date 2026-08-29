@@ -42,6 +42,8 @@ const rateLimitRoutes = require('./api/routes/rateLimit.routes');
 // FIX-2026-08-26 Phase 2c-v2: Consent routes on the bot's main port —
 //   public (no requireAuth) so first-run users can decide before logging in.
 const consentRoutes = require('./api/routes/consent.routes');
+// Phase 4-2026-08-29: Chat routes — community room + DM to admin
+const chatRoutes = require('./api/routes/chat.routes');
 
 function createApp() {
   const app = express();
@@ -157,6 +159,9 @@ app.use('/api/admin/snapshot', require('./api/routes/adminSnapshot.routes'));
 
 // FIX-2026-08-26 Phase 2c-v2: Consent routes (public; first-run users can decide pre-login)
 app.use('/api/consent', consentRoutes);
+
+// Phase 4-2026-08-29: Chat routes (requireAuth) — community + DM to admin
+app.use('/api/chat', chatRoutes);
 
 // FIX-2026-08-26: App version endpoint — public, used by navbar to show user what version is running
 app.get('/api/app/version', (_req, res) => {

@@ -107,6 +107,45 @@ const handlers = {
     return { ok: true, action: 'revoked' };
   },
 
+  /**
+   * Phase 4-2026-08-29: chat_message — admin→bot DM or community message.
+   *   payload shape: { id, scope, text, displayName, createdAt, fromAdmin: true, toMachineId }
+   *   - adds to local ring buffer (admin already canonical; this is a backup path
+   *     for the small window between admin POST /api/instances/.../chat/send and the
+   *     bot's own chatInbox poll — ensures browser sees it ~immediately).
+   *   - emits 'chat:message' on eventBus → dashboardWs broadcasts to all browser tabs.
+   */
+  async chat_message(payload, ctx) {
+    const msg = {
+      id: String(payload?.id || ''),
+      scope: payload?.scope === 'dm' ? 'dm' : 'community',
+      fromAdmin: true,
+      fromMachineId: null,
+      toMachineId: payload?.toMachineId || null,
+      displayName: String(payload?.displayName || 'admin').slice(0, 64),
+      text: String(payload?.text || '').slice(0, 2000),
+      createdAt: payload?.createdAt || new Date().toISOString(),
+    };
+    if (!msg.text) {
+      logger.warn('admin: chat_message ignored (empty text)');
+      return { ok: false, reason: 'empty' };
+    }
+    try {
+      const chatLocalStore = require('../services/chatLocalStore');
+      chatLocalStore.addMessage(msg);
+    } catch (e) {
+      logger.warn({ err: e.message }, 'admin: chat_message localStore add failed');
+    }
+    ctx.eventBus?.emit?.('chat:message', msg);
+    logger.info({
+      id: msg.id,
+      scope: msg.scope,
+      toMachineId: msg.toMachineId ? msg.toMachineId.slice(0, 12) + '...' : null,
+      len: msg.text.length,
+    }, 'admin: chat_message delivered');
+    return { ok: true, action: 'chat_message' };
+  },
+
   // FIX-2026-08-26 Phase 2e: notify user via Telegram about unauthorized state
   //   - sends ad-hoc message to user's TG chat (if configured)
   //   - admin can include 'message' (default contact info) + 'reason' (audit)

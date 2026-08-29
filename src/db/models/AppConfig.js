@@ -363,6 +363,15 @@ const appConfigSchema = new mongoose.Schema(
     autoPauseAdjustLastRunAt:  { type: Date,    default: null },
     autoPauseAdjustLastStats:  { type: Object,  default: null },
     autoPauseAdjustLastError:  { type: String,  default: null },
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Phase 4-2026-08-29: Chat System — Operator display name
+    //   - Used as identity when posting to admin community room or DM
+    //   - Empty → resolved at send time: customerTag || first 8 chars of machineId
+    //   - 1..32 chars (sanitized via chatService.sanitizeDisplayName)
+    //   - Set from Settings section / chat.html; persisted across restart
+    // ═══════════════════════════════════════════════════════════════════════
+    chatDisplayName: { type: String, default: '', maxlength: 32 },
   },
   { timestamps: true }
 );

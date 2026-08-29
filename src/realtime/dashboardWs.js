@@ -19,6 +19,10 @@ const EVENTS_TO_FORWARD = [
   // FIX-2026-08-27 Bug A: show_message cmd → toast on dashboard
   //   Emitted by commandExecutor.show_message → all connected WS clients show toast.
   'admin:message',
+  // Phase 4-2026-08-29: chat message arrives via admin command OR via chatInbox poll.
+  //   Emitted from commandExecutor.chat_message() and admin-monitor/chatInbox.js.
+  //   Browser ws-client.js forwards to AdminToast + window CustomEvent for chatWidget.js.
+  'chat:message',
 ];
 
 /**
