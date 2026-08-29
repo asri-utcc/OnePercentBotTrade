@@ -27,6 +27,7 @@ async function init() {
     return;
   }
   await loadConfig();
+  await loadChatDisplayName();
 }
 
 async function loadConfig() {
@@ -199,14 +200,20 @@ function render() {
 
         ${renderBnbSection()}
 
-        <!-- ════════ 📜 กลุ่มที่ 5: Consent & License (FIX-2026-08-26) ════════ -->
+        <!-- ════════ 💬 กลุ่มที่ 5: Chat Display Name (Phase 4-2026-08-29) ════════ -->
+        <h5 id="group-chat" class="settings-group-title">💬 Chat Display Name</h5>
+        <p class="text-muted-3 small mb-3">ชื่อที่จะแสดงใน Community Room + DM กับ admin</p>
+
+        ${renderChatDisplayNameSection()}
+
+        <!-- ════════ 📜 กลุ่มที่ 6: Consent & License (FIX-2026-08-26) ════════ -->
         <h5 id="group-consent" class="settings-group-title">📜 Consent &amp; License</h5>
         <p class="text-muted-3 small mb-3">การยินยอมให้ดำเนินการ + รายละเอียด License</p>
 
         ${renderConsentSection()}
         ${renderLicenseSection()}
 
-        <!-- ════════ 💾 กลุ่มที่ 6: Backup & Restore (FIX-2026-08-29) ════════ -->
+        <!-- ════════ 💾 กลุ่มที่ 7: Backup & Restore (FIX-2026-08-29) ════════ -->
         <h5 id="group-data" class="settings-group-title">💾 Backup &amp; Restore</h5>
         <p class="text-muted-3 small mb-3">สำรองและกู้คืนการตั้งค่าทั้งระบบเป็นไฟล์ .json</p>
 
@@ -1328,6 +1335,33 @@ function renderBnbSection() {
 }
 
 // ─── 📜 Section: Consent status (FIX-2026-08-26) ──────────────────
+// Phase 4-2026-08-29: Chat Display Name — operator's identity in community room + DM to admin
+function renderChatDisplayNameSection() {
+  return section('sec-chat-display-name', '💬', 'Chat Display Name — ชื่อที่แสดงในแชท', false, `
+    <div class="alert alert-info small mb-3">
+      <strong>📌 ใช้ที่ไหน:</strong> ชื่อนี้จะแสดงเมื่อคุณโพสต์ใน <a href="/chat.html">Community Room</a> หรือส่ง DM ให้ admin
+      · ถ้าไม่ตั้ง ระบบจะใช้ <code>customerTag</code> หรือ 8 ตัวแรกของ machineId เป็น fallback
+      · แก้ไขได้ตลอด — มีผลกับข้อความถัดไปที่ส่ง
+    </div>
+
+    <div class="row g-3 align-items-end">
+      <div class="col-md-6">
+        <label class="form-label">ชื่อที่จะแสดง <span class="text-muted small">(1-32 ตัวอักษร)</span></label>
+        <input type="text" class="form-control" id="f-chat-display-name" maxlength="32" placeholder="เช่น alice, alice-shopA" />
+        <div class="form-text text-muted small mt-1" id="f-chat-display-name-help">Loading...</div>
+      </div>
+      <div class="col-md-3">
+        <button type="button" class="btn btn-primary" id="btn-save-chat-display-name">💾 บันทึกชื่อ</button>
+      </div>
+      <div class="col-md-3">
+        <a href="/chat.html" class="btn btn-outline-info">💬 เปิดหน้าแชท</a>
+      </div>
+    </div>
+
+    <div id="chat-display-name-status" class="ms-2 small mt-2"></div>
+  `);
+}
+
 function renderConsentSection() {
   const status = consentStatus || { decision: null, consentVersion: null, consentEnabled: false };
   const decision = status.decision; // 'accepted' | 'declined' | null
@@ -1761,6 +1795,9 @@ function bindEvents() {
   if (clearToken) clearToken.onclick = clearTelegramToken;
   const saveChat = document.getElementById('btn-save-chat');
   if (saveChat) saveChat.onclick = saveChatId;
+  // Phase 4-2026-08-29: Chat display name
+  const saveChatName = document.getElementById('btn-save-chat-display-name');
+  if (saveChatName) saveChatName.onclick = saveChatDisplayName;
   const testBtn = document.getElementById('btn-test');
   if (testBtn) testBtn.onclick = sendTest;
   const tgEnabled = document.getElementById('f-enabled');
@@ -1924,6 +1961,40 @@ async function saveChatId() {
     setStatus('test-status', '✅ บันทึก Chat ID แล้ว');
     await loadConfig();
   } catch (err) { setStatus('test-status', '❌ ' + err.message, true); }
+}
+
+// Phase 4-2026-08-29: Chat Display Name loaders
+async function loadChatDisplayName() {
+  try {
+    const r = await API.get('/api/chat/display-name');
+    const input = document.getElementById('f-chat-display-name');
+    const help = document.getElementById('f-chat-display-name-help');
+    if (input) input.value = r.displayName || '';
+    if (help) {
+      const src = r.displayName ? 'ตั้งเอง' : `fallback: ${r.resolved}`;
+      help.textContent = `ปัจจุบัน: "${r.resolved}" (${src})`;
+    }
+  } catch (err) {
+    const help = document.getElementById('f-chat-display-name-help');
+    if (help) help.textContent = '❌ ' + err.message;
+  }
+}
+
+async function saveChatDisplayName() {
+  const input = document.getElementById('f-chat-display-name');
+  const value = (input && input.value || '').trim();
+  const statusEl = document.getElementById('chat-display-name-status');
+  if (!value) {
+    if (statusEl) statusEl.innerHTML = '<span class="text-danger">❌ กรุณากรอกชื่อ</span>';
+    return;
+  }
+  try {
+    const r = await API.put('/api/chat/display-name', { displayName: value });
+    if (statusEl) statusEl.innerHTML = '<span class="text-success">✅ บันทึกแล้ว — ข้อความถัดไปจะใช้ชื่อนี้</span>';
+    await loadChatDisplayName();
+  } catch (err) {
+    if (statusEl) statusEl.innerHTML = `<span class="text-danger">❌ ${escapeHtml(err.message || 'unknown')}</span>`;
+  }
 }
 
 async function sendTest() {

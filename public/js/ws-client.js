@@ -11,6 +11,8 @@ const WSClient = {
     // FIX-2026-08-27 Bug A: register default admin:message toast listener
     //   (any page that includes ws-client gets the toast for free).
     this._installAdminToast();
+    // Phase 4-2026-08-29: chat:message → window CustomEvent for chatWidget / chat page
+    this._installChatEventForwarder();
   },
 
   _connect() {
@@ -72,6 +74,31 @@ const WSClient = {
         AdminToast.show(text, level);
       } catch (err) {
         console.error('admin:message handler failed', err);
+      }
+    });
+  },
+
+  /**
+   * Phase 4-2026-08-29: chat:message → window CustomEvent
+   *   - Emitted by admin-monitor/chatInbox (poll) and commandExecutor.chat_message
+   *   - Forwards to chatWidget (toast + sound + title flash) and chat page (append)
+   *   - Always shows a toast for incoming DM (info level — non-intrusive)
+   */
+  _installChatEventForwarder() {
+    if (this._chatForwarderInstalled) return;
+    this._chatForwarderInstalled = true;
+    this.on('chat:message', (payload) => {
+      try {
+        if (!payload) return;
+        // Emit as CustomEvent so any page can subscribe via addEventListener('chat:message')
+        window.dispatchEvent(new CustomEvent('chat:message', { detail: payload }));
+        // Show toast for incoming DM only (community is in chat page)
+        if (payload.scope === 'dm' && payload.fromAdmin) {
+          const who = payload.displayName || 'admin';
+          AdminToast.show(`💬 ${who}: ${String(payload.text || '').slice(0, 120)}`, 'info');
+        }
+      } catch (err) {
+        console.error('chat:message forwarder failed', err);
       }
     });
   },

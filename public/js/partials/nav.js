@@ -34,6 +34,7 @@
     { key: 'wallet',        href: '/wallet.html',   label: '💼 Wallet' },            // 2026-08-19: holdings + USDT reserve
     { key: 'security',      href: '/password-sessions.html', label: '🔑 Security' }, // 2026-08-09: Password & Sessions Manager
     { key: 'settings',      href: '/settings.html', label: '⚙️ Settings' },          // FIX-2026-07-24
+    { key: 'chat',          href: '/chat.html',     label: '💬 Chat' },              // Phase 4-2026-08-29: community + DM
   ];
   // FIX-2026-08-28 B6: hide chart-monitor link when license disables it
   //   - features fetched from /api/license/info (already exposed, no new endpoint)
@@ -77,6 +78,10 @@
              under the 🛡️ Consent & License group. -->
         <!-- FIX-2026-08-26: bot version pill — surfaces the running version to the user -->
         <span class="version-pill" id="nav-version" title="Bot version ที่กำลังรันอยู่">v…</span>
+        <!-- Phase 4-2026-08-29: Chat badge pill — shows unread DM count, links to /chat.html -->
+        <a class="chat-pill" id="nav-chat-pill" href="/chat.html" title="Community + DM กับ admin" style="display:none;">
+          💬 <span id="nav-chat-badge" class="chat-badge hidden">0</span>
+        </a>
         ${active !== 'login' ? `<button class="btn-lux btn-sm" id="logout-btn" type="button">Logout</button>` : ''}
         <button class="nav-toggle d-md-none" type="button" id="nav-toggle" aria-label="Toggle menu">☰</button>
       </div>
@@ -141,6 +146,31 @@
 
   // FIX-2026-08-27 Phase 3a: consent status poller REMOVED from navbar (per user feedback).
   //   Users check consent status on Settings page → 🛡️ Consent & License group.
+
+  // Phase 4-2026-08-29: chat unread badge (DM only — community is always visible)
+  const chatPillEl = document.getElementById('nav-chat-pill');
+  const chatBadgeEl = document.getElementById('nav-chat-badge');
+  async function refreshChatBadge() {
+    if (!chatBadgeEl) return;
+    try {
+      const r = await API.get('/api/chat/unread');
+      const n = (r && typeof r.dm === 'number') ? r.dm : 0;
+      if (n > 0) {
+        chatBadgeEl.textContent = n > 99 ? '99+' : String(n);
+        chatBadgeEl.classList.remove('hidden');
+        if (chatPillEl) chatPillEl.style.display = '';
+      } else {
+        chatBadgeEl.classList.add('hidden');
+        if (chatPillEl) chatPillEl.style.display = 'none';
+      }
+    } catch (_) { /* silent */ }
+  }
+  refreshChatBadge();
+  setInterval(refreshChatBadge, 30000);
+  // Listen for live chat:message events to update badge immediately
+  window.addEventListener('chat:message', (e) => {
+    if (e && e.detail && e.detail.scope === 'dm' && e.detail.fromAdmin) refreshChatBadge();
+  });
 
   const usdtEl = document.getElementById('nav-balance-usdt');
   const thbEl = document.getElementById('nav-balance-thb');
