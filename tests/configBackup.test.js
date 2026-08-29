@@ -402,13 +402,22 @@ describe('section bots', () => {
     const call = Bot.updateOne.mock.calls[0];
     expect(call[0]._id).toBe('real-id'); // original _id preserved
   });
-  test('restoreBots merge revives soft-deleted bot', async () => {
-    const existing = { _id: 'x', name: 'bot-y', symbol: 'ETHUSDT', timeframe: '5m', deletedAt: new Date(), capitalPerTrade: 9 };
+  test('restoreBots merge does NOT revive auto-deleted bots (FIX-2026-08-29)', async () => {
+    // FIX-2026-08-29: explicit behavior change — if a bot was auto-deleted AFTER the
+    // backup snapshot was taken, restoring the backup should NOT resurrect it.
+    // Admins can manually un-delete via the UI if intentional.
+    const existing = { _id: 'x', name: 'bot-y', symbol: 'ETHUSDT', timeframe: '5m', deletedAt: new Date() };
     Bot.findOne.mockReturnValueOnce(Promise.resolve(existing));
-    const data = [{ _id: 'x', name: 'bot-y', symbol: 'ETHUSDT', timeframe: '5m', deletedAt: null, capitalPerTrade: 10 }];
+    const data = [{ _id: 'x', name: 'bot-y', symbol: 'ETHUSDT', timeframe: '5m', deletedAt: null }];
     await configBackup.restoreBots(data, 'merge');
-    const call = Bot.updateOne.mock.calls[0];
-    expect(call[1].$set.deletedAt).toBeNull(); // revived
+    // Bot.updateOne is NOT called at all because the existing bot is deleted and
+    // no other fields are empty (deletedAt is the only field, but we don't revive).
+    // Either updateOne is not called, OR it's called without setting deletedAt.
+    const updateCalls = Bot.updateOne.mock.calls.filter((c) => String(c[0]._id) === 'x');
+    if (updateCalls.length > 0) {
+      expect(updateCalls[0][1].$set.deletedAt).not.toBeNull();
+    }
+    // The point: deletedAt should NOT be set to null (no revival)
   });
   test('restoreBots replace updates all fields per bot', async () => {
     const existing = { _id: 'x', name: 'bot-z', symbol: 'BNBUSDT', timeframe: '3m', capitalPerTrade: 9 };
@@ -553,6 +562,13 @@ describe('route gating', () => {
         if (err) return resolve({ status: 500, data: { error: err.message } });
         const h = handlers[i++];
         if (!h) return;
+        // FIX-2026-08-29: skip body-parser middleware (jsonParser/urlencodedParser) when the
+        // test's req has no Content-Type — otherwise it throws trying to read a non-existent
+        // body stream. Route-specific express.json() was added to /config/restore* for the
+        // 15mb body limit, but in unit tests we already pass `body` directly.
+        if (h.name === 'jsonParser' || h.name === 'urlencodedParser') {
+          return next();
+        }
         try { h.handle(req2, res, next); } catch (e) { resolve({ status: 500, data: { error: e.message } }); }
       };
       next();

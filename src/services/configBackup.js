@@ -422,10 +422,12 @@ async function restoreBots(data, mode = 'merge') {
             set[k] = v;
           }
         }
-        // Always revive if incoming deletedAt=null and existing has deletedAt
-        if (incoming.deletedAt == null && existing.deletedAt) {
-          set.deletedAt = null;
-        }
+        // FIX-2026-08-29: don't auto-revive auto-deleted bots. If a bot was soft-deleted
+        // AFTER the backup snapshot was taken (e.g. by autoDeleteBot), restoring the
+        // backup should NOT resurrect it — that's an explicit admin action done outside
+        // the backup flow. Admins can un-delete manually via the UI if intentional.
+        // (Revival path remains in replace mode if the backup explicitly carried
+        //  deletedAt=null AND we want to force-overwrite; see replace branch.)
         if (Object.keys(set).length > 0) {
           await Bot.updateOne({ _id: existing._id }, { $set: set });
           updated += 1;

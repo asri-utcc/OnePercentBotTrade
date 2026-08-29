@@ -845,7 +845,10 @@ router.post('/config/backup', requireAuth, async (req, res) => {
   }
 });
 
-router.post('/config/restore/preview', requireAuth, async (req, res) => {
+// FIX-2026-08-29: route-specific body parser (15mb) for restore endpoints.
+// Global limit in app.js is 1mb which is too small for full config backups
+// (server-side MAX_BACKUP_BYTES=10mb; payload can include 100s of bots+positions).
+router.post('/config/restore/preview', requireAuth, express.json({ limit: '15mb' }), async (req, res) => {
   if (!_checkConfigBackupLicense(res)) return;
   try {
     const payload = req.body && req.body.payload;
@@ -866,7 +869,7 @@ router.post('/config/restore/preview', requireAuth, async (req, res) => {
   }
 });
 
-router.post('/config/restore', requireAuth, async (req, res) => {
+router.post('/config/restore', requireAuth, express.json({ limit: '15mb' }), async (req, res) => {
   if (!_checkConfigBackupLicense(res)) return;
   try {
     const payload = req.body && req.body.payload;
@@ -890,7 +893,7 @@ router.post('/config/restore', requireAuth, async (req, res) => {
       dryRun,
     });
     if (!dryRun) {
-      try { eventBus.emit('admin:config-restored', { sections: sections || 'all', mode, machineId: v.payload.machineId }); } catch (_) { /* ignore */ }
+      try { eventBus.emit('admin:config-restored', { sections: sections || 'all', mode, machineId: v.payload.machineId }); } catch (emitErr) { logger.warn({ err: emitErr.message }, 'admin: eventBus.emit(admin:config-restored) failed'); }
     }
     logger.info({ sections: sections || 'all', mode, dryRun, results: result.results }, 'admin: POST config/restore');
     res.json(result);

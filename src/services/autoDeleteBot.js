@@ -189,7 +189,7 @@ async function tick() {
           } catch (tgErr) {
             logger.warn({ err: tgErr.message }, 'autoDeleteBot: telegram sendNow failed (non-fatal)');
           }
-        } else if (lastActiveMs <= warningCutoffMs && (!b.deleteNotificationSentAt || new Date(b.deleteNotificationSentAt).getTime() < lastActiveMs)) {
+        } else if (lastActiveMs <= warningCutoffMs && (!b.deleteNotificationSentAt || new Date(b.deleteNotificationSentAt).getTime() < new Date(b.disabledAt || 0).getTime())) {
           // FIX-2026-08-20: safety cap — skip if already hit MAX_WARNS_PER_TICK this round
           if (stats.warned >= MAX_WARNS_PER_TICK) {
             stats.skipped_cap += 1;
