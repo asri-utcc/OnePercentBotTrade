@@ -328,7 +328,7 @@ async function refresh() {
   } catch (err) {
     console.error('refresh failed', err);
     if (err.message && err.message.includes('not found')) {
-      alert('Bot not found');
+      await AdminModalAlert.alert('Bot not found', 'warn');
       location.href = '/bots.html';
     }
   }

@@ -449,7 +449,7 @@ async function loadHistory() {
 }
 
 window.deleteBacktest = async (id) => {
-  if (!confirm('ลบ?')) return;
+  if (!(await AdminModalAlert.confirm({ title: '🗑️ ลบ Backtest', message: 'ลบ?', level: 'error', okLabel: 'ลบ' }))) return;
   await API.del(`/api/backtest/${id}`);
   await loadHistory();
 };
@@ -555,12 +555,12 @@ async function mbRun() {
   // FIX-2026-07-30: เตือนถ้าทุนไม่พอ (จะทำให้หลายไม้ถูก skip เพราะ capital exhausted)
   const needed = mbSuggestCapital();
   if (totalCapital < needed) {
-    const confirm = window.confirm(
-      `⚠️ ทุนรวม ($${totalCapital}) น้อยกว่าที่ควรใช้ ($${needed})\n` +
-      `(ผลรวม Max ไม้ × ทุน/ไม้ ของทุกบอท)\n\n` +
-      `จะมี skip เยอะเพราะทุนเต็ม — ดำเนินการต่อหรือไม่?`
-    );
-    if (!confirm) return;
+    const ok = await AdminModalAlert.confirm({
+      title: '⚠️ ทุนรวมไม่พอ',
+      message: `ทุนรวม ($${totalCapital}) น้อยกว่าที่ควรใช้ ($${needed})\n(ผลรวม Max ไม้ × ทุน/ไม้ ของทุกบอท)\n\nจะมี skip เยอะเพราะทุนเต็ม — ดำเนินการต่อหรือไม่?`,
+      level: 'warn', okLabel: 'ดำเนินการต่อ',
+    });
+    if (!ok) return;
   }
 
   out.innerHTML = '<div class="text-center py-4 text-muted-3">⏳ กำลังรัน multi-bot backtest (อาจใช้เวลา 10–30s)…</div>';

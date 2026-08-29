@@ -708,10 +708,16 @@ async function onSaveHint() {
 }
 
 async function killSession(sid, btn) {
-  if (!confirm(`ลบ session นี้?\nDevice ที่ login ด้วย session นี้จะถูก logout ทันที และต้อง login ใหม่`)) return;
+  const ok = await AdminModalAlert.confirm({
+    title: '🗑️ ลบ Session นี้?',
+    message: 'Device ที่ login ด้วย session นี้จะถูก logout ทันที และต้อง login ใหม่',
+    level: 'warn',
+    okLabel: '✕ ลบ',
+  });
+  if (!ok) return;
   if (btn) {
     btn.disabled = true;
-    btn.textContent = '⏳ �ำลังลบ…';
+    btn.textContent = '⏳ กำลังลบ…';
   }
   try {
     await API.del(`/api/auth/sessions/${encodeURIComponent(sid)}`);
@@ -720,7 +726,7 @@ async function killSession(sid, btn) {
     if (row) row.style.transition = 'opacity 0.3s', row.style.opacity = '0.3';
     setTimeout(() => loadAll(), 300);
   } catch (err) {
-    alert(`ลบ session ไม่สำเร็จ: ${err.message}`);
+    await AdminModalAlert.show({ title: '⛔ Error', message: 'ลบ session ไม่สำเร็จ: ' + (err.message || err), level: 'error' });
     if (btn) { btn.disabled = false; btn.textContent = '✕ ลบ'; }
   }
 }
@@ -728,7 +734,13 @@ async function killSession(sid, btn) {
 async function killOthers() {
   const othersCount = (state.sessions || []).filter((s) => !s.isCurrent).length;
   if (othersCount === 0) return;
-  if (!confirm(`Logout ${othersCount} device อื่นทันที?\n\nDevice เหล่านั้นจะต้อง login ใหม่ด้วย password ปัจจุบัน`)) return;
+  const ok = await AdminModalAlert.confirm({
+    title: '🧹 Logout ทุก Device อื่น?',
+    message: `Logout ${othersCount} device อื่นทันที?\n\nDevice เหล่านั้นจะต้อง login ใหม่ด้วย password ปัจจุบัน`,
+    level: 'warn',
+    okLabel: '🧹 Kill All',
+  });
+  if (!ok) return;
   const btn = document.getElementById('kill-others-btn');
   if (btn) { btn.disabled = true; btn.textContent = '⏳ กำลังลบ…'; }
   try {
@@ -736,7 +748,7 @@ async function killOthers() {
     setTimeout(() => loadAll(), 300);
     // success indicator (auto-clears on reload)
   } catch (err) {
-    alert(`Kill all others ไม่สำเร็จ: ${err.message}`);
+    await AdminModalAlert.show({ title: '⛔ Error', message: 'Kill all others ไม่สำเร็จ: ' + (err.message || err), level: 'error' });
     if (btn) { btn.disabled = false; btn.textContent = '🧹 Kill All Other Sessions'; }
   }
 }
@@ -750,7 +762,7 @@ async function refreshAttempts() {
     state.loginAttempts = r.attempts || [];
     render();
   } catch (err) {
-    alert(`Refresh ไม่สำเร็จ: ${err.message}`);
+    await AdminModalAlert.show({ title: '⛔ Error', message: 'Refresh ไม่สำเร็จ: ' + (err.message || err), level: 'error' });
   } finally {
     if (btn) { btn.disabled = false; btn.textContent = '🔄 Refresh'; }
   }

@@ -577,7 +577,12 @@
     }
 
     // Confirm clobber
-    const ok = window.confirm(`⚠️ ยืนยัน: overwrite ${Object.keys(settings).length} fields บน ${selectedBotIds.length} บอท\n\nFields ที่จะเปลี่ยน:\n${Object.keys(settings).join(', ')}`);
+    const ok = await AdminModalAlert.confirm({
+      title: '⚠️ Bulk Update',
+      message: `ยืนยัน: overwrite ${Object.keys(settings).length} fields บน ${selectedBotIds.length} บอท\n\nFields ที่จะเปลี่ยน:\n${Object.keys(settings).join(', ')}`,
+      level: 'error', okLabel: 'Overwrite',
+    });
+    if (!ok) return;
     if (!ok) return;
 
     status.textContent = '⏳ กำลังส่ง…';
@@ -638,7 +643,12 @@
     }
     const skipNote = deletedSkipped.length > 0 ? '\n\n(ข้าม ' + deletedSkipped.length + ' บอทที่ถูก soft-delete)' : '';
     const verb = action === 'enable' ? 'เปิด' : 'หยุด';
-    const ok = window.confirm(`�️ ยืนยัน${verb} ${toggleableBotIds.length} บอท?${skipNote}`);
+    const ok = await AdminModalAlert.confirm({
+      title: verb === 'เปิด' ? '▶️ Start Bots' : '⏸️ Stop Bots',
+      message: `ยืนยัน${verb} ${toggleableBotIds.length} บอท?${skipNote}`,
+      level: 'warn', okLabel: verb,
+    });
+    if (!ok) return;
     if (!ok) return;
 
     status.textContent = `⏳ กำลัง${verb}…`;
