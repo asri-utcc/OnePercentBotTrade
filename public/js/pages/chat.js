@@ -77,6 +77,34 @@
   }
 
   // ── Polling ──
+  // Phase 4-FIX-2026-08-30: defensive dedupe — even with server-side dedupe,
+  // legacy browser state may contain messages from before the fix. On every
+  // load, drop incoming entries that already exist (by id or clientId) or
+  // that match an existing non-optimistic entry by (createdAt + text).
+  function _mergeMessages(existing, incoming) {
+    const seen = new Set();
+    for (const m of existing) {
+      if (m.id) seen.add('id:' + m.id);
+      if (m.clientId) seen.add('cid:' + m.clientId);
+    }
+    const out = existing.slice();
+    for (const m of incoming) {
+      const k1 = m.id ? 'id:' + m.id : null;
+      const k2 = m.clientId ? 'cid:' + m.clientId : null;
+      if (k1 && seen.has(k1)) continue;
+      if (k2 && seen.has(k2)) continue;
+      // Fallback: same text+createdAt from a prior non-optimistic entry
+      const dupIdx = out.findIndex(
+        (x) => !x._optimistic && x.createdAt === m.createdAt && x.text === m.text
+      );
+      if (dupIdx !== -1) continue;
+      out.push(m);
+      if (k1) seen.add(k1);
+      if (k2) seen.add(k2);
+    }
+    return out;
+  }
+
   async function loadHistory({ reset = false } = {}) {
     try {
       const params = new URLSearchParams({ scope: _view });
@@ -84,9 +112,11 @@
       const r = await API.get('/api/chat/history?' + params.toString());
       const incoming = r.messages || [];
       if (reset) {
-        _messages = incoming.slice().reverse(); // newest-first from API
+        // Phase 4-FIX-2026-08-30: dedupe incoming itself in case the server
+        // returned duplicates (legacy state from before this fix).
+        _messages = _mergeMessages([], incoming).reverse();
       } else {
-        _messages = _messages.concat(incoming);
+        _messages = _mergeMessages(_messages, incoming);
       }
       if (incoming.length > 0) {
         _since = incoming[incoming.length - 1].createdAt;
