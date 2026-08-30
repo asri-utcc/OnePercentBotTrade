@@ -71,6 +71,10 @@ function setText(id, text) {
   const el = document.getElementById(id);
   if (el) el.textContent = text;
 }
+function setHtml(id, html) {
+  const el = document.getElementById(id);
+  if (el) el.innerHTML = html;
+}
 function setTileClass(id, klass) {
   const el = document.getElementById(id);
   if (el) {
@@ -401,9 +405,9 @@ function renderHeatmap(byHour, byDow) {
   if (!el) return;
   if (!byHour || !byDow) {
     setText('ta-heat-meta', 'ไม่มีข้อมูล');
-    setText('ta-heat-summary', '<div class="ta-empty">ไม่มีข้อมูล</div>');
-    setText('ta-heat-marg-day', '<div class="ta-empty">—</div>');
-    setText('ta-heat-marg-hour', '<div class="ta-empty">—</div>');
+    setHtml('ta-heat-summary', '<div class="ta-empty">ไม่มีข้อมูล</div>');
+    setHtml('ta-heat-marg-day', '<div class="ta-empty">—</div>');
+    setHtml('ta-heat-marg-hour', '<div class="ta-empty">—</div>');
     const det = document.getElementById('ta-heat-detail');
     if (det) det.style.display = 'none';
     el.innerHTML = '<div class="ta-empty" style="grid-column: 1 / -1;">ไม่มีข้อมูล</div>';
@@ -562,7 +566,7 @@ function renderHeatmap(byHour, byDow) {
       + '<span class="value">' + winRate + (totalTradesInCells > 0 ? '%' : '') + '</span>'
       + '<span class="sub">' + totalTradesInCells + ' trades · avg ' + avgPnlPerTrade + ' USDT/trade</span>'
     + '</div>';
-  setText('ta-heat-summary', summaryHtml);
+  setHtml('ta-heat-summary', summaryHtml);
 
   // Marginal aggregates (right column)
   const daySums = Array.from({ length: 7 }, (_, d) => Array.from({ length: 24 }, (_, h) => m[d][h]).reduce((a, b) => a + b, 0));
@@ -577,7 +581,7 @@ function renderHeatmap(byHour, byDow) {
       + '<span class="ta-heat-marg-pnl ' + cls + '">' + fmtPnl(v, { sign: true }) + '</span>'
       + '</div>';
   }).join('');
-  setText('ta-heat-marg-day', dayHtml);
+  setHtml('ta-heat-marg-day', dayHtml);
 
   const hourSums = Array.from({ length: 24 }, (_, h) => Array.from({ length: 7 }, (_, d) => m[d][h]).reduce((a, b) => a + b, 0));
   const maxHourAbs = Math.max(1, ...hourSums.map((v) => Math.abs(v)));
@@ -591,7 +595,7 @@ function renderHeatmap(byHour, byDow) {
       + '<span class="ta-heat-marg-pnl ' + cls + '">' + fmtPnl(v, { sign: true }) + '</span>'
       + '</div>';
   }).join('');
-  setText('ta-heat-marg-hour', hourHtml);
+  setHtml('ta-heat-marg-hour', hourHtml);
 }
 
 function showHeatDetail(d, h, pnl, count, wins, losses, dayFull) {
