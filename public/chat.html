@@ -71,6 +71,13 @@
       font-size: 0.7rem; color: var(--text-soft); margin-bottom: 0.2rem;
       display: flex; gap: 0.5rem; align-items: baseline;
     }
+    .chat-msg-owner {
+      font-size: 0.65rem; color: var(--text-soft, #6b7585);
+      background: rgba(255,255,255,0.05);
+      padding: 1px 6px; border-radius: 4px;
+      font-family: ui-monospace, monospace;
+      cursor: help;
+    }
     .chat-msg-text {
       color: var(--text-bright);
       font-size: 0.88rem;
@@ -173,6 +180,6 @@
   <script src="/js/ws-client.js?v=2026-08-29-fix3"></script>
   <script>window.NAV_ACTIVE = 'chat';</script>
   <script src="/js/partials/nav.js"></script>
-  <script src="/js/pages/chat.js?v=2026-08-30-fix1"></script>
+  <script src="/js/pages/chat.js?v=2026-08-30-enter"></script>
 </body>
 </html>

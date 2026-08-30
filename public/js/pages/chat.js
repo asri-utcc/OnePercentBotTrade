@@ -34,6 +34,16 @@
     if (diff < 86400) return `${Math.floor(diff / 3600)}h`;
     return d.toLocaleString();
   }
+  // Phase 4-2026-08-30: identity tag for impersonation prevention.
+  //   - admin-sourced: 🛡 admin (the admin username is stable & JWT-bound)
+  //   - operator-sourced: 🏷 <machineId.slice(0,8)> (unique per bot install)
+  //   - own (mine): same operator tag — confirms which bot you are
+  function _ownerTag(m, mine) {
+    if (mine) return { icon: '🏷', label: 'you' };
+    if (m.fromAdmin) return { icon: '🛡', label: m.fromAdmin };
+    if (m.fromMachineId) return { icon: '🏷', label: m.fromMachineId.slice(0, 8) };
+    return { icon: '?', label: 'unknown' };
+  }
   function _setStatus(msg, level) {
     const el = _el('chat-status');
     if (!msg) { el.classList.add('hidden'); el.textContent = ''; return; }
@@ -63,10 +73,13 @@
       const mine = !!m.fromMachineId && !m.fromAdmin;
       const cls = mine ? 'chat-msg mine' : 'chat-msg';
       const who = m.displayName || (mine ? 'me' : 'admin');
+      const owner = _ownerTag(m, mine);
+      const ownerTitle = m.fromMachineId || m.fromAdmin || '';
       return `
         <div class="${cls}">
           <div class="chat-msg-meta">
             <strong>${_escape(who)}</strong>
+            <span class="chat-msg-owner" title="${_escape(ownerTitle)}">${owner.icon} ${_escape(owner.label)}</span>
             <span>${_escape(_formatTime(m.createdAt))}</span>
           </div>
           <div class="chat-msg-text">${_escape(m.text)}</div>
@@ -256,7 +269,15 @@
   // ── Init ──
   function init() {
     _el('chat-send-form').addEventListener('submit', sendMessage);
-    _el('chat-send-text').addEventListener('input', _updateCharCount);
+    const ta = _el('chat-send-text');
+    ta.addEventListener('input', _updateCharCount);
+    // Phase 4-2026-08-30: Enter sends, Shift+Enter inserts newline (textarea).
+    ta.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
+        e.preventDefault();
+        sendMessage();
+      }
+    });
     _el('chat-tab-community').addEventListener('click', () => setView('community'));
     _el('chat-tab-dm').addEventListener('click', () => setView('dm'));
     _el('chat-display-name-save').addEventListener('click', saveDisplayName);
