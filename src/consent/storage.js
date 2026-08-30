@@ -76,4 +76,29 @@ function currentDecision() {
   return r.status === 'decided' ? r.decision : null;
 }
 
-module.exports = { read, write, currentDecision };
+/**
+ * FIX-2026-08-30 Phase 3b-7: Force re-consent support.
+ *
+ *   Delete the local consent file so the bot re-enters first-run state.
+ *   - Atomic single-file unlink (no tmp+rename needed for a delete).
+ *   - Returns { ok, existed } so callers know if anything actually changed.
+ *   - Never throws; logs and returns { ok:false, error } on filesystem failure.
+ *
+ *   Called by consentHandlers.forceReset() which is invoked from the
+ *   commandExecutor's `force_reconsent` handler (admin → bot command queue).
+ */
+function deleteConsentFile() {
+  try {
+    if (fs.existsSync(config.filePath)) {
+      fs.unlinkSync(config.filePath);
+      logger.info({ filePath: config.filePath }, 'consent: local file deleted (force re-consent)');
+      return { ok: true, existed: true };
+    }
+    return { ok: true, existed: false };
+  } catch (err) {
+    logger.warn({ err: err.message, filePath: config.filePath }, 'consent: delete failed');
+    return { ok: false, existed: false, error: err.message };
+  }
+}
+
+module.exports = { read, write, currentDecision, delete: deleteConsentFile };

@@ -288,6 +288,56 @@ class BotManager {
     logger.info('botManager stopped');
   }
 
+  /**
+   * FIX-2026-08-30 Phase 3b-7: Soft pause (admin force_reconsent).
+   *   - Stops periodic timers + WS (via stop()) so no new BUYs are dispatched.
+   *   - Existing positions remain open; their TP/SL orders on Binance are unaffected.
+   *   - Idempotent: calling pause() twice returns alreadyPaused=true.
+   *   - Sets _paused=true so resume() knows to call start() again.
+   *   - Reuses stop() rather than introducing new teardown code; the existing
+   *     start() has `if (this.running) return;` guard so resume()→start() is safe.
+   */
+  async pause(reason = 'admin_pause') {
+    if (this._paused) {
+      logger.info({ reason, alreadyPaused: true }, 'botManager.pause: already paused — no-op');
+      return { ok: true, alreadyPaused: true };
+    }
+    this._paused = true;
+    this._pausedAt = Date.now();
+    this._pausedReason = reason;
+    try {
+      await this.stop();
+    } catch (err) {
+      logger.warn({ err: err.message, reason }, 'botManager.pause: stop() failed (continuing)');
+    }
+    logger.info({ reason }, 'botManager paused');
+    return { ok: true, alreadyPaused: false };
+  }
+
+  /**
+   * FIX-2026-08-30 Phase 3b-7: Resume after pause (admin force_reconsent accept).
+   *   - Idempotent: returns alreadyRunning=true when not currently paused.
+   *   - Calls start() to re-init timers + WS + re-spawn traders from DB.
+   *   - Clears _paused flags.
+   */
+  async resume() {
+    if (!this._paused) {
+      logger.info('botManager.resume: not paused — no-op');
+      return { ok: true, alreadyRunning: true };
+    }
+    try {
+      await this.start();
+    } catch (err) {
+      logger.warn({ err: err.message }, 'botManager.resume: start() failed');
+      return { ok: false, error: err.message };
+    }
+    this._paused = false;
+    this._pausedAt = null;
+    this._pausedReason = null;
+    logger.info('botManager resumed');
+    return { ok: true };
+  }
+
   async spawnTrader(bot, opts = {}) {
     // FIX-2026-08-22 (zombie): refuse to spawn a trader for a soft-deleted bot
     //   - ป้องกัน checkAutoPauseBots RESUME branch (หรือ caller อื่น) จากการเปิด trader

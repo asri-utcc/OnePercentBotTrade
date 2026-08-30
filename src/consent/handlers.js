@@ -46,6 +46,7 @@ let _inFlight = null;        // promise of the current recordDecision call (or n
 let _engaged = false;        // set when user loads /consent or /api/consent/status on 6015
 let _lastWriteAt = 0;        // for race-detection warnings
 let _lastWriteDecision = null;
+let _awaitingReconsent = false;  // FIX-2026-08-30 Phase 3b-7: true between forceReset() and the next recordDecision('accepted')
 
 let _sectionsCache = null;   // sections are static per process (adminMonitorEnabled is stable)
 
@@ -171,6 +172,8 @@ async function recordDecision({ decision, source: sourceOverride, port } = {}) {
     }
 
     logger.info({ decision, source, previousDecision, port, pushed }, 'consent-handlers: decision recorded');
+    // FIX-2026-08-30 Phase 3b-7: clear awaiting-reconsent flag on accept (force_reconsent → user accepts)
+    if (decision === 'accepted') _awaitingReconsent = false;
     return { decision, previousDecision, source, pushed, alreadyDecided: false };
   })().finally(() => {
     _inFlight = null;
@@ -178,6 +181,49 @@ async function recordDecision({ decision, source: sourceOverride, port } = {}) {
 
   return _inFlight;
 }
+
+/**
+ * FIX-2026-08-30 Phase 3b-7: Force re-consent (admin → bot).
+ *
+ *   Called from commandExecutor's `force_reconsent` handler when admin clicks
+ *   the "Force Re-consent" button in Machine Detail.
+ *
+ *   Steps (idempotent):
+ *     1) Delete local consent file → next /api/consent/status returns 'pending'
+ *     2) Reset _engaged flag → next /consent page load sets it again
+ *     3) Emit 'consent:reconsent_required' → server.js logs + ensures botManager
+ *        is paused (commandExecutor already paused, but the listener is the
+ *        single source of truth for "paused because consent pending" state).
+ *
+ *   Does NOT push to admin (admin already knows it queued the command).
+ *   Does NOT call recordDecision (no user input yet — we only stage the prompt).
+ */
+async function forceReset({ source = 'admin_force_reconsent', port } = {}) {
+  const del = storage.delete();
+  _engaged = false;
+  _awaitingReconsent = true;  // FIX-2026-08-30 Phase 3b-7: signal server.js listener to resume botManager on next accept
+  try {
+    emitter.emit('consent:reconsent_required', {
+      source,
+      port: port || null,
+      fileDeleted: del.ok,
+      fileExisted: !!del.existed,
+    });
+  } catch (err) {
+    logger.warn({ err: err.message }, 'consent-handlers: forceReset emitter threw');
+  }
+  logger.info({
+    source, port, fileDeleted: del.ok, fileExisted: !!del.existed, error: del.error,
+  }, 'consent-handlers: forceReset');
+  return { ok: del.ok, fileDeleted: del.ok, fileExisted: !!del.existed, error: del.error };
+}
+
+/**
+ * FIX-2026-08-30 Phase 3b-7: Server.js polls this to detect when the user
+ *   accepts after a force_reconsent (file was deleted → previousDecision=null
+ *   on the next decision, so the standard 'declined→accepted' branch doesn't fire).
+ */
+function isAwaitingReconsent() { return _awaitingReconsent; }
 
 // ─── exports ──────────────────────────────────────────────────────────
 
@@ -187,6 +233,8 @@ module.exports = {
   getStatusPayload,
   getSections,
   recordDecision,
+  forceReset,
+  isAwaitingReconsent,
   markEngaged,
   hasEngaged,
   // for tests

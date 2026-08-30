@@ -94,6 +94,44 @@ async function main() {
       logger.error({ err: err.message }, 'consent: gate failed (treating as declined)');
       consentDecision = 'declined';
     }
+    // FIX-2026-08-30 Phase 3b-7: Force re-consent (admin → bot).
+    //   - Log when admin triggers force_reconsent (file deleted + bot paused).
+    //   - When user accepts via overlay, resume botManager (or start if never ran).
+    //   - Registered here (before the declined branch) so it works for both startup paths.
+    consentHandlers.emitter.on('consent:reconsent_required', (payload) => {
+      logger.info({
+        source: payload.source,
+        port: payload.port,
+        fileDeleted: payload.fileDeleted,
+        fileExisted: payload.fileExisted,
+      }, 'consent: re-prompt required (admin force_reconsent)');
+    });
+    consentHandlers.emitter.on('decision', async (payload) => {
+      if (payload.decision !== 'accepted') return;
+      if (!consentHandlers.isAwaitingReconsent()) return;
+      // FIX-2026-08-30 Phase 3b-7: user accepted after admin force_reconsent
+      try {
+        if (botManager._paused) {
+          logger.info({ source: payload.source, port: payload.port }, 'consent: force_reconsent accepted — resuming botManager');
+          await botManager.resume();
+        } else if (!_botManagerStarted) {
+          logger.info({ source: payload.source, port: payload.port }, 'consent: force_reconsent accepted (never started) — starting botManager');
+          await botManager.start();
+          _botManagerStarted = true;
+          // Re-apply post-start hooks the early-return path skipped
+          try { await syncBotActionPasswordFromAppConfig(); } catch (e) { logger.warn({ err: e.message }, 'consent: botActionPassword sync failed'); }
+          try {
+            const cap = await binanceRateLimitConfig.getBinanceRateLimit({ forceRefresh: true });
+            binanceRest.setRateLimitCapacity(cap);
+            logger.info({ capacity: cap }, 'consent: binanceRateLimit applied on force_reconsent resume');
+          } catch (e) { logger.warn({ err: e.message }, 'consent: binanceRateLimit apply failed'); }
+        } else {
+          logger.warn({ source: payload.source }, 'consent: force_reconsent accepted but botManager neither paused nor unstarted — no-op');
+        }
+      } catch (err) {
+        logger.error({ err: err.message }, 'consent: force_reconsent resume failed');
+      }
+    });
     if (consentDecision === 'declined') {
       logger.warn('consent: declined — botManager.start() SKIPPED; web server stays open for settings');
       // FIX-2026-08-26 Phase 2c-v2: Auto-resume — when user changes mind via /consent on 6015,

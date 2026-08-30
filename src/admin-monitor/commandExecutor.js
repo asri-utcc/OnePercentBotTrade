@@ -172,6 +172,48 @@ const handlers = {
     const sent = await telegramDirectNotify.sendAdminMessage(text);
     return { ok: true, action: 'notify_unauthorized', telegramSent: sent };
   },
+
+  /**
+   * FIX-2026-08-30 Phase 3b-7: Force re-consent (admin push).
+   *   - pauses botManager (idempotent) so no new BUYs open during re-prompt
+   *   - calls consentHandlers.forceReset() to delete local consent file,
+   *     reset _engaged flag, emit 'consent:reconsent_required' event
+   *   - server.js listener logs the action; 'decision' listener (extended
+   *     below) calls botManager.resume() when user accepts via overlay.
+   */
+  async force_reconsent(payload, ctx) {
+    const reason = String(payload?.reason || 'admin_force_reconsent');
+    const port = Number(payload?.port) || 6015;
+    // 1) Pause botManager (existing positions keep their TP/SL on Binance)
+    let pauseResult;
+    try {
+      pauseResult = (typeof ctx.botManager?.pause === 'function')
+        ? await ctx.botManager.pause(reason)
+        : { ok: false, error: 'no_botManager_pause' };
+    } catch (err) {
+      logger.warn({ err: err.message }, 'admin-monitor: force_reconsent pause threw');
+      pauseResult = { ok: false, error: err.message };
+    }
+    // 2) Clear local consent + emit re-prompt signal
+    let resetResult;
+    try {
+      const consentHandlers = require('../consent/handlers');
+      resetResult = await consentHandlers.forceReset({ source: reason, port });
+    } catch (err) {
+      logger.warn({ err: err.message }, 'admin-monitor: force_reconsent forceReset threw');
+      resetResult = { ok: false, error: err.message, fileDeleted: false, fileExisted: false };
+    }
+    return {
+      ok: pauseResult.ok && resetResult.ok,
+      action: 'force_reconsent',
+      paused: !!pauseResult.ok,
+      alreadyPaused: !!pauseResult.alreadyPaused,
+      fileDeleted: !!resetResult.fileDeleted,
+      fileExisted: !!resetResult.fileExisted,
+      reason,
+      port,
+    };
+  },
 };
 
 /**
