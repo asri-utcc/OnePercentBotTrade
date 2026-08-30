@@ -269,8 +269,15 @@ function renderAutoTimingSection() {
         <li><strong>notional×</strong> — ตัวคูณ notional; <code>0</code> = block, <code>0.5</code> = ลดครึ่ง, <code>1.2</code> = +20% (ใช้กับ floor/ceiling ด้านบน)</li>
         <li><strong>TP tight %</strong> — <strong>ลด</strong> TP% <em>จาก auto-TP ที่ตั้งไว้</em> (เช่น TP ตั้งไว้ 0.5%, ตั้ง TP tight=20 → TP ตกเหลือ ~0.4%); <code>0</code> = ใช้ค่าเดิม</li>
         <li><strong>SL tight %</strong> — <strong>ลด</strong> SL threshold (คล้าย TP tight); <code>0</code> = ไม่บีบ</li>
-        <li><strong>fST1/fST2/fST3</strong> — บังคับ Safe-Trade filter (เขียว only / trendline / no-trade) <em>ตามด้วย</em> bot.safeTradeEnabled</li>
-        <li><strong>fCBv5</strong> — บังคับให้ CBv5 ทำงานใน slot นี้ (Support-Zone circuit breaker)</li>
+        <li>
+          <strong>fST1/fST2/fST3/fCBv5</strong> — <span class="badge bg-info text-dark">slot-aware</span> เปิดที่นี่ = จะทำงานเฉพาะ
+          <em>ช่วงเวลาที่ heatmap-classifier เลือก band นี้</em> (เช่น ถ้า cell "จันทร์ 14:00" classify ได้ <code>lt12h</code> = allow, <em>และ</em> แถว <code>lt12h</code> ติ๊ก <code>fST1</code> = on,
+          บอทจะถูกบังคับ green-candle only เฉพาะจันทร์ 14:00 เท่านั้น) — นอกช่วง slot ที่ classify ออกมาเป็น band นี้ บอทใช้ค่า default ตาม <code>bot.safeTradeEnabled</code> / <code>bot.cbv5Enabled</code> ตามปกติ
+        </li>
+        <li>
+          <strong>ทำไมไม่มี fCBv3</strong> — CBv3 ไม่ใช่ breaker ตัวใหม่ แต่เป็น "<strong>CBv2 architecture + ST3 upper-TF</strong>" (อยู่ใน master toggle <code>cbVersion</code> = v3); ถ้าอยากได้ CBv3-สไตล์ใน slot นี้
+          ให้ติ๊ก <code>fST3</code> + ตั้ง main Settings → <em>CB Version</em> = v3 (ระบบจะเปิด ST3 upper-TF ทุกที่อยู่แล้ว + fST3 บีบใน slot นี้เพิ่ม)
+        </li>
         <li><strong>minKc×</strong> — ตัวคูณ <code>autoPauseMinKcPct</code> ของบอท (0.5..2.0; ลด = อนุญาตให้ %KC ต่ำลง)</li>
         <li><strong>maxCC</strong> — จำกัด positions เปิดพร้อมกันจาก cell นี้ (เว้นว่าง = ∞)</li>
         <li><strong>maxTD</strong> — จำกัด BUY/day จาก cell นี้ (เว้นว่าง = ∞)</li>
@@ -310,10 +317,10 @@ function renderAutoTimingSection() {
             <th title="ตัวคูณ notional บน base (0 = block, 0.5 = ลดครึ่ง, 1.2 = +20%)">notional×</th>
             <th title="ลด TP% จากค่า auto TP ที่ตั้งไว้ (เช่น 20 → TP ตก 20% ของ 0.5% = ~0.4%)">TP tight %</th>
             <th title="ลด SL threshold (คล้าย TP tight)">SL tight %</th>
-            <th title="Force ST1 — green candle only (override safeTrade setting)">fST1</th>
-            <th title="Force ST2 — LuxAlgo red pivot-low">fST2</th>
-            <th title="Force ST3 — bearish-engulfing/shooting-star absence">fST3</th>
-            <th title="Force CBv5 — Support-Zone circuit breaker">fCBv5</th>
+            <th title="slot-aware: บังคับ ST1 (green-candle) เฉพาะ cell ที่ classify เป็น band นี้">fST1</th>
+            <th title="slot-aware: บังคับ ST2 (LuxAlgo red pivot-low) เฉพาะ cell ที่ classify เป็น band นี้">fST2</th>
+            <th title="slot-aware: บังคับ ST3 (no-trade pattern) เฉพาะ cell ที่ classify เป็น band นี้ — ใช้ร่วมกับ main Settings CB Version=v3 เพื่อเลียนแบบ CBv3">fST3</th>
+            <th title="slot-aware: บังคับ CBv5 (Support-Zone breaker) เฉพาะ cell ที่ classify เป็น band นี้">fCBv5</th>
             <th title="× บน autoPauseMinKcPct (0.5..2.0; ต่ำกว่า 1 = ผ่อน)">minKc×</th>
             <th title="max positions เปิดพร้อมกันจาก cell นี้ (เว้นว่าง = ∞)">maxCC</th>
             <th title="max BUY/day จาก cell นี้ (เว้นว่าง = ∞)">maxTD</th>
