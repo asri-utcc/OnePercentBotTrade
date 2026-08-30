@@ -26,6 +26,7 @@ const {
   buildByTimeframe,
   buildBySellReason,
   buildByHour,
+  buildHeatmap,
   buildByDayOfWeek,
   buildByDay,
   buildByMonth,
@@ -54,7 +55,8 @@ function mkTrade(o = {}) {
     realizedPnl: o.realizedPnl != null ? o.realizedPnl : 0.5,
     pnlPercent: o.pnlPercent != null ? o.pnlPercent : 0.3,
     sellFilledAt: o.sellFilledAt || new Date('2026-08-15T10:30:00Z'),
-    buyFilledAt: o.buyFilledAt || new Date('2026-08-15T10:00:00Z'),
+    buyFilledAt: o.buyFilledAt !== undefined ? o.buyFilledAt : new Date('2026-08-15T10:00:00Z'),
+    buyLayers: o.buyLayers || [],
     buyPrice: o.buyPrice != null ? o.buyPrice : 100,
     sellAvgPrice: o.sellAvgPrice != null ? o.sellAvgPrice : 100.5,
     sellPrice: o.sellPrice != null ? o.sellPrice : 100.5,
@@ -264,6 +266,78 @@ describe('buildByHour', () => {
     expect(hour9.wins).toBe(1);
     expect(hour9.losses).toBe(1);
     expect(r).toHaveLength(24);
+  });
+});
+
+describe('buildHeatmap', () => {
+  const cellOf = (m, at) => {
+    const d = new Date(at);
+    return m[d.getDay()][d.getHours()];
+  };
+
+  test('returns two 7x24 matrices plus buyMissing', () => {
+    const r = buildHeatmap([]);
+    expect(r.sell).toHaveLength(7);
+    expect(r.buy).toHaveLength(7);
+    expect(r.sell[0]).toHaveLength(24);
+    expect(r.buy[0]).toHaveLength(24);
+    expect(r.buyMissing).toBe(0);
+  });
+
+  test('sell matrix buckets by sellFilledAt, buy matrix by buyFilledAt', () => {
+    const buyAt = new Date('2026-08-17T04:00:00Z');   // Sunday
+    const sellAt = new Date('2026-08-18T09:00:00Z');  // Monday
+    const r = buildHeatmap([mkTrade({ buyFilledAt: buyAt, sellFilledAt: sellAt, realizedPnl: 2 })]);
+    expect(cellOf(r.sell, sellAt)).toMatchObject({ count: 1, wins: 1, losses: 0, pnl: 2 });
+    expect(cellOf(r.buy, buyAt)).toMatchObject({ count: 1, wins: 1, losses: 0, pnl: 2 });
+    // the same trade must NOT land in the other matrix's slot
+    expect(cellOf(r.buy, sellAt).count).toBe(0);
+    expect(cellOf(r.sell, buyAt).count).toBe(0);
+  });
+
+  test('a losing trade colours the BUY slot red (loss attributed to entry hour)', () => {
+    const buyAt = new Date('2026-08-17T04:00:00Z');
+    const r = buildHeatmap([
+      mkTrade({ buyFilledAt: buyAt, sellFilledAt: new Date('2026-08-17T09:00:00Z'), realizedPnl: -1.5 }),
+    ]);
+    expect(cellOf(r.buy, buyAt)).toMatchObject({ count: 1, wins: 0, losses: 1, pnl: -1.5 });
+  });
+
+  test('DCA stack uses the FIRST buy layer as entry time', () => {
+    const layer0 = new Date('2026-08-17T02:00:00Z');
+    const r = buildHeatmap([mkTrade({
+      buyFilledAt: new Date('2026-08-17T06:00:00Z'),
+      buyLayers: [{ filledAt: layer0 }, { filledAt: new Date('2026-08-17T06:00:00Z') }],
+      sellFilledAt: new Date('2026-08-17T09:00:00Z'),
+      realizedPnl: 1,
+    })]);
+    expect(cellOf(r.buy, layer0).count).toBe(1);
+    expect(cellOf(r.buy, new Date('2026-08-17T06:00:00Z')).count).toBe(0);
+  });
+
+  test('counts trades with no entry timestamp as buyMissing', () => {
+    const r = buildHeatmap([
+      mkTrade({ buyFilledAt: null, buyLayers: [], sellFilledAt: new Date('2026-08-17T09:00:00Z'), realizedPnl: 1 }),
+    ]);
+    expect(r.buyMissing).toBe(1);
+    expect(cellOf(r.sell, new Date('2026-08-17T09:00:00Z')).count).toBe(1);
+  });
+
+  test('accumulates multiple trades in the same slot', () => {
+    const at = new Date('2026-08-17T04:00:00Z');
+    const r = buildHeatmap([
+      mkTrade({ buyFilledAt: at, sellFilledAt: at, realizedPnl: 1 }),
+      mkTrade({ buyFilledAt: at, sellFilledAt: at, realizedPnl: -0.25 }),
+      mkTrade({ buyFilledAt: at, sellFilledAt: at, realizedPnl: 0.5 }),
+    ]);
+    expect(cellOf(r.buy, at)).toMatchObject({ count: 3, wins: 2, losses: 1, pnl: 1.25 });
+  });
+
+  test('survives JSON round-trip (regression: matrices used to hang off an Array prop)', () => {
+    const at = new Date('2026-08-17T04:00:00Z');
+    const r = JSON.parse(JSON.stringify(buildHeatmap([mkTrade({ buyFilledAt: at, sellFilledAt: at, realizedPnl: 1 })])));
+    expect(r.sell).toHaveLength(7);
+    expect(r.buy[0]).toHaveLength(24);
   });
 });
 

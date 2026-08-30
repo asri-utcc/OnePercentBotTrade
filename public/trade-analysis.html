@@ -316,6 +316,29 @@
     .ta-heat-cell.is-bear { box-shadow: inset 0 0 0 1px rgba(255,77,109,0.45); }
 
     /* ───── FIX-2026-08-30: Enhanced heatmap UI ───── */
+    .ta-heat-toggle {
+      display: inline-flex;
+      border: 1px solid rgba(255,255,255,0.12);
+      border-radius: 8px;
+      overflow: hidden;
+    }
+    .ta-heat-toggle button {
+      background: transparent;
+      border: 0;
+      color: var(--text-muted-2, #9aa4b2);
+      font-size: 0.72rem;
+      padding: 3px 10px;
+      white-space: nowrap;
+      cursor: pointer;
+      transition: background 0.15s, color 0.15s;
+    }
+    .ta-heat-toggle button + button { border-left: 1px solid rgba(255,255,255,0.12); }
+    .ta-heat-toggle button:hover { background: rgba(255,255,255,0.06); }
+    .ta-heat-toggle button.is-active {
+      background: rgba(0,229,184,0.16);
+      color: var(--bull-1);
+      font-weight: 600;
+    }
     .ta-heat-summary {
       display: grid;
       grid-template-columns: repeat(4, 1fr);
@@ -502,6 +525,12 @@
       <h3>📊 Trade Analysis</h3>
       <div class="d-flex gap-2 align-items-center">
         <span class="text-muted-3" id="ta-meta" style="font-size: 0.78rem;">—</span>
+        <select id="ta-range" class="form-select form-select-sm" style="width: auto; font-size: 0.78rem;" title="ช่วงเวลาของข้อมูลทั้งหน้า">
+          <option value="">ตลอดอายุการใช้งาน</option>
+          <option value="7">7 วันล่าสุด</option>
+          <option value="30">30 วันล่าสุด</option>
+          <option value="90">90 วันล่าสุด</option>
+        </select>
         <button id="ta-refresh-btn" type="button" class="btn-lux btn-sm">🔄 รีเฟรซ</button>
       </div>
     </div>
@@ -706,8 +735,18 @@
     <!-- ─── Row 5: HEATMAP (hour x day-of-week) ─────────── -->
     <div class="lux-card ta-section">
       <div class="lux-header">
-        <h5>🕐 PnL Heatmap (Day-of-week × Hour-of-day)</h5>
-        <span class="text-muted-3" id="ta-heat-meta" style="font-size: 0.72rem;">—</span>
+        <h5>🕐 Heatmap (Day-of-week × Hour-of-day)</h5>
+        <div class="d-flex gap-2 align-items-center flex-wrap">
+          <div class="ta-heat-toggle">
+            <button type="button" data-heat-view="sell" class="is-active">💰 เวลาที่ขาย</button>
+            <button type="button" data-heat-view="buy">🛒 เวลาที่ซื้อ</button>
+          </div>
+          <div class="ta-heat-toggle">
+            <button type="button" data-heat-metric="pnl" class="is-active">Net PnL</button>
+            <button type="button" data-heat-metric="wr">Win rate</button>
+          </div>
+          <span class="text-muted-3" id="ta-heat-meta" style="font-size: 0.72rem;">—</span>
+        </div>
       </div>
       <div class="lux-body">
         <!-- FIX-2026-08-30: enhanced heatmap — summary tiles + heat grid + detail panel -->
@@ -721,15 +760,15 @@
             </div>
             <div class="ta-heat-x-label">Hour-of-day (เวลาตามเครื่อง server)</div>
             <div class="ta-heat-color-scale mt-2">
-              <span class="ta-heat-scale-label">−10</span>
+              <span class="ta-heat-scale-label" id="ta-heat-legend-neg">-10 USDT</span>
               <div class="ta-heat-scale-bar"></div>
-              <span class="ta-heat-scale-label">0</span>
+              <span class="ta-heat-scale-label" id="ta-heat-legend-mid">0</span>
               <div class="ta-heat-scale-bar ta-heat-scale-bar-bull"></div>
-              <span class="ta-heat-scale-label">+10 USDT</span>
+              <span class="ta-heat-scale-label" id="ta-heat-legend-pos">+10 USDT</span>
             </div>
           </div>
           <div class="ta-heat-marginals">
-            <div class="ta-heat-marg-title">📅 By day (รวม 24 �ม.)</div>
+            <div class="ta-heat-marg-title">📅 By day (รวม 24 ชม.)</div>
             <div id="ta-heat-marg-day"></div>
             <div class="ta-heat-marg-title mt-3">🕒 By hour (รวม 7 วัน)</div>
             <div id="ta-heat-marg-hour"></div>
@@ -737,11 +776,12 @@
         </div>
         <div id="ta-heat-detail" class="ta-heat-detail" style="display:none;"></div>
         <div class="ta-meta-row mt-2">
-          <span class="pill">🟢 = PnL บวก (ช่องเข้ม = กำไรเยอะ)</span>
-          <span class="pill">🔴 = PnL ลบ (ช่องเข้ม = ขาดทุนเยอะ)</span>
-          <span class="pill">🕐 หา "ช่องเขียวเข้ม" = ช่วงเวลาทำเงิน, "ช่องแดงเข้ม" = ช่วงเวลาที่ควรหลีกเลี่ยง</span>
+          <span class="pill">💰 <b>เวลาที่ขาย</b> = ผลของไม้ที่ "ปิด" ในช่องนั้น (จังหวะ TP ยิงติด)</span>
+          <span class="pill">🛒 <b>เวลาที่ซื้อ</b> = ผลของไม้ที่ "เข้า" ในช่องนั้น (ซื้อ 04:00 ขาย 09:00 กำไร → เขียวที่ 04:00)</span>
+          <span class="pill">🟢 เขียว = ดี · 🔴 แดง = แย่ (ช่องเข้ม = แรงกว่า)</span>
+          <span class="pill">Net PnL: cap ±10 USDT · Win rate: กลาง 50%, cap ±25%</span>
+          <span class="pill">ช่องจาง = ไม้น้อยกว่า 3 ไม้ (โหมด Win rate)</span>
           <span class="pill">🖱 คลิกช่องเพื่อดูสถิติเจาะลึก</span>
-          <span class="pill">cap ±10 USDT ต่อช่อง</span>
         </div>
       </div>
     </div>
@@ -942,6 +982,6 @@
   <script>window.NAV_ACTIVE = 'analysis';</script>
   <script src="/js/partials/nav.js"></script>
   <script src="/js/partials/rateLimitGauge.js"></script>
-  <script src="/js/pages/trade-analysis.js?v=2026-08-30-fix2"></script>
+  <script src="/js/pages/trade-analysis.js?v=2026-08-30-heat2"></script>
 </body>
 </html>

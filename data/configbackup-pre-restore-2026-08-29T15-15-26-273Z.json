@@ -1,0 +1,53 @@
+{
+  "version": "onepercentbot-config-backup-1",
+  "schemaVersion": 1,
+  "appVersion": "1.7.2",
+  "createdAt": "2026-08-29T15:15:26.273Z",
+  "machineId": "test-machine-id-1234567890",
+  "appName": "OnePercentBotTrade",
+  "encryption": {
+    "algorithm": "aes-256-gcm",
+    "note": "Encrypted blobs (apiKeys, telegram token) require SAME ENCRYPTION_KEY env-var to decrypt on restore."
+  },
+  "sections": {
+    "apiKeys": {
+      "present": false,
+      "error": "Cannot read properties of undefined (reading 'lean')"
+    },
+    "telegram": {
+      "present": false,
+      "error": "Cannot read properties of undefined (reading 'lean')"
+    },
+    "appConfig": {
+      "present": false,
+      "error": "Cannot read properties of undefined (reading 'lean')"
+    },
+    "positions": {
+      "present": false,
+      "error": "Cannot read properties of undefined (reading 'lean')"
+    },
+    "bots": {
+      "present": false,
+      "error": "Cannot read properties of undefined (reading 'lean')"
+    },
+    "license": {
+      "present": true,
+      "readonly": true,
+      "data": {
+        "tier": "pro",
+        "owner": "test-owner",
+        "expiresAt": "2027-01-01T00:00:00.000Z",
+        "features": {
+          "configBackup": true
+        },
+        "hasLicense": true,
+        "snapshotAt": "2026-08-29T15:15:26.273Z"
+      }
+    },
+    "others": {
+      "present": false,
+      "note": "Future expansion placeholder",
+      "data": {}
+    }
+  }
+}

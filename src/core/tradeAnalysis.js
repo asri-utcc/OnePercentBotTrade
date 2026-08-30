@@ -101,7 +101,7 @@ async function fetchAllSoldTrades({ since = null } = {}) {
   const q = { state: 'sold', realizedPnl: { $ne: null } };
   if (since) q.sellFilledAt = { $gte: since };
   const cursor = Trade.find(q)
-    .select('_id botId symbol timeframe realizedPnl pnlPercent sellFilledAt buyFilledAt buyPrice sellAvgPrice sellPrice buyQuoteQty buyQty sellQty sellFilledQty sellReason sellReasonDetail sellReasonAt isDcaStack dcaLayerCount stackTotalQty stackTotalSpent stackBep buyFee sellFee retryCount')
+    .select('_id botId symbol timeframe realizedPnl pnlPercent sellFilledAt buyFilledAt buyLayers.filledAt buyPrice sellAvgPrice sellPrice buyQuoteQty buyQty sellQty sellFilledQty sellReason sellReasonDetail sellReasonAt isDcaStack dcaLayerCount stackTotalQty stackTotalSpent stackBep buyFee sellFee retryCount')
     .lean()
     .cursor({ batchSize: 500 });
   const out = [];
@@ -269,27 +269,54 @@ function buildBySellReason(trades) {
 
 function buildByHour(trades) {
   const buckets = Array.from({ length: 24 }, (_, h) => ({ hour: h, label: HOUR_LABELS[h], count: 0, wins: 0, losses: 0, pnl: 0 }));
-  // FIX-2026-08-29: also build the (dow × hour) CROSS-CUT matrix for the heatmap
-  // so the frontend doesn't need to do an independence approximation. Each cell is
-  // { pnl, count, wins, losses } — count/wins/losses enable density-based shading later.
-  const matrix = Array.from({ length: 7 }, () => Array.from({ length: 24 }, () => ({ pnl: 0, count: 0, wins: 0, losses: 0 })));
   for (const t of trades) {
     if (!t.sellFilledAt) continue;
-    const d = new Date(t.sellFilledAt).getDay();
     const h = new Date(t.sellFilledAt).getHours();
     const v = Number(t.realizedPnl) || 0;
     buckets[h].count += 1;
     buckets[h].pnl = Number((buckets[h].pnl + v).toFixed(4));
     if (v > 0) buckets[h].wins += 1;
     else if (v < 0) buckets[h].losses += 1;
-    // Cross-cut
-    matrix[d][h].count += 1;
-    matrix[d][h].pnl = Number((matrix[d][h].pnl + v).toFixed(4));
-    if (v > 0) matrix[d][h].wins += 1;
-    else if (v < 0) matrix[d][h].losses += 1;
   }
-  buckets.matrix = matrix;
   return buckets;
+}
+
+// FIX-2026-08-30: the (dow × hour) CROSS-CUT matrices for the heatmap, so the frontend
+// doesn't need an independence approximation. Previously these hung off buildByHour's
+// return value as `buckets.matrix` — a non-index property on an Array, which
+// JSON.stringify silently drops, so the frontend never actually received it.
+//
+// Two attributions of the SAME closed trade:
+//   sell — bucket by sellFilledAt  → "closing at this slot earned/lost how much"
+//   buy  — bucket by first buy fill → "entering at this slot tends to end green/red"
+// Each cell is { pnl, count, wins, losses }; the frontend renders either net PnL or
+// win rate from those, and uses count for density shading.
+function entryTimeOf(t) {
+  const layer0 = Array.isArray(t.buyLayers) && t.buyLayers.length ? t.buyLayers[0].filledAt : null;
+  return layer0 || t.buyFilledAt || null;
+}
+
+function buildHeatmap(trades) {
+  const blank = () => Array.from({ length: 7 }, () => Array.from({ length: 24 }, () => ({ pnl: 0, count: 0, wins: 0, losses: 0 })));
+  const sell = blank();
+  const buy = blank();
+  let buyMissing = 0;
+  for (const t of trades) {
+    const v = Number(t.realizedPnl) || 0;
+    const add = (m, at) => {
+      const dt = new Date(at);
+      const cell = m[dt.getDay()][dt.getHours()];
+      cell.count += 1;
+      cell.pnl = Number((cell.pnl + v).toFixed(4));
+      if (v > 0) cell.wins += 1;
+      else if (v < 0) cell.losses += 1;
+    };
+    if (t.sellFilledAt) add(sell, t.sellFilledAt);
+    const entryAt = entryTimeOf(t);
+    if (entryAt) add(buy, entryAt);
+    else buyMissing += 1;
+  }
+  return { sell, buy, buyMissing };
 }
 
 function buildByDayOfWeek(trades) {
@@ -1066,6 +1093,7 @@ async function aggregateTradeAnalysis({ since = null } = {}) {
   const byTimeframe = buildByTimeframe(trades);
   const bySellReason = buildBySellReason(trades);
   const byHour = buildByHour(trades);
+  const heatmap = buildHeatmap(trades);
   const byDayOfWeek = buildByDayOfWeek(trades);
   const byDay = buildByDay(trades);
   const byMonth = buildByMonth(trades);
@@ -1107,6 +1135,7 @@ async function aggregateTradeAnalysis({ since = null } = {}) {
     byTimeframe,
     bySellReason,
     byHour,
+    heatmap,
     byDayOfWeek,
     byDay,
     byMonth,
@@ -1132,6 +1161,7 @@ module.exports = {
   buildByTimeframe,
   buildBySellReason,
   buildByHour,
+  buildHeatmap,
   buildByDayOfWeek,
   buildByDay,
   buildByMonth,

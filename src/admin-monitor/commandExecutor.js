@@ -185,17 +185,23 @@ const handlers = {
     const reason = String(payload?.reason || 'admin_force_reconsent');
     const port = Number(payload?.port) || 6015;
     // 1) Pause botManager (existing positions keep their TP/SL on Binance)
-    let pauseResult;
+    let pauseResult = { ok: false, error: 'no_botManager_pause', alreadyPaused: false };
     try {
-      pauseResult = (typeof ctx.botManager?.pause === 'function')
-        ? await ctx.botManager.pause(reason)
-        : { ok: false, error: 'no_botManager_pause' };
+      if (typeof ctx.botManager?.pause === 'function') {
+        const r = await ctx.botManager.pause(reason);
+        // Defensive: stubs / older versions may return undefined
+        pauseResult = {
+          ok: !!(r && r.ok),
+          error: r && r.error ? r.error : undefined,
+          alreadyPaused: !!(r && r.alreadyPaused),
+        };
+      }
     } catch (err) {
       logger.warn({ err: err.message }, 'admin-monitor: force_reconsent pause threw');
-      pauseResult = { ok: false, error: err.message };
+      pauseResult = { ok: false, error: err.message, alreadyPaused: false };
     }
     // 2) Clear local consent + emit re-prompt signal
-    let resetResult;
+    let resetResult = { ok: false, fileDeleted: false, fileExisted: false };
     try {
       const consentHandlers = require('../consent/handlers');
       resetResult = await consentHandlers.forceReset({ source: reason, port });

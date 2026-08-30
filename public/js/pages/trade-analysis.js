@@ -400,10 +400,31 @@ function renderBySellReason(bySr) {
   setText('ta-sr-meta', `${totalCount} ไม้ · ${bySr.rows.length} ประเภท`);
 }
 
-function renderHeatmap(byHour, byDow) {
+// Heatmap view state — persists across re-renders so switching tab/metric
+// doesn't need a round-trip to the API (the matrices for both views ship together).
+const HEAT_MIN_TRADES = 3; // win-rate mode: below this a slot is too thin to read
+const heatState = { heatmap: null, view: 'sell', metric: 'pnl' };
+
+function renderHeatmap(heatmap) {
+  heatState.heatmap = heatmap || null;
+  drawHeatmap();
+}
+
+function heatMatrix() {
+  const hm = heatState.heatmap;
+  if (!hm) return null;
+  const m = heatState.view === 'buy' ? hm.buy : hm.sell;
+  const ok = Array.isArray(m) && m.length === 7 && Array.isArray(m[0]) && m[0].length === 24;
+  return ok ? m : null;
+}
+
+function drawHeatmap() {
   const el = document.getElementById('ta-heatmap');
   if (!el) return;
-  if (!byHour || !byDow) {
+  const isWr = heatState.metric === 'wr';
+  const isBuy = heatState.view === 'buy';
+  const matrix = heatMatrix();
+  if (!matrix) {
     setText('ta-heat-meta', 'ไม่มีข้อมูล');
     setHtml('ta-heat-summary', '<div class="ta-empty">ไม่มีข้อมูล</div>');
     setHtml('ta-heat-marg-day', '<div class="ta-empty">—</div>');
@@ -414,35 +435,38 @@ function renderHeatmap(byHour, byDow) {
     return;
   }
 
-  const max = 10; // cap at +/-10 USDT for color intensity
-  const hasCrossCut = byHour.matrix && Array.isArray(byHour.matrix) && byHour.matrix.length === 7
-    && Array.isArray(byHour.matrix[0]) && byHour.matrix[0].length === 24;
+  // m[d][h] = the value we colour by; cellStats keeps the raw counts for tooltips/detail.
+  // pnl mode → net USDT (neutral 0, cap ±10). wr mode → win-rate % (neutral 50, cap ±25).
+  const cellStats = Array.from({ length: 7 }, () => Array.from({ length: 24 }, () => ({ count: 0, wins: 0, losses: 0, pnl: 0 })));
   const m = Array.from({ length: 7 }, () => new Array(24).fill(0));
-  const cellStats = Array.from({ length: 7 }, () => Array.from({ length: 24 }, () => ({ count: 0, wins: 0, losses: 0 })));
-  if (hasCrossCut) {
-    for (let d = 0; d < 7; d++) for (let h = 0; h < 24; h++) {
-      const cell = byHour.matrix[d][h] || { pnl: 0, count: 0, wins: 0, losses: 0 };
-      m[d][h] = Number(cell.pnl || 0);
-      cellStats[d][h] = { count: cell.count || 0, wins: cell.wins || 0, losses: cell.losses || 0 };
-    }
-  } else {
-    const totalHourCount = byHour.reduce((a, x) => a + (x.count || 0), 0) || 1;
-    const totalDowCount = byDow.reduce((a, x) => a + (x.count || 0), 0) || 1;
-    for (let d = 0; d < 7; d++) {
-      for (let h = 0; h < 24; h++) {
-        const hc = (byHour[h] && byHour[h].count) || 0;
-        const dc = (byDow[d] && byDow[d].count) || 0;
-        if (hc === 0 || dc === 0) { m[d][h] = 0; continue; }
-        const hourShare = hc / totalHourCount;
-        const dowShare = dc / totalDowCount;
-        m[d][h] = (byHour[h].pnl * hourShare) * dowShare * (hc / Math.max(1, hc));
-        cellStats[d][h] = { count: 0, wins: 0, losses: 0 };
-      }
+  const thin = Array.from({ length: 7 }, () => new Array(24).fill(false));
+  for (let d = 0; d < 7; d++) for (let h = 0; h < 24; h++) {
+    const cell = matrix[d][h] || { pnl: 0, count: 0, wins: 0, losses: 0 };
+    const s = { count: cell.count || 0, wins: cell.wins || 0, losses: cell.losses || 0, pnl: Number(cell.pnl || 0) };
+    cellStats[d][h] = s;
+    if (isWr) {
+      thin[d][h] = s.count > 0 && s.count < HEAT_MIN_TRADES;
+      m[d][h] = s.count > 0 ? (s.wins / s.count) * 100 : 0;
+    } else {
+      m[d][h] = s.pnl;
     }
   }
 
+  const cap = isWr ? 25 : 10;
+  const neutral = isWr ? 50 : 0;
+  const unit = isWr ? '%' : ' USDT';
+  const fmtVal = (v, s) => (isWr
+    ? (s && s.count > 0 ? v.toFixed(0) + '%' : '—')
+    : fmtPnl(v, { sign: true }) + ' USDT');
+  // Rank value: what "best"/"worst" means per metric. Empty slots must never win.
+  const rankOf = (d, h) => {
+    const s = cellStats[d][h];
+    if (isWr) return s.count >= HEAT_MIN_TRADES ? m[d][h] - neutral : null;
+    return s.count > 0 ? m[d][h] : null;
+  };
+
   const dayLabels = ['อา', 'จ', 'อ', 'พ', 'พฤ', 'ศ', 'ส'];
-  const dayFull = ['อา�ิตย์', 'จันทร์', 'อังคาร', 'พุธ', 'พฤหัสบดี', 'ศุกร์', 'เสาร์'];
+  const dayFull = ['อาทิตย์', 'จันทร์', 'อังคาร', 'พุธ', 'พฤหัสบดี', 'ศุกร์', 'เสาร์'];
 
   // Header row
   let html = '<div class="ta-heat-corner"></div>';
@@ -452,31 +476,24 @@ function renderHeatmap(byHour, byDow) {
   }
 
   // Aggregate stats per cell
-  let bestSlot = { d: 0, h: 0, v: 0 };
-  let worstSlot = { d: 0, h: 0, v: 0 };
+  let bestSlot = null;
+  let worstSlot = null;
   let mostActiveSlot = { d: 0, h: 0, v: 0 };
   let totalTradesInCells = 0;
   let totalWinsInCells = 0;
-  let totalLossesInCells = 0;
   let totalPnlCells = 0;
   for (let d = 0; d < 7; d++) for (let h = 0; h < 24; h++) {
-    const v = m[d][h];
     const s = cellStats[d][h];
     if (s.count > 0) {
       totalTradesInCells += s.count;
       totalWinsInCells += s.wins;
-      totalLossesInCells += s.losses;
-      totalPnlCells += v;
+      totalPnlCells += s.pnl;
       if (s.count > mostActiveSlot.v) mostActiveSlot = { d, h, v: s.count };
     }
-    if (v > bestSlot.v) bestSlot = { d, h, v };
-    if (v < worstSlot.v) worstSlot = { d, h, v };
-  }
-  // Peak = best cell that has actual trades (avoid marking 0-trade empty cells)
-  let peakSlot = { d: -1, h: -1, v: 0 };
-  for (let d = 0; d < 7; d++) for (let h = 0; h < 24; h++) {
-    const s = cellStats[d][h];
-    if (s.count > 0 && m[d][h] > peakSlot.v) peakSlot = { d, h, v: m[d][h] };
+    const r = rankOf(d, h);
+    if (r === null) continue;
+    if (r > 0 && (!bestSlot || r > bestSlot.r)) bestSlot = { d, h, r, v: m[d][h] };
+    if (r < 0 && (!worstSlot || r < worstSlot.r)) worstSlot = { d, h, r, v: m[d][h] };
   }
 
   for (let d = 0; d < 7; d++) {
@@ -484,31 +501,34 @@ function renderHeatmap(byHour, byDow) {
     for (let h = 0; h < 24; h++) {
       const v = m[d][h];
       const s = cellStats[d][h];
+      const dev = s.count > 0 ? v - neutral : 0;
       let bg = 'rgba(255,255,255,0.04)';
       let cls = '';
-      if (v > 0.01) {
-        const a = Math.min(0.85, (Math.min(v, max) / max) * 0.85 + 0.15);
+      if (s.count > 0 && dev > 0.01) {
+        const a = Math.min(0.85, (Math.min(dev, cap) / cap) * 0.85 + 0.15) * (thin[d][h] ? 0.45 : 1);
         bg = 'rgba(0,229,184,' + a + ')';
         cls = 'is-bull';
-      } else if (v < -0.01) {
-        const a = Math.min(0.85, (Math.min(Math.abs(v), max) / max) * 0.85 + 0.15);
+      } else if (s.count > 0 && dev < -0.01) {
+        const a = Math.min(0.85, (Math.min(Math.abs(dev), cap) / cap) * 0.85 + 0.15) * (thin[d][h] ? 0.45 : 1);
         bg = 'rgba(255,77,109,' + a + ')';
         cls = 'is-bear';
       }
-      const isPeak = (d === peakSlot.d && h === peakSlot.h);
-      if (isPeak && peakSlot.v > 0) cls += ' is-peak';
-      // FIX-2026-08-30: density ring — borders grow thicker with log of trade count
+      if (bestSlot && d === bestSlot.d && h === bestSlot.h) cls += ' is-peak';
+      // density ring — borders grow thicker with log of trade count
       const ringAlpha = s.count > 0 ? Math.min(0.35, 0.08 + Math.log10(s.count + 1) * 0.18) : 0;
       const densityRing = s.count > 0 ? (' border:1px solid rgba(255,255,255,' + ringAlpha + ');') : '';
-      const detailMd = '**' + dayFull[d] + ' ' + String(h).padStart(2, '0') + ':00**\n\n'
-        + '• PnL: ' + fmtPnl(v, { sign: true }) + ' USDT\n'
+      const detailMd = '**' + dayFull[d] + ' ' + String(h).padStart(2, '0') + ':00** '
+        + (isBuy ? '(เวลาที่ซื้อ)' : '(เวลาที่ขาย)') + '\n\n'
         + (s.count > 0
-          ? '• Trades: ' + s.count + ' (' + s.wins + 'W / ' + s.losses + 'L)\n'
+          ? '• PnL: ' + fmtPnl(s.pnl, { sign: true }) + ' USDT\n'
+            + '• Trades: ' + s.count + ' (' + s.wins + 'W / ' + s.losses + 'L)\n'
             + '• Win rate: ' + ((s.wins / s.count) * 100).toFixed(0) + '%\n'
-            + '• Avg/trade: ' + fmtPnl(v / s.count, { sign: true }) + ' USDT\n\nคลิกเพื่อดูรายละเอียด'
+            + '• Avg/trade: ' + fmtPnl(s.pnl / s.count, { sign: true }) + ' USDT\n'
+            + (thin[d][h] ? '\n⚠️ ไม้น้อยกว่า ' + HEAT_MIN_TRADES + ' ไม้ — สีจางลง\n' : '')
+            + '\nคลิกเพื่อดูรายละเอียด'
           : '• (no trades in this slot)');
       html += '<div class="ta-heat-cell ' + cls + '" style="background:' + bg + ';' + densityRing + '"'
-        + ' data-d="' + d + '" data-h="' + h + '" data-pnl="' + v + '" data-count="' + s.count + '" data-wins="' + s.wins + '" data-losses="' + s.losses + '"'
+        + ' data-d="' + d + '" data-h="' + h + '" data-pnl="' + s.pnl + '" data-count="' + s.count + '" data-wins="' + s.wins + '" data-losses="' + s.losses + '"'
         + ' data-tip="' + detailMd + '"></div>';
     }
   }
@@ -525,36 +545,38 @@ function renderHeatmap(byHour, byDow) {
       const losses = Number(node.getAttribute('data-losses'));
       el.querySelectorAll('.ta-heat-cell.is-active').forEach((n) => n.classList.remove('is-active'));
       node.classList.add('is-active');
-      showHeatDetail(d, h, v, cnt, wins, losses, dayFull);
+      showHeatDetail(d, h, v, cnt, wins, losses, dayFull, isBuy);
     });
   });
 
-  const slotLabel = (s) => s ? (dayFull[s.d] + ' ' + String(s.h).padStart(2, '0') + ':00 (' + fmtPnl(s.v, { sign: true }) + ' USDT)') : '—';
-
-  setText('ta-heat-meta', (hasCrossCut ? '✅ ข้อมูลจริง' : '�️ ประมาณการ') + ' · 7×24');
+  const missNote = (isBuy && heatState.heatmap && heatState.heatmap.buyMissing)
+    ? ' · ' + heatState.heatmap.buyMissing + ' ไม้ไม่มีเวลาซื้อ'
+    : '';
+  setText('ta-heat-meta', (isBuy ? '🛒 เวลาที่ซื้อ' : '💰 เวลาที่ขาย') + ' · '
+    + (isWr ? 'Win rate' : 'Net PnL') + ' · ' + totalTradesInCells + ' ไม้' + missNote);
 
   // Summary tiles (4 cards)
   const winRate = totalTradesInCells > 0 ? ((totalWinsInCells / totalTradesInCells) * 100).toFixed(1) : '—';
   const avgPnlPerTrade = totalTradesInCells > 0 ? fmtPnl(totalPnlCells / totalTradesInCells, { sign: true }) : '—';
-  const peakSub = peakSlot.v > 0
-    ? (dayFull[peakSlot.d] + ' ' + String(peakSlot.h).padStart(2, '0') + ':00 · ' + fmtPnl(peakSlot.v, { sign: true }) + ' USDT')
-    : 'no profitable slot';
-  const worstSub = worstSlot.v < 0
-    ? (dayFull[worstSlot.d] + ' ' + String(worstSlot.h).padStart(2, '0') + ':00 · ' + fmtPnl(worstSlot.v, { sign: true }) + ' USDT')
-    : 'no losing slot';
+  const slotSub = (slot, fallback) => (slot
+    ? (dayFull[slot.d] + ' ' + String(slot.h).padStart(2, '0') + ':00 · '
+       + fmtVal(slot.v, cellStats[slot.d][slot.h]) + ' · ' + cellStats[slot.d][slot.h].count + ' ไม้')
+    : fallback);
   const activeSub = mostActiveSlot.v > 0
     ? (dayFull[mostActiveSlot.d] + ' ' + String(mostActiveSlot.h).padStart(2, '0') + ':00')
     : 'no trades yet';
+  const bestLabel = isBuy ? '🏆 ซื้อแล้วดีสุด' : '🏆 ขายแล้วดีสุด';
+  const worstLabel = isBuy ? '💀 ซื้อแล้วแย่สุด' : '💀 ขายแล้วแย่สุด';
   const summaryHtml = ''
     + '<div class="ta-heat-summary-tile is-bull">'
-      + '<span class="label">🏆 Best slot</span>'
-      + '<span class="value">' + (peakSlot.v > 0 ? fmtPnl(peakSlot.v, { sign: true }) : '—') + '</span>'
-      + '<span class="sub">' + peakSub + '</span>'
+      + '<span class="label">' + bestLabel + '</span>'
+      + '<span class="value">' + (bestSlot ? fmtVal(bestSlot.v, cellStats[bestSlot.d][bestSlot.h]) : '—') + '</span>'
+      + '<span class="sub">' + slotSub(bestSlot, isWr ? 'ยังไม่มีช่องที่ถึง ' + HEAT_MIN_TRADES + ' ไม้' : 'no profitable slot') + '</span>'
     + '</div>'
     + '<div class="ta-heat-summary-tile is-bear">'
-      + '<span class="label">💀 Worst slot</span>'
-      + '<span class="value">' + (worstSlot.v < 0 ? fmtPnl(worstSlot.v, { sign: true }) : '—') + '</span>'
-      + '<span class="sub">' + worstSub + '</span>'
+      + '<span class="label">' + worstLabel + '</span>'
+      + '<span class="value">' + (worstSlot ? fmtVal(worstSlot.v, cellStats[worstSlot.d][worstSlot.h]) : '—') + '</span>'
+      + '<span class="sub">' + slotSub(worstSlot, isWr ? 'ยังไม่มีช่องที่ถึง ' + HEAT_MIN_TRADES + ' ไม้' : 'no losing slot') + '</span>'
     + '</div>'
     + '<div class="ta-heat-summary-tile">'
       + '<span class="label">🎯 Most active</span>'
@@ -568,37 +590,59 @@ function renderHeatmap(byHour, byDow) {
     + '</div>';
   setHtml('ta-heat-summary', summaryHtml);
 
-  // Marginal aggregates (right column)
-  const daySums = Array.from({ length: 7 }, (_, d) => Array.from({ length: 24 }, (_, h) => m[d][h]).reduce((a, b) => a + b, 0));
-  const maxDayAbs = Math.max(1, ...daySums.map((v) => Math.abs(v)));
-  const dayHtml = daySums.map((v, d) => {
-    const w = Math.min(50, (Math.abs(v) / maxDayAbs) * 50);
-    const cls = v > 0 ? 'is-bull' : v < 0 ? 'is-bear' : 'is-zero';
-    const side = v >= 0 ? ('left:50%') : ('left:' + (50 - w) + '%');
+  // Marginal aggregates (right column). In wr mode a marginal is the pooled win rate
+  // of the whole row/column (not the mean of cell win rates — that would over-weight
+  // thin slots), rendered as deviation from 50%.
+  const margRow = (label, agg) => {
+    const v = agg.value;
+    const dev = agg.has ? v - neutral : 0;
+    const w = Math.min(50, (Math.abs(dev) / Math.max(1e-9, agg.maxAbs)) * 50);
+    const cls = !agg.has ? 'is-zero' : dev > 0 ? 'is-bull' : dev < 0 ? 'is-bear' : 'is-zero';
+    const side = dev >= 0 ? ('left:50%') : ('left:' + (50 - w) + '%');
+    const text = !agg.has ? '—' : (isWr ? v.toFixed(0) + '%' : fmtPnl(v, { sign: true }));
     return '<div class="ta-heat-marg-row">'
-      + '<span class="ta-heat-marg-label">' + dayLabels[d] + '</span>'
+      + '<span class="ta-heat-marg-label">' + label + '</span>'
       + '<div class="ta-heat-marg-bar-wrap"><div class="ta-heat-marg-bar ' + cls + '" style="width:' + w + '%;' + side + ';"></div></div>'
-      + '<span class="ta-heat-marg-pnl ' + cls + '">' + fmtPnl(v, { sign: true }) + '</span>'
+      + '<span class="ta-heat-marg-pnl ' + cls + '">' + text + '</span>'
       + '</div>';
-  }).join('');
-  setHtml('ta-heat-marg-day', dayHtml);
+  };
+  const poolOf = (cells) => {
+    let count = 0; let wins = 0; let pnl = 0;
+    for (const s of cells) { count += s.count; wins += s.wins; pnl += s.pnl; }
+    return { has: count > 0, value: isWr ? (count ? (wins / count) * 100 : 0) : pnl };
+  };
+  const dayPools = Array.from({ length: 7 }, (_, d) => poolOf(cellStats[d]));
+  const hourPools = Array.from({ length: 24 }, (_, h) => poolOf(Array.from({ length: 7 }, (_, d) => cellStats[d][h])));
+  const maxDevOf = (pools) => Math.max(1e-9, ...pools.map((p) => (p.has ? Math.abs(p.value - neutral) : 0)));
+  const maxDay = maxDevOf(dayPools);
+  const maxHour = maxDevOf(hourPools);
+  setHtml('ta-heat-marg-day', dayPools.map((p, d) => margRow(dayLabels[d], { ...p, maxAbs: maxDay })).join(''));
+  setHtml('ta-heat-marg-hour', hourPools.map((p, h) => margRow(String(h).padStart(2, '0'), { ...p, maxAbs: maxHour })).join(''));
 
-  const hourSums = Array.from({ length: 24 }, (_, h) => Array.from({ length: 7 }, (_, d) => m[d][h]).reduce((a, b) => a + b, 0));
-  const maxHourAbs = Math.max(1, ...hourSums.map((v) => Math.abs(v)));
-  const hourHtml = hourSums.map((v, h) => {
-    const w = Math.min(50, (Math.abs(v) / maxHourAbs) * 50);
-    const cls = v > 0 ? 'is-bull' : v < 0 ? 'is-bear' : 'is-zero';
-    const side = v >= 0 ? ('left:50%') : ('left:' + (50 - w) + '%');
-    return '<div class="ta-heat-marg-row">'
-      + '<span class="ta-heat-marg-label">' + String(h).padStart(2, '0') + '</span>'
-      + '<div class="ta-heat-marg-bar-wrap"><div class="ta-heat-marg-bar ' + cls + '" style="width:' + w + '%;' + side + ';"></div></div>'
-      + '<span class="ta-heat-marg-pnl ' + cls + '">' + fmtPnl(v, { sign: true }) + '</span>'
-      + '</div>';
-  }).join('');
-  setHtml('ta-heat-marg-hour', hourHtml);
+  // Legend text tracks the active metric
+  setText('ta-heat-legend-neg', isWr ? '0%' : '-10 USDT');
+  setText('ta-heat-legend-mid', isWr ? '50%' : '0');
+  setText('ta-heat-legend-pos', isWr ? '100%' : '+10 USDT');
 }
 
-function showHeatDetail(d, h, pnl, count, wins, losses, dayFull) {
+function bindHeatmapControls() {
+  document.querySelectorAll('[data-heat-view]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      heatState.view = btn.getAttribute('data-heat-view');
+      document.querySelectorAll('[data-heat-view]').forEach((b) => b.classList.toggle('is-active', b === btn));
+      drawHeatmap();
+    });
+  });
+  document.querySelectorAll('[data-heat-metric]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      heatState.metric = btn.getAttribute('data-heat-metric');
+      document.querySelectorAll('[data-heat-metric]').forEach((b) => b.classList.toggle('is-active', b === btn));
+      drawHeatmap();
+    });
+  });
+}
+
+function showHeatDetail(d, h, pnl, count, wins, losses, dayFull, isBuy) {
   const det = document.getElementById('ta-heat-detail');
   if (!det) return;
   const wr = count > 0 ? ((wins / count) * 100).toFixed(1) : '—';
@@ -606,7 +650,7 @@ function showHeatDetail(d, h, pnl, count, wins, losses, dayFull) {
   const pnlCls = pnl > 0 ? 'is-bull' : pnl < 0 ? 'is-bear' : 'is-info';
   det.innerHTML = ''
     + '<div class="ta-heat-detail-cell is-info" style="grid-column: 1 / -1; flex-direction: row; justify-content: space-between;">'
-      + '<span><strong>📍 ' + dayFull[d] + ' ' + String(h).padStart(2, '0') + ':00</strong> · ' + (count > 0 ? count + ' trades' : 'no trades yet') + '</span>'
+      + '<span><strong>📍 ' + dayFull[d] + ' ' + String(h).padStart(2, '0') + ':00</strong> <span class="text-muted-3">(' + (isBuy ? 'เวลาที่ซื้อ' : 'เวลาที่ขาย') + ')</span> · ' + (count > 0 ? count + ' trades' : 'no trades yet') + '</span>'
       + '<span class="ta-heat-detail-close" id="ta-heat-detail-close">✕ ปิด</span>'
     + '</div>'
     + '<div class="ta-heat-detail-cell ' + pnlCls + '"><span class="label">Total PnL</span><span class="value">' + fmtPnl(pnl, { sign: true }) + ' USDT</span></div>'
@@ -828,7 +872,7 @@ function renderAllSections(d) {
   renderBySymbol(d.bySymbol);
   renderByTimeframe(d.byTimeframe);
   renderBySellReason(d.bySellReason);
-  renderHeatmap(d.byHour, d.byDayOfWeek);
+  renderHeatmap(d.heatmap);
   renderHoldDuration(d.duration);
   renderSizing(d.sizing);
   renderBotLeaderboard(d.byBot);
@@ -847,7 +891,9 @@ async function loadAnalysis({ force = false } = {}) {
   if (!force && now - _lastFetchAt < MIN_INTERVAL_MS && _analysisData) return;
   _loading = true;
   try {
-    const data = await API.get('/api/analysis/trade-analysis');
+    const days = Number(document.getElementById('ta-range')?.value || 0);
+    const qs = days > 0 ? ('?since=' + new Date(Date.now() - days * 86400000).toISOString()) : '';
+    const data = await API.get('/api/analysis/trade-analysis' + qs);
     _analysisData = data;
     _lastFetchAt = Date.now();
     renderAllSections(data);
@@ -861,8 +907,12 @@ async function loadAnalysis({ force = false } = {}) {
 
 // ─── Boot ──────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
+  bindHeatmapControls();
   loadAnalysis().catch(() => {});
   document.getElementById('ta-refresh-btn')?.addEventListener('click', () => {
+    loadAnalysis({ force: true }).catch(() => {});
+  });
+  document.getElementById('ta-range')?.addEventListener('change', () => {
     loadAnalysis({ force: true }).catch(() => {});
   });
   // WS events: refetch on trade:update
