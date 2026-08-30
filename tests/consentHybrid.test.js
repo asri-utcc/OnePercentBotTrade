@@ -270,3 +270,89 @@ describe('consent/html — formal/boring design (Phase 2c-v3)', () => {
     expect(html).toMatch(/id="cs-decline"[^>]*disabled/);
   });
 });
+
+describe('consent/storage.delete() — FIX-2026-08-30 Phase 3b-7', () => {
+  beforeEach(() => {
+    config.filePath = TMP_FILE;
+    if (fs.existsSync(TMP_FILE)) fs.unlinkSync(TMP_FILE);
+    handlers._resetEngagedForTest();
+    config.enabled = true;
+  });
+
+  test('returns ok=true, existed=true when file present', () => {
+    storage.write({ decision: 'accepted', source: 'first_run' });
+    const r = storage.delete();
+    expect(r.ok).toBe(true);
+    expect(r.existed).toBe(true);
+    expect(fs.existsSync(TMP_FILE)).toBe(false);
+  });
+
+  test('returns ok=true, existed=false when file missing', () => {
+    const r = storage.delete();
+    expect(r.ok).toBe(true);
+    expect(r.existed).toBe(false);
+  });
+
+  test('after delete, currentDecision() returns null', () => {
+    storage.write({ decision: 'accepted', source: 'first_run' });
+    storage.delete();
+    expect(storage.currentDecision()).toBeNull();
+    expect(handlers.getStatus()).toBe('pending');
+  });
+});
+
+describe('consent/handlers.forceReset() — FIX-2026-08-30 Phase 3b-7', () => {
+  let emitSpy;
+  let resetSpy;
+  beforeEach(() => {
+    config.filePath = TMP_FILE;
+    if (fs.existsSync(TMP_FILE)) fs.unlinkSync(TMP_FILE);
+    handlers._resetEngagedForTest();
+    config.enabled = true;
+    emitSpy = jest.fn();
+    resetSpy = jest.fn();
+    handlers.emitter.on('consent:reconsent_required', resetSpy);
+  });
+  afterEach(() => {
+    handlers.emitter.removeListener('consent:reconsent_required', resetSpy);
+  });
+
+  test('deletes file, emits consent:reconsent_required, sets awaiting flag', async () => {
+    storage.write({ decision: 'accepted', source: 'first_run' });
+    handlers.markEngaged();
+    const r = await handlers.forceReset({ source: 'admin_force_reconsent', port: 6015 });
+    expect(r.ok).toBe(true);
+    expect(r.fileDeleted).toBe(true);
+    expect(r.fileExisted).toBe(true);
+    expect(fs.existsSync(TMP_FILE)).toBe(false);
+    expect(handlers.hasEngaged()).toBe(false);
+    expect(resetSpy).toHaveBeenCalledTimes(1);
+    expect(resetSpy.mock.calls[0][0]).toMatchObject({ source: 'admin_force_reconsent', port: 6015, fileDeleted: true, fileExisted: true });
+    expect(handlers.isAwaitingReconsent()).toBe(true);
+  });
+
+  test('idempotent: second call on missing file returns fileExisted=false', async () => {
+    await handlers.forceReset({ source: 'admin_force_reconsent' });
+    const r = await handlers.forceReset({ source: 'admin_force_reconsent' });
+    expect(r.fileExisted).toBe(false);
+    expect(r.fileDeleted).toBe(true);
+  });
+
+  test('isAwaitingReconsent cleared after recordDecision(accepted)', async () => {
+    await handlers.forceReset({ source: 'admin_force_reconsent' });
+    expect(handlers.isAwaitingReconsent()).toBe(true);
+    await handlers.recordDecision({ decision: 'accepted', port: 6015 });
+    expect(handlers.isAwaitingReconsent()).toBe(false);
+  });
+
+  test('isAwaitingReconsent stays true after recordDecision(declined) — user must accept', async () => {
+    await handlers.forceReset({ source: 'admin_force_reconsent' });
+    await handlers.recordDecision({ decision: 'declined', port: 6015 });
+    expect(handlers.isAwaitingReconsent()).toBe(true);
+  });
+
+  test('emitter throws does not crash handler', () => {
+    handlers.emitter.on('consent:reconsent_required', () => { throw new Error('subscriber boom'); });
+    expect(handlers.forceReset({ source: 'admin_force_reconsent' })).resolves.toMatchObject({ ok: true });
+  });
+});

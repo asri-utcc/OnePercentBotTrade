@@ -277,6 +277,70 @@ describe('commandExecutor.notify_unauthorized', () => {
   });
 });
 
+describe('commandExecutor.force_reconsent (FIX-2026-08-30 Phase 3b-7)', () => {
+  test('pauses bot + invokes forceReset; returns expected shape', async () => {
+    const ctx = buildCtx();
+    ctx.botManager.pause.mockResolvedValue({ ok: true, alreadyPaused: false });
+    const r = await executor.execute({
+      commandId: 'fr1',
+      type: 'force_reconsent',
+      payload: { reason: 'admin_reset_consent', port: 6015 },
+    }, ctx);
+    expect(ctx.botManager.pause).toHaveBeenCalledWith('admin_reset_consent');
+    expect(r.action).toBe('force_reconsent');
+    expect(r.paused).toBe(true);
+    expect(r.alreadyPaused).toBe(false);
+    expect(r.fileDeleted).toBe(true); // real storage.delete() ran against test env
+    expect(r.reason).toBe('admin_reset_consent');
+    expect(r.port).toBe(6015);
+  });
+
+  test('defaults reason to admin_force_reconsent', async () => {
+    const ctx = buildCtx();
+    await executor.execute({ commandId: 'fr1', type: 'force_reconsent' }, ctx);
+    expect(ctx.botManager.pause).toHaveBeenCalledWith('admin_force_reconsent');
+  });
+
+  test('defaults port to 6015', async () => {
+    const ctx = buildCtx();
+    const r = await executor.execute({ commandId: 'fr1', type: 'force_reconsent' }, ctx);
+    expect(r.port).toBe(6015);
+  });
+
+  test('returns alreadyPaused=true on second invocation', async () => {
+    const ctx = buildCtx();
+    ctx.botManager.pause.mockResolvedValueOnce({ ok: true, alreadyPaused: false });
+    ctx.botManager.pause.mockResolvedValueOnce({ ok: true, alreadyPaused: true });
+    await executor.execute({ commandId: 'fr1', type: 'force_reconsent' }, ctx);
+    const r2 = await executor.execute({ commandId: 'fr2', type: 'force_reconsent' }, ctx);
+    expect(r2.alreadyPaused).toBe(true);
+  });
+
+  test('returns paused=false when botManager missing', async () => {
+    const ctx = buildCtx({ botManager: undefined });
+    const r = await executor.execute({ commandId: 'fr1', type: 'force_reconsent' }, ctx);
+    expect(r.paused).toBe(false);
+  });
+
+  test('tolerates botManager.pause throwing (no handler crash)', async () => {
+    const ctx = buildCtx();
+    ctx.botManager.pause.mockRejectedValue(new Error('pause boom'));
+    const r = await executor.execute({ commandId: 'fr1', type: 'force_reconsent' }, ctx);
+    expect(r).toBeDefined();
+    expect(r.action).toBe('force_reconsent');
+  });
+
+  test('isAwaitingReconsent is set after force_reconsent; cleared after recordDecision(accepted)', async () => {
+    const consentHandlers = require('../src/consent/handlers');
+    const ctx = buildCtx();
+    await executor.execute({ commandId: 'fr1', type: 'force_reconsent' }, ctx);
+    expect(consentHandlers.isAwaitingReconsent()).toBe(true);
+    // Simulate user accepting via overlay
+    await consentHandlers.recordDecision({ decision: 'accepted', port: 6015, source: 'settings_change' });
+    expect(consentHandlers.isAwaitingReconsent()).toBe(false);
+  });
+});
+
 describe('commandExecutor.execute — guard rails', () => {
   test('throws on unknown command type', async () => {
     const ctx = buildCtx();
