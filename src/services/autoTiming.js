@@ -419,7 +419,7 @@ class AutoTiming {
           },
         },
       });
-      AutoTimingLog.create({
+      const logPromise = AutoTimingLog.create({
         botId: String(bot._id || bot.id),
         ts: new Date(msOf(now)),
         day: bucket.day, hour: bucket.hour,
@@ -435,7 +435,10 @@ class AutoTiming {
         medianHoldMin: cellStats ? cellStats.medianHoldMin : 0,
         confidence: decision.confidence,
         note: decision.reason,
-      }).catch((err) => logger.warn({ err: err.message }, 'autoTiming: log append failed'));
+      });
+      if (logPromise && typeof logPromise.catch === 'function') {
+        logPromise.catch((err) => logger.warn({ err: err.message }, 'autoTiming: log append failed'));
+      }
     } catch (err) {
       logger.warn({ err: err.message }, 'autoTiming: telemetry write failed');
     }

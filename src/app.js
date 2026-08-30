@@ -152,6 +152,7 @@ function createApp() {
   app.use('/api/daily-target', dailyTargetRoutes); // 2026-08-06: Daily Profit Target gauge
   app.use('/api/system', rateLimitRoutes); // 2026-08-23: live Binance API weight gauge
   app.use('/api/coins', require('./api/routes/coin.routes')); // FIX-2026-08-01: coin info aggregator
+  app.use('/api/auto-timing', require('./api/routes/autoTiming.routes')); // FIX-2026-08-30 Phase 4
 // FIX-2026-08-21: Trade Analysis aggregator (includes soft-deleted bots)
 app.use('/api/analysis', require('./api/routes/analysis.routes'));
 // FIX-2026-08-26: Admin Snapshot — read-only aggregated bot state for OnePercentBot-Admin
