@@ -19,6 +19,7 @@ let autoPauseAdjustCfg = null; // FIX-2026-08-29: auto-pause threshold auto-adju
 let consentStatus = null;  // FIX-2026-08-26 Phase 3a: GET /api/consent/status for Settings page
 let licenseInfo = null;   // FIX-2026-08-26 Phase 3a: GET /api/license/info for Settings page
 let configBackupPreview = null; // FIX-2026-08-29: GET /api/admin/config/backup/preview
+let autoTimingCfg = null; // FIX-2026-08-30 / Phase 4: Auto-Timing config
 
 async function init() {
   const me = await API.get('/api/auth/me').catch(() => null);
@@ -120,7 +121,17 @@ async function loadConfig() {
       console.warn('license info load failed:', err.message);
       licenseInfo = { license: null, lastValidatedAt: null, adminMonitorEnabled: false, machineId: '—' };
     }
+    // FIX-2026-08-30 / Phase 4: Auto-Timing master config (5-band editor + Save/Run-now)
+    if (window.AutoTimingUI && typeof window.AutoTimingUI.loadConfig === 'function') {
+      autoTimingCfg = await window.AutoTimingUI.loadConfig();
+    } else {
+      autoTimingCfg = { config: null, status: null, bands: [], defaultBands: {} };
+    }
     render();
+    // FIX-2026-08-30 / Phase 4: Auto-Timing uses its own renderer, bind its section events after render()
+    if (window.AutoTimingUI && typeof window.AutoTimingUI.bind === 'function') {
+      window.AutoTimingUI.bind();
+    }
   } catch (err) {
     document.getElementById('settings-content').innerHTML =
       `<div class="lux-body"><div class="alert alert-danger">โหลด config ล้มเหลว: ${escapeHtml(err.message)}</div></div>`;
@@ -190,6 +201,14 @@ function render() {
         ${renderRateLimitSection()}
         ${renderAutoReserveSection()}
         ${renderAutoPauseAdjustSection()}
+        ${(function () {
+          // FIX-2026-08-30 / Phase 4: Auto-Timing section (5-band table editor + Save/Run-now)
+          if (window.AutoTimingUI && typeof window.AutoTimingUI.render === 'function') {
+            window.AUTO_TIMING_CFG = autoTimingCfg;
+            return window.AutoTimingUI.render();
+          }
+          return '';
+        })()}
         ${renderCbVersionSection()}
         ${renderDpsSection()}
         ${renderDailyTargetSection()}
@@ -1883,6 +1902,11 @@ function bindEvents() {
   if (sapa) sapa.onclick = saveAutoPauseAdjust;
   const tapa = document.getElementById('btn-trigger-apa');
   if (tapa) tapa.onclick = triggerAutoPauseAdjust;
+
+  // FIX-2026-08-30 / Phase 4: Auto-Timing (Save / Run-now / Reset bands)
+  if (window.AutoTimingUI && typeof window.AutoTimingUI.bind === 'function') {
+    window.AutoTimingUI.bind();
+  }
 
   // FIX-2026-08-29: Config Backup & Restore
   const cbBackup = document.getElementById('cfg-backup-btn');
