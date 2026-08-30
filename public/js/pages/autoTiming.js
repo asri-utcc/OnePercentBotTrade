@@ -26,7 +26,7 @@ function bandActionsFor(bandId) {
 function selectedAction(band, defaultBand) {
   const a = (band && band.action) || (defaultBand && defaultBand.action) || 'allow';
   return window.AUTO_TIMING_VALID_ACTIONS.map((act) =>
-    `<option value="${act}" ${act === a ? 'selected' : ''}>${act}</option>`).join('');
+    `<option value="${act}" ${act === a ? 'selected' : ''}>${actionBadgeEmoji(act)} ${act}</option>`).join('');
 }
 
 // UX-2026-08-30: visual cue for action dropdown — color-coded chip + emoji prefix
@@ -210,6 +210,52 @@ function renderAutoTimingSection() {
         <label class="form-label">🔺 Max ceiling (USDT)</label>
         <input type="number" class="form-control form-control-sm" id="at-ceiling" value="${ceiling}" min="10" max="10000" />
         <small class="text-muted">above → cap only</small>
+      </div>
+    </div>
+
+    <h6 class="mt-4 mb-2">📖 Action legend (ก่อนปรับ knob)
+      <a href="#" class="ms-2 small text-muted" id="at-legend-toggle">ซ่อน / แสดง</a>
+    </h6>
+    <div class="at-action-legend table-responsive" id="at-action-legend-table">
+      <table class="table table-sm align-middle mb-3" style="min-width:600px;">
+        <thead class="table-light">
+          <tr>
+            <th style="width:140px;">action</th>
+            <th>ความหมาย</th>
+            <th>ผลจริงต่อ BUY</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr class="at-row-allow">
+            <td><strong>✅ allow</strong></td>
+            <td>"<strong>ผ่านปกติ</strong>" — slot นี้ทำงานได้ตามปกติ ไม่ override อะไรเลย (default intent ของบอท)</td>
+            <td>BUY ตาม <code>bot config</code> เดิม (notional เต็ม, TP auto, STx ตามที่บอทตั้ง, no clamp)</td>
+          </tr>
+          <tr class="at-row-stimulate">
+            <td><strong>⭐ stimulate</strong></td>
+            <td>"<strong>ดีมาก</strong>" — slot นี้ผลงานดีเด่น ดัน notional เพิ่มขึ้น</td>
+            <td><code>notional × 1.2</code> (ดัน +20%) — entry ใหญ่ขึ้นเมื่อชนะบ่อย, TP/SL unchanged</td>
+          </tr>
+          <tr class="at-row-encourage">
+            <td><strong>✨ encourage</strong></td>
+            <td>"<strong>ดี</strong>" — slot ค่อนข้างดี กระตุ้นเบาๆ</td>
+            <td><code>notional × 1.1</code> (boost +10%) — เพิ่มเล็กน้อย, ไม่บีบ TP/SL</td>
+          </tr>
+          <tr class="at-row-limit">
+            <td><strong>⚠️ limit</strong></td>
+            <td>"<strong>ระวัง</strong>" — slot พอใช้ได้แต่ควรลดความเสี่ยง</td>
+            <td><code>notional × 0.5</code> + <strong>tight TP 30%</strong> + <strong>force ST1</strong> (green only) + <code>maxCC</code>/<code>maxTD</code> caps</td>
+          </tr>
+          <tr class="at-row-suppress">
+            <td><strong>🚫 suppress</strong></td>
+            <td>"<strong>ห้าม</strong>" — slot มีประวัติแย่มาก → block ไม่ให้ BUY ผ่าน</td>
+            <td><code>notional = 0 → SKIP BUY</code> + Tier 2 cool-down <strong>90 วัน</strong> (กัน decay re-allow) + alert <code>autoTimingSuppressHit</code></td>
+          </tr>
+        </tbody>
+      </table>
+      <div class="alert alert-secondary small py-2 px-3 mb-3">
+        💡 <strong>ทางลัด:</strong> <em>stricter</em> = allow → encourage → stimulate → limit → suppress (เรียงจาก "ผ่าน" → "ห้าม"; stimulate/encourage ทั้งคู่คือ "boost แต่ไม่ลดความเสี่ยง").<br />
+        ⚙️ <strong>ค่า default ในแต่ละ band</strong> ตั้งให้ตรงกับประสบการณ์ทั่วไป (≤10 นาที = stimulate, 1–12 ชม. = allow, >2 วัน = suppress); กด <code>↺</code> reset row กลับเป็นค่า default ได้ทุกเมื่อ.
       </div>
     </div>
 
@@ -476,6 +522,17 @@ function bindAutoTimingSectionEvents() {
       const visible = helpBlock.style.display !== 'none';
       helpBlock.style.display = visible ? 'none' : 'block';
       helpLink.textContent = visible ? '📘 คำอธิบายแต่ละคอลัมน์' : '❌ ปิดคำอธิบาย';
+    };
+  }
+
+  // UX-2026-08-30: action legend toggle (default open)
+  const legendLink = document.getElementById('at-legend-toggle');
+  const legendTable = document.getElementById('at-action-legend-table');
+  if (legendLink && legendTable) {
+    legendLink.onclick = (e) => {
+      e.preventDefault();
+      const visible = legendTable.style.display !== 'none';
+      legendTable.style.display = visible ? 'none' : 'block';
     };
   }
 

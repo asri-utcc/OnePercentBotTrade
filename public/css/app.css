@@ -417,6 +417,39 @@ a:hover { color: var(--gold-2); text-decoration: none; }
   border-color: rgba(245,184,0,0.45);
 }
 
+/* FIX-2026-08-30 UX-3: Auto-Timing Action Legend table — color-coded rows */
+.at-action-legend {
+  border: 1px solid rgba(255,255,255,0.06);
+  border-radius: 8px;
+  background: rgba(0,0,0,0.12);
+  padding: 0.25rem 0.5rem;
+}
+.at-action-legend table {
+  margin-bottom: 0;
+}
+.at-action-legend thead th {
+  font-size: 0.78rem;
+  color: var(--text-1, #f1f5f9);
+  background: rgba(255,255,255,0.03);
+  font-weight: 600;
+  border-bottom: 1px solid rgba(255,255,255,0.10);
+}
+.at-action-legend tbody td {
+  font-size: 0.85rem;
+  vertical-align: middle;
+}
+.at-action-legend tbody tr.at-row-allow      td:first-child { border-left: 4px solid #00e5b8; background: rgba(0,229,184,0.05); }
+.at-action-legend tbody tr.at-row-stimulate  td:first-child { border-left: 4px solid #60a5fa; background: rgba(96,165,250,0.05); }
+.at-action-legend tbody tr.at-row-encourage  td:first-child { border-left: 4px solid #22d3ee; background: rgba(34,211,238,0.05); }
+.at-action-legend tbody tr.at-row-limit      td:first-child { border-left: 4px solid #fb923c; background: rgba(251,146,60,0.06); }
+.at-action-legend tbody tr.at-row-suppress   td:first-child { border-left: 4px solid #ff4d6d; background: rgba(255,77,109,0.06); }
+.at-action-legend tbody code {
+  background: rgba(255,255,255,0.08);
+  padding: 0.1rem 0.3rem;
+  border-radius: 4px;
+  font-size: 0.78rem;
+}
+
 /* FIX-2026-08-30 UX-2: Auto-Timing per-band table — horizontal scroll + readability */
 .at-bands-scroll {
   position: relative;
