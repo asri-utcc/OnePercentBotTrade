@@ -43,6 +43,8 @@ function _getLicense() {
 // flags (autoAddBot / autoUpdateTp / autoPauseMinKc) so legacy licenses don't silently
 // gain premium features.
 // FIX-2026-08-29: +1 key (configBackup) for Config Backup/Restore feature. Default ON.
+// FIX-2026-08-30: +1 key (autoTiming) for Phase 4 Auto-Timing (heatmap-driven entry gate).
+//   Premium-only, default OFF — owner must enable via admin Edit License modal.
 function _getFeatures() {
   const lic = _getLicense();
   if (!lic) {
@@ -63,6 +65,7 @@ function _getFeatures() {
     chartMonitor: f.chartMonitor !== false,
     dps: f.dps !== false,
     configBackup: f.configBackup !== false,
+    autoTiming: f.autoTiming === true,
   };
 }
 
@@ -80,6 +83,7 @@ function _allFeatures(on) {
     chartMonitor: on,
     dps: on,
     configBackup: on,
+    autoTiming: on,
   };
 }
 

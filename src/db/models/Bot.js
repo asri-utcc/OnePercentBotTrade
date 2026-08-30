@@ -182,6 +182,20 @@ const botSchema = new mongoose.Schema(
     autoPauseAdjustLastCheckedAt: { type: Date, default: null },
     autoPauseAdjustLastActionAt: { type: Date, default: null },
     autoPauseAdjustLastStats: { type: Object, default: null }, // { runningBots, action: 'tighten'|'loosen'|null, deltaKc, deltaVol, prevKc, prevVol, newKc, newVol }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // FIX-2026-08-30 / Phase 4 — Auto-Timing (Heatmap-driven entry gate)
+    //   - Master toggle lives in AppConfig.autoTimingEnabled (premium feature).
+    //   - Per-bot opt-in: null = inherit master, true/false = explicit override.
+    //   - overrideCell: optional manual override map of "day:hour" → action
+    //     e.g. { "1:3": "suppress", "6:14": "stimulate" } — wins over classifier output.
+    //   - lastEvaluatedAt: telemetry for UI; null = never evaluated.
+    //   - Only entry-time decisions are gated (DCA layers 2/3 always pass through).
+    // ═══════════════════════════════════════════════════════════════════════
+    autoTimingEnabled:        { type: Boolean, default: null },        // null = inherit, true/false = explicit
+    autoTimingOverrideCell:   { type: Object,  default: null },        // { '0:4': 'suppress', ... } or null
+    autoTimingLastEvaluatedAt: { type: Date,    default: null },
+    autoTimingLastDecision:    { type: Object,  default: null },       // { day, hour, bandId, action, blocked, reason }
     // FIX-2026-07-31: auto-arm SL-on-UKC for stuck losing positions (per-bot toggle, default true)
     //   - เมื่อ position ขาดทุน > autoArmLossPct + เปิดมา > autoArmAgeHours → trader set trade.useStopLossOnUKC=true
     //   - _checkStopLossOnUpperKC จะยอม trigger เฉพาะ trade ที่มี flag นี้

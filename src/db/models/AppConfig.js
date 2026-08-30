@@ -364,6 +364,37 @@ const appConfigSchema = new mongoose.Schema(
     autoPauseAdjustLastStats:  { type: Object,  default: null },
     autoPauseAdjustLastError:  { type: String,  default: null },
 
+    // �══════════════════════════════════════════════════════════════════════
+    // Auto-Timing (Phase 4 — Heatmap-driven entry gate)
+    //   - Master toggle; per-bot opt-in lives in Bot.autoTimingEnabled (null = inherit)
+    //   - Lookback window (7..90d, default 30d) with linear-step weighting:
+    //       days 1..recentDays → autoTimingRecentWeight (default 1.5)
+    //       days recentDays+1..lookbackDays → autoTimingNormalWeight (default 1.0)
+    //   - 2-tier evidence model: recent rolling + persistent lifetime + cool-down
+    //   - Bands: 5 tiers from src/core/holdBands.js, each with 10 knobs
+    //     (see src/core/autoTimingDefaults.js for the canonical defaults)
+    //   - Confidence: enforce when n ≥ autoTimingMinTradesEnforce,
+    //                 show-only when n ≥ autoTimingMinTradesShow, else ignore
+    //   - Clamp: skip BUY when computed notional < autoTimingMinNotionalFloorUSDT,
+    //            cap at autoTimingMaxNotionalCeilingUSDT
+    //   - License-gated: licenseService.isFeatureEnabled('autoTiming')
+    //   - engine: src/services/autoTiming.js (singleton scheduler, 30-min interval)
+    // ═══════════════════════════════════════════════════════════════════════
+    autoTimingEnabled:           { type: Boolean, default: false },
+    autoTimingLookbackDays:      { type: Number,  default: 30, min: 7, max: 90 },
+    autoTimingRecentDays:        { type: Number,  default: 7,  min: 1, max: 30 },
+    autoTimingRecentWeight:      { type: Number,  default: 1.5, min: 1.0, max: 2.5 },
+    autoTimingNormalWeight:      { type: Number,  default: 1.0, min: 0.5, max: 1.5 },
+    autoTimingSuppressCooldownDays: { type: Number, default: 90, min: 30, max: 365 },
+    autoTimingMinTradesEnforce:  { type: Number,  default: 10, min: 1, max: 100 },
+    autoTimingMinTradesShow:     { type: Number,  default: 3,  min: 1, max: 50 },
+    autoTimingBands:             { type: Object,  default: () => require('../core/autoTimingDefaults').getDefaultBandsClone() },
+    autoTimingMinNotionalFloorUSDT:   { type: Number, default: 10, min: 1 },
+    autoTimingMaxNotionalCeilingUSDT: { type: Number, default: 200, min: 10 },
+    autoTimingLastRunAt:         { type: Date,    default: null },
+    autoTimingLastStats:         { type: Object,  default: null },
+    autoTimingLastError:         { type: String,  default: null },
+
     // ═══════════════════════════════════════════════════════════════════════
     // Phase 4-2026-08-29: Chat System — Operator display name
     //   - Used as identity when posting to admin community room or DM
