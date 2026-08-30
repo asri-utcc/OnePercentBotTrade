@@ -487,8 +487,8 @@ async function triggerAutoTimingSection() {
 // UX-2026-08-30: Heatmap modal — show 7× 24 cells using the same recent-weighted aggregation
 // the classifier consumes. Click button â€‚ fetch /api/auto-timing/cell-matrix and render.
 function buildHeatmapModalOuterHTML() {
-  return '
-    <div class="modal fade" id="at-heatmap-modal" tabindex="-1" aria-hidden="true">â€‚
+  return `
+    <div class="modal fade" id="at-heatmap-modal" tabindex="-1" aria-hidden="true">
       <div class="modal-dialog modal-xl modal-dialog-scrollable">
         <div class="modal-content" style="background:var(--bg-2,#0f1623); color:var(--text-1,#f1f5f9);">
           <div class="modal-header">
@@ -500,7 +500,7 @@ function buildHeatmapModalOuterHTML() {
           </div>
         </div>
       </div>
-    </div>';
+    </div>`;
 }
 
 function buildHeatmapModalBodyHTML(meta, matrix) {
