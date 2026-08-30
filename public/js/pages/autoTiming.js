@@ -520,7 +520,7 @@ function buildHeatmapModalBodyHTML(meta, matrix) {
   const rows = Array.from({ length: 7 }, (_, day) => {
     const cells = Array.from({ length: 24 }, (_, hour) => {
       const cell = (matrix || []).find((c) => c.day === day && c.hour === hour) || null;
-      if (!cell) return '<td class="at-hm-cell at-hm-empty">·</td>';
+      if (!cell) return '<td class="at-hm-cell at-hm-empty">&middot;</td>';
       const m = cell.metrics || {};
       const n = Number(m.n) || 0;
       const wr = Number(m.winRate) || 0;
@@ -531,33 +531,34 @@ function buildHeatmapModalBodyHTML(meta, matrix) {
       const blocked = !!cell.blocked;
       const everBad = cell.tier2EverBadCount || 0;
       const actEmoji = actionBadgeEmoji(action);
-      // Background fill by win rate (only if weighted N ≥ minShow)
-      const fillOpacity = (n >= minShow) ? Math.min(0.55, Math.max(0, (wr - 0.3) * 0.9)) : 0;
-      const fillColor = wr >= 0.6 ? 'green' : wr <= 0.4 ? 'red' : 'gold';
-      const tier2Line = tier2 ? '<div class="at-hm-tier2" title="Tier 2 lock: ever-bad × ' + everBad + '">⛔ T2</div>' : '';
-      const blockLine = blocked ? '<div class="at-hm-block" title="Blocked by Auto-Timing">🚫 block</div>' : '';
+      // WR strip opacity: 0.3..1.0 wr -> 0.20..0.85 opacity; below minShow = faded strip
+      const wrOpacity = (n >= minShow) ? Math.min(0.85, Math.max(0.20, 0.20 + (wr - 0.3) * 1.0)) : 0.10;
+      const wrColor = wr >= 0.6 ? '#00e5b8' : wr <= 0.4 ? '#ff4d6d' : '#f5b800';
+      const tier2Line = tier2 ? '<div class="at-hm-tier2" title="Tier 2 lock: ever-bad \xc3\x97 ' + everBad + '">\xe2\x9b\x94 T2</div>' : '';
+      const blockLine = blocked ? '<div class="at-hm-block" title="Blocked by Auto-Timing">\xf0\x9f\x9a\xab block</div>' : '';
       const safeHour = String(hour).padStart(2, '0');
       const safeDay = dows[day] || day;
       const tipLines = [
         safeDay + ' ' + safeHour + ':00',
         'action: ' + actEmoji + ' ' + action,
-        'band: ' + (cell.bandId || '—'),
+        'band: ' + (cell.bandId || '\xe2\x80\x94'),
         'weighted N: ' + n.toFixed(2) + ' (raw=' + scanned + ' over ' + lookback + 'd)',
         'win rate: ' + (wr * 100).toFixed(1) + '%',
         'pnl: ' + pnl.toFixed(4) + ' USDT',
         'median hold: ' + holdMin.toFixed(1) + ' min',
-        'confidence: ' + (cell.confidence || '—'),
-        tier2 ? 'Tier 2: ever-bad × ' + everBad : '',
-        blocked ? 'BLOCKED — BUY skipped' : '',
+        'confidence: ' + (cell.confidence || '\xe2\x80\x94'),
+        tier2 ? 'Tier 2: ever-bad \xc3\x97 ' + everBad : '',
+        blocked ? 'BLOCKED \xe2\x80\x94 BUY skipped' : '',
       ].filter(Boolean);
       const tip = tipLines.join('\n');
       return '<td class="at-hm-cell at-hm-act-' + action + ' ' + (blocked ? 'at-hm-blocked' : '') + '"' +
-        ' style="background-color:' + fillColor + '; opacity:' + (0.3 + fillOpacity * 0.7) + ';"' +
         ' data-tip="' + escapeHtml(tip) + '"' +
         ' data-band="' + escapeHtml(cell.bandId || '') + '"' +
         ' data-day="' + day + '" data-hour="' + hour + '">' +
+        '<div class="at-hm-wr-strip" style="background-color:' + wrColor + '; opacity:' + wrOpacity + ';"></div>' +
         '<div class="at-hm-act">' + actEmoji + '</div>' +
-        '<div class="at-hm-n">' + (n < minShow ? '·' : n.toFixed(0)) + '</div>' +
+        '<div class="at-hm-n">' + (n < minShow ? '\xc2\xb7' : n.toFixed(0)) + '</div>' +
+        (tier2 ? '<div class="at-hm-wr-pct">WR ' + (wr * 100).toFixed(0) + '%</div>' : '') +
         tier2Line + blockLine +
         '</td>';
     }).join('');
@@ -565,9 +566,9 @@ function buildHeatmapModalBodyHTML(meta, matrix) {
   }).join('');
 
   return '<div class="alert alert-info small py-2 px-3 mb-2">' +
-    '<strong>📐 Aggregation:</strong> weighted N = trades × <code>recentWeight</code>' + recentW + ' for last ' + recent + 'd, then <code>normalWeight</code>' + normalW + ' for days ' + (recent + 1) + '..' + lookback + '.' +
-    '<br />• Use weighted N vs min trades (show=' + minShow + ', enforce=' + minEnf + ') to decide <strong>action</strong> of each cell' +
-    '<br />• Cell color = win rate (green ≥60%, gold 40-60%, red ≤40%, faded = N < ' + minShow + ')' +
+    '<strong>\xf0\x9f\x93\x90 Aggregation:</strong> weighted N = trades \xc3\x97 <code>recentWeight</code>' + recentW + ' for last ' + recent + 'd, then <code>normalWeight</code>' + normalW + ' for days ' + (recent + 1) + '..' + lookback + '.' +
+    '<br />\xe2\x80\xa2 Cell color (top strip) = win rate; left bar = action. Tier-2 cells show WR%%.' +
+    '<br />\xe2\x80\xa2 Hover any cell for full breakdown; click copies summary.' +
     '</div>' +
     '<div class="at-hm-scroll">' +
     '<table class="at-hm-table" id="at-hm-table-body">' +
@@ -576,23 +577,23 @@ function buildHeatmapModalBodyHTML(meta, matrix) {
     '</table></div>' +
     '<div class="at-hm-legend">' +
     '<strong>Action:</strong>' +
-    '<span class="at-hm-legend-pill at-hm-act-allow">✅ allow</span>' +
-    '<span class="at-hm-legend-pill at-hm-act-stimulate">⭐ stimulate</span>' +
-    '<span class="at-hm-legend-pill at-hm-act-encourage">✨ encourage</span>' +
-    '<span class="at-hm-legend-pill at-hm-act-limit">⚠️ limit</span>' +
-    '<span class="at-hm-legend-pill at-hm-act-suppress">🚫 suppress</span>' +
-    '<span class="ms-3"><strong>WinRate fill:</strong></span>' +
-    '<span class="at-hm-legend-fill" style="background-color:green; opacity:0.55;">≥60%</span>' +
-    '<span class="at-hm-legend-fill" style="background-color:gold; opacity:0.55;">40–60%</span>' +
-    '<span class="at-hm-legend-fill" style="background-color:red; opacity:0.55;">≤40%</span>' +
-    '<span class="at-hm-legend-pill ms-3 at-hm-tier2">⛔ T2 = Tier 2 lock (ever-bad ≥ 10)</span>' +
-    '<span class="at-hm-legend-pill at-hm-block">🚫 block</span>' +
+    '<span class="at-hm-legend-pill at-hm-act-allow">\xe2\x9c\x85 allow</span>' +
+    '<span class="at-hm-legend-pill at-hm-act-stimulate">\xe2\xad\x90 stimulate</span>' +
+    '<span class="at-hm-legend-pill at-hm-act-encourage">\xe2\x9c\xa8 encourage</span>' +
+    '<span class="at-hm-legend-pill at-hm-act-limit">\xe2\x9a\xa0\xef\xb8\x8f limit</span>' +
+    '<span class="at-hm-legend-pill at-hm-act-suppress">\xf0\x9f\x9a\xab suppress</span>' +
+    '<span class="ms-3"><strong>WR strip:</strong></span>' +
+    '<span class="at-hm-legend-fill" style="background-color:#00e5b8;">\xe2\x89\xa560%</span>' +
+    '<span class="at-hm-legend-fill" style="background-color:#f5b800;">40\xe2\x80\x9360%</span>' +
+    '<span class="at-hm-legend-fill" style="background-color:#ff4d6d;">\xe2\x89\xa440%</span>' +
+    '<span class="at-hm-legend-pill ms-3 at-hm-tier2">\xe2\x9b\x94 T2 = Tier 2 lock (ever-bad \xe2\x89\xa5 10)</span>' +
+    '<span class="at-hm-legend-pill at-hm-block">\xf0\x9f\x9a\xab block</span>' +
     '</div>' +
     '<div class="text-muted small mt-2">' +
-    'ℹ Table uses <em>only</em> current weight values from master config + per-license gating; not raw 30d heatmap.' +
-    ' Change <code>autoTimingRecentWeight</code> / <code>autoTimingRecentDays</code> then Run now → cell distribution updates immediately.' +
+    '\xe2\x84\xb9 Table uses current weight values from master config + per-license gating. Change <code>autoTimingRecentWeight</code> / <code>autoTimingRecentDays</code> then Run now \xe2\x86\x92 cell distribution updates immediately.' +
     '</div>';
 }
+
 
 let _atHmModalInstance = null;
 async function openHeatmapModal() {
@@ -774,6 +775,7 @@ window.AutoTimingUI = {
   save: saveAutoTimingSection,
   trigger: triggerAutoTimingSection,
   resetBands: resetAutoTimingBandsToDefaults,
+  openHeatmapModal: openHeatmapModal, // FIX-2026-08-30 UX-5: shared with chart-monitor.html
   loadConfig: async function () {
     try {
       const r = await API.get('/api/auto-timing/config');

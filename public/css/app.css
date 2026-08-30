@@ -428,7 +428,7 @@ a:hover { color: var(--gold-2); text-decoration: none; }
 .at-hm-table {
   min-width: 1100px;
   border-collapse: separate;
-  border-spacing: 1px;
+  border-spacing: 2px;
   width: 100%;
   margin-bottom: 0;
 }
@@ -454,52 +454,73 @@ a:hover { color: var(--gold-2); text-decoration: none; }
 }
 .at-hm-table tbody td.at-hm-cell {
   position: relative;
-  height: 38px;
-  padding: 2px 1px;
+  height: 46px;
+  min-width: 38px;
+  padding: 4px 2px 3px;
   font-size: 0.7rem;
   text-align: center;
   vertical-align: middle;
-  border: 1px solid rgba(255,255,255,0.04);
+  border: 1px solid rgba(255,255,255,0.06);
   cursor: help;
   user-select: none;
-  background-color: rgba(0,0,0,0.18);
-  /* fill from --at-hm-opacity (set inline as win-rate fill) */
-  background-blend-mode: normal;
-}
-.at-hm-table tbody td.at-hm-cell[style*="--at-hm-opacity:0"] {
-  opacity: 1;
+  /* FIX-2026-08-30 UX-5 readability fix: neutral dark base, NOT red bg */
+  background-color: rgba(255,255,255,0.03);
+  overflow: hidden;
 }
 .at-hm-table tbody td.at-hm-cell.at-hm-empty {
-  background-color: rgba(255,255,255,0.02);
+  background-color: rgba(255,255,255,0.015);
   color: var(--text-4, #475569);
 }
 .at-hm-table tbody td.at-hm-cell:hover {
-  outline: 2px solid rgba(96,165,250,0.6);
+  outline: 2px solid rgba(96,165,250,0.7);
   outline-offset: -2px;
   z-index: 4;
+  background-color: rgba(255,255,255,0.06);
 }
-.at-hm-table tbody td.at-hm-cell .at-hm-act { font-size: 0.85rem; line-height: 1; }
+.at-hm-table tbody td.at-hm-cell .at-hm-wr-strip {
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  height: 4px;
+  pointer-events: none;
+  border-top-left-radius: 2px;
+  border-top-right-radius: 2px;
+}
+.at-hm-table tbody td.at-hm-cell .at-hm-act {
+  font-size: 1.05rem;
+  line-height: 1;
+  margin-top: 4px;
+  filter: drop-shadow(0 1px 2px rgba(0,0,0,0.55));
+}
 .at-hm-table tbody td.at-hm-cell .at-hm-n {
   font-family: var(--font-mono);
-  font-size: 0.62rem;
-  color: var(--text-2, #cbd5e1);
+  font-size: 0.72rem;
+  color: rgba(255,255,255,0.92);
+  font-weight: 600;
   margin-top: 1px;
+}
+.at-hm-table tbody td.at-hm-cell .at-hm-wr-pct {
+  font-family: var(--font-mono);
+  font-size: 0.55rem;
+  color: rgba(255,255,255,0.65);
+  margin-top: 1px;
+  letter-spacing: 0.02em;
 }
 .at-hm-table tbody td.at-hm-cell .at-hm-tier2,
 .at-hm-table tbody td.at-hm-cell .at-hm-block {
   font-size: 0.55rem;
   font-weight: 700;
   margin-top: 1px;
+  letter-spacing: 0.02em;
 }
 .at-hm-table tbody td.at-hm-cell .at-hm-tier2 { color: #ff4d6d; }
 .at-hm-table tbody td.at-hm-cell .at-hm-block { color: #fb923c; }
-/* Action-tinted cell borders (left edge) */
-.at-hm-table tbody td.at-hm-act-allow      { box-shadow: inset 4px 0 0 #00e5b8; }
-.at-hm-table tbody td.at-hm-act-stimulate  { box-shadow: inset 4px 0 0 #60a5fa; }
-.at-hm-table tbody td.at-hm-act-encourage  { box-shadow: inset 4px 0 0 #22d3ee; }
-.at-hm-table tbody td.at-hm-act-limit      { box-shadow: inset 4px 0 0 #fb923c; }
-.at-hm-table tbody td.at-hm-act-suppress   { box-shadow: inset 4px 0 0 #ff4d6d; background-color: rgba(255,77,109,0.10); }
-.at-hm-table tbody td.at-hm-blocked        { outline: 1px dashed #ff4d6d; outline-offset: -2px; }
+/* Action-tinted left edge (4px) — uses box-shadow so it doesn't fight cell bg */
+.at-hm-table tbody td.at-hm-cell.at-hm-act-allow      { box-shadow: inset 4px 0 0 0 #00e5b8; }
+.at-hm-table tbody td.at-hm-cell.at-hm-act-stimulate  { box-shadow: inset 4px 0 0 0 #60a5fa; }
+.at-hm-table tbody td.at-hm-cell.at-hm-act-encourage  { box-shadow: inset 4px 0 0 0 #22d3ee; }
+.at-hm-table tbody td.at-hm-cell.at-hm-act-limit      { box-shadow: inset 4px 0 0 0 #fb923c; }
+.at-hm-table tbody td.at-hm-cell.at-hm-act-suppress   { box-shadow: inset 4px 0 0 0 #ff4d6d; }
+.at-hm-table tbody td.at-hm-cell.at-hm-blocked        { outline: 1.5px dashed #ff4d6d; outline-offset: -2px; }
 
 .at-hm-legend {
   margin-top: 0.75rem;
@@ -516,8 +537,8 @@ a:hover { color: var(--gold-2); text-decoration: none; }
 }
 .at-hm-legend-fill {
   display: inline-block;
-  width: 20px; height: 14px;
-  border-radius: 3px;
+  width: 22px; height: 6px;
+  border-radius: 2px;
   vertical-align: middle;
   margin-right: 4px;
 }

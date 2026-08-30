@@ -671,6 +671,7 @@
         <!-- FIX-2026-08-23: Master Config (mirror bots.html) — bulk-edit many bots at once -->
         <button class="btn btn-outline-primary btn-sm" id="btn-cm-master-config" type="button"
           title="ตั้งค่าหลายบอทพร้อมกัน (clobber mode)">⚙️ Master Config</button>
+        <button class="btn btn-outline-info btn-sm" id="btn-heatmap-cm" type="button" title="Auto-Timing Heatmap - cells classified by recent-weighted win rate">🗺 Heatmap</button>
         <button class="btn btn-primary btn-sm" id="cm-refresh-btn" type="button">🔄 Refresh</button>
       </div>
     </div>
@@ -885,6 +886,19 @@
   <!-- FIX-2026-08-23: Master Config modal (same partial as bots.html) -->
   <script src="/js/botConfigIO.js"></script>
   <script src="/js/partials/masterConfigModal.js"></script>
+  <!-- FIX-2026-08-30 UX-5: Auto-Timing Heatmap modal (shared with settings.html) -->
+  <script src="/js/pages/autoTiming.js?v=2026-08-30-ux5-fix3"></script>
+  <script>
+    document.addEventListener('DOMContentLoaded', function () {
+      var btn = document.getElementById('btn-heatmap-cm');
+      if (btn && window.AutoTimingUI && typeof window.AutoTimingUI.openHeatmapModal === 'function') {
+        btn.onclick = window.AutoTimingUI.openHeatmapModal;
+      } else if (btn) {
+        btn.disabled = true;
+        btn.title = 'Heatmap unavailable (script failed to load)';
+      }
+    });
+  </script>
   <script src="/js/pages/chart-monitor.js?v=2026-08-30-fix1"></script>
 </body>
 </html>
