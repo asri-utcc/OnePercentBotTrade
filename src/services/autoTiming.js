@@ -419,6 +419,35 @@ class AutoTiming {
       maxCeilingUSDT: this._config.maxCeilingUSDT,
     }, { openFromCell, tradesFromCellToday });
 
+    // FIX-2026-08-30 / Phase 4: emit suppressHit event with anti-spam latch 1/bot/day/cell
+    if (decision.blocked) {
+      const latchKey = `${bot._id || bot.id}:${bucket.day}:${bucket.hour}`;
+      const todayKey = new Date(msOf(now)).toISOString().slice(0, 10); // YYYY-MM-DD
+      const fullKey = `${latchKey}:${todayKey}`;
+      if (!this._autoTimingSuppressLatched || !this._autoTimingSuppressLatched.has(fullKey)) {
+        if (!this._autoTimingSuppressLatched) this._autoTimingSuppressLatched = new Set();
+        this._autoTimingSuppressLatched.add(fullKey);
+        // Reset memory lazily: cap size to 5000 entries (TTL-ish protection)
+        if (this._autoTimingSuppressLatched.size > 5000) {
+          const arr = [...this._autoTimingSuppressLatched];
+          this._autoTimingSuppressLatched = new Set(arr.slice(-2500));
+        }
+        try {
+          eventBus.emit('autoTiming:suppressHit', {
+            botId: String(bot._id || bot.id),
+            botName: bot.name || null,
+            symbol: bot.symbol || null,
+            timeframe: bot.timeframe || null,
+            day: bucket.day,
+            hour: bucket.hour,
+            action: decision.effectiveAction || 'suppress',
+            reason: decision.reason || decision.skipReason || 'cell_suppressed',
+            holdBand: decision.bandId || null,
+          });
+        } catch (_) { /* ignore */ }
+      }
+    }
+
     // Telemetry: persist last decision + log append
     try {
       await Bot.updateOne({ _id: bot._id }, {

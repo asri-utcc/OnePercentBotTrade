@@ -87,6 +87,11 @@ const DEFAULT_EVENTS = {
   //   ก่อนหน้านี้ silent log → user ไม่รู้จนกว่าจะสังเกตเห็น "10 positions vs 9 open orders" ใน UI
   //   ตอนนี้ส่ง telegram alert ทันที + latch ใน DB (orphanLatchedAt) กัน spam ทุก 5 นาที
   orphanBuyFilled: true,
+  // FIX-2026-08-30 / Phase 4: Auto-Timing (heatmap-driven entry gate) — premium feature, default OFF
+  //   - autoTimingWeeklySummary: สรุป actions + tier-2 promotions + suppress hits รายสัปดาห์ (Mon 00:05)
+  //   - autoTimingSuppressHit: แจ้งเมื่อ trader ข้าม BUY เพราะ Suppress cell (latch 1/bot/day)
+  autoTimingWeeklySummary: false,
+  autoTimingSuppressHit: false,
 };
 const DEFAULT_THRESHOLDS = {
   positionLossPct: 2, positionProfitPct: 1, positionStuckMin: 30,
@@ -194,7 +199,7 @@ let configLoadedAt = 0;
 let bound = false;
 // FIX-2026-07-26: last sent timestamp ต่อ period (กันส่งซ้ำในรอบ tick เดียวกัน)
 //   - daily: 'YYYY-MM-DD', weekly: 'YYYY-Www', monthly: 'YYYY-MM'
-const lastSummarySent = { day: null, week: null, month: null };
+const lastSummarySent = { day: null, week: null, month: null, autoTimingWeek: null };
 
 // ─── Config loader ────────────────────────────────────
 async function loadConfig(force = false) {
@@ -706,6 +711,11 @@ function renderMessage(eventKey, p, cfg) {
       case 'weeklySummary':
       case 'monthlySummary':
         return renderSummaryMessage(eventKey, p, cfg);
+      // FIX-2026-08-30 / Phase 4: Auto-Timing events
+      case 'autoTimingWeeklySummary':
+        return renderAutoTimingWeeklySummary(p);
+      case 'autoTimingSuppressHit':
+        return renderAutoTimingSuppressHit(p);
       default:
         logger.warn({ eventKey }, 'telegramNotifier: unknown event key (renderMessage skipped)');
         return null;
@@ -744,6 +754,44 @@ function renderSummaryMessage(eventKey, p, cfg) {
     `Trades: ${p.trades} (wins=${p.wins}, losses=${p.losses}, win rate=${winRate}%)\n` +
     `P&L: ${sign}${p.pnlUsdt.toFixed(4)} USDT${thbLine}\n` +
     `ต่อบอท:\n${perBotLines}${moreLine}`;
+}
+
+// FIX-2026-08-30 / Phase 4: Auto-Timing render helpers
+function renderAutoTimingSuppressHit(p) {
+  // p = { botName, symbol, timeframe, day, hour, action, reason, holdBand }
+  const dows = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  const dow = dows[p.day] || ('D' + p.day);
+  const tf = p.timeframe || '?';
+  const reason = p.reason || 'suppressed';
+  const action = p.action || 'suppress';
+  const band = p.holdBand || '';
+  return `⏱ Auto-Timing Suppress\n` +
+    `Bot: ${p.botName}\n` +
+    `Symbol: ${p.symbol} (${tf})\n` +
+    `Slot: ${dow} ${String(p.hour).padStart(2, '0')}:00\n` +
+    `Action: ${action}${band ? ' · band=' + band : ''}\n` +
+    `Reason: ${reason}`;
+}
+
+function renderAutoTimingWeeklySummary(p) {
+  // p = { rangeLabel, totalDecisions, byAction: { suppress, limit, encourage, stimulate, allow },
+  //       tier2Promotions, suppressedHits, suppressedBotNames }
+  const a = p.byAction || {};
+  const byActLine = [
+    a.suppress ? `🚫 Suppress ${a.suppress}` : null,
+    a.limit ? `⚠️ Limit ${a.limit}` : null,
+    a.stimulate ? `⭐ Stimulate ${a.stimulate}` : null,
+    a.encourage ? `✨ Encourage ${a.encourage}` : null,
+    a.allow ? `✅ Allow ${a.allow}` : null,
+  ].filter(Boolean).join(' · ');
+  const tier2 = p.tier2Promotions != null ? p.tier2Promotions : 0;
+  const suppressedHits = p.suppressedHits != null ? p.suppressedHits : 0;
+  const suppressedNames = (p.suppressedBotNames && p.suppressedBotNames.length > 0)
+    ? `\nSuppressed: ${p.suppressedBotNames.slice(0, 5).join(', ')}${p.suppressedBotNames.length > 5 ? ` (+${p.suppressedBotNames.length - 5} more)` : ''}` : '';
+  return `⏱ Auto-Timing Weekly Summary (${p.rangeLabel || 'this week'})\n` +
+    `Decisions: ${p.totalDecisions != null ? p.totalDecisions : 0} (${byActLine || 'n/a'})\n` +
+    `Tier 2 promotions: ${tier2}\n` +
+    `Suppressed hits: ${suppressedHits}${suppressedNames}`;
 }
 
 function formatQty(q) {
@@ -1308,6 +1356,28 @@ function bindEventHandlers() {
       logger.warn({ err: err.message }, 'telegramNotifier: autoAddBot:restored handler error');
     }
   });
+
+  // FIX-2026-08-30 / Phase 4: Auto-Timing Suppress Hit
+  //   - emitted from services/autoTiming.decideForBot() latched at 1/bot/day per cell
+  //   - p = { botId, botName, symbol, timeframe, day, hour, action, reason, holdBand }
+  eventBus.on('autoTiming:suppressHit', async (p) => {
+    try {
+      if (!p || !p.botId) return;
+      await dispatch('autoTimingSuppressHit', {
+        botId: p.botId,
+        botName: p.botName,
+        symbol: p.symbol,
+        timeframe: p.timeframe,
+        day: p.day,
+        hour: p.hour,
+        action: p.action || 'suppress',
+        reason: p.reason || 'cell_suppressed',
+        holdBand: p.holdBand,
+      });
+    } catch (err) {
+      logger.warn({ err: err.message }, 'telegramNotifier: autoTiming:suppressHit handler error');
+    }
+  });
 }
 
 // ─── Periodic scan (PnL threshold + stuck duration) ───
@@ -1532,6 +1602,50 @@ async function scanAndDispatchSummaries() {
         lastSummarySent.month = prevMonthKey;
       } catch (err) {
         logger.warn({ err: err.message }, 'telegramNotifier: monthlySummary failed');
+      }
+    }
+  }
+
+  // ─── Auto-Timing Weekly Summary (FIX-2026-08-30 / Phase 4) ───
+  //   - ใช้ AutoTimingLog 7 วันล่าสุด (Mon 00:00 → Sun 24:00) — ส่งพร้อม weeklySummary
+  //   - รวม byAction + tier2Promotions + suppressedHits + top suppressed bot names
+  if (cfg.events.autoTimingWeeklySummary && lastSummarySent.autoTimingWeek !== weekKey) {
+    if (now.getDay() === 1 && now.getHours() === 0 && now.getMinutes() >= 5) {
+      try {
+        const AutoTimingLog = require('../db/models/AutoTimingLog');
+        const Bot = require('../db/models/Bot');
+        const endDate = startOfLocalDay(now);
+        const startDate = new Date(endDate.getTime() - 7 * 24 * 60 * 60 * 1000);
+        const logs = await AutoTimingLog.find({
+          ts: { $gte: startDate, $lt: endDate },
+        }).select({ action: 1, blocked: 1, botId: 1 }).lean();
+        const byAction = { suppress: 0, limit: 0, encourage: 0, stimulate: 0, allow: 0 };
+        let suppressedHits = 0;
+        const suppressedBotIds = new Set();
+        for (const r of (logs || [])) {
+          if (byAction[r.action] != null) byAction[r.action] += 1;
+          if (r.blocked && r.action === 'suppress') {
+            suppressedHits += 1;
+            if (r.botId) suppressedBotIds.add(String(r.botId));
+          }
+        }
+        // lookup bot names (capped 100)
+        const botIdArr = [...suppressedBotIds].slice(0, 100);
+        const bots = botIdArr.length > 0
+          ? await Bot.find({ _id: { $in: botIdArr } }).select({ name: 1 }).lean()
+          : [];
+        const suppressedBotNames = bots.map((b) => b.name).filter(Boolean);
+        await dispatch('autoTimingWeeklySummary', {
+          rangeLabel: weekKey,
+          totalDecisions: (logs || []).length,
+          byAction,
+          tier2Promotions: 0, // tracked via autoTimingLastStats — not joined here for simplicity
+          suppressedHits,
+          suppressedBotNames,
+        });
+        lastSummarySent.autoTimingWeek = weekKey;
+      } catch (err) {
+        logger.warn({ err: err.message }, 'telegramNotifier: autoTimingWeeklySummary failed');
       }
     }
   }
