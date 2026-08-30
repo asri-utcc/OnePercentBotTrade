@@ -319,6 +319,19 @@ class AutoTiming {
       };
       await this._persistSchedulerTelemetry(stats, null);
       try { eventBus.emit('autoTiming:applied', stats); } catch (_) { /* ignore */ }
+      // FIX-2026-08-30 / Phase 4: dashboard tile ping — emitted right after every runOnce so the
+      //   navbar pill refreshes today's decision tally via GET /api/auto-timing/recent-decisions.
+      try {
+        eventBus.emit('autoTiming:update', {
+          ts: Date.now(),
+          source,
+          ranAt: stats.ranAt,
+          enabled: !!(this._config && this._config.enabled),
+          cellsEvaluated,
+          tier2Promotions,
+          tradesScanned: trades.length,
+        });
+      } catch (_) { /* ignore */ }
       logger.info({ stats }, 'autoTiming: tick done');
       return { ok: true, ...stats };
     } catch (err) {

@@ -327,6 +327,96 @@ a:hover { color: var(--gold-2); text-decoration: none; }
 .rl-tag-warn { background: rgba(245,184,0,0.14); color: var(--gold-1, #f5b800); }
 .rl-tag-bad  { background: rgba(255,77,109,0.16); color: var(--bear-1, #ff4d6d); }
 
+/* FIX-2026-08-30 / Phase 4: Auto-Timing tile — navbar pill + popover */
+.app-nav .nav-auto-timing {
+  display: inline-flex; align-items: center; gap: 0.4rem;
+  padding: 0.3rem 0.7rem;
+  border-radius: 999px;
+  background: rgba(255,255,255,0.04);
+  border: 1px solid rgba(255,255,255,0.08);
+  font-family: var(--font-mono);
+  font-size: 0.78rem; font-weight: 600;
+  cursor: pointer; user-select: none;
+  transition: background 0.2s, border-color 0.2s;
+}
+.app-nav .nav-auto-timing:hover { background: rgba(255,255,255,0.08); }
+.app-nav .nav-auto-timing .at-glyph { font-size: 0.95rem; line-height: 1; }
+.app-nav .nav-auto-timing .at-summary {
+  display: inline-flex; gap: 0.4rem; align-items: center;
+}
+.app-nav .nav-auto-timing .at-summary span { line-height: 1; }
+.app-nav .nav-auto-timing.zone-idle {
+  background: rgba(148,163,184,0.10); color: #94a3b8;
+}
+.app-nav .nav-auto-timing.zone-live {
+  background: rgba(0,229,184,0.10); color: #00e5b8;
+  border-color: rgba(0,229,184,0.35);
+}
+.app-nav .nav-auto-timing.zone-warm {
+  background: rgba(251,146,60,0.10); color: #fb923c;
+  border-color: rgba(251,146,60,0.35);
+}
+.app-nav .nav-auto-timing.zone-danger {
+  background: rgba(255,77,109,0.10); color: #ff4d6d;
+  border-color: rgba(255,77,109,0.40);
+}
+.app-nav .nav-auto-timing .seg-red    { color: #ff4d6d; }
+.app-nav .nav-auto-timing .seg-orange { color: #fb923c; }
+.app-nav .nav-auto-timing .seg-blue   { color: #60a5fa; }
+.app-nav .nav-auto-timing .seg-cyan   { color: #22d3ee; }
+.app-nav .nav-auto-timing .seg-green  { color: #00e5b8; }
+@media (max-width: 575.98px) {
+  .app-nav .nav-auto-timing { display: none; }
+}
+
+.at-popover {
+  position: absolute;
+  z-index: 1100;
+  min-width: 240px; max-width: 320px;
+  background: var(--bg-2, #0f1623);
+  border: 1px solid var(--border-1, rgba(255,255,255,0.08));
+  border-radius: 12px;
+  padding: 0.85rem 1rem;
+  box-shadow: 0 10px 30px rgba(0,0,0,0.45);
+  font-size: 0.85rem;
+  color: var(--text-2, #cbd5e1);
+  font-family: var(--font-sans, system-ui, sans-serif);
+}
+.at-pop-header {
+  display: flex; align-items: center; gap: 0.5rem;
+  margin-bottom: 0.55rem;
+  color: var(--text-1, #f1f5f9);
+  font-size: 0.95rem;
+}
+.at-pop-glyph { font-size: 1.05rem; }
+.at-pop-row {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 0.28rem 0;
+  border-top: 1px solid rgba(255,255,255,0.04);
+}
+.at-pop-row:first-of-type { border-top: none; }
+.at-pop-row > span:first-child { color: var(--text-3, #94a3b8); }
+.at-pop-row .val { color: var(--text-1, #f1f5f9); font-family: var(--font-mono); font-size: 0.82rem; }
+.at-pop-row .val-red    { color: #ff4d6d; }
+.at-pop-row .val-orange { color: #fb923c; }
+.at-pop-row .val-blue   { color: #60a5fa; }
+.at-pop-row .val-cyan   { color: #22d3ee; }
+.at-pop-row .val-green  { color: #00e5b8; }
+.at-pop-hr { margin: 0.4rem 0 0.6rem; border-color: rgba(255,255,255,0.06); }
+.at-pop-link {
+  display: block; margin-top: 0.7rem; padding: 0.5rem 0.6rem;
+  border-radius: 8px; text-decoration: none; text-align: center;
+  background: rgba(245,184,0,0.08);
+  color: var(--gold-1, #f5b800);
+  border: 1px solid rgba(245,184,0,0.30);
+  font-weight: 600;
+  transition: background 0.2s, border-color 0.2s;
+}
+.at-pop-link:hover {
+  background: rgba(245,184,0,0.15);
+  border-color: rgba(245,184,0,0.45);
+}
+
 /* FIX-2026-08-20: secondary "🛡 N USDT" pill — sits next to the main balance
    pill only when reserve > 0. Hidden otherwise. */
 .app-nav .balance-reserve-pill {
