@@ -338,6 +338,7 @@ function renderAutoTimingSection() {
       <button type="button" class="btn btn-primary" id="btn-save-at">💾 บันทึก Auto-Timing</button>
       <button type="button" class="btn btn-outline-warning ms-2" id="btn-trigger-at">🖐 Run now</button>
       <button type="button" class="btn btn-outline-secondary ms-2" id="btn-reset-all-at">↺ Reset bands → defaults</button>
+      <button type="button" class="btn btn-outline-info ms-2" id="btn-heatmap-at">🗺 Heatmap</button>
       <span class="ms-2 text-muted small" id="at-status"></span>
     </div>
 
@@ -483,6 +484,181 @@ async function triggerAutoTimingSection() {
   }
 }
 
+// UX-2026-08-30: Heatmap modal — show 7×24 cells using the same recent-weighted aggregation
+// the classifier consumes. Click button → fetch /api/auto-timing/cell-matrix and render.
+function buildHeatmapModalHTML(meta, matrix) {
+  const dows = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  const lookback = (meta && meta.lookbackDays) || 30;
+  const recent = (meta && meta.recentDays) || 7;
+  const recentW = (meta && meta.recentWeight) || 1.5;
+  const normalW = (meta && meta.normalWeight) || 1.0;
+  const scanned = (meta && meta.tradesScanned) || 0;
+  const minEnf = (meta && meta.minTradesEnforce) || 10;
+  const minShow = (meta && meta.minTradesShow) || 3;
+
+  // Build header row (hours 0..23)
+  const hourHeaders = '<th class="at-hm-corner">day\\h</th>' +
+    Array.from({ length: 24 }, (_, h) => `<th class="at-hm-hour">${String(h).padStart(2, '0')}</th>`).join('');
+  // Build 7 day rows
+  const rows = Array.from({ length: 7 }, (_, day) => {
+    const cells = Array.from({ length: 24 }, (_, hour) => {
+      const cell = (matrix || []).find((c) => c.day === day && c.hour === hour) || null;
+      if (!cell) return '<td class="at-hm-cell at-hm-empty">·</td>';
+      const m = cell.metrics || {};
+      const n = Number(m.n) || 0;
+      const wr = Number(m.winRate) || 0;
+      const pnl = Number(m.pnlUSDT) || 0;
+      const holdMin = Number(m.medianHoldMin) || 0;
+      const action = cell.action || 'allow';
+      const tier2 = !!cell.tier2Hit;
+      const blocked = !!cell.blocked;
+      const everBad = cell.tier2EverBadCount || 0;
+      const actEmoji = actionBadgeEmoji(action);
+      // Background fill by win rate (only if weighted N ≥ minShow)
+      const fillOpacity = (n >= minShow) ? Math.min(0.55, Math.max(0, (wr - 0.3) * 0.9)) : 0;
+      const fillColor = wr >= 0.6 ? 'green' : wr <= 0.4 ? 'red' : 'gold';
+      const tier2Line = tier2 ? `<div class="at-hm-tier2" title="Tier 2 lock: ever-bad × ${everBad}">⛔ T2</div>` : '';
+      const blockLine = blocked ? '<div class="at-hm-block" title="Blocked by Auto-Timing">🚫 block</div>' : '';
+      const safeHour = String(hour).padStart(2, '0');
+      const safeDay = dows[day] || day;
+      const tipLines = [
+        `${safeDay} ${safeHour}:00`,
+        `action: ${actEmoji} ${action}`,
+        `band: ${cell.bandId || '—'}`,
+        `weighted N: ${n.toFixed(2)} (raw=${scanned} over ${lookback}d)`,
+        `win rate: ${(wr * 100).toFixed(1)}%`,
+        `pnl: ${pnl.toFixed(4)} USDT`,
+        `median hold: ${holdMin.toFixed(1)} min`,
+        `confidence: ${cell.confidence || '—'}`,
+        tier2 ? `Tier 2: ever-bad × ${everBad}` : '',
+        blocked ? 'BLOCKED — BUY skipped' : '',
+      ].filter(Boolean);
+      const tip = tipLines.join('\n');
+      return `
+        <td class="at-hm-cell at-hm-act-${action} ${blocked ? 'at-hm-blocked' : ''}"
+            style="background:${fillColor}; --at-hm-opacity:${fillOpacity};"
+            data-tip="${escapeHtml(tip)}"
+            data-band="${escapeHtml(cell.bandId || '')}"
+            data-day="${day}" data-hour="${hour}">
+          <div class="at-hm-act">${actEmoji}</div>
+          <div class="at-hm-n">${n < minShow ? '·' : n.toFixed(0)}</div>
+          ${tier2Line}${blockLine}
+        </td>`;
+    }).join('');
+    return `<tr><th class="at-hm-dow">${dows[day]}</th>${cells}</tr>`;
+  }).join('');
+
+  return `
+    <div class="modal fade" id="at-heatmap-modal" tabindex="-1" aria-hidden="true">
+      <div class="modal-dialog modal-xl modal-dialog-scrollable">
+        <div class="modal-content" style="background:var(--bg-2,#0f1623); color:var(--text-1,#f1f5f9);">
+          <div class="modal-header">
+            <h5 class="modal-title">🗺 Auto-Timing Heatmap (recent-weighted)</h5>
+            <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+          </div>
+          <div class="modal-body">
+            <div class="alert alert-info small py-2 px-3 mb-2">
+              <strong>📐 Aggregation:</strong> weighted N = trades × <code>recentWeight</code>${recentW} for last ${recent}d, then <code>normalWeight</code>${normalW} for days ${recent+1}..${lookback}.
+              <br />• ใช้ค่า weighted N เทียบกับ min trades (show=${minShow}, enforce=${minEnf}) เพื่อตัดสิน <strong>action</strong> ของแต่ละ cell
+              <br />• สี cell = win rate ของ cell นั้น (เขียว ≥60%, ทอง 40-60%, แดง ≤40%, จาง = N &lt; ${minShow})
+            </div>
+            <div class="at-hm-scroll">
+              <table class="at-hm-table" id="at-hm-table-body">
+                <thead><tr>${hourHeaders}</tr></thead>
+                <tbody>${rows}</tbody>
+              </table>
+            </div>
+            <div class="at-hm-legend">
+              <strong>Action:</strong>
+              <span class="at-hm-legend-pill at-hm-act-allow">✅ allow</span>
+              <span class="at-hm-legend-pill at-hm-act-stimulate">⭐ stimulate</span>
+              <span class="at-hm-legend-pill at-hm-act-encourage">✨ encourage</span>
+              <span class="at-hm-legend-pill at-hm-act-limit">⚠️ limit</span>
+              <span class="at-hm-legend-pill at-hm-act-suppress">🚫 suppress</span>
+              <span class="ms-3"><strong>WinRate fill:</strong></span>
+              <span class="at-hm-legend-fill" style="background:green; opacity:0.55;">≥60%</span>
+              <span class="at-hm-legend-fill" style="background:gold; opacity:0.55;">40–60%</span>
+              <span class="at-hm-legend-fill" style="background:red; opacity:0.55;">≤40%</span>
+              <span class="at-hm-legend-pill ms-3 at-hm-tier2">⛔ T2 = Tier 2 lock (ever-bad ≥ 10)</span>
+              <span class="at-hm-legend-pill at-hm-block">🚫 block</span>
+            </div>
+            <div class="text-muted small mt-2">
+              ℹ️ ตารางนี้ใช้ <em>เฉพาะ</em> ค่า weight ปัจจุบันจาก master config + per-license gating; ไม่ใช่ raw 30d heatmap แบบเดิม
+              — การเปลี่ยน <code>autoTimingRecentWeight</code> / <code>autoTimingRecentDays</code> แล้วกด Run now → cell distribution จะเปลี่ยนทันที
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>`;
+}
+
+let _atHmModalInstance = null;
+async function openHeatmapModal() {
+  let m = document.getElementById('at-heatmap-modal');
+  if (!m) {
+    const wrapper = document.createElement('div');
+    wrapper.innerHTML = buildHeatmapModalHTML({}, []);
+    document.body.appendChild(wrapper);
+    m = document.getElementById('at-heatmap-modal');
+    const closeBtn = m.querySelector('[data-bs-dismiss="modal"]');
+    if (closeBtn) closeBtn.addEventListener('click', () => m.style.display = 'none');
+    m.addEventListener('click', (e) => { if (e.target === m) m.style.display = 'none'; });
+  }
+  // Loading state
+  m.querySelector('.modal-body').innerHTML = '<div class="text-center py-5"><div class="spinner-border text-info" role="status"></div><div class="mt-2 text-muted">⏳ กำลังโหลด cell-matrix...</div></div>';
+  m.style.display = 'block';
+  m.classList.add('show');
+  document.body.classList.add('modal-open');
+  try {
+    const resp = await API.get('/api/auto-timing/cell-matrix');
+    if (!resp || !resp.ok) {
+      m.querySelector('.modal-body').innerHTML = `<div class="alert alert-warning">⚠️ Auto-Timing master ปิดอยู่ — เปิด toggle แล้วลองใหม่ (reason: ${resp && resp.reason})</div>`;
+      return;
+    }
+    m.innerHTML = buildHeatmapModalHTML(resp.meta || {}, resp.matrix || []).match(/<div class="modal-dialog[\s\S]*<\/div><\/div><\/div>/)[0];
+    m.querySelector('.modal-header h5').innerHTML = '🗺 Auto-Timing Heatmap (recent-weighted)';
+    // close on backdrop / close btn
+    const closeBtn = m.querySelector('[data-bs-dismiss="modal"]');
+    if (closeBtn) closeBtn.addEventListener('click', () => m.style.display = 'none');
+    m.addEventListener('click', (e) => { if (e.target === m) m.style.display = 'none'; });
+    // hover tooltip via a single floating div
+    installHeatmapTip();
+  } catch (err) {
+    m.querySelector('.modal-body').innerHTML = `<div class="alert alert-danger">❌ ${escapeHtml(err.message || 'load failed')}</div>`;
+  }
+}
+
+function installHeatmapTip() {
+  const tipElOld = document.getElementById('at-hm-tip');
+  if (tipElOld) tipElOld.remove();
+  const tip = document.createElement('div');
+  tip.id = 'at-hm-tip';
+  tip.className = 'at-hm-tip';
+  document.body.appendChild(tip);
+  document.querySelectorAll('.at-hm-cell').forEach((td) => {
+    td.addEventListener('mouseenter', () => {
+      tip.textContent = td.getAttribute('data-tip') || '';
+      tip.style.display = 'block';
+    });
+    td.addEventListener('mousemove', (e) => {
+      tip.style.left = (e.clientX + 12) + 'px';
+      tip.style.top = (e.clientY + 12) + 'px';
+    });
+    td.addEventListener('mouseleave', () => { tip.style.display = 'none'; });
+    td.addEventListener('click', () => {
+      const day = td.getAttribute('data-day');
+      const hour = td.getAttribute('data-hour');
+      const summary = (td.getAttribute('data-tip') || '').split('\n').slice(0, 4).join(' · ');
+      navigator.clipboard && navigator.clipboard.writeText(`autoTiming cell ${summary}`);
+      const st = document.getElementById('at-status');
+      if (st) {
+        st.textContent = `📋 cell(${day},${hour}) copied — ${summary}`;
+        st.className = 'ms-2 small text-info';
+      }
+    });
+  });
+}
+
 function resetAutoTimingBandsToDefaults() {
   const defaults = getAutoTimingDefaultBands();
   document.querySelectorAll('#at-bands-table tbody tr').forEach((row) => {
@@ -519,6 +695,8 @@ function bindAutoTimingSectionEvents() {
   if (btnTrigger) btnTrigger.onclick = triggerAutoTimingSection;
   const btnResetAll = document.getElementById('btn-reset-all-at');
   if (btnResetAll) btnResetAll.onclick = resetAutoTimingBandsToDefaults;
+  const btnHeatmap = document.getElementById('btn-heatmap-at');
+  if (btnHeatmap) btnHeatmap.onclick = openHeatmapModal;
 
   // UX-2026-08-30: help-block toggle
   const helpLink = document.getElementById('at-bands-help-link');

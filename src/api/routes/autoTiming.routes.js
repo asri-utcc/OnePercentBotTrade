@@ -208,10 +208,25 @@ router.get('/cell-matrix', requireAuth, async (req, res) => {
           confidence: result.confidence,
           tier2Hit: result.tier2Hit,
           metrics: result.metrics,
+          tier2SuppressUntil: tier2 && tier2.suppressUntil ? tier2.suppressUntil : null,
+          tier2EverBadCount: tier2 && tier2.everBadCount != null ? tier2.everBadCount : 0,
         });
       }
     }
-    res.json({ ok: true, matrix, generatedAt: nowMs });
+    res.json({
+      ok: true,
+      matrix,
+      generatedAt: nowMs,
+      meta: {
+        tradesScanned: trades.length,
+        lookbackDays: AutoTiming._config.lookbackDays,
+        recentDays: AutoTiming._config.recentDays,
+        recentWeight: AutoTiming._config.recentWeight,
+        normalWeight: AutoTiming._config.normalWeight,
+        minTradesEnforce: AutoTiming._config.minTradesEnforce,
+        minTradesShow: AutoTiming._config.minTradesShow,
+      },
+    });
   } catch (err) {
     logger.warn({ err: err.message }, 'autoTiming: GET /cell-matrix failed');
     res.status(500).json({ error: err.message });
