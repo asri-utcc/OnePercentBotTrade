@@ -117,10 +117,13 @@
     const btn = _el('chat-send-btn');
     btn.disabled = true;
     try {
-      await API.post('/api/chat/send', { scope: _view, text });
+      const r = await API.post('/api/chat/send', { scope: _view, text });
       ta.value = '';
       _updateCharCount();
-      // Optimistic local append — also wait for the next poll to reconcile
+      const tempClientId = r && r.id ? r.id : null;
+      // Optimistic local append — Phase 4-FIX-2026-08-30: tag with clientId so
+      // onLiveMessage can replace this placeholder when the inbox echo arrives
+      // (avoids the "send 1 → see 2" duplicate).
       _messages.push({
         scope: _view,
         fromAdmin: false,
@@ -128,6 +131,8 @@
         displayName: _el('chat-display-name-input').value || 'me',
         text,
         createdAt: new Date().toISOString(),
+        clientId: tempClientId,
+        _optimistic: true,
       });
       _since = _messages[_messages.length - 1].createdAt;
       renderMessages();
@@ -192,17 +197,30 @@
   // ── Live event hook ──
   function onLiveMessage(payload) {
     if (!payload) return;
-    // Append if matching view
-    if (payload.scope === _view) {
-      // De-dup by id + createdAt
-      const exists = _messages.some((m) => (m.id && m.id === payload.id) || (m.createdAt === payload.createdAt && m.text === payload.text));
-      if (!exists) {
-        _messages.push(payload);
+    if (payload.scope !== _view) return;
+    // Phase 4-FIX-2026-08-30: replace optimistic placeholder if clientId matches.
+    //   Otherwise (admin→bot or unrelated), de-dup by id or by (createdAt + text).
+    if (payload.clientId) {
+      const optIdx = _messages.findIndex((m) => m._optimistic && m.clientId === payload.clientId);
+      if (optIdx !== -1) {
+        _messages[optIdx] = { ...payload, _optimistic: false };
         _since = payload.createdAt;
         renderMessages();
+        try { API.post('/api/chat/read', { scope: _view }); } catch (_) {}
+        return;
       }
-      try { API.post('/api/chat/read', { scope: _view }); } catch (_) {}
     }
+    const exists = _messages.some((m) =>
+      (m.id && m.id === payload.id) ||
+      (payload.clientId && m.clientId && m.clientId === payload.clientId) ||
+      (m.createdAt === payload.createdAt && m.text === payload.text && !m._optimistic)
+    );
+    if (!exists) {
+      _messages.push(payload);
+      _since = payload.createdAt;
+      renderMessages();
+    }
+    try { API.post('/api/chat/read', { scope: _view }); } catch (_) {}
   }
 
   // ── Init ──

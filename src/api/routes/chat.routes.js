@@ -41,22 +41,29 @@ router.post('/send', requireAuth, async (req, res) => {
 
     if (!adminMonitor.config.enabled) {
       // Admin not enabled — still record locally so the operator sees their own message
+      const localId = clientId || require('crypto').randomUUID();
+      const nowIso = new Date().toISOString();
       chatLocalStore.addMessage({
+        id: localId,
+        clientId: localId,
         scope,
         fromAdmin: false,
         fromMachineId: 'local',
         displayName: chatLocalStore.resolveDisplayName(),
         text,
-        createdAt: new Date().toISOString(),
+        createdAt: nowIso,
       });
       return res.json({
         ok: true,
         queued: false,
+        id: localId,
         message: {
+          id: localId,
+          clientId: localId,
           scope,
           text,
           displayName: chatLocalStore.resolveDisplayName(),
-          createdAt: new Date().toISOString(),
+          createdAt: nowIso,
         },
       });
     }

@@ -62,8 +62,10 @@ function enqueue({ scope, text, clientId, createdAt, displayName }) {
   };
   _queue.push(msg);
   // Optimistic local append for snappy UX — actual server message arrives via inbox poll.
+  // Phase 4-FIX-2026-08-30: also pass clientId so dedupe-by-clientId works when inbox echoes.
   chatLocalStore.addMessage({
     id: safeClientId,
+    clientId: safeClientId,
     scope: safeScope,
     fromAdmin: false,
     fromMachineId: getMachineId(),

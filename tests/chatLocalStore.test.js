@@ -115,4 +115,42 @@ describe('chatLocalStore (Phase 4)', () => {
     expect(chatLocalStore.getDisplayName()).toBe('');
     expect(chatLocalStore.resolveDisplayName()).toBe('operator');
   });
+
+  // Phase 4-FIX-2026-08-30: regression tests for "send 1 → see 2" duplicate.
+  // Optimistic local append (chatOutbox.enqueue) and inbox echo (chatInbox poll)
+  // both call addMessage for the same logical message — the optimistic copy uses
+  // clientId as `id`, the echo uses the Mongo `_id` as `id` with the same clientId.
+  // We dedupe on id OR clientId so the second addMessage returns false.
+  test('Phase 4-FIX-2026-08-30: addMessage dedupes by id', () => {
+    chatLocalStore.addMessage({ id: 'a1', scope: 'community', fromAdmin: false, text: 'hi', displayName: 'op' });
+    const r = chatLocalStore.addMessage({ id: 'a1', scope: 'community', fromAdmin: false, text: 'hi', displayName: 'op' });
+    expect(r).toBe(false);
+    expect(chatLocalStore.getMessages('community')).toHaveLength(1);
+  });
+
+  test('Phase 4-FIX-2026-08-30: addMessage dedupes by clientId across different ids', () => {
+    // Simulates the actual flow:
+    //   (1) chatOutbox.enqueue optimistically appends with id=clientId='cid-1'
+    //   (2) chatInbox echoes back with id=mongoId='mongo-id-1' and clientId='cid-1'
+    chatLocalStore.addMessage({
+      id: 'cid-1',
+      clientId: 'cid-1',
+      scope: 'community',
+      fromAdmin: false,
+      text: 'hello',
+      displayName: 'op',
+    });
+    const r = chatLocalStore.addMessage({
+      id: 'mongo-id-1',
+      clientId: 'cid-1',
+      scope: 'community',
+      fromAdmin: false,
+      text: 'hello',
+      displayName: 'op',
+    });
+    expect(r).toBe(false);
+    expect(chatLocalStore.getMessages('community')).toHaveLength(1);
+    // The optimistic copy (first one) wins; the echo is dropped.
+    expect(chatLocalStore.getMessages('community')[0].id).toBe('cid-1');
+  });
 });

@@ -58,8 +58,20 @@ function addMessage(msg) {
   if (!msg || typeof msg !== 'object') return false;
   const scope = _trimScope(msg.scope);
   const buf = _buffers[scope];
+  const newId = String(msg.id || msg._id || '');
+  const newClientId = String(msg.clientId || '');
+  // Phase 4-FIX-2026-08-30: de-dupe by id OR clientId.
+  //   The optimistic local append from chatOutbox.enqueue uses clientId as `id`.
+  //   When the same message echoes back via chatInbox poll, admin returns the
+  //   Mongo `_id` in `id` and the same clientId in `clientId` — either match
+  //   means we've already stored this message.
+  for (const existing of buf) {
+    if (newId && existing.id && existing.id === newId) return false;
+    if (newClientId && existing.clientId && existing.clientId === newClientId) return false;
+  }
   buf.push({
-    id: String(msg.id || msg._id || ''),
+    id: newId,
+    clientId: newClientId,
     scope,
     fromAdmin: !!msg.fromAdmin,
     fromMachineId: msg.fromMachineId || null,
