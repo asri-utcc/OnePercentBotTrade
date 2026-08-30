@@ -1,6 +1,6 @@
 {
   "name": "onepercentbottrade",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "description": "Binance Spot Maker-only Trading Bot with S1 signal (BOD Keltner Channel)",
   "main": "src/server.js",
   "scripts": {

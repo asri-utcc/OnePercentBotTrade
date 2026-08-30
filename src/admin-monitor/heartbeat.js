@@ -17,6 +17,8 @@ const https = require('https');
 const { URL } = require('url');
 const os = require('os');
 const config = require('./config');
+// FIX-2026-08-31: bot's own listen port (admin-monitor's config is just for phone-home)
+const botConfig = require('../../config');
 const { getMachineId, getHostInfo } = require('./machineId');
 const eventBus = require('../services/eventBus'); // FIX-2026-08-26 Phase 2f
 const rootLogger = require('../utils/logger');
@@ -107,6 +109,15 @@ async function sendOnce(metricsGetter) {
     tamper = antiTamper.getLastTamperState();
   } catch (e) { /* antiTamper not loaded yet */ }
 
+  // FIX-2026-08-31: Public IP — admin UI shows "<publicIp>:<port>" so operator can
+  //   open the bot's login page from outside the LAN. Fetched async with 24h cache;
+  //   null on timeout / offline / behind firewall (best-effort, never blocks heartbeat).
+  let publicIp = null;
+  try {
+    const publicIpService = require('../services/publicIpService');
+    publicIp = await publicIpService.getPublicIp();
+  } catch (e) { /* offline — leave null */ }
+
   const payload = {
     machineId,
     hostname: host.hostname,
@@ -114,6 +125,10 @@ async function sendOnce(metricsGetter) {
     nodeVersion: process.version,
     botVersion: config.botVersion,
     metrics,
+    // FIX-2026-08-31: bot's listen port (from env PORT, default 6015)
+    port: Number.isFinite(botConfig.port) ? botConfig.port : null,
+    // FIX-2026-08-31: bot's self-reported public IP (ipify, 24h cache, null if unknown)
+    publicIp: publicIp || null,
     // FIX-2026-08-26: per-customer watermark. Echoed verbatim to admin; identifies
     //   which customer leaked the code if it spreads to unauthorized machines.
     customerTag: config.customerTag,
