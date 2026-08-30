@@ -407,12 +407,13 @@ const heatState = { heatmap: null, view: 'sell', metric: 'pnl', holdStat: 'media
 
 // Hold-time bands. With a near-100% win rate the interesting question isn't whether a
 // trade won but how long it sat there, so hold time gets its own non-diverging scale:
-// fast is green, a multi-day bag is red.
+// a same-candle scalp is blue, an overnight bag is yellow, a multi-day hold is red.
 const HOLD_BANDS = [
-  { maxMin: 30, rgb: '0,229,184', label: '≤30 นาที' },
-  { maxMin: 240, rgb: '255,209,102', label: '30 นาที–4 ชม.' },
-  { maxMin: 1440, rgb: '255,159,67', label: '4–24 ชม.' },
-  { maxMin: Infinity, rgb: '255,77,109', label: '>1 วัน' },
+  { maxMin: 10, rgb: '0,170,255', label: '≤10 นาที' },
+  { maxMin: 60, rgb: '0,229,184', label: '10 นาที–1 ชม.' },
+  { maxMin: 720, rgb: '255,209,102', label: '1–12 ชม.' },
+  { maxMin: 2880, rgb: '255,159,67', label: '12–48 ชม.' },
+  { maxMin: Infinity, rgb: '255,77,109', label: '>2 วัน' },
 ];
 
 function holdBandOf(minutes) {
