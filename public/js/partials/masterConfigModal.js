@@ -41,6 +41,8 @@
     { id: 'mc-tpTrendMultiplier', key: 'tpTrendMultiplier', section: 'tp', order: 50, type: 'number', step: '1', min: '1', max: '10', label: '✖️ ตัวคูณ TP ตามแนวโน้ม' },
     { id: 'mc-autoPauseMinKcPct', key: 'autoPauseMinKcPct', section: 'automation', order: 30, type: 'number', step: '0.1', min: '0.1', max: '50', label: '⏸️ Min-%KC threshold (%)' },
     { id: 'mc-autoPauseMin24hVolUsdt', key: 'autoPauseMin24hVolUsdt', section: 'automation', order: 31, type: 'number', step: '1000', min: '0', label: '💵 Auto-pause Min 24h Vol (USDT)' },
+    // FIX-2026-08-30 / Phase 4: per-bot Auto-Timing opt-in (3-state string → null/true/false at backend)
+    { id: 'mc-autoTimingEnabled', key: 'autoTimingEnabled', section: 'automation', order: 40, type: 'select', options: ['inherit','true','false'], label: '⏱️ Auto-Timing (heatmap entry gate) · inherit=master' },
     { id: 'mc-autoArmLossPct', key: 'autoArmLossPct', section: 'risk', order: 30, type: 'number', step: '0.5', min: '1', max: '99', label: '🛡️ ขาดทุนขั้นต่ำสำหรับ Auto-arm (%)' },
     { id: 'mc-autoArmAgeHours', key: 'autoArmAgeHours', section: 'risk', order: 40, type: 'number', step: '0.5', min: '0.5', max: '999', label: '⏰ อายุ Position ขั้นต่ำสำหรับ Auto-arm (ชม.)' },
     { id: 'mc-cbv2LockHours', key: 'cbv2LockHours', section: 'risk', order: 80, type: 'number', step: '0.5', min: '0.5', max: '168', label: '⏱ ระยะเวลา CBv2 Cooldown (ชม.)' },
@@ -563,12 +565,19 @@
 
     // Collect toggles — tri-state radios (— / ✅ / ❌)
     // - value "" (default) → ไม่ส่ง key (leave as-is)
-    // - value "true" / "false" → ส่งค่าจริง (clobber ค่าเดิม)
+    // - value "true" / "false" → �่งค่าจริง (clobber ค่าเดิม)
     document.querySelectorAll('.mc-toggle-mode').forEach((el) => {
       if (el.checked && el.value !== '') {
         settings[el.getAttribute('data-key')] = (el.value === 'true');
       }
     });
+
+    // FIX-2026-08-30 / Phase 4: autoTimingEnabled is 3-state string ("inherit"/"true"/"false")
+    //   Convert to real null/true/false before POST so backend whitelist accepts it.
+    if ('autoTimingEnabled' in settings) {
+      const v = settings.autoTimingEnabled;
+      settings.autoTimingEnabled = v === 'true' ? true : v === 'false' ? false : null;
+    }
 
     if (Object.keys(settings).length === 0) {
       status.textContent = '❌ กรอก field อย่างน้อย 1 อย่าง หรือติ๊ก toggle อย่างนั้น 1 อย่าง';

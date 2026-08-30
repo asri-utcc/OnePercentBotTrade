@@ -2258,6 +2258,8 @@ async function createBot() {
     autoPauseMin24hVolUsdt: parseFloat(document.getElementById('nb-auto-pause-min-24h-vol').value) || 1000000, // FIX-2026-08-10: 24h volume guard (USDT, default 1M)
     // FIX-2026-08-29: per-bot opt-in for auto-adjust (default ON; absent on legacy DOM → true)
     autoPauseAdjustEnabled: (() => { const e = document.getElementById('nb-auto-pause-adjust-enabled'); return e ? e.checked : true; })(),
+    // FIX-2026-08-30 / Phase 4: per-bot Auto-Timing opt-in (3-state: null=inherit, true=force on, false=force off)
+    autoTimingEnabled: (() => { const e = document.getElementById('nb-auto-timing-enabled'); if (!e) return null; return e.value === 'true' ? true : e.value === 'false' ? false : null; })(),
     autoArmStopLossOnUKC: document.getElementById('nb-auto-arm-stop-loss-ukc').checked, // FIX-2026-07-31 (F1): per-bot auto-arm SL-on-UKC toggle (default true)
     autoArmLossPct: parseFloat(document.getElementById('nb-auto-arm-loss-pct').value) || 10, // FIX-2026-08-03 / EXT-2026-08-20: F1 loss threshold (1..99, default 10)
     autoArmAgeHours: parseFloat(document.getElementById('nb-auto-arm-age-hours').value) || 4, // FIX-2026-08-03 / EXT-2026-08-20: F1 age threshold (0.5..999, default 4)

@@ -174,9 +174,11 @@
         continue;
       }
       if (BOOLEAN_FIELDS.has(k)) {
+        // FIX-2026-08-30: tristate fields (autoTimingEnabled) preserve null as 'inherit'
+        if (k === 'autoTimingEnabled' && v === null) { out[k] = null; continue; }
         if (typeof v === 'boolean') out[k] = v;
         else if (v === 'true' || v === '1' || v === 1) out[k] = true;
-        else if (v === 'false' || v === '0' || v === 0 || v === null) out[k] = false;
+        else if (v === 'false' || v === '0' || v === 0) out[k] = false;
         else out[k] = v === true;
         continue;
       }

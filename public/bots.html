@@ -424,6 +424,7 @@
                       <input class="form-check-input" type="checkbox" id="nb-auto-pause-adjust-enabled" checked />
                       <label class="form-check-label" for="nb-auto-pause-adjust-enabled">🔧 <strong>ให้ Auto-adjust threshold</strong> (เมื่อ master เปิด)</label>
                       <small class="text-muted d-block mt-1">ระบบจะปรับ KC/Vol thresholds อัตโนมัติตามจำนวนบอทที่รัน — uncheck เพื่อ opt-out</small>
+                    <div class="mt-3"><label class="form-label small mb-1" for="nb-auto-timing-enabled">⏱️ <strong>Auto-Timing</strong> (heatmap-driven entry gate)</label><select class="form-select form-select-sm" id="nb-auto-timing-enabled" style="max-width:240px;"><option value="inherit" selected>🟢 Inherit master (default)</option><option value="true">✅ Force ON for this bot</option><option value="false">🚫 Force OFF for this bot</option></select><small class="text-muted d-block mt-1">null = inherit AppConfig.autoTimingEnabled; true/false = explicit override. License feature <code>autoTiming</code> required.</small></div>
                     </div>
                   </div>
                 </div>

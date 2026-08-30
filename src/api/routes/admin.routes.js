@@ -537,6 +537,8 @@ const BOT_DEFAULTS_SCHEMA = {
   tpTrendMultiplier: 2,
   autoUpdateTp: true,
   stopLossOnUpperKC: false,
+  // FIX-2026-08-30 / Phase 4: Auto-Timing per-bot tristate (null = inherit master)
+  autoTimingEnabled: null,
   defaultSymbol: 'BNBUSDT',
   defaultTimeframe: '3m',
 };
@@ -578,6 +580,8 @@ router.put('/bot-defaults', requireAuth, async (req, res) => {
       'autoPauseEnabled', 'autoPauseAdjustEnabled', 'autoArmStopLossOnUKC',
       'slUkcTriggerOnProfit', 'tpTrendEnabled', 'autoUpdateTp', 'stopLossOnUpperKC',
     ];
+    // FIX-2026-08-30 / Phase 4: 3-state tri fields — accepts true/false/null (null = inherit)
+    const TRISTATE_FIELDS = ['autoTimingEnabled'];
     const NUMBER_FIELDS = [
       'capitalPerTrade', 'maxTrades', 'tpPercent', 'retryTimeMin', 'retryMax',
       'kcMult', 'minSpreadTicks', 'suggestTpWindow',
@@ -593,6 +597,9 @@ router.put('/bot-defaults', requireAuth, async (req, res) => {
     const update = {};
     for (const k of BOOLEAN_FIELDS) {
       if (typeof body[k] === 'boolean') update[k] = body[k];
+    }
+    for (const k of TRISTATE_FIELDS) {
+      if (body[k] === null || typeof body[k] === 'boolean') update[k] = body[k];
     }
     for (const k of NUMBER_FIELDS) {
       if (body[k] === undefined) continue;

@@ -223,6 +223,16 @@ function render() {
                   </div>
                 </div>
               </div>
+              <div class="bot-settings-option mt-2">
+                <label class="form-label small mb-1" for="f-auto-timing-enabled">⏱️ <strong>Auto-Timing</strong> (heatmap-driven entry gate)</label>
+                <select class="form-select form-select-sm" id="f-auto-timing-enabled" style="max-width:220px;">
+                  <option value="inherit" ${bot.autoTimingEnabled === null || bot.autoTimingEnabled === undefined ? 'selected' : ''}>🟢 Inherit master (default)</option>
+                  <option value="true" ${bot.autoTimingEnabled === true ? 'selected' : ''}>✅ Force ON for this bot</option>
+                  <option value="false" ${bot.autoTimingEnabled === false ? 'selected' : ''}>🚫 Force OFF for this bot</option>
+                </select>
+                <small class="text-muted d-block mt-1">null = inherit AppConfig.autoTimingEnabled; true/false = explicit override. ต้องเปิด license feature <code>autoTiming</code> ด้วย</small>
+                </div>
+              </div>
             </div>
           </div>
         </details>
@@ -1168,6 +1178,10 @@ async function save(e) {
     autoPauseMinKcPct: parseFloat(document.getElementById('f-auto-pause-min-kc').value) || 2, // FIX-2026-08-01: auto-pause threshold %
     autoPauseMin24hVolUsdt: parseFloat(document.getElementById('f-auto-pause-min-24h-vol').value) || 1000000, // FIX-2026-08-10: 24h volume guard (USDT, default 1M)
     autoPauseAdjustEnabled: document.getElementById('f-auto-pause-adjust-enabled').checked, // FIX-2026-08-29: per-bot opt-in for auto-adjust (default ON)
+    autoTimingEnabled: (() => { // FIX-2026-08-30 / Phase 4: 3-state — null=inherit, true=force on, false=force off
+      const v = document.getElementById('f-auto-timing-enabled').value;
+      return v === 'true' ? true : v === 'false' ? false : null;
+    })(),
     autoArmStopLossOnUKC: document.getElementById('f-auto-arm-stop-loss-ukc').checked, // FIX-2026-07-31 (F1): per-bot auto-arm SL-on-UKC toggle (default true)
     autoArmLossPct: parseFloat(document.getElementById('f-auto-arm-loss-pct').value) || 10, // FIX-2026-08-03 / EXT-2026-08-20: per-bot F1 loss threshold (1..99, default 10)
     autoArmAgeHours: parseFloat(document.getElementById('f-auto-arm-age-hours').value) || 4, // FIX-2026-08-03 / EXT-2026-08-20: per-bot F1 age threshold (0.5..999, default 4)

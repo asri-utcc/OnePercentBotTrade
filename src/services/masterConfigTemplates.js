@@ -30,6 +30,8 @@ const ALLOWED_TEMPLATE_FIELDS = [
   'autoPauseEnabled', 'autoPauseMinKcPct', 'autoPauseMin24hVolUsdt',
   // FIX-2026-08-29: auto-pause threshold auto-adjust per-bot opt-in
   'autoPauseAdjustEnabled',
+  // FIX-2026-08-30: Auto-Timing (Phase 4) per-bot tristate (null|true|false = inherit/force-on/force-off)
+  'autoTimingEnabled',
   'suggestTpWindow', 'autoArmStopLossOnUKC', 'autoArmLossPct', 'autoArmAgeHours', 'slUkcTriggerOnProfit',
   'tpTrendMultiplier', 'tpTrendEnabled',
   'dcaEnabled', 'dcaMaxLayers',

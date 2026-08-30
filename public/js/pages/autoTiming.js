@@ -556,7 +556,7 @@ function buildHeatmapModalBodyHTML(meta, matrix) {
         ' data-band="' + escapeHtml(cell.bandId || '') + '"' +
         ' data-day="' + day + '" data-hour="' + hour + '">' +
         '<div class="at-hm-wr-strip" style="background-color:' + wrColor + '; opacity:' + wrOpacity + ';"></div>' +
-        '<div class="at-hm-act">' + actEmoji + '</div>' +
+        '<div class="at-hm-act-dot at-act-' + action + '">●</div>' +
         '<div class="at-hm-n">' + (n < minShow ? '\xc2\xb7' : n.toFixed(0)) + '</div>' +
         (tier2 ? '<div class="at-hm-wr-pct">WR ' + (wr * 100).toFixed(0) + '%</div>' : '') +
         tier2Line + blockLine +
@@ -577,11 +577,11 @@ function buildHeatmapModalBodyHTML(meta, matrix) {
     '</table></div>' +
     '<div class="at-hm-legend">' +
     '<strong>Action:</strong>' +
-    '<span class="at-hm-legend-pill at-hm-act-allow">\xe2\x9c\x85 allow</span>' +
-    '<span class="at-hm-legend-pill at-hm-act-stimulate">\xe2\xad\x90 stimulate</span>' +
-    '<span class="at-hm-legend-pill at-hm-act-encourage">\xe2\x9c\xa8 encourage</span>' +
-    '<span class="at-hm-legend-pill at-hm-act-limit">\xe2\x9a\xa0\xef\xb8\x8f limit</span>' +
-    '<span class="at-hm-legend-pill at-hm-act-suppress">\xf0\x9f\x9a\xab suppress</span>' +
+    '<span class="at-hm-legend-pill"><span class="at-hm-legend-dot at-act-allow">\u25cf</span> allow</span>' +
+    '<span class="at-hm-legend-pill"><span class="at-hm-legend-dot at-act-stimulate">\u25cf</span> stimulate</span>' +
+    '<span class="at-hm-legend-pill"><span class="at-hm-legend-dot at-act-encourage">\u25cf</span> encourage</span>' +
+    '<span class="at-hm-legend-pill"><span class="at-hm-legend-dot at-act-limit">\u25cf</span> limit</span>' +
+    '<span class="at-hm-legend-pill"><span class="at-hm-legend-dot at-act-suppress">\u25cf</span> suppress</span>' +
     '<span class="ms-3"><strong>WR strip:</strong></span>' +
     '<span class="at-hm-legend-fill" style="background-color:#00e5b8;">\xe2\x89\xa560%</span>' +
     '<span class="at-hm-legend-fill" style="background-color:#f5b800;">40\xe2\x80\x9360%</span>' +

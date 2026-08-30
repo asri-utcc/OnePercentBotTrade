@@ -54,6 +54,8 @@ const BOOLEAN_FIELDS = new Set([
   'autoPauseEnabled',
   // FIX-2026-08-29: auto-pause threshold auto-adjust per-bot opt-in (added to ALLOWED_TEMPLATE_FIELDS)
   'autoPauseAdjustEnabled',
+  // FIX-2026-08-30: Auto-Timing (Phase 4) per-bot tristate (null|true|false = inherit/force-on/force-off)
+  'autoTimingEnabled',
   'autoArmStopLossOnUKC', 'slUkcTriggerOnProfit',
   'tpTrendEnabled', 'autoUpdateTp', 'stopLossOnUpperKC',
 ]);
@@ -132,11 +134,13 @@ function sanitizeImportSettings(raw) {
       continue;
     }
     if (BOOLEAN_FIELDS.has(k)) {
+      // FIX-2026-08-30: tristate fields (autoTimingEnabled) preserve null as 'inherit'
+      if (k === 'autoTimingEnabled' && v === null) { out[k] = null; continue; }
       if (typeof v === 'boolean') {
         out[k] = v;
       } else if (v === 'true' || v === '1' || v === 1) {
         out[k] = true;
-      } else if (v === 'false' || v === '0' || v === 0 || v === null) {
+      } else if (v === 'false' || v === '0' || v === 0) {
         out[k] = false;
       } else {
         out[k] = v === true; // strict

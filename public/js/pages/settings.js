@@ -396,6 +396,15 @@ function renderBotDefaultsSection() {
         </label>
       </div>
       <div class="col-md-4">
+        <label class="form-label">⏱️ Auto-Timing (heatmap-driven)</label>
+        <select class="form-select form-select-sm" id="bd-auto-timing-enabled">
+          <option value="inherit" ${(d.autoTimingEnabled === null || d.autoTimingEnabled === undefined) ? 'selected' : ''}>🟢 Inherit master</option>
+          <option value="true" ${d.autoTimingEnabled === true ? 'selected' : ''}>✅ Force ON</option>
+          <option value="false" ${d.autoTimingEnabled === false ? 'selected' : ''}>🚫 Force OFF</option>
+        </select>
+        <small class="text-muted-3 d-block mt-1">Tristate: inherit / force-on / force-off</small>
+      </div>
+      <div class="col-md-4">
         <label class="form-check form-switch">
           <input type="checkbox" class="form-check-input" id="bd-auto-arm-stop-loss-ukc" ${d.autoArmStopLossOnUKC ? 'checked' : ''} />
           <span class="form-check-label">🛡️ Auto-arm SL-on-UKC</span>
@@ -2722,6 +2731,11 @@ async function saveBotDefaults() {
   const int = (id) => parseInt(el(id).value, 10);
   const str = (id) => (el(id).value || '').trim();
   const isChecked = (id) => el(id) ? el(id).checked : false;
+  // FIX-2026-08-30: tristate helper for autoTimingEnabled (inherit/true/false)
+  const tristate = (id) => {
+    const v = el(id) ? el(id).value : 'inherit';
+    return v === 'true' ? true : v === 'false' ? false : null;
+  };
 
   const payload = {
     defaultSymbol: str('bd-symbol') || 'BNBUSDT',
@@ -2763,6 +2777,8 @@ async function saveBotDefaults() {
     safeTradeTrendlineEnabled: isChecked('bd-safe-trade-trendline-enabled'),
     safeTradeNoTradeEnabled: isChecked('bd-safe-trade-no-trade-enabled'),
     autoPauseEnabled: isChecked('bd-auto-pause-enabled'),
+    // FIX-2026-08-30: Auto-Timing per-bot tristate (inherit/force-on/force-off)
+    autoTimingEnabled: tristate('bd-auto-timing-enabled'),
     autoPauseAdjustEnabled: isChecked('bd-auto-pause-adjust-enabled'), // FIX-2026-08-29: per-bot opt-in for auto-adjust (mirror botDefaults)
     autoPauseMinKcPct: num('bd-auto-pause-min-kc'),
     autoPauseMin24hVolUsdt: num('bd-auto-pause-min-24h-vol'),
