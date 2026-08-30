@@ -315,6 +315,40 @@
     .ta-heat-cell.is-bull { box-shadow: inset 0 0 0 1px rgba(0,229,184,0.45); }
     .ta-heat-cell.is-bear { box-shadow: inset 0 0 0 1px rgba(255,77,109,0.45); }
 
+    /* ───── Sticky range toolbar ─────
+       --ta-nav-h is measured from the real navbar at runtime (it wraps on narrow
+       screens, so a hard-coded offset would either overlap or leave a gap). */
+    .ta-toolbar {
+      position: sticky;
+      top: var(--ta-nav-h, 56px);
+      z-index: 1020;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin-bottom: 1rem;
+      padding: 8px 12px;
+      border-radius: 10px;
+      border: 1px solid var(--border-soft, rgba(255,255,255,0.08));
+      background: linear-gradient(180deg, rgba(12,17,28,0.96), rgba(12,17,28,0.88));
+      backdrop-filter: blur(14px) saturate(140%);
+      -webkit-backdrop-filter: blur(14px) saturate(140%);
+      transition: box-shadow 0.18s, border-color 0.18s;
+    }
+    .ta-toolbar.is-stuck {
+      box-shadow: 0 6px 22px rgba(0,0,0,0.45);
+      border-color: rgba(255,255,255,0.16);
+    }
+    .ta-toolbar-label { font-size: 0.78rem; font-weight: 600; color: var(--text-2, #c7cedb); white-space: nowrap; }
+    .ta-toolbar-hint { font-size: 0.72rem; color: var(--text-muted-3, #7b8494); white-space: nowrap; }
+    .ta-toolbar.is-filtered { border-color: rgba(0,229,184,0.35); }
+    .ta-toolbar.is-filtered .ta-toolbar-hint { color: var(--bull-1); }
+    #ta-top-btn { display: none; }
+    .ta-toolbar.is-stuck #ta-top-btn { display: inline-block; }
+    @media (max-width: 640px) {
+      .ta-toolbar-hint { display: none; }
+    }
+
     /* ───── FIX-2026-08-30: Enhanced heatmap UI ───── */
     .ta-heat-toggle {
       display: inline-flex;
@@ -523,16 +557,22 @@
   <div class="container-fluid px-3 px-md-4 py-3 py-md-4" style="max-width: 1400px;">
     <div class="page-title">
       <h3>📊 Trade Analysis</h3>
-      <div class="d-flex gap-2 align-items-center">
-        <span class="text-muted-3" id="ta-meta" style="font-size: 0.78rem;">—</span>
-        <select id="ta-range" class="form-select form-select-sm" style="width: auto; font-size: 0.78rem;" title="ช่วงเวลาของข้อมูลทั้งหน้า">
-          <option value="">ตลอดอายุการใช้งาน</option>
-          <option value="7">7 วันล่าสุด</option>
-          <option value="30">30 วันล่าสุด</option>
-          <option value="90">90 วันล่าสุด</option>
-        </select>
-        <button id="ta-refresh-btn" type="button" class="btn-lux btn-sm">🔄 รีเฟรซ</button>
-      </div>
+      <span class="text-muted-3" id="ta-meta" style="font-size: 0.78rem;">—</span>
+    </div>
+
+    <!-- Sticky toolbar: the range picker has to stay reachable while reading the
+         sections further down the page (they all re-aggregate on the same range). -->
+    <div class="ta-toolbar" id="ta-toolbar">
+      <span class="ta-toolbar-label">🗓 ช่วงเวลา</span>
+      <select id="ta-range" class="form-select form-select-sm" style="width: auto; font-size: 0.78rem;" title="ช่วงเวลาของข้อมูลทั้งหน้า">
+        <option value="">ตลอดอายุการใช้งาน</option>
+        <option value="7">7 วันล่าสุด</option>
+        <option value="30">30 วันล่าสุด</option>
+        <option value="90">90 วันล่าสุด</option>
+      </select>
+      <span class="ta-toolbar-hint" id="ta-range-hint">มีผลกับทุกส่วนในหน้านี้</span>
+      <button id="ta-refresh-btn" type="button" class="btn-lux btn-sm ms-auto">🔄 รีเฟรซ</button>
+      <button id="ta-top-btn" type="button" class="btn-lux btn-sm" title="กลับขึ้นบนสุด">↑</button>
     </div>
 
     <!-- ─── HERO: all-time totals ─────────────────────────── -->
@@ -982,6 +1022,6 @@
   <script>window.NAV_ACTIVE = 'analysis';</script>
   <script src="/js/partials/nav.js"></script>
   <script src="/js/partials/rateLimitGauge.js"></script>
-  <script src="/js/pages/trade-analysis.js?v=2026-08-30-heat2"></script>
+  <script src="/js/pages/trade-analysis.js?v=2026-08-30-heat3"></script>
 </body>
 </html>

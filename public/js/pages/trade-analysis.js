@@ -861,6 +861,52 @@ function renderTpSlDeep(ts) {
   setText('ta-tpsl-meta', `${ts.count || (ts.tp?.count || 0) + (ts.sl?.count || 0) + (ts.cb?.count || 0) + (ts.manual?.count || 0)} ไม้ · avg TP ${fmtPnl(ts.tp?.avgPnl, { sign: true, decimals: 3 })} vs avg SL ${fmtPnl(ts.sl?.avgPnl, { sign: true, decimals: 3 })} · TP rate ${tpRate.toFixed(1)}%`);
 }
 
+// ─── Sticky range toolbar ───────────────────────────────────
+// The toolbar sticks under the navbar so the range picker stays reachable while
+// reading the lower sections. The navbar wraps on narrow screens, so its height is
+// measured rather than assumed.
+function syncToolbarOffset() {
+  const nav = document.getElementById('app-nav');
+  if (!nav) return;
+  document.documentElement.style.setProperty('--ta-nav-h', nav.offsetHeight + 'px');
+}
+
+function updateRangeHint() {
+  const sel = document.getElementById('ta-range');
+  const hint = document.getElementById('ta-range-hint');
+  const bar = document.getElementById('ta-toolbar');
+  if (!sel || !hint || !bar) return;
+  const days = Number(sel.value || 0);
+  bar.classList.toggle('is-filtered', days > 0);
+  hint.textContent = days > 0
+    ? `กำลังกรอง ${days} วันล่าสุด · ทุกส่วนในหน้านี้`
+    : 'มีผลกับทุกส่วนในหน้านี้';
+}
+
+function bindStickyToolbar() {
+  const bar = document.getElementById('ta-toolbar');
+  if (!bar) return;
+  syncToolbarOffset();
+  window.addEventListener('resize', syncToolbarOffset);
+  // A sentinel above the toolbar tells us when it has actually stuck, so the
+  // shadow + back-to-top button only appear once it detaches from the flow.
+  const sentinel = document.createElement('div');
+  sentinel.style.cssText = 'position:absolute;height:1px;width:1px;';
+  bar.parentNode.insertBefore(sentinel, bar);
+  if ('IntersectionObserver' in window) {
+    const nav = document.getElementById('app-nav');
+    const navH = nav ? nav.offsetHeight : 56;
+    new IntersectionObserver(
+      ([e]) => bar.classList.toggle('is-stuck', !e.isIntersecting),
+      { rootMargin: `-${navH + 4}px 0px 0px 0px`, threshold: 0 },
+    ).observe(sentinel);
+  }
+  document.getElementById('ta-top-btn')?.addEventListener('click', () => {
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  });
+  updateRangeHint();
+}
+
 // ─── Main render + fetch ────────────────────────────────────
 function renderAllSections(d) {
   renderHero(d.summary);
@@ -885,7 +931,29 @@ function renderAllSections(d) {
   setText('ta-footer-ts', `สร้างเมื่อ ${fmtTsShort(d.generatedAt)} · ใช้เวลา ${d.computeMs}ms · server cache 60s`);
 }
 
-async function loadAnalysis({ force = false } = {}) {
+// Changing the range re-renders every section, and section heights shift with the
+// data — so pin the card the user is currently reading and restore its screen
+// position afterwards instead of letting the page jump.
+function captureScrollAnchor() {
+  const nav = document.getElementById('app-nav');
+  const bar = document.getElementById('ta-toolbar');
+  const guide = (nav ? nav.offsetHeight : 56) + (bar ? bar.offsetHeight : 0) + 8;
+  const cards = Array.from(document.querySelectorAll('.ta-section'));
+  for (const card of cards) {
+    const top = card.getBoundingClientRect().top;
+    if (top >= guide - 4) return { card, offset: top };
+  }
+  const last = cards[cards.length - 1];
+  return last ? { card: last, offset: last.getBoundingClientRect().top } : null;
+}
+
+function restoreScrollAnchor(anchor) {
+  if (!anchor || !anchor.card.isConnected) return;
+  const delta = anchor.card.getBoundingClientRect().top - anchor.offset;
+  if (Math.abs(delta) > 1) window.scrollBy(0, delta);
+}
+
+async function loadAnalysis({ force = false, keepAnchor = false } = {}) {
   const now = Date.now();
   if (!force && _loading) return;
   if (!force && now - _lastFetchAt < MIN_INTERVAL_MS && _analysisData) return;
@@ -896,7 +964,9 @@ async function loadAnalysis({ force = false } = {}) {
     const data = await API.get('/api/analysis/trade-analysis' + qs);
     _analysisData = data;
     _lastFetchAt = Date.now();
+    const anchor = keepAnchor ? captureScrollAnchor() : null;
     renderAllSections(data);
+    if (anchor) requestAnimationFrame(() => restoreScrollAnchor(anchor));
   } catch (err) {
     console.error('trade-analysis load failed:', err);
     setText('ta-meta', `โหลดล้มเหลว: ${err.message}`);
@@ -908,12 +978,14 @@ async function loadAnalysis({ force = false } = {}) {
 // ─── Boot ──────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
   bindHeatmapControls();
+  bindStickyToolbar();
   loadAnalysis().catch(() => {});
   document.getElementById('ta-refresh-btn')?.addEventListener('click', () => {
-    loadAnalysis({ force: true }).catch(() => {});
+    loadAnalysis({ force: true, keepAnchor: true }).catch(() => {});
   });
   document.getElementById('ta-range')?.addEventListener('change', () => {
-    loadAnalysis({ force: true }).catch(() => {});
+    updateRangeHint();
+    loadAnalysis({ force: true, keepAnchor: true }).catch(() => {});
   });
   // WS events: refetch on trade:update
   if (typeof WSClient !== 'undefined') {
