@@ -22,6 +22,7 @@ const buyCommitment = require('../services/buyCommitment'); // FIX-2026-08-21: a
 const telegramNotifier = require('../services/telegramNotifier');
 const phoneHomeMonitor = require('../admin-monitor/phoneHomeMonitor'); // FIX-2026-08-26 Phase 2f
 const licenseService = require('../services/licenseService'); // FIX-2026-08-27 Phase 3a C2: license features + max-capital gate
+const autoTiming = require('../services/autoTiming'); // FIX-2026-08-30 Phase 4: Auto-Timing (heatmap-driven entry gate)
 const logger = require('../utils/logger');
 const Bot = require('../db/models/Bot');
 const Trade = require('../db/models/Trade');
@@ -3472,13 +3473,52 @@ class Trader {
       return;
     }
 
+    // FIX-2026-08-30 / Phase 4 — Auto-Timing (heatmap-driven entry gate)
+    //   Compute the decision ONCE early so:
+    //     (a) short-circuit on blocked (suppress/floor/max_concurrent/max_trades_day)
+    //         BEFORE we touch safe-trade / DPS / notional logic
+    //     (b) downstream insertions (ST#1/ST#2/ST#3/CBv5/TP tighten/notional mult)
+    //         can read this._autoTimingDecision instead of recomputing
+    //   - decideForBot() is no-op (returns allow) when master disabled or bot opted-out
+    //   - DCA layer 2/3 NOT gated (per design): autoTiming.bumpCounter tracks layer 1 fills
+    //     only; deeper layers slip through the gate unconditionally
+    //   - Cached on this._autoTimingDecision so we don't double-query the engine
+    const autoTimingDecision = await autoTiming.decideForBot(this.bot, Date.now());
+    this._autoTimingDecision = autoTimingDecision;
+    if (autoTimingDecision && autoTimingDecision.blocked) {
+      const skipNote = `autoTiming_${autoTimingDecision.skipReason || 'blocked'}`;
+      logger.info({
+        botId: this.bot._id.toString(),
+        symbol: this.bot.symbol,
+        day: autoTimingDecision.bandId != null ? null : null, // bandId available if needed
+        action: autoTimingDecision.effectiveAction,
+        skipReason: autoTimingDecision.skipReason,
+        source: autoTimingDecision.source,
+        reason: autoTimingDecision.reason,
+      }, 'trader: skip BUY — Auto-Timing blocked');
+      await Signal.updateOne({ _id: signalDoc._id }, { outcome: 'skipped', note: skipNote });
+      try {
+        eventBus.emit('autoTiming:blocked', {
+          botId: String(this.bot._id),
+          symbol: this.bot.symbol,
+          skipReason: autoTimingDecision.skipReason,
+          action: autoTimingDecision.effectiveAction,
+          bandId: autoTimingDecision.bandId,
+        });
+      } catch (_) {}
+      return;
+    }
+
     // FIX-2026-08-01: Safe-trade filter (default ON)
     //   - ก่อนวาง BUY ให้เช็ค super-upper TF (3m/5m→4h, 15m→1d, 1h→1w)
     //   - PASS = lastClose > open (green ONLY — strict, FIX-2026-08-19) — แดง block ทันทีไม่สน EMA
     //   - FAIL-OPEN on Binance error (API outage ไม่ block การเทรด)
     //   - skip BUY ทันทีถ้า fail (don't waste signal slot)
     // FIX-2026-08-28 B6: license gate — basic tier disables Safe Trade (#1) entirely
-    if (licenseService.isFeatureEnabled('safeTrade') && this.bot.safeTradeEnabled !== false) {
+    // FIX-2026-08-30 / Phase 4: Auto-Timing can FORCE ST#1 ON even when user disabled it
+    //   via per-band `forceST1: true` (e.g. lt48h default band tightens entry).
+    if (licenseService.isFeatureEnabled('safeTrade') && this.bot.safeTradeEnabled !== false
+        || this._autoTimingDecision?.forceST1 === true) {
       try {
         const st = await signalEngine.checkSafeTrade(this.bot, binanceRest, indicators);
         if (st.skip) {
@@ -3522,7 +3562,8 @@ class Trader {
     //   - FAIL-OPEN on Binance error / warmup / insufficient data (mirror ST#1)
     //   - **ไม่แนะนำสำหรับ DCA bots** (DCA ซื้อ dip — filter นี้ block dip-buy → ขัดกับ DCA intent)
     //   - ทำงานคู่กับ ST#1: ST#1 = "ขาขึ้นบน super-upper TF" + ST#2 = "ราคายังอยู่เหนือ support บน upper-TF"
-    if (licenseService.isFeatureEnabled('safeTrade') && this.bot.safeTradeTrendlineEnabled === true) {
+    if ((licenseService.isFeatureEnabled('safeTrade') && this.bot.safeTradeTrendlineEnabled === true)
+        || this._autoTimingDecision?.forceST2 === true) {
       try {
         const trendTF = volatilityScanner.TREND_TF_MAP && volatilityScanner.TREND_TF_MAP[this.bot.timeframe];
         const st2 = await signalEngine.checkSafeTradeTrendline(this.bot, trendTF, binanceRest);
@@ -3582,7 +3623,11 @@ class Trader {
     // FIX-2026-08-05: ST#3 disabled for DCA bots (UI warns "not recommended for DCA")
     //   - DCA intent = buy dips — filter = block dip-buys → ขัดกัน
     //   - Wizard layer-add ของ DCA ใช้ placeBuy path เดียวกัน → ต้อง bypass filter
-    if (licenseService.isFeatureEnabled('safeTrade') && this.bot.safeTradeNoTradeEnabled === true && !this._isDcaMode()) {
+    // FIX-2026-08-30 / Phase 4: Auto-Timing can FORCE ST#3 ON. Note: ST#3 normally
+    //   skips DCA bots (DCA = buy dips), but a force from autoTiming bypasses that
+    //   restriction too — caller has explicitly opted into the tighter filter.
+    if ((licenseService.isFeatureEnabled('safeTrade') && this.bot.safeTradeNoTradeEnabled === true && !this._isDcaMode())
+        || this._autoTimingDecision?.forceST3 === true) {
       try {
         const trendTF = volatilityScanner.TREND_TF_MAP && volatilityScanner.TREND_TF_MAP[this.bot.timeframe];
         const st3 = await signalEngine.checkNoTradeOnUpperTF(this.bot, trendTF, binanceRest);
@@ -3646,8 +3691,14 @@ class Trader {
     //     admin disabled CBv5 for this license tier → skip CBv5 evaluation entirely.
     //     Two independent gates: AppConfig.cbv5MasterEnabled (operator toggle) AND
     //     License.features.cbv5 (admin tier control). Both must be true to run CBv5.
+    // FIX-2026-08-30 / Phase 4: Auto-Timing can FORCE CBv5 ON via per-band `forceCBv5: true`.
+    //   cbv5MasterToggle is the operator-level master switch (admin dashboard); forceCBv5
+    //   is the per-cell Auto-Timing override. We treat forceCBv5 as one more enabling
+    //   condition in the AND chain — it cannot turn CBv5 ON if the master toggle is OFF.
+    const cbv5AutoTimingForce = this._autoTimingDecision?.forceCBv5 === true;
     const cbv5PreGate = await cbCooldownGate.evaluateCbCooldown(this, this.bot, 'v5', Date.now());
-    if (this.bot.cbv5Enabled !== false && !this._isDcaMode() && !cbv5PreGate.active && !this._hasActiveCbCooldownExceptV5() && await cbv5MasterToggle.isMasterCbv5Enabled() && licenseService.isFeatureEnabled('cbv5')) {
+    if ((this.bot.cbv5Enabled !== false && !this._isDcaMode() && !cbv5PreGate.active && !this._hasActiveCbCooldownExceptV5() && await cbv5MasterToggle.isMasterCbv5Enabled() && licenseService.isFeatureEnabled('cbv5'))
+        || (cbv5AutoTimingForce && !this._isDcaMode() && !cbv5PreGate.active && licenseService.isFeatureEnabled('cbv5'))) {
       try {
         const evalResult = await cbPatternEvaluator.fetchAndEvaluateCBv5({
           bot: this.bot,
@@ -4124,6 +4175,29 @@ class Trader {
             }, 'trader: DPS size below minNotional — falling back to capitalPerTrade');
           }
         }
+      }
+
+      // FIX-2026-08-30 / Phase 4: Auto-Timing notional multiplier
+      //   - Applied AFTER DPS/DCA resolution, BEFORE license max-capital check
+      //   - Order matters: Auto-Timing → DPS → License cap
+      //     (DCA bumps for layer-2/3 are NOT autoTiming-gated; this block only fires
+      //      when the proposed layer-1 size is being multiplied down/up)
+      //   - The decider already applied the clamp below-floor / cap-above-ceiling
+      //     and emitted the early-return when skipReason='floor', so we only see
+      //     either `in_range` or `capped_high` here (never `skipped_low`).
+      //   - notionalMult === 1 → no-op (most common case for allow/limit-down/etc.)
+      if (autoTimingDecision && autoTimingDecision.notionalMult !== 1 && autoTimingDecision.notionalFinal > 0) {
+        const before = buyNotionalUSDT;
+        buyNotionalUSDT = autoTimingDecision.notionalFinal;
+        logger.info({
+          botId: this.bot._id.toString(),
+          symbol: this.bot.symbol,
+          action: autoTimingDecision.effectiveAction,
+          bandId: autoTimingDecision.bandId,
+          notionalBefore: Number(before.toFixed(4)),
+          notionalAfter: Number(buyNotionalUSDT.toFixed(4)),
+          clamped: autoTimingDecision.notionalClamped,
+        }, `trader: Auto-Timing notional adjusted (${autoTimingDecision.effectiveAction})`);
       }
 
       // FIX-2026-08-27 Phase 3a C2: License max-capital pre-check
@@ -5206,7 +5280,7 @@ class Trader {
       //   - ก่อนหน้านี้: emit 'filled' ก่อนคำนวณ TP → telegramNotifier อ่าน DB เจอ targetSellPrice=null
       //   - BUY notification ไม่มี 🎯 Target Sell line (ใน telegramNotifier render)
       const tp = await this._computeTp({ buyPrice: avgPrice });
-      const sellPrice = tp.sellPrice;
+      let sellPrice = tp.sellPrice;
       logger.info({
         tradeId: trade._id.toString(),
         tpTrendEnabled: tp.tpTrendEnabled,
@@ -5217,6 +5291,40 @@ class Trader {
         tpEffective: tp.tpEffective,
         avgPrice, sellPrice,
       }, 'trader: TP applied with trend multiplier');
+
+      // FIX-2026-08-30 / Phase 4: Auto-Timing TP tighten — per-decision override
+      //   - if Auto-Timing set tpTightenPct > 0 on this BUY slot, reduce TP by that %
+      //   - we recompute sellPrice from a temporary reduced tpPercent (mirror _computeTp path)
+      //   - applies to NEW positions only (DCA layers use stackBep path which already
+      //     calls _computeTp separately — those don't go through here)
+      //   - tpTightenPct=0 (most bands) → no-op
+      const atDecision = this._autoTimingDecision;
+      const atTpTightenPct = atDecision && Number.isFinite(atDecision.tpTightenPct) ? atDecision.tpTightenPct : 0;
+      if (atTpTightenPct > 0) {
+        const reducedTpPercent = tp.tpEffective * (1 - atTpTightenPct / 100);
+        const reducedSellPriceRaw = fees.calcSellPrice({
+          buyPrice: avgPrice,
+          tpPercent: reducedTpPercent,
+          feeRate: tp.feeRate,
+        });
+        const tickSize = symbolInfo.getCached(this.bot.symbol)
+          ? symbolInfo.getCached(this.bot.symbol).priceFilter.tickSize : null;
+        const reducedSellPrice = tickSize
+          ? symbolInfo.roundPrice(reducedSellPriceRaw, tickSize).toString()
+          : reducedSellPriceRaw.toString();
+        sellPrice = reducedSellPrice;
+        logger.info({
+          tradeId: trade._id.toString(),
+          botId: this.bot._id.toString(),
+          bandId: atDecision.bandId,
+          action: atDecision.effectiveAction,
+          tpTightenPct: atTpTightenPct,
+          sellPriceBefore: tp.sellPrice,
+          sellPriceAfter: sellPrice,
+          tpEffectiveBefore: tp.tpEffective,
+          tpEffectiveAfter: reducedTpPercent,
+        }, 'trader: TP tightened by Auto-Timing');
+      }
 
       // FIX 1: idempotent state update — ใช้ guard { state: 'placed' | 'filled' | 'retrying' }
       // กัน double-update ถ้า 2 path (WS + retry) มาถึงพร้อมกัน

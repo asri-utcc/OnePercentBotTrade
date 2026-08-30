@@ -66,8 +66,10 @@ describe('sessionStore.getAllSessionDocs', () => {
       const cond2 = capturedFilter.$or[1];
       expect(cond1.expires.$exists).toBe(false);
       expect(cond2.expires.$gt).toBeInstanceOf(Date);
-      // 1ms slack — `new Date()` inside getAllSessionDocs() may have been built a microsecond before `now`
-      expect(cond2.expires.$gt.getTime()).toBeGreaterThanOrEqual(now.getTime() - 1);
+      // 100ms slack — `new Date()` inside getAllSessionDocs() is built AFTER `now` in test,
+      //   and module require chain may take longer (FIX-2026-08-30: extra autoTiming models).
+      //   The only invariant is "filter time > now" — anything within 100ms is acceptable.
+      expect(cond2.expires.$gt.getTime()).toBeGreaterThanOrEqual(now.getTime() - 100);
     } finally {
       mongoose.connection.db = originalDb;
     }

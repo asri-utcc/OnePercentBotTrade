@@ -79,7 +79,52 @@ class AutoTiming {
     this._running = true;
     await this._loadConfig();
     this._installInterval();
+    this._installEventListeners();
     logger.info({ cfg: this._configSummary() }, 'autoTiming: started');
+  }
+
+  /**
+   * FIX-2026-08-30: subscribe to trade lifecycle events to maintain per-cell
+   * counters (openFromCell, tradesFromCellToday) without requiring trader.js
+   * explicit call sites. Architecture: emit-based, decoupled from BUY pipeline.
+   *   - 'trade:update' state='filled'  → bumpCounter('open') for layer-1 fills
+   *   - 'trade:update' state='sold'    → bumpCounter('close')
+   *   - 'trade:update' state='holding' → ALSO bumpCounter('open') (DCA layer fills
+   *     re-emit as holding)
+   */
+  _installEventListeners() {
+    if (this._eventsBound) return;
+    this._eventsBound = true;
+    this._onTradeUpdate = (payload) => {
+      try {
+        if (!payload || !payload.tradeId) return;
+        if (payload.state === 'filled' || payload.state === 'holding') {
+          // Resolve botId from payload or DB lookup; we use the payload's botId if present
+          const botId = payload.botId || null;
+          if (botId) {
+            const bot = { _id: botId };
+            const buyTs = payload.buyFilledAt ? new Date(payload.buyFilledAt).getTime() : Date.now();
+            this.bumpCounter('open', bot, buyTs);
+          }
+        } else if (payload.state === 'sold') {
+          const botId = payload.botId || null;
+          if (botId) {
+            const bot = { _id: botId };
+            const sellTs = payload.sellFilledAt ? new Date(payload.sellFilledAt).getTime() : Date.now();
+            this.bumpCounter('close', bot, sellTs);
+          }
+        }
+      } catch (err) {
+        logger.warn({ err: err.message }, 'autoTiming: trade:update handler failed');
+      }
+    };
+    eventBus.on('trade:update', this._onTradeUpdate);
+  }
+
+  _uninstallEventListeners() {
+    if (!this._eventsBound) return;
+    if (this._onTradeUpdate) eventBus.off('trade:update', this._onTradeUpdate);
+    this._eventsBound = false;
   }
 
   async reloadConfig() {
@@ -95,6 +140,7 @@ class AutoTiming {
 
   stop() {
     if (this._timer) { clearInterval(this._timer); this._timer = null; }
+    this._uninstallEventListeners();
     this._running = false;
     this._inFlight = false;
     logger.info('autoTiming: stopped');

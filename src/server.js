@@ -18,6 +18,7 @@ const binanceRateLimitConfig = require('./services/binanceRateLimitConfig'); // 
 const binanceRest = require('./binance/binanceRest'); // FIX-2026-08-21: apply capacity to live token-bucket
 const walletSnapshot = require('./services/walletSnapshot'); // FIX-2026-08-22: daily portfolio-value snapshot scheduler
 const autoReserve = require('./services/autoReserve'); // FIX-2026-08-24: auto reserve/release USDT scheduler
+const autoTiming = require('./services/autoTiming'); // FIX-2026-08-30 Phase 4: Auto-Timing (heatmap-driven entry gate)
 const adminMonitor = require('./admin-monitor'); // FIX-2026-08-26: OnePercentBot-Admin heartbeat + command listener
 const eventBus = require('./services/eventBus');
 const consent = require('./consent'); // FIX-2026-08-26 Phase 2c: first-run consent gate (3 sections + admin DB + local file)
@@ -256,6 +257,16 @@ async function main() {
     logger.info('server: autoReserve skipped (License.features.autoReserve === false or no license)');
   }
 
+  // FIX-2026-08-30 Phase 4: Auto-Timing (heatmap-driven entry gate) — premium feature
+  //   - License-gated: requires License.features.autoTiming === true
+  //   - Master toggle in AppConfig.autoTimingEnabled (settings UI)
+  //   - When both gates open: 30-min scheduler + eventBus listeners for trade:update
+  if (licenseService.isFeatureEnabled('autoTiming')) {
+    autoTiming.start();
+  } else {
+    logger.info('server: autoTiming skipped (License.features.autoTiming === false or no license)');
+  }
+
   // FIX-2026-08-26: OnePercentBot-Admin monitor — heartbeat (5min) + command poll (1min)
   //   - ADMIN_ENABLED=true required (default OFF)
   //   - Provides admin with machine health + accepts remote pause/resume/kill/force_close_all
@@ -326,6 +337,7 @@ async function main() {
     try { autoDeleteBot.stop(); } catch (e) { /* ignore */ }
     try { walletSnapshot.stop(); } catch (e) { /* ignore */ }
     try { autoReserve.stop(); } catch (e) { /* ignore */ }
+    try { autoTiming.stop(); } catch (e) { /* ignore */ }
     try { adminMonitor.stop(); } catch (e) { /* ignore */ }
     try { await botManager.flushActiveTimeOnShutdown(); } catch (e) { /* ignore */ }
     try { await botManager.stop(); } catch (e) { /* ignore */ }
