@@ -19,19 +19,15 @@
   <script src="/js/api.js"></script>
   <script src="/js/ws-client.js?v=2026-08-29-fix3"></script>
   <script>
+    // FIX-2026-08-30: หน้าหลักคือ Chart Monitor — landing page redirect
+    //   - ผู้ใช้ authenticated จะถูกส่งไปที่ /chart-monitor.html ทันที
+    //   - ผู้ใช้ไม่ authenticated → /login.html (เหมือนเดิม)
+    //   - WSClient.start() ถูกเรียกในหน้า Chart Monitor แทน (ไม่ต้อง start ที่นี่)
     API.get('/api/auth/me').then((me) => {
       if (!me.authenticated) {
         location.href = '/login.html';
       } else {
-        document.getElementById('content').innerHTML = `
-          <div class="lux-card">
-            <div class="lux-body text-center" style="padding:3rem 1.5rem;">
-              <h2 style="color:var(--gold-1);font-weight:800;">👋 ยินดีต้อนรับ</h2>
-              <p class="text-muted-2 mt-2">เลือกเมนูด้านบนเพื่อจัดการบอท ดูกราฟ หรือทดสอบ backtest</p>
-              <a href="/bots.html" class="btn btn-primary mt-3">🤖 ไปที่หน้า Bots</a>
-            </div>
-          </div>`;
-        WSClient.start();
+        location.href = '/chart-monitor.html';
       }
     });
   </script>
