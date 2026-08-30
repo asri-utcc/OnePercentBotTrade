@@ -109,6 +109,18 @@ async function fetchAllSoldTrades({ since = null } = {}) {
   return out;
 }
 
+// FIX-2026-08-30: the hold-time heatmap needs positions that are still open — a slot
+// whose trades all turned into multi-day bags would otherwise look pristine, because
+// only closed trades are ever aggregated (survivorship bias). These are NOT fed into
+// any other section; the rest of the page stays closed-trades-only.
+const OPEN_HOLD_STATES = ['filled', 'holding', 'stopping', 'selling', 'partial_sell_wait'];
+
+async function fetchOpenTrades({ since = null } = {}) {
+  const q = { state: { $in: OPEN_HOLD_STATES }, buyFilledAt: { $ne: null } };
+  if (since) q.buyFilledAt = { $ne: null, $gte: since };
+  return Trade.find(q).select('_id symbol buyFilledAt buyLayers.filledAt').lean();
+}
+
 // ─── Section builders ──────────────────────────────────
 
 function buildSummary(trades) {
@@ -296,13 +308,21 @@ function entryTimeOf(t) {
   return layer0 || t.buyFilledAt || null;
 }
 
-function buildHeatmap(trades) {
-  const blank = () => Array.from({ length: 7 }, () => Array.from({ length: 24 }, () => ({ pnl: 0, count: 0, wins: 0, losses: 0 })));
+function buildHeatmap(trades, openTrades = [], now = Date.now()) {
+  const blank = () => Array.from({ length: 7 }, () => Array.from({ length: 24 }, () => ({
+    pnl: 0, count: 0, wins: 0, losses: 0, holds: [], holdsOpen: [],
+  })));
   const sell = blank();
   const buy = blank();
   let buyMissing = 0;
   for (const t of trades) {
     const v = Number(t.realizedPnl) || 0;
+    const entryAt = entryTimeOf(t);
+    // Hold time in whole minutes — rounded here so the per-cell arrays stay compact
+    // on the wire (the frontend needs the raw values to compute median/avg/p75).
+    const holdMin = (entryAt && t.sellFilledAt)
+      ? Math.max(0, Math.round((new Date(t.sellFilledAt) - new Date(entryAt)) / 60000))
+      : null;
     const add = (m, at) => {
       const dt = new Date(at);
       const cell = m[dt.getDay()][dt.getHours()];
@@ -310,13 +330,23 @@ function buildHeatmap(trades) {
       cell.pnl = Number((cell.pnl + v).toFixed(4));
       if (v > 0) cell.wins += 1;
       else if (v < 0) cell.losses += 1;
+      if (holdMin !== null) cell.holds.push(holdMin);
     };
     if (t.sellFilledAt) add(sell, t.sellFilledAt);
-    const entryAt = entryTimeOf(t);
     if (entryAt) add(buy, entryAt);
     else buyMissing += 1;
   }
-  return { sell, buy, buyMissing };
+  // Still-open positions only have an entry time, so they land in the BUY matrix
+  // alone, and in holdsOpen so the UI can mark a slot as "still bagged".
+  let openCount = 0;
+  for (const t of openTrades) {
+    const entryAt = entryTimeOf(t);
+    if (!entryAt) continue;
+    const dt = new Date(entryAt);
+    buy[dt.getDay()][dt.getHours()].holdsOpen.push(Math.max(0, Math.round((now - dt) / 60000)));
+    openCount += 1;
+  }
+  return { sell, buy, buyMissing, openCount };
 }
 
 function buildByDayOfWeek(trades) {
@@ -1093,7 +1123,7 @@ async function aggregateTradeAnalysis({ since = null } = {}) {
   const byTimeframe = buildByTimeframe(trades);
   const bySellReason = buildBySellReason(trades);
   const byHour = buildByHour(trades);
-  const heatmap = buildHeatmap(trades);
+  const heatmap = buildHeatmap(trades, await fetchOpenTrades({ since }));
   const byDayOfWeek = buildByDayOfWeek(trades);
   const byDay = buildByDay(trades);
   const byMonth = buildByMonth(trades);

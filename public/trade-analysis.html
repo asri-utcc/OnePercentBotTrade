@@ -530,7 +530,10 @@
     }
     .ta-heat-detail-cell.is-bull .value { color: var(--bull-1); }
     .ta-heat-detail-cell.is-bear .value { color: var(--bear-1); }
+    .ta-heat-detail-cell.is-warn .value { color: var(--gold-1, #ffd166); }
     .ta-heat-detail-cell.is-info .value { color: var(--text-1); }
+    .ta-heat-band { display: inline-flex; align-items: center; gap: 4px; font-size: 0.65rem; color: var(--text-2); }
+    .ta-heat-band i { width: 14px; height: 8px; border-radius: 3px; display: inline-block; }
     .ta-heat-detail-close {
       font-size: 0.7rem;
       color: var(--text-3);
@@ -784,6 +787,12 @@
           <div class="ta-heat-toggle">
             <button type="button" data-heat-metric="pnl" class="is-active">Net PnL</button>
             <button type="button" data-heat-metric="wr">Win rate</button>
+            <button type="button" data-heat-metric="hold">⏱ Hold time</button>
+          </div>
+          <div class="ta-heat-toggle" id="ta-heat-holdstat" style="display:none;">
+            <button type="button" data-heat-hold-stat="median" class="is-active">Median</button>
+            <button type="button" data-heat-hold-stat="avg">Average</button>
+            <button type="button" data-heat-hold-stat="p75">P75</button>
           </div>
           <span class="text-muted-3" id="ta-heat-meta" style="font-size: 0.72rem;">—</span>
         </div>
@@ -799,7 +808,7 @@
               <div></div>
             </div>
             <div class="ta-heat-x-label">Hour-of-day (เวลาตามเครื่อง server)</div>
-            <div class="ta-heat-color-scale mt-2">
+            <div class="ta-heat-color-scale mt-2" id="ta-heat-color-scale">
               <span class="ta-heat-scale-label" id="ta-heat-legend-neg">-10 USDT</span>
               <div class="ta-heat-scale-bar"></div>
               <span class="ta-heat-scale-label" id="ta-heat-legend-mid">0</span>
@@ -1022,6 +1031,6 @@
   <script>window.NAV_ACTIVE = 'analysis';</script>
   <script src="/js/partials/nav.js"></script>
   <script src="/js/partials/rateLimitGauge.js"></script>
-  <script src="/js/pages/trade-analysis.js?v=2026-08-30-heat3"></script>
+  <script src="/js/pages/trade-analysis.js?v=2026-08-30-heat4"></script>
 </body>
 </html>

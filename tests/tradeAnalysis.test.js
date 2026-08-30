@@ -339,6 +339,64 @@ describe('buildHeatmap', () => {
     expect(r.sell).toHaveLength(7);
     expect(r.buy[0]).toHaveLength(24);
   });
+
+  test('records hold minutes for closed trades on BOTH sell and buy cells', () => {
+    const buyAt = new Date('2026-08-17T04:00:00Z');   // Sun 04:00
+    const sellAt = new Date('2026-08-17T04:30:00Z');  // Sun 04:30 — 30 min hold
+    const r = buildHeatmap([mkTrade({ buyFilledAt: buyAt, sellFilledAt: sellAt, realizedPnl: 1 })]);
+    expect(cellOf(r.sell, sellAt).holds).toEqual([30]);
+    expect(cellOf(r.buy, buyAt).holds).toEqual([30]);
+    // no open trades yet
+    expect(r.openCount).toBe(0);
+  });
+
+  test('still-open positions land only in the BUY matrix and contribute holdsOpen', () => {
+    const now = new Date('2026-08-17T05:00:00Z');
+    const buyAt = new Date(now.getTime() - 90 * 60_000); // 90 min ago
+    const open = { _id: 'open1', state: 'holding', buyFilledAt: buyAt, buyLayers: [] };
+    const r = buildHeatmap([], [open], now);
+    expect(r.openCount).toBe(1);
+    // buy cell at the open trade's entry hour holds the 90-min open position
+    const bcell = cellOf(r.buy, buyAt);
+    expect(bcell.holdsOpen).toEqual([90]);
+    expect(bcell.holds).toEqual([]);
+    // sell matrix must NOT receive the open trade (it has no sellFilledAt)
+    const scell = cellOf(r.sell, buyAt);
+    expect(scell.count).toBe(0);
+  });
+
+  test('DCA still-open positions use first layer filledAt as entry', () => {
+    const now = new Date('2026-08-17T05:00:00Z');
+    // layer0 90 min ago, layer1 10 min ago — different hours so we can tell them apart
+    const layer0 = new Date(now.getTime() - 90 * 60_000);
+    const layer1 = new Date(now.getTime() - 10 * 60_000);
+    const open = {
+      _id: 'open2',
+      state: 'filled',
+      buyFilledAt: layer1, // would otherwise (and used to) be the entry
+      buyLayers: [{ filledAt: layer0 }, { filledAt: layer1 }],
+    };
+    const r = buildHeatmap([], [open], now);
+    // entry = layer0 (older of the two); 90-min hold attributed to layer0's hour
+    expect(cellOf(r.buy, layer0).holdsOpen).toEqual([90]);
+    expect(cellOf(r.buy, layer1).holdsOpen).toEqual([]);
+  });
+
+  test('default now() works without an explicit argument', () => {
+    const open = { _id: 'open3', state: 'holding', buyFilledAt: new Date(Date.now() - 1000), buyLayers: [] };
+    const r = buildHeatmap([], [open]); // no `now` provided
+    expect(r.openCount).toBe(1);
+    expect(cellOf(r.buy, open.buyFilledAt).holdsOpen).toEqual([0]); // ~0 min
+  });
+
+  test('survives JSON round-trip with open positions too', () => {
+    const now = new Date('2026-08-17T05:00:00Z');
+    const buyAt = new Date(now.getTime() - 10 * 60_000);
+    const open = { _id: 'open4', state: 'holding', buyFilledAt: buyAt, buyLayers: [] };
+    const r = JSON.parse(JSON.stringify(buildHeatmap([], [open], now)));
+    expect(r.openCount).toBe(1);
+    expect(cellOf(r.buy, buyAt).holdsOpen).toEqual([10]);
+  });
 });
 
 describe('buildByDayOfWeek', () => {
