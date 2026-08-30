@@ -29,6 +29,22 @@ function selectedAction(band, defaultBand) {
     `<option value="${act}" ${act === a ? 'selected' : ''}>${act}</option>`).join('');
 }
 
+// UX-2026-08-30: visual cue for action dropdown — color-coded chip + emoji prefix
+function actionBadgeEmoji(action) {
+  const m = {
+    allow: '✅', limit: '⚠️', encourage: '✨', stimulate: '⭐', suppress: '🚫',
+  };
+  return m[action] || '·';
+}
+function actionBadgeClass(action) {
+  // used to color the first <td> in each row to scan suppress/limit at a glance
+  const m = {
+    allow: 'at-act-allow', limit: 'at-act-limit', encourage: 'at-act-encourage',
+    stimulate: 'at-act-stimulate', suppress: 'at-act-suppress',
+  };
+  return m[action] || 'at-act-allow';
+}
+
 function numOr(v, fallback) {
   return (v === undefined || v === null || Number.isNaN(Number(v))) ? fallback : Number(v);
 }
@@ -79,45 +95,49 @@ function renderAutoTimingSection() {
     const safeBandName = escapeHtml(bandName);
 
     return `
-      <tr data-band="${safeBandName}">
-        <td class="text-start align-middle"><code>${safeBandName}</code> <span class="text-muted small">${escapeHtml(bandLabel)}</span></td>
+      <tr data-band="${safeBandName}" class="${actionBadgeClass(action)}">
+        <td class="text-start align-middle">
+          <div class="at-band-name"><code>${safeBandName}</code></div>
+          <div class="text-muted small">${escapeHtml(bandLabel)}</div>
+        </td>
         <td class="align-middle">
-          <select class="form-select form-select-sm at-action" id="at-action-${safeBandName}">
+          <select class="form-select form-select-sm at-action" id="at-action-${safeBandName}" title="action หลัก">
             ${selectedAction(savedBand, def)}
           </select>
+          <div class="at-act-emoji text-center small" id="at-act-emoji-${safeBandName}">${actionBadgeEmoji(action)} ${escapeHtml(action)}</div>
         </td>
         <td class="align-middle">
-          <input type="number" step="0.05" min="0" max="3" class="form-control form-control-sm at-nomult" id="at-nomult-${safeBandName}" value="${notionalMult}" title="Multiplier บน base notional" />
+          <input type="number" step="0.05" min="0" max="3" class="form-control form-control-sm at-nomult text-center" id="at-nomult-${safeBandName}" value="${notionalMult}" title="× notional (0=block, 0.5=half, 1.2=+20%)" />
         </td>
         <td class="align-middle">
-          <input type="number" step="1" min="0" max="50" class="form-control form-control-sm at-tp" id="at-tp-${safeBandName}" value="${tpTighten}" title="% ลด TP" />
+          <input type="number" step="1" min="0" max="50" class="form-control form-control-sm at-tp text-center" id="at-tp-${safeBandName}" value="${tpTighten}" title="ลด TP% จาก auto TP เช่น 20 → TP ตก 20% (0=keep)" />
         </td>
         <td class="align-middle">
-          <input type="number" step="1" min="0" max="50" class="form-control form-control-sm at-sl" id="at-sl-${safeBandName}" value="${slTighten}" title="% ลด SL" />
+          <input type="number" step="1" min="0" max="50" class="form-control form-control-sm at-sl text-center" id="at-sl-${safeBandName}" value="${slTighten}" title="ลด SL threshold (0=keep)" />
         </td>
         <td class="text-center align-middle">
-          <input type="checkbox" class="form-check-input at-st1" id="at-st1-${safeBandName}" ${st1 ? 'checked' : ''} title="forceST1 green candle" />
+          <input type="checkbox" class="form-check-input at-st1" id="at-st1-${safeBandName}" ${st1 ? 'checked' : ''} title="force ST1 — green-candle only" />
         </td>
         <td class="text-center align-middle">
-          <input type="checkbox" class="form-check-input at-st2" id="at-st2-${safeBandName}" ${st2 ? 'checked' : ''} title="forceST2 LuxAlgo" />
+          <input type="checkbox" class="form-check-input at-st2" id="at-st2-${safeBandName}" ${st2 ? 'checked' : ''} title="force ST2 — LuxAlgo red pivot-low" />
         </td>
         <td class="text-center align-middle">
-          <input type="checkbox" class="form-check-input at-st3" id="at-st3-${safeBandName}" ${st3 ? 'checked' : ''} title="forceST3 no-trade" />
+          <input type="checkbox" class="form-check-input at-st3" id="at-st3-${safeBandName}" ${st3 ? 'checked' : ''} title="force ST3 — bearish-engulfing absence" />
         </td>
         <td class="text-center align-middle">
-          <input type="checkbox" class="form-check-input at-cbv5" id="at-cbv5-${safeBandName}" ${cbv5 ? 'checked' : ''} title="force CBv5" />
+          <input type="checkbox" class="form-check-input at-cbv5" id="at-cbv5-${safeBandName}" ${cbv5 ? 'checked' : ''} title="force CBv5 — Support-Zone breaker" />
         </td>
         <td class="align-middle">
-          <input type="number" step="0.05" min="0.5" max="2" class="form-control form-control-sm at-kc" id="at-kc-${safeBandName}" value="${kcMult}" title="× on autoPauseMinKcPct" />
+          <input type="number" step="0.05" min="0.5" max="2" class="form-control form-control-sm at-kc text-center" id="at-kc-${safeBandName}" value="${kcMult}" title="× minKcPct (0.5..2.0; <1=loosen)" />
         </td>
         <td class="align-middle">
-          <input type="number" step="1" min="0" max="100" class="form-control form-control-sm at-mc" id="at-mc-${safeBandName}" value="${maxCC === '' ? '' : maxCC}" placeholder="∞" title="max concurrent (null=∞)" />
+          <input type="number" step="1" min="0" max="100" class="form-control form-control-sm at-mc text-center" id="at-mc-${safeBandName}" value="${maxCC === '' ? '' : maxCC}" placeholder="∞" title="max concurrent positions (เว้นว่าง=ไม่จำกัด)" />
         </td>
         <td class="align-middle">
-          <input type="number" step="1" min="0" max="100" class="form-control form-control-sm at-mtd" id="at-mtd-${safeBandName}" value="${maxTD === '' ? '' : maxTD}" placeholder="∞" title="max trades/day (null=∞)" />
+          <input type="number" step="1" min="0" max="100" class="form-control form-control-sm at-mtd text-center" id="at-mtd-${safeBandName}" value="${maxTD === '' ? '' : maxTD}" placeholder="∞" title="max BUY/day (เว้นว่าง=ไม่จำกัด)" />
         </td>
         <td class="text-center align-middle">
-          <button type="button" class="btn btn-outline-secondary btn-sm at-reset" data-band="${safeBandName}" title="Reset row to default">↺</button>
+          <button type="button" class="btn btn-outline-secondary btn-sm at-reset" data-band="${safeBandName}" title="reset row → default">↺</button>
         </td>
       </tr>
     `;
@@ -193,28 +213,72 @@ function renderAutoTimingSection() {
       </div>
     </div>
 
-    <h6 class="mt-4 mb-2">🎚 Per-band knobs (5 bands × 10 attrs)</h6>
-    <div class="table-responsive">
-      <table class="table table-sm table-bordered align-middle text-center mb-2" id="at-bands-table">
+    <h6 class="mt-4 mb-2">🎚 Per-band knobs (5 bands × 10 attrs)
+      <a href="#" class="ms-2 small text-muted" id="at-bands-help-link">📘 คำอธิบายแต่ละคอลัมน์</a>
+    </h6>
+    <div class="alert alert-secondary small py-2 px-3 mb-2" id="at-bands-help" style="display:none;">
+      <strong>📘 Cheat-sheet:</strong>
+      <ul class="mb-1">
+        <li><strong>action</strong> — เลือก Suppress / Limit / Encourage / Stimulate / Allow; เป็นตัวคุม <em>overall vibe</em> ของ slot นี้</li>
+        <li><strong>notional×</strong> — ตัวคูณ notional; <code>0</code> = block, <code>0.5</code> = ลดครึ่ง, <code>1.2</code> = +20% (ใช้กับ floor/ceiling ด้านบน)</li>
+        <li><strong>TP tight %</strong> — <strong>ลด</strong> TP% <em>จาก auto-TP ที่ตั้งไว้</em> (เช่น TP ตั้งไว้ 0.5%, ตั้ง TP tight=20 → TP ตกเหลือ ~0.4%); <code>0</code> = ใช้ค่าเดิม</li>
+        <li><strong>SL tight %</strong> — <strong>ลด</strong> SL threshold (คล้าย TP tight); <code>0</code> = ไม่บีบ</li>
+        <li><strong>fST1/fST2/fST3</strong> — บังคับ Safe-Trade filter (เขียว only / trendline / no-trade) <em>ตามด้วย</em> bot.safeTradeEnabled</li>
+        <li><strong>fCBv5</strong> — บังคับให้ CBv5 ทำงานใน slot นี้ (Support-Zone circuit breaker)</li>
+        <li><strong>minKc×</strong> — ตัวคูณ <code>autoPauseMinKcPct</code> ของบอท (0.5..2.0; ลด = อนุญาตให้ %KC ต่ำลง)</li>
+        <li><strong>maxCC</strong> — จำกัด positions เปิดพร้อมกันจาก cell นี้ (เว้นว่าง = ∞)</li>
+        <li><strong>maxTD</strong> — จำกัด BUY/day จาก cell นี้ (เว้นว่าง = ∞)</li>
+        <li><strong>↺</strong> — reset row กลับค่า default</li>
+      </ul>
+    </div>
+
+    <div class="at-bands-scroll">
+      <table class="table table-sm table-bordered align-middle text-center mb-2 at-bands-table" id="at-bands-table">
+        <colgroup>
+          <col style="width:160px;">  <!-- band -->
+          <col style="width:140px;">  <!-- action -->
+          <col style="width:90px;">   <!-- notional× -->
+          <col style="width:90px;">   <!-- TP tight -->
+          <col style="width:90px;">   <!-- SL tight -->
+          <col style="width:60px;">   <!-- fST1 -->
+          <col style="width:60px;">   <!-- fST2 -->
+          <col style="width:60px;">   <!-- fST3 -->
+          <col style="width:60px;">   <!-- fCBv5 -->
+          <col style="width:80px;">   <!-- minKc× -->
+          <col style="width:80px;">   <!-- maxCC -->
+          <col style="width:80px;">   <!-- maxTD -->
+          <col style="width:60px;">   <!-- ↺ -->
+        </colgroup>
         <thead class="table-light">
+          <tr class="at-bands-superhdr text-muted-2 small">
+            <th colspan="2" class="text-start">🪪 Slot</th>
+            <th colspan="3">💵 Notional &amp; Exit</th>
+            <th colspan="4">🔒 Force filters</th>
+            <th>📏 KC adj.</th>
+            <th colspan="2">⏱ Daily limits</th>
+            <th></th>
+          </tr>
           <tr>
-            <th>band</th>
-            <th>action</th>
-            <th>notional×</th>
-            <th>TP↓%</th>
-            <th>SL↓%</th>
-            <th>fST1</th>
-            <th>fST2</th>
-            <th>fST3</th>
-            <th>fCBv5</th>
-            <th>minKc×</th>
-            <th>maxCC</th>
-            <th>maxTD</th>
-            <th>↺</th>
+            <th class="text-start" title="ชื่อ hold-band (lt10m/lt1h/...) + label ภาษาไทย">band</th>
+            <th title="action หลัก — คุม overall vibe ของ slot นี้">action</th>
+            <th title="ตัวคูณ notional บน base (0 = block, 0.5 = ลดครึ่ง, 1.2 = +20%)">notional×</th>
+            <th title="ลด TP% จากค่า auto TP ที่ตั้งไว้ (เช่น 20 → TP ตก 20% ของ 0.5% = ~0.4%)">TP tight %</th>
+            <th title="ลด SL threshold (คล้าย TP tight)">SL tight %</th>
+            <th title="Force ST1 — green candle only (override safeTrade setting)">fST1</th>
+            <th title="Force ST2 — LuxAlgo red pivot-low">fST2</th>
+            <th title="Force ST3 — bearish-engulfing/shooting-star absence">fST3</th>
+            <th title="Force CBv5 — Support-Zone circuit breaker">fCBv5</th>
+            <th title="× บน autoPauseMinKcPct (0.5..2.0; ต่ำกว่า 1 = ผ่อน)">minKc×</th>
+            <th title="max positions เปิดพร้อมกันจาก cell นี้ (เว้นว่าง = ∞)">maxCC</th>
+            <th title="max BUY/day จาก cell นี้ (เว้นว่าง = ∞)">maxTD</th>
+            <th title="reset row กลับค่า default">↺</th>
           </tr>
         </thead>
         <tbody>${bandRows}</tbody>
       </table>
+    </div>
+    <div class="text-muted small mb-2">
+      💡 <strong>Tip:</strong> แต่ละ cell (จันทร์ 02:00, อังคาร 14:00, ...) จะใช้ knob ของ <em>hold-band</em> ที่ cell นั้น classify ได้; ค่าเริ่มต้นทำเครื่องหมายด้วย <code>↺</code>
     </div>
 
     <div class="mt-3">
@@ -384,6 +448,9 @@ function resetAutoTimingBandsToDefaults() {
     setVal('.at-kc', def.minKcMult != null ? def.minKcMult : 1);
     setVal('.at-mc', def.maxConcurrent != null ? def.maxConcurrent : '');
     setVal('.at-mtd', def.maxTradesPerDay != null ? def.maxTradesPerDay : '');
+    // re-stamp row class + emoji caption
+    const actionSel = row.querySelector('.at-action');
+    if (actionSel && typeof actionSel.onchange === 'function') actionSel.onchange();
   });
   const el = document.getElementById('at-status');
   if (el) {
@@ -399,6 +466,35 @@ function bindAutoTimingSectionEvents() {
   if (btnTrigger) btnTrigger.onclick = triggerAutoTimingSection;
   const btnResetAll = document.getElementById('btn-reset-all-at');
   if (btnResetAll) btnResetAll.onclick = resetAutoTimingBandsToDefaults;
+
+  // UX-2026-08-30: help-block toggle
+  const helpLink = document.getElementById('at-bands-help-link');
+  const helpBlock = document.getElementById('at-bands-help');
+  if (helpLink && helpBlock) {
+    helpLink.onclick = (e) => {
+      e.preventDefault();
+      const visible = helpBlock.style.display !== 'none';
+      helpBlock.style.display = visible ? 'none' : 'block';
+      helpLink.textContent = visible ? '📘 คำอธิบายแต่ละคอลัมน์' : '❌ ปิดคำอธิบาย';
+    };
+  }
+
+  // UX-2026-08-30: action dropdown — update row colour + emoji caption live
+  document.querySelectorAll('#at-bands-table .at-action').forEach((sel) => {
+    sel.onchange = () => {
+      const row = sel.closest('tr');
+      const bandId = row && row.getAttribute('data-band');
+      if (!row || !bandId) return;
+      const action = sel.value || 'allow';
+      // strip existing action class
+      const classesToStrip = ['at-act-allow', 'at-act-limit', 'at-act-encourage', 'at-act-stimulate', 'at-act-suppress'];
+      classesToStrip.forEach((c) => row.classList.remove(c));
+      row.classList.add(actionBadgeClass(action));
+      const cap = document.getElementById('at-act-emoji-' + bandId);
+      if (cap) cap.innerHTML = actionBadgeEmoji(action) + ' ' + escapeHtml(action);
+    };
+  });
+
   document.querySelectorAll('.at-reset').forEach((btn) => {
     btn.onclick = () => {
       const bandId = btn.getAttribute('data-band');
@@ -418,6 +514,9 @@ function bindAutoTimingSectionEvents() {
       setVal('.at-kc', def.minKcMult != null ? def.minKcMult : 1);
       setVal('.at-mc', def.maxConcurrent != null ? def.maxConcurrent : '');
       setVal('.at-mtd', def.maxTradesPerDay != null ? def.maxTradesPerDay : '');
+      // re-stamp row class + emoji caption from new action value
+      const actionSel = row.querySelector('.at-action');
+      if (actionSel && typeof actionSel.onchange === 'function') actionSel.onchange();
     };
   });
 }

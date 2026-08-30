@@ -417,6 +417,107 @@ a:hover { color: var(--gold-2); text-decoration: none; }
   border-color: rgba(245,184,0,0.45);
 }
 
+/* FIX-2026-08-30 UX-2: Auto-Timing per-band table — horizontal scroll + readability */
+.at-bands-scroll {
+  position: relative;
+  overflow-x: auto;
+  overflow-y: visible;
+  /* min-width บังคับให้ table กว้างพอที่จะอ่านได้ทุก column → ถ้า viewport เล็กให้ scroll แทนบีบ */
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 8px;
+  background: rgba(0,0,0,0.18);
+}
+.at-bands-table {
+  /* table ต้องกว้างพอ 13 col × min ~80px → ~1100px */
+  min-width: 1100px;
+  width: 100%;
+  margin-bottom: 0;
+}
+.at-bands-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--bg-2, #0f1623);
+  color: var(--text-1, #f1f5f9);
+  border-bottom: 1px solid rgba(255,255,255,0.10);
+  font-weight: 600;
+  font-size: 0.78rem;
+  white-space: nowrap;
+  text-align: center;
+  vertical-align: middle;
+}
+.at-bands-table thead th[title]:hover {
+  cursor: help;
+  text-decoration: underline dotted rgba(255,255,255,0.35);
+}
+.at-bands-table thead .at-bands-superhdr th {
+  font-size: 0.72rem;
+  color: var(--text-3, #94a3b8);
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  background: rgba(255,255,255,0.03);
+}
+.at-bands-table .at-band-name {
+  font-weight: 600;
+  font-family: var(--font-mono);
+  font-size: 0.85rem;
+}
+.at-bands-table .at-act-emoji {
+  margin-top: 2px;
+  font-size: 0.72rem;
+  font-family: var(--font-mono);
+  color: var(--text-3, #94a3b8);
+}
+.at-bands-table tbody td {
+  vertical-align: middle;
+}
+/* Action-tinted row borders (left edge) — ทำให้ scan suppress/limit ได้ทันที */
+.at-bands-table tbody tr.at-act-suppress   td:first-child { border-left: 4px solid #ff4d6d; background: rgba(255,77,109,0.06); }
+.at-bands-table tbody tr.at-act-limit      td:first-child { border-left: 4px solid #fb923c; background: rgba(251,146,60,0.06); }
+.at-bands-table tbody tr.at-act-encourage  td:first-child { border-left: 4px solid #22d3ee; background: rgba(34,211,238,0.05); }
+.at-bands-table tbody tr.at-act-stimulate  td:first-child { border-left: 4px solid #60a5fa; background: rgba(96,165,250,0.05); }
+.at-bands-table tbody tr.at-act-allow      td:first-child { border-left: 4px solid #00e5b8; background: rgba(0,229,184,0.04); }
+.at-bands-table tbody tr:hover td {
+  background-color: rgba(255,255,255,0.04);
+}
+/* Compact numeric inputs */
+.at-bands-table input[type="number"] {
+  text-align: center;
+  padding: 0.2rem 0.4rem;
+  font-family: var(--font-mono);
+  font-size: 0.85rem;
+}
+.at-bands-table select.form-select-sm {
+  padding: 0.2rem 0.5rem;
+  font-size: 0.85rem;
+}
+@media (max-width: 575.98px) {
+  .at-bands-table { min-width: 0; }
+  .at-bands-table thead { display: none; }
+  .at-bands-table tbody tr {
+    display: block;
+    border: 1px solid rgba(255,255,255,0.1);
+    border-radius: 8px;
+    padding: 0.5rem;
+    margin-bottom: 0.5rem;
+  }
+  .at-bands-table tbody td {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.25rem 0;
+    border: none;
+  }
+  .at-bands-table tbody td::before {
+    content: attr(data-label);
+    color: var(--text-3, #94a3b8);
+    font-size: 0.78rem;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+  }
+}
+
 /* FIX-2026-08-20: secondary "🛡 N USDT" pill — sits next to the main balance
    pill only when reserve > 0. Hidden otherwise. */
 .app-nav .balance-reserve-pill {
