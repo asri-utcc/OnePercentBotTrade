@@ -388,6 +388,10 @@ const appConfigSchema = new mongoose.Schema(
     autoTimingSuppressCooldownDays: { type: Number, default: 90, min: 30, max: 365 },
     autoTimingMinTradesEnforce:  { type: Number,  default: 10, min: 1, max: 100 },
     autoTimingMinTradesShow:     { type: Number,  default: 3,  min: 1, max: 50 },
+    // FIX-2026-08-31: Hold-time metric selector — 'median' (default, outlier-robust)
+    //   or 'p75' (more sensitive to "stuck" / �อย cells). Determines which statistic
+    //   is used to bucket a cell into the 5-band table (lt10m/lt1h/lt12h/lt48h/gt48h).
+    autoTimingHoldMetric:        { type: String, enum: ['median','p75'], default: 'median' },
     autoTimingBands:             { type: Object,  default: () => require('../../core/autoTimingDefaults').getDefaultBandsClone() },
     autoTimingMinNotionalFloorUSDT:   { type: Number, default: 10, min: 1 },
     autoTimingMaxNotionalCeilingUSDT: { type: Number, default: 200, min: 10 },

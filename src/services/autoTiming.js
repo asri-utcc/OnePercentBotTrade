@@ -187,6 +187,9 @@ class AutoTiming {
       cooldownDays:      posOrDefault(cfg.autoTimingSuppressCooldownDays, DEFAULT_COOLDOWN_DAYS),
       minTradesEnforce:  posOrDefault(cfg.autoTimingMinTradesEnforce, DEFAULT_MIN_TRADES_ENFORCE),
       minTradesShow:     posOrDefault(cfg.autoTimingMinTradesShow, DEFAULT_MIN_TRADES_SHOW),
+      // FIX-2026-08-31: hold-time metric selector (median|p75) — defaults to median
+      //   for backward compat. Validated against enum in AppConfig.
+      holdMetric:        (cfg.autoTimingHoldMetric === 'p75') ? 'p75' : 'median',
       minFloorUSDT:      posOrDefault(cfg.autoTimingMinNotionalFloorUSDT, DEFAULT_MIN_NOTIONAL_FLOOR),
       maxCeilingUSDT:    posOrDefault(cfg.autoTimingMaxNotionalCeilingUSDT, DEFAULT_MAX_NOTIONAL_CEILING),
       suppressThresholdEverBad: SUPPRESS_THRESHOLD_EVER_BAD,
@@ -475,6 +478,9 @@ class AutoTiming {
         nWeighted: cellStats ? cellStats.n : 0,
         winRate: cellStats ? cellStats.winRate : 0,
         medianHoldMin: cellStats ? cellStats.medianHoldMin : 0,
+        // FIX-2026-08-31: persist p75HoldMin alongside median so the UI can show
+        //   both, and so future A/B tests don't need to recompute aggregations.
+        p75HoldMin: cellStats ? (cellStats.p75HoldMin || 0) : 0,
         confidence: decision.confidence,
         note: decision.reason,
       });
@@ -496,7 +502,7 @@ class AutoTiming {
     }).select({ buyFilledAt: 1, sellFilledAt: 1, pnlUSDT: 1 }).lean();
     const cellMap = aggregateByCell(trades, this._config, msOf(now));
     return cellMap.get(`${bucket.day}:${bucket.hour}`) || {
-      bucket, n: 0, winRate: 0, pnlUSDT: 0, medianHoldMin: 0, holds: [],
+      bucket, n: 0, winRate: 0, pnlUSDT: 0, medianHoldMin: 0, p75HoldMin: 0, holds: [],
     };
   }
 
@@ -542,6 +548,7 @@ function defaultConfig() {
     cooldownDays: DEFAULT_COOLDOWN_DAYS,
     minTradesEnforce: DEFAULT_MIN_TRADES_ENFORCE,
     minTradesShow: DEFAULT_MIN_TRADES_SHOW,
+    holdMetric: 'median', // FIX-2026-08-31: default to median (outlier-robust)
     minFloorUSDT: DEFAULT_MIN_NOTIONAL_FLOOR,
     maxCeilingUSDT: DEFAULT_MAX_NOTIONAL_CEILING,
     suppressThresholdEverBad: SUPPRESS_THRESHOLD_EVER_BAD,
@@ -573,7 +580,9 @@ function aggregateByCell(trades, config, nowMs) {
     const key = `${d.getDay()}:${d.getHours()}`;
     let cell = map.get(key);
     if (!cell) {
-      cell = { bucket: { day: d.getDay(), hour: d.getHours() }, n: 0, winRate: 0, pnlUSDT: 0, medianHoldMin: 0, holds: [], weightedSumW: 0, weightedSumWin: 0 };
+      // FIX-2026-08-31: pre-allocate p75HoldMin=0 alongside medianHoldMin so the
+      //   classifier can pick either metric without crashing on legacy cells.
+      cell = { bucket: { day: d.getDay(), hour: d.getHours() }, n: 0, winRate: 0, pnlUSDT: 0, medianHoldMin: 0, p75HoldMin: 0, holds: [], weightedSumW: 0, weightedSumWin: 0 };
       map.set(key, cell);
     }
     cell.weightedSumW += w;
@@ -587,6 +596,9 @@ function aggregateByCell(trades, config, nowMs) {
     cell.n = cell.weightedSumW;
     cell.winRate = cell.weightedSumW > 0 ? cell.weightedSumWin / cell.weightedSumW : 0;
     cell.medianHoldMin = median(cell.holds);
+    // FIX-2026-08-31: compute P75 alongside median so the user can switch metrics
+    //   without recomputing the full 30-day aggregation.
+    cell.p75HoldMin = percentile(cell.holds, 0.75);
     delete cell.weightedSumW; delete cell.weightedSumWin;
   }
   return map;
@@ -597,6 +609,21 @@ function median(arr) {
   const sorted = [...arr].sort((a, b) => a - b);
   const mid = Math.floor(sorted.length / 2);
   return sorted.length % 2 === 0 ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid];
+}
+
+// FIX-2026-08-31: percentile helper — linear interpolation between adjacent ranks.
+//   p in [0,1]. Returns 0 for empty arrays. For p=0.5 this equals median().
+function percentile(arr, p) {
+  if (!arr || arr.length === 0) return 0;
+  if (!Number.isFinite(p) || p < 0 || p > 1) return 0;
+  const sorted = [...arr].sort((a, b) => a - b);
+  if (sorted.length === 1) return sorted[0];
+  const rank = p * (sorted.length - 1); // 0..n-1
+  const lo = Math.floor(rank);
+  const hi = Math.ceil(rank);
+  if (lo === hi) return sorted[lo];
+  const frac = rank - lo;
+  return sorted[lo] * (1 - frac) + sorted[hi] * frac;
 }
 
 function buildTier2Upsert({ day, hour, suppressUntil, pnlPerTrade, winRate, existing }) {

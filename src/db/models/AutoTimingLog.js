@@ -47,6 +47,10 @@ const AutoTimingLogSchema = new mongoose.Schema({
   nWeighted:  { type: Number, default: 0 },
   winRate:    { type: Number, default: 0 },
   medianHoldMin: { type: Number, default: 0 },
+  // FIX-2026-08-31: P75 hold (min) — companion to medianHoldMin so the UI can
+  //   display both and the user can switch holdMetric in Settings without losing
+  //   historical data.
+  p75HoldMin: { type: Number, default: 0 },
   confidence: { type: String, default: 'no_data' },
   note:       { type: String, default: null },
 }, {

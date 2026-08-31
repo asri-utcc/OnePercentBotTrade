@@ -113,32 +113,55 @@
     bar.innerHTML = `📁 <strong>${_quota.used}/${_quota.limit}</strong> used today · resets at 00:00 BKK`;
   }
 
-  // ── Identity rendering row ──
+  // ── Identity rendering row (compact chip → popover) ──
   function _renderIdentityRow() {
     const row = _el('chat-identity-row');
     if (!row) return;
-    const swatches = OPERATOR_COLORS.map((c) =>
-      `<button type="button" class="chat-swatch" data-color="${c}" style="background:${c};${_myColor === c ? 'outline:2px solid #fff;' : ''}" title="${c}"></button>`
-    ).join('');
-    const icons = SYSTEM_ICONS.map((ic) =>
-      `<button type="button" class="chat-icon-btn" data-icon="${ic}" style="${_myIcon === ic ? 'outline:2px solid #fff;' : ''}">${ic}</button>`
-    ).join('');
+    // FIX 2026-08-31: compact chip — single button shows current color+icon,
+    // popover opens full picker. Avoids 28-button row taking 3 lines of space.
+    const c = _myColor || '#888';
+    const ic = _myIcon || '👤';
     row.innerHTML = `
-      <div class="chat-identity-block">
-        <span class="chat-identity-label">🎨 สี</span>
-        ${swatches}
-      </div>
-      <div class="chat-identity-block">
-        <span class="chat-identity-label">🐾 ไอคอน</span>
-        ${icons}
+      <button type="button" id="chat-identity-chip" class="chat-identity-chip" style="border-color:${c};color:${c};" title="เปลี่ยนสี/ไอคอน">
+        <span class="chat-identity-chip-icon" style="color:${c}">${ic}</span>
+        <span class="chat-identity-chip-text">${_myColor || _myIcon ? 'เปลี่ยน' : 'เลือกสี/ไอคอน'}</span>
+      </button>
+      <div id="chat-identity-popover" class="chat-identity-popover hidden">
+        <div class="chat-popover-section">
+          <div class="chat-popover-label">🎨 สี</div>
+          <div class="chat-popover-colors">
+            ${OPERATOR_COLORS.map((cc) =>
+              `<button type="button" class="chat-swatch" data-color="${cc}" style="background:${cc};${_myColor === cc ? 'outline:2px solid #fff;' : ''}" title="${cc}"></button>`
+            ).join('')}
+          </div>
+        </div>
+        <div class="chat-popover-section">
+          <div class="chat-popover-label">🐾 ไอคอน</div>
+          <div class="chat-popover-icons">
+            ${SYSTEM_ICONS.map((ii) =>
+              `<button type="button" class="chat-icon-btn" data-icon="${ii}" style="${_myIcon === ii ? 'outline:2px solid #fff;' : ''}">${ii}</button>`
+            ).join('')}
+          </div>
+        </div>
       </div>
     `;
-    row.querySelectorAll('.chat-swatch').forEach((b) =>
-      b.addEventListener('click', () => _setMyColor(b.dataset.color))
-    );
-    row.querySelectorAll('.chat-icon-btn').forEach((b) =>
-      b.addEventListener('click', () => _setMyIcon(b.dataset.icon))
-    );
+    const chip = _el('chat-identity-chip');
+    const pop = _el('chat-identity-popover');
+    if (chip && pop) {
+      chip.addEventListener('click', (e) => {
+        e.stopPropagation();
+        pop.classList.toggle('hidden');
+      });
+      document.addEventListener('click', (e) => {
+        if (!pop.contains(e.target) && e.target !== chip) pop.classList.add('hidden');
+      });
+      pop.querySelectorAll('.chat-swatch').forEach((b) =>
+        b.addEventListener('click', () => { _setMyColor(b.dataset.color); pop.classList.add('hidden'); })
+      );
+      pop.querySelectorAll('.chat-icon-btn').forEach((b) =>
+        b.addEventListener('click', () => { _setMyIcon(b.dataset.icon); pop.classList.add('hidden'); })
+      );
+    }
   }
 
   async function _loadMyIdentity() {
@@ -165,7 +188,10 @@
     try {
       const r = await API.get('/api/chat/quota');
       _quota = r || _quota;
-    } catch (_) { /* admin disabled */ }
+    } catch (err) {
+      // FIX 2026-08-31: suppress 401 noise from page-load-before-login
+      if (!err || err.status !== 401) console.warn('chat: quota load failed', err);
+    }
     _updateQuotaBar();
   }
 
@@ -381,7 +407,16 @@
     });
     const json = await r.json().catch(() => ({}));
     if (!r.ok) {
-      throw new Error(json.message || json.error || `HTTP ${r.status}`);
+      // FIX 2026-08-31: extract string error (was producing "[object Object]"
+      // when admin returns {ok:false, error:{nested:...}})
+      let msg = json.message || json.error;
+      if (typeof msg !== 'string') {
+        msg = (msg && (msg.error || msg.message)) || `HTTP ${r.status}`;
+      }
+      const err = new Error(typeof msg === 'string' ? msg : `HTTP ${r.status}`);
+      err.status = r.status;
+      err.body = json;
+      throw err;
     }
     if (json.quota) _quota = json.quota;
     _updateQuotaBar();
