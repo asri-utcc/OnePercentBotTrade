@@ -396,7 +396,17 @@ function renderBotDefaultsSection() {
         </label>
       </div>
       <div class="col-md-4">
-        <label class="form-label">⏱️ Auto-Timing (heatmap-driven)</label>
+        <label class="form-label" for="bd-auto-timing-enabled">⏱️ Auto-Timing (heatmap-driven)</label>
+        <select class="form-select form-select-sm" id="bd-auto-timing-enabled">
+      </div>
+      <div class="col-md-4">
+        <label class="form-check form-switch">
+          <input type="checkbox" class="form-check-input" id="bd-auto-pause-adjust-enabled" ${d.autoPauseAdjustEnabled === true ? 'checked' : ''} />
+          <span class="form-check-label">🎚️ Auto-pause threshold auto-adjust</span>
+        </label>
+      </div>
+      <div class="col-md-4">
+        <label class="form-label" for="bd-auto-timing-enabled">⏱️ Auto-Timing (heatmap-driven)</label>
         <select class="form-select form-select-sm" id="bd-auto-timing-enabled">
           <option value="inherit" ${(d.autoTimingEnabled === null || d.autoTimingEnabled === undefined) ? 'selected' : ''}>🟢 Inherit master</option>
           <option value="true" ${d.autoTimingEnabled === true ? 'selected' : ''}>✅ Force ON</option>

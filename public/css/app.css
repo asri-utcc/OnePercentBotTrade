@@ -688,28 +688,64 @@ a:hover { color: var(--gold-2); text-decoration: none; }
   font-size: 0.85rem;
 }
 @media (max-width: 575.98px) {
-  .at-bands-table { min-width: 0; }
+  .at-bands-scroll { overflow-x: visible; }
+  .at-bands-table { min-width: 0; width: 100%; }
   .at-bands-table thead { display: none; }
+
+  /* Each band becomes a stacked card on mobile (FIX-2026-08-31: data-label attributes) */
   .at-bands-table tbody tr {
     display: block;
-    border: 1px solid rgba(255,255,255,0.1);
+    border: 1px solid rgba(255,255,255,0.10);
     border-radius: 8px;
-    padding: 0.5rem;
-    margin-bottom: 0.5rem;
+    padding: 0.5rem 0.75rem;
+    margin-bottom: 0.6rem;
+    background: rgba(255,255,255,0.02);
   }
+  /* Band header cell spans full width on its own row */
+  .at-bands-table tbody td:first-child {
+    display: block;
+    padding: 0 0 0.35rem 0;
+    border-bottom: 1px solid rgba(255,255,255,0.08);
+    margin-bottom: 0.35rem;
+  }
+  /* Other cells: flex row with label ::before + control on the right */
   .at-bands-table tbody td {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    padding: 0.25rem 0;
+    gap: 0.75rem;
+    padding: 0.3rem 0;
     border: none;
   }
   .at-bands-table tbody td::before {
     content: attr(data-label);
+    flex: 0 0 auto;
     color: var(--text-3, #94a3b8);
     font-size: 0.78rem;
     text-transform: uppercase;
-    letter-spacing: 0.03em;
+    letter-spacing: 0.04em;
+    min-width: 6.5rem;
+  }
+  /* form control on the right fills remaining space */
+  .at-bands-table tbody td > input,
+  .at-bands-table tbody td > select,
+  .at-bands-table tbody td > button {
+    flex: 1 1 auto;
+    max-width: 12rem;
+    text-align: center;
+  }
+  /* Reset button: own row, right-aligned, less prominent */
+  .at-bands-table tbody td[data-label="reset"] {
+    justify-content: flex-end;
+    padding-top: 0.5rem;
+    border-top: 1px solid rgba(255,255,255,0.06);
+    margin-top: 0.35rem;
+  }
+  .at-bands-table tbody td[data-label="reset"]::before { content: ""; }
+  .at-bands-table tbody td[data-label="reset"] > button {
+    flex: 0 0 auto;
+    max-width: none;
+    width: auto;
   }
 }
 

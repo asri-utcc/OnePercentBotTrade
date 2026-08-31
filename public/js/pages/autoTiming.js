@@ -96,47 +96,47 @@ function renderAutoTimingSection() {
 
     return `
       <tr data-band="${safeBandName}" class="${actionBadgeClass(action)}">
-        <td class="text-start align-middle">
+        <td class="text-start align-middle" data-label="band">
           <div class="at-band-name"><code>${safeBandName}</code></div>
           <div class="text-muted small">${escapeHtml(bandLabel)}</div>
         </td>
-        <td class="align-middle">
+        <td class="align-middle" data-label="action">
           <select class="form-select form-select-sm at-action" id="at-action-${safeBandName}" title="action หลัก">
             ${selectedAction(savedBand, def)}
           </select>
           <div class="at-act-emoji text-center small" id="at-act-emoji-${safeBandName}">${actionBadgeEmoji(action)} ${escapeHtml(action)}</div>
         </td>
-        <td class="align-middle">
+        <td class="align-middle" data-label="notional×">
           <input type="number" step="0.05" min="0" max="3" class="form-control form-control-sm at-nomult text-center" id="at-nomult-${safeBandName}" value="${notionalMult}" title="× notional (0=block, 0.5=half, 1.2=+20%)" />
         </td>
-        <td class="align-middle">
+        <td class="align-middle" data-label="TP tight %">
           <input type="number" step="1" min="0" max="50" class="form-control form-control-sm at-tp text-center" id="at-tp-${safeBandName}" value="${tpTighten}" title="ลด TP% จาก auto TP เช่น 20 → TP ตก 20% (0=keep)" />
         </td>
-        <td class="align-middle">
+        <td class="align-middle" data-label="SL tight %">
           <input type="number" step="1" min="0" max="50" class="form-control form-control-sm at-sl text-center" id="at-sl-${safeBandName}" value="${slTighten}" title="ลด SL threshold (0=keep)" />
         </td>
-        <td class="text-center align-middle">
+        <td class="text-center align-middle" data-label="force ST1">
           <input type="checkbox" class="form-check-input at-st1" id="at-st1-${safeBandName}" ${st1 ? 'checked' : ''} title="force ST1 — green-candle only" />
         </td>
-        <td class="text-center align-middle">
+        <td class="text-center align-middle" data-label="force ST2">
           <input type="checkbox" class="form-check-input at-st2" id="at-st2-${safeBandName}" ${st2 ? 'checked' : ''} title="force ST2 — LuxAlgo red pivot-low" />
         </td>
-        <td class="text-center align-middle">
+        <td class="text-center align-middle" data-label="force ST3">
           <input type="checkbox" class="form-check-input at-st3" id="at-st3-${safeBandName}" ${st3 ? 'checked' : ''} title="force ST3 — bearish-engulfing absence" />
         </td>
-        <td class="text-center align-middle">
+        <td class="text-center align-middle" data-label="force CBv5">
           <input type="checkbox" class="form-check-input at-cbv5" id="at-cbv5-${safeBandName}" ${cbv5 ? 'checked' : ''} title="force CBv5 — Support-Zone breaker" />
         </td>
-        <td class="align-middle">
+        <td class="align-middle" data-label="minKc×">
           <input type="number" step="0.05" min="0.5" max="2" class="form-control form-control-sm at-kc text-center" id="at-kc-${safeBandName}" value="${kcMult}" title="× minKcPct (0.5..2.0; <1=loosen)" />
         </td>
-        <td class="align-middle">
+        <td class="align-middle" data-label="max concurrent">
           <input type="number" step="1" min="0" max="100" class="form-control form-control-sm at-mc text-center" id="at-mc-${safeBandName}" value="${maxCC === '' ? '' : maxCC}" placeholder="∞" title="max concurrent positions (เว้นว่าง=ไม่จำกัด)" />
         </td>
-        <td class="align-middle">
+        <td class="align-middle" data-label="max trades/day">
           <input type="number" step="1" min="0" max="100" class="form-control form-control-sm at-mtd text-center" id="at-mtd-${safeBandName}" value="${maxTD === '' ? '' : maxTD}" placeholder="∞" title="max BUY/day (เว้นว่าง=ไม่จำกัด)" />
         </td>
-        <td class="text-center align-middle">
+        <td class="text-center align-middle" data-label="reset">
           <button type="button" class="btn btn-outline-secondary btn-sm at-reset" data-band="${safeBandName}" title="reset row → default">↺</button>
         </td>
       </tr>

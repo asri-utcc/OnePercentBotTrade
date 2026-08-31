@@ -43,7 +43,11 @@
     'dynamicSizeEnabled',
     'safeTradeEnabled', 'safeTradeTrendlineEnabled', 'safeTradeNoTradeEnabled',
     'autoPauseEnabled',
+    // FIX-2026-08-29: auto-pause threshold auto-adjust per-bot opt-in (mirror src/services/botConfigIO.js)
+    'autoPauseAdjustEnabled',
     'autoArmStopLossOnUKC', 'slUkcTriggerOnProfit',
+    // FIX-2026-08-30: Auto-Timing (Phase 4) per-bot tristate (null|true|false = inherit/force-on/force-off)
+    'autoTimingEnabled',
     'tpTrendEnabled', 'autoUpdateTp', 'stopLossOnUpperKC',
   ]);
 

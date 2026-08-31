@@ -527,6 +527,7 @@ const BOT_DEFAULTS_SCHEMA = {
   safeTradeTrendlineEnabled: false,
   safeTradeNoTradeEnabled: false,
   autoPauseEnabled: true,
+  autoPauseAdjustEnabled: true, // FIX-2026-08-29: per-bot opt-in for auto-pause threshold auto-adjust (default ON; per-bot opt-out)
   autoPauseMinKcPct: 2,
   autoPauseMin24hVolUsdt: 1_000_000,
   autoArmStopLossOnUKC: true,
