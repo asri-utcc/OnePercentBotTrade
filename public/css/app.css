@@ -485,6 +485,21 @@ a:hover { color: var(--gold-2); text-decoration: none; }
   border-top-left-radius: 2px;
   border-top-right-radius: 2px;
 }
+/* FIX-2026-09-01: hold-band background overlay (bottom layer, low alpha).
+   Mirrors HOLD_BANDS rgb in src/core/holdBands.js so modal cells visually
+   match the Trade Analysis heatmap. Per-cell bg color set inline. */
+.at-hm-table tbody td.at-hm-cell .at-hm-band-bg {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+}
+.at-hm-table tbody td.at-hm-cell .at-hm-wr-strip { z-index: 1; }
+.at-hm-table tbody td.at-hm-cell .at-hm-act-dot,
+.at-hm-table tbody td.at-hm-cell .at-hm-n,
+.at-hm-table tbody td.at-hm-cell .at-hm-wr-pct,
+.at-hm-table tbody td.at-hm-cell .at-hm-tier2,
+.at-hm-table tbody td.at-hm-cell .at-hm-block { position: relative; z-index: 2; }
 .at-hm-table tbody td.at-hm-cell .at-hm-act-dot {
   font-size: 1.35rem;
   line-height: 1;

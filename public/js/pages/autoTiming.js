@@ -504,7 +504,7 @@ async function triggerAutoTimingSection() {
 }
 
 // UX-2026-08-30: Heatmap modal — show 7× 24 cells using the same recent-weighted aggregation
-// the classifier consumes. Click button â€‚ fetch /api/auto-timing/cell-matrix and render.
+// the classifier consumes. Click button → fetch /api/auto-timing/cell-matrix and render.
 function buildHeatmapModalOuterHTML() {
   return `
     <div class="modal fade" id="at-heatmap-modal" tabindex="-1" aria-hidden="true">
@@ -521,6 +521,22 @@ function buildHeatmapModalOuterHTML() {
       </div>
     </div>`;
 }
+
+// FIX-2026-09-01: Hold-band color map (mirrors HOLD_BANDS in src/core/holdBands.js).
+//   Each band has an rgb tuple used as rgba(alpha) background overlay per cell so the
+//   modal visually matches the Trade Analysis heatmap without needing a hover tooltip.
+//   Order: lt10m → lt1h → lt12h → lt48h → gt48h (faster → slower).
+const AT_HM_BAND_RGB = {
+  lt10m: '0,170,255',     // blue   — fast scalps
+  lt1h:  '0,229,184',     // green  — fast trades
+  lt12h: '255,209,102',   // yellow — intraday
+  lt48h: '255,159,67',    // orange — multi-day
+  gt48h: '255,77,109',    // red    — chronic bags
+};
+const AT_HM_BAND_LABEL = {
+  lt10m: '≤10 นาที', lt1h: '10 นาที–1 ชม.', lt12h: '1–12 ชม.',
+  lt48h: '12–48 ชม.', gt48h: '>2 วัน',
+};
 
 function buildHeatmapModalBodyHTML(meta, matrix) {
   const dows = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
@@ -546,6 +562,7 @@ function buildHeatmapModalBodyHTML(meta, matrix) {
       const pnl = Number(m.pnlUSDT) || 0;
       const holdMin = Number(m.medianHoldMin) || 0;
       const action = cell.action || 'allow';
+      const bandId = cell.bandId || 'lt10m';
       const tier2 = !!cell.tier2Hit;
       const blocked = !!cell.blocked;
       const everBad = cell.tier2EverBadCount || 0;
@@ -553,14 +570,16 @@ function buildHeatmapModalBodyHTML(meta, matrix) {
       // WR strip opacity: 0.3..1.0 wr -> 0.20..0.85 opacity; below minShow = faded strip
       const wrOpacity = (n >= minShow) ? Math.min(0.85, Math.max(0.20, 0.20 + (wr - 0.3) * 1.0)) : 0.10;
       const wrColor = wr >= 0.6 ? '#00e5b8' : wr <= 0.4 ? '#ff4d6d' : '#f5b800';
-      const tier2Line = tier2 ? '<div class="at-hm-tier2" title="Tier 2 lock: ever-bad \xc3\x97 ' + everBad + '">\xe2\x9b\x94 T2</div>' : '';
-      const blockLine = blocked ? '<div class="at-hm-block" title="Blocked by Auto-Timing">\xf0\x9f\x9a\xab block</div>' : '';
+      // FIX-2026-09-01: hold-band background rgb (default white if bandId unknown)
+      const bandRgb = AT_HM_BAND_RGB[cell.bandId || 'lt10m'] || '255,255,255';
+      const tier2Line = tier2 ? '<div class="at-hm-tier2" title="Tier 2 lock: ever-bad × ' + everBad + '">⛔ T2</div>' : '';
+      const blockLine = blocked ? '<div class="at-hm-block" title="Blocked by Auto-Timing">🚫 block</div>' : '';
       const safeHour = String(hour).padStart(2, '0');
       const safeDay = dows[day] || day;
       const tipLines = [
         safeDay + ' ' + safeHour + ':00',
         'action: ' + actEmoji + ' ' + action,
-        'band: ' + (cell.bandId || '\xe2\x80\x94'),
+        'band: ' + bandId + ' (' + (AT_HM_BAND_LABEL[bandId] || '?') + ')',
         'weighted N: ' + n.toFixed(2) + ' (raw=' + scanned + ' over ' + lookback + 'd)',
         'win rate: ' + (wr * 100).toFixed(1) + '%',
         'pnl: ' + pnl.toFixed(4) + ' USDT',
@@ -568,18 +587,19 @@ function buildHeatmapModalBodyHTML(meta, matrix) {
         'median hold: ' + holdMin.toFixed(1) + ' min',
         'p75 hold: ' + (Number(m.p75HoldMin) || 0).toFixed(1) + ' min',
         'hold metric (active): ' + (m.holdMetric || 'median'),
-        'confidence: ' + (cell.confidence || '\xe2\x80\x94'),
-        tier2 ? 'Tier 2: ever-bad \xc3\x97 ' + everBad : '',
-        blocked ? 'BLOCKED \xe2\x80\x94 BUY skipped' : '',
+        'confidence: ' + (cell.confidence || '—'),
+        tier2 ? 'Tier 2: ever-bad × ' + everBad : '',
+        blocked ? 'BLOCKED — BUY skipped' : '',
       ].filter(Boolean);
       const tip = tipLines.join('\n');
       return '<td class="at-hm-cell at-hm-act-' + action + ' ' + (blocked ? 'at-hm-blocked' : '') + '"' +
         ' data-tip="' + escapeHtml(tip) + '"' +
         ' data-band="' + escapeHtml(cell.bandId || '') + '"' +
         ' data-day="' + day + '" data-hour="' + hour + '">' +
+        '<div class="at-hm-band-bg" style="background-color: rgba(' + bandRgb + ', 0.18);"></div>' +
         '<div class="at-hm-wr-strip" style="background-color:' + wrColor + '; opacity:' + wrOpacity + ';"></div>' +
         '<div class="at-hm-act-dot at-act-' + action + '">●</div>' +
-        '<div class="at-hm-n">' + (n < minShow ? '\xc2\xb7' : n.toFixed(0)) + '</div>' +
+        '<div class="at-hm-n">' + (n < minShow ? '·' : n.toFixed(0)) + '</div>' +
         (tier2 ? '<div class="at-hm-wr-pct">WR ' + (wr * 100).toFixed(0) + '%</div>' : '') +
         tier2Line + blockLine +
         '</td>';
@@ -588,10 +608,12 @@ function buildHeatmapModalBodyHTML(meta, matrix) {
   }).join('');
 
   return '<div class="alert alert-info small py-2 px-3 mb-2">' +
-    '<strong>\xf0\x9f\x93\x90 Aggregation:</strong> weighted N = trades \xc3\x97 <code>recentWeight</code>' + recentW + ' for last ' + recent + 'd, then <code>normalWeight</code>' + normalW + ' for days ' + (recent + 1) + '..' + lookback + '.' +
-    '<br />\xe2\x80\xa2 Cell color (top strip) = win rate; left bar = action. Tier-2 cells show WR%%.' +
-    '<br />\xe2\x80\xa2 <strong>Hold metric (band bucket):</strong> ' + (meta.holdMetric || 'median') + ' \xe2\x80\x94 switching in Settings changes which band each cell falls into.' +
-    '<br />\xe2\x80\xa2 Hover any cell for full breakdown (both median + p75 hold shown); click copies summary.' +
+    '<strong>📐 Aggregation:</strong> weighted N = trades × <code>recentWeight</code>' + recentW + ' for last ' + recent + 'd, then <code>normalWeight</code>' + normalW + ' for days ' + (recent + 1) + '..' + lookback + '.' +
+    '<br />• <strong>Cell background</strong> = hold-band color (blue ≤10m / green ≤1h / yellow ≤12h / orange ≤48h / red >48h) — matches Trade Analysis heatmap.' +
+    '<br />• <strong>Top strip</strong> = win rate (green ≥60%, yellow 40–60%, red ≤40%). Tier-2 cells show WR%.' +
+    '<br />• <strong>Center dot</strong> = action (allow / stimulate / encourage / limit / suppress).' +
+    '<br />• <strong>Hold metric (band bucket):</strong> ' + (meta.holdMetric || 'median') + ' — switching in Settings changes which band each cell falls into.' +
+    '<br />• Hover any cell for full breakdown (median + p75 hold shown); click copies summary.' +
     '</div>' +
     '<div class="at-hm-scroll">' +
     '<table class="at-hm-table" id="at-hm-table-body">' +
@@ -599,21 +621,27 @@ function buildHeatmapModalBodyHTML(meta, matrix) {
     '<tbody>' + rows + '</tbody>' +
     '</table></div>' +
     '<div class="at-hm-legend">' +
-    '<strong>Action:</strong>' +
+    '<strong>Hold-band:</strong>' +
+    '<span class="at-hm-legend-pill"><span class="at-hm-legend-dot" style="background:rgba(0,170,255,0.45)"></span> ≤10 นาที</span>' +
+    '<span class="at-hm-legend-pill"><span class="at-hm-legend-dot" style="background:rgba(0,229,184,0.45)"></span> ≤1 ชม.</span>' +
+    '<span class="at-hm-legend-pill"><span class="at-hm-legend-dot" style="background:rgba(255,209,102,0.45)"></span> ≤12 ชม.</span>' +
+    '<span class="at-hm-legend-pill"><span class="at-hm-legend-dot" style="background:rgba(255,159,67,0.45)"></span> ≤48 ชม.</span>' +
+    '<span class="at-hm-legend-pill"><span class="at-hm-legend-dot" style="background:rgba(255,77,109,0.45)"></span> >2 วัน</span>' +
+    '<span class="ms-3"><strong>Action:</strong></span>' +
     '<span class="at-hm-legend-pill"><span class="at-hm-legend-dot at-act-allow">\u25cf</span> allow</span>' +
     '<span class="at-hm-legend-pill"><span class="at-hm-legend-dot at-act-stimulate">\u25cf</span> stimulate</span>' +
     '<span class="at-hm-legend-pill"><span class="at-hm-legend-dot at-act-encourage">\u25cf</span> encourage</span>' +
     '<span class="at-hm-legend-pill"><span class="at-hm-legend-dot at-act-limit">\u25cf</span> limit</span>' +
     '<span class="at-hm-legend-pill"><span class="at-hm-legend-dot at-act-suppress">\u25cf</span> suppress</span>' +
     '<span class="ms-3"><strong>WR strip:</strong></span>' +
-    '<span class="at-hm-legend-fill" style="background-color:#00e5b8;">\xe2\x89\xa560%</span>' +
-    '<span class="at-hm-legend-fill" style="background-color:#f5b800;">40\xe2\x80\x9360%</span>' +
-    '<span class="at-hm-legend-fill" style="background-color:#ff4d6d;">\xe2\x89\xa440%</span>' +
-    '<span class="at-hm-legend-pill ms-3 at-hm-tier2">\xe2\x9b\x94 T2 = Tier 2 lock (ever-bad \xe2\x89\xa5 10)</span>' +
-    '<span class="at-hm-legend-pill at-hm-block">\xf0\x9f\x9a\xab block</span>' +
+    '<span class="at-hm-legend-fill" style="background-color:#00e5b8;">≥60%</span>' +
+    '<span class="at-hm-legend-fill" style="background-color:#f5b800;">40–60%</span>' +
+    '<span class="at-hm-legend-fill" style="background-color:#ff4d6d;">≤40%</span>' +
+    '<span class="at-hm-legend-pill ms-3 at-hm-tier2">⛔ T2 = Tier 2 lock (ever-bad ≥ 10)</span>' +
+    '<span class="at-hm-legend-pill at-hm-block">🚫 block</span>' +
     '</div>' +
     '<div class="text-muted small mt-2">' +
-    '\xe2\x84\xb9 Table uses current weight values from master config + per-license gating. Change <code>autoTimingRecentWeight</code> / <code>autoTimingRecentDays</code> then Run now \xe2\x86\x92 cell distribution updates immediately.' +
+    'ℹ Table uses current weight values from master config + per-license gating. Change <code>autoTimingRecentWeight</code> / <code>autoTimingRecentDays</code> then Run now → cell distribution updates immediately.' +
     '</div>';
 }
 
