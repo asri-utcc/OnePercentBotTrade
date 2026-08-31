@@ -62,17 +62,45 @@ describe('Master Config autoTimingEnabled — every whitelist must accept it', (
   });
 });
 
+// FIX-2026-08-31: regex checks must strip // line comments first — otherwise a
+// pattern like 'autoTimingEnabled' embedded inside a comment block passes the
+// match even when the whitelist itself is missing the entry. The previous test
+// had this exact false-positive and let the bug ship.
+function stripJsComments(src) {
+  // Remove //... line comments but preserve strings. Simple: only strip when
+  // // is at start-of-line or preceded by whitespace (avoid // inside URLs).
+  return src.replace(/(^|[\s;,(])(?:\/\/)[^\n]*/g, '$1');
+}
+
 describe('bot.routes.js bulk-update whitelist includes autoTimingEnabled', () => {
   // Read the route source to confirm the whitelist (lightweight contract test)
   const fs = require('fs');
   const path = require('path');
-  const src = fs.readFileSync(
+  const raw = fs.readFileSync(
     path.join(__dirname, '..', 'src', 'api', 'routes', 'bot.routes.js'),
     'utf8'
   );
+  const src = stripJsComments(raw);
 
-  test('allowed[] in /bulk-update includes autoTimingEnabled', () => {
-    expect(src).toMatch(/const allowed = \[[\s\S]*?['"]autoTimingEnabled['"][\s\S]*?\];/);
+  test('allowed[] in /bulk-update includes autoTimingEnabled as a real entry (not a comment)', () => {
+    // Find the bulk-update route block, then verify the entry is present AFTER
+    // stripping line comments — so a commented-out 'autoTimingEnabled' cannot
+    // satisfy the test.
+    const bulkBlock = src.match(/router\.post\('\/bulk-update'[\s\S]*?\];/);
+    expect(bulkBlock).not.toBeNull();
+    const block = bulkBlock[0];
+    // Must contain 'autoTimingEnabled' as a quoted string in a line that is not a comment
+    expect(block).toMatch(/^\s*'autoTimingEnabled'\s*,?\s*$/m);
+  });
+
+  test('allowed[] in PUT /:id includes autoTimingEnabled as a real entry (not a comment)', () => {
+    // FIX-2026-08-31: the literal 'autoTimingEnabled' was previously embedded
+    // INSIDE a single-line comment after 'autoPauseAdjustEnabled' — this
+    // regression test makes sure the entry is a real list item.
+    const putBlock = src.match(/router\.put\('\/:id'[\s\S]*?\];/);
+    expect(putBlock).not.toBeNull();
+    const block = putBlock[0];
+    expect(block).toMatch(/^\s*'autoTimingEnabled'\s*,?\s*$/m);
   });
 
   test('tristate coercion handles null/true/false', () => {
@@ -83,13 +111,23 @@ describe('bot.routes.js bulk-update whitelist includes autoTimingEnabled', () =>
 describe('admin.routes.js bot-defaults TRISTATE_FIELDS includes autoTimingEnabled', () => {
   const fs = require('fs');
   const path = require('path');
-  const src = fs.readFileSync(
+  const raw = fs.readFileSync(
     path.join(__dirname, '..', 'src', 'api', 'routes', 'admin.routes.js'),
     'utf8'
   );
+  const src = stripJsComments(raw);
 
-  test('TRISTATE_FIELDS includes autoTimingEnabled', () => {
-    expect(src).toMatch(/const TRISTATE_FIELDS = \[[\s\S]*?'autoTimingEnabled'[\s\S]*?\];/);
+  test('TRISTATE_FIELDS includes autoTimingEnabled as a real entry (not a comment)', () => {
+    // After stripJsComments(), any surviving 'autoTimingEnabled' string IS a real entry.
+    // The line is `const TRISTATE_FIELDS = ['autoTimingEnabled'];` — toContain is sufficient.
+    expect(src).toContain("'autoTimingEnabled'");
+  });
+
+  test('/api/admin/app-config whitelist includes autoTimingEnabled as a real entry (not a comment)', () => {
+    // FIX-2026-08-31: added to PUT /app-config whitelist (mounted under /api/admin).
+    const block = src.match(/router\.put\('\/app-config'[\s\S]*?\};/);
+    expect(block).not.toBeNull();
+    expect(block[0]).toContain('autoTimingEnabled: \'boolean\'');
   });
 
   test('tristate coercion handles null/true/false', () => {
