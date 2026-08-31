@@ -1146,7 +1146,14 @@ router.put('/:id', requireAuth, async (req, res) => {
       // FIX-2026-08-29: per-bot opt-out for the auto-pause threshold auto-adjust scheduler
       //   (autoPauseAdjustEnabled on Bot, default true). Was missing from BOTH this
       //   PATCH whitelist AND the bulk-update allowed[] — silently dropped from bot-edit save.
-      'autoPauseAdjustEnabled', // FIX-2026-08-05: audit fix — missing from allowed list caused bot-edit save to silently drop the field  // FIX-2026-08-30: Auto-Timing (Phase 4) per-bot tristate (null|true|false = inherit/force-on/force-off)  'autoTimingEnabled',  // FIX-2026-08-06: CBv2 fields (cbv2Enabled, cbv2LockHours)  // FIX-2026-08-08: Feature #1+3 (dynamicSizeEnabled, cbAutoUnlockEnabled, cbAutoUnlockThresholdPct)  // FIX-2026-08-08: CBv3 fields (cbv3Enabled, cbv3LockHours) — added to whitelist for bulk update + bot-edit save  // FIX-2026-08-10: 24h vol guard field for Auto Pause-Resume  // FIX-2026-08-14: CBv5 fields (12 advanced params) — silent-drop bug exposed by botConfigIO import feature
+      'autoPauseAdjustEnabled',
+      // FIX-2026-08-30: Auto-Timing (Phase 4) per-bot tristate (null|true|false = inherit/force-on/force-off)
+      'autoTimingEnabled',
+      // FIX-2026-08-06: CBv2 fields (cbv2Enabled, cbv2LockHours)
+      // FIX-2026-08-08: Feature #1+3 (dynamicSizeEnabled, cbAutoUnlockEnabled, cbAutoUnlockThresholdPct)
+      // FIX-2026-08-08: CBv3 fields (cbv3Enabled, cbv3LockHours) — added to whitelist for bulk update + bot-edit save
+      // FIX-2026-08-10: 24h vol guard field for Auto Pause-Resume
+      // FIX-2026-08-14: CBv5 fields (12 advanced params) — silent-drop bug exposed by botConfigIO import feature
       'cbv5Enabled', 'cbv5LockHours',
       'cbv5KcLen', 'cbv5KcMult',
       'cbv5PivotLookback', 'cbv5PivotLeftLen', 'cbv5PivotRightLen',
@@ -2120,6 +2127,10 @@ router.post('/bulk-update', requireAuth, async (req, res) => {
       //   (autoPauseAdjustEnabled on Bot, default true). Was missing from whitelist,
       //   so toggling only this field returned 400 'no valid fields in settings'.
       'autoPauseAdjustEnabled',
+      // FIX-2026-08-31: Auto-Timing (Phase 4) per-bot tristate (null|true|false = inherit/force-on/force-off)
+      //   Was missing from this bulk-update whitelist — bulk-update on per-bot autoTiming returned 400
+      //   'no valid fields in settings' even though the field was sent.
+      'autoTimingEnabled',
       'suggestTpWindow', 'autoArmStopLossOnUKC', 'autoArmLossPct', 'autoArmAgeHours', 'slUkcTriggerOnProfit',
       'tpTrendMultiplier', 'tpTrendEnabled',
       'dcaEnabled', 'dcaMaxLayers',
