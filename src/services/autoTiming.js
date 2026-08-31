@@ -678,3 +678,4 @@ module.exports.AutoTiming = AutoTiming;
 module.exports.aggregateByCell = aggregateByCell;
 module.exports.bucketOf = bucketOf;
 module.exports.median = median;
+module.exports.percentile = percentile;

@@ -67,6 +67,8 @@ function renderAutoTimingSection() {
   const cooldown = numOr(cfg.autoTimingSuppressCooldownDays, 90);
   const minEnforce = numOr(cfg.autoTimingMinTradesEnforce, 10);
   const minShow = numOr(cfg.autoTimingMinTradesShow, 3);
+  // FIX-2026-08-31: hold-time metric selector — median (default, outlier-robust) | p75 (sensitive)
+  const holdMetric = (cfg.autoTimingHoldMetric === 'p75') ? 'p75' : 'median';
   const floor = numOr(cfg.autoTimingMinNotionalFloorUSDT, 10);
   const ceiling = numOr(cfg.autoTimingMaxNotionalCeilingUSDT, 200);
   const lastRunAt = cfg.autoTimingLastRunAt ? new Date(cfg.autoTimingLastRunAt).toLocaleString() : '—';
@@ -196,6 +198,15 @@ function renderAutoTimingSection() {
         <label class="form-label">👁 Min trades (show)</label>
         <input type="number" class="form-control form-control-sm" id="at-minShow" value="${minShow}" min="1" max="50" />
         <small class="text-muted">[show, enforce) = advisory</small>
+      </div>
+      <div class="col-md-3">
+        <!-- FIX-2026-08-31: hold-time metric — median (default) or p75 (more sensitive to �อย cells) -->
+        <label class="form-label">⏱ Hold metric</label>
+        <select class="form-select form-select-sm" id="at-hold-metric" title="statistic used to bucket a cell into a hold-band">
+          <option value="median" ${holdMetric === 'median' ? 'selected' : ''}>📊 Median (default — outlier-robust)</option>
+          <option value="p75" ${holdMetric === 'p75' ? 'selected' : ''}>📐 P75 (sensitive to ดอย cells)</option>
+        </select>
+        <small class="text-muted">band bucket selector</small>
       </div>
     </div>
 
@@ -436,6 +447,12 @@ async function saveAutoTimingSection() {
   const cooldown = parseInt(document.getElementById('at-cooldown').value, 10);
   const minEnforce = parseInt(document.getElementById('at-minEnforce').value, 10);
   const minShow = parseInt(document.getElementById('at-minShow').value, 10);
+  // FIX-2026-08-31: include holdMetric in PUT payload
+  const holdMetricEl = document.getElementById('at-hold-metric');
+  const holdMetric = holdMetricEl ? holdMetricEl.value : 'median';
+  if (holdMetric !== 'median' && holdMetric !== 'p75') {
+    setStatus('❌ holdMetric must be median or p75', true); return;
+  }
   const floor = parseFloat(document.getElementById('at-floor').value);
   const ceiling = parseFloat(document.getElementById('at-ceiling').value);
   if (floor > ceiling) { setStatus('❌ floor ต้อง ≤ ceiling', true); return; }
@@ -450,6 +467,8 @@ async function saveAutoTimingSection() {
       autoTimingSuppressCooldownDays: cooldown,
       autoTimingMinTradesEnforce: minEnforce,
       autoTimingMinTradesShow: minShow,
+      // FIX-2026-08-31: send hold metric selector to backend
+      autoTimingHoldMetric: holdMetric,
       autoTimingMinNotionalFloorUSDT: floor,
       autoTimingMaxNotionalCeilingUSDT: ceiling,
       autoTimingBands: bands,

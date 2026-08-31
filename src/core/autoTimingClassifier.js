@@ -5,7 +5,7 @@
  *
  * Inputs:
  *   cell         - { bucket: {day:0..6, hour:0..23}, n (weighted trade count),
- *                    winRate (0..1), pnlUSDT, medianHoldMin, holds[] }
+ *                    winRate (0..1), pnlUSDT, medianHoldMin, p75HoldMin, holds[] }
  *   tier2State   - null OR { everBadCount, firstBadAt, lastBadAt,
  *                            suppressUntil, lifetimeN, lifetimeWinRate }
  *   config       - master config:
@@ -13,7 +13,8 @@
  *                      minTradesShow (default 3),
  *                      minTradesEnforce (default 10),
  *                      suppressCooldownDays (default 90),
- *                      suppressThresholdEverBad (default 10) }
+ *                      suppressThresholdEverBad (default 10),
+ *                      holdMetric ('median'|'p75', default 'median') }
  *   now          - timestamp (default Date.now()) for cool-down comparison
  *
  * Output:
@@ -25,7 +26,7 @@
  *     blocked: boolean,                 // true ⇒ caller MUST skip BUY
  *     confidence: 'enforce'|'show'|'no_data',
  *     tier2Hit: 'cool_down'|'ever_bad'|'fresh',
- *     metrics: { n, winRate, pnlUSDT, medianHoldMin },
+ *     metrics: { n, winRate, pnlUSDT, medianHoldMin, p75HoldMin, holdMetric },
  *     asOf: timestamp,
  *   }
  *
@@ -37,6 +38,11 @@
  *   4. n ≥ minTradesEnforce → band.action (confidence='enforce')
  *   5. n in [minTradesShow, minTradesEnforce) → band.action (confidence='show',
  *      advisory only — caller may still apply but logs/advisory UI marks it)
+ *
+ * FIX-2026-08-31: holdMetric (median|p75) selects which hold statistic determines
+ *   the band bucket. P75 is more sensitive to "stuck"/ดอย cells — it pulls the
+ *   cell into a worse band if even 25% of positions held longer than expected.
+ *   Median stays as default (outlier-robust) for backward compat.
  */
 const { holdBandOf } = require('./holdBands');
 
@@ -60,14 +66,22 @@ function classify(cell, tier2State, config, now = Date.now()) {
   const minShow = positiveOrDefault(safeConfig.minTradesShow, 3);
   const minEnforce = positiveOrDefault(safeConfig.minTradesEnforce, 10);
   const suppressThreshold = positiveOrDefault(safeConfig.suppressThresholdEverBad, 10);
+  // FIX-2026-08-31: select hold statistic — median (default) or p75.
+  const holdMetric = (safeConfig.holdMetric === 'p75') ? 'p75' : 'median';
 
   const n = Math.max(0, Number(cell && cell.n) || 0);
   const winRate = clamp01(Number(cell && cell.winRate) || 0);
   const pnlUSDT = Number(cell && cell.pnlUSDT) || 0;
   const medianHoldMin = Number(cell && cell.medianHoldMin) || 0;
-  const metrics = { n, winRate, pnlUSDT, medianHoldMin };
+  const p75HoldMin = Number(cell && cell.p75HoldMin) || 0;
+  const metrics = { n, winRate, pnlUSDT, medianHoldMin, p75HoldMin, holdMetric };
 
-  const band = holdBandOf(medianHoldMin);
+  // FIX-2026-08-31: bucket cell by user-selected metric. Falls back to median
+  //   if cell.p75HoldMin is missing (legacy / cold-path).
+  const holdForBand = holdMetric === 'p75'
+    ? (p75HoldMin > 0 ? p75HoldMin : medianHoldMin)
+    : medianHoldMin;
+  const band = holdBandOf(holdForBand);
   const bandConfig = bands[band.id] || defaultBandConfig(band.id);
 
   // 1) Cool-down override (sticky bad)
@@ -124,10 +138,11 @@ function classify(cell, tier2State, config, now = Date.now()) {
 
   // 4/5) Apply band action with confidence gating
   const confidence = n >= minEnforce ? 'enforce' : 'show';
+  const metricNote = holdMetric === 'p75' ? ` [holdMetric=p75]` : '';
   const reason = confidence === 'enforce'
     ? `band=${band.id} action=${bandConfig.action} (winRate=${(winRate * 100).toFixed(1)}%, ` +
-      `pnlPerTrade=${pnlPerTrade.toFixed(4)})`
-    : `advisory only (n=${n} ∈ [${minShow},${minEnforce})); band=${band.id} action=${bandConfig.action}`;
+      `pnlPerTrade=${pnlPerTrade.toFixed(4)})${metricNote}`
+    : `advisory only (n=${n} ∈ [${minShow},${minEnforce})); band=${band.id} action=${bandConfig.action}${metricNote}`;
 
   return buildResult({
     action: bandConfig.action,

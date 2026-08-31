@@ -41,11 +41,17 @@ const PUT_FIELDS = [
   'autoTimingSuppressCooldownDays',
   'autoTimingMinTradesEnforce',
   'autoTimingMinTradesShow',
+  // FIX-2026-08-31: hold-time metric selector (median|p75) — determines which
+  //   statistic the classifier uses to bucket a cell into the 5-band table.
+  'autoTimingHoldMetric',
   'autoTimingBands',
   'autoTimingMinNotionalFloorUSDT',
   'autoTimingMaxNotionalCeilingUSDT',
   'autoTimingIntervalMs',
 ];
+
+// FIX-2026-08-31: allowed values for autoTimingHoldMetric (must match AppConfig enum)
+const ALLOWED_HOLD_METRICS = ['median', 'p75'];
 
 // Numeric validators
 function boundedNumber(value, min, max) {
@@ -102,6 +108,15 @@ router.put('/config', requireAuth, async (req, res) => {
         const v = boundedNumber(body[key], min, max);
         if (v === null) errors.push(`${key} must be a number in [${min},${max}]`);
         else update[key] = v;
+      }
+    }
+    // FIX-2026-08-31: hold metric (string, enum-checked)
+    if (body.autoTimingHoldMetric !== undefined) {
+      const v = String(body.autoTimingHoldMetric);
+      if (!ALLOWED_HOLD_METRICS.includes(v)) {
+        errors.push(`autoTimingHoldMetric must be one of [${ALLOWED_HOLD_METRICS.join(',')}]`);
+      } else {
+        update.autoTimingHoldMetric = v;
       }
     }
     // Bands validation
@@ -225,6 +240,8 @@ router.get('/cell-matrix', requireAuth, async (req, res) => {
         normalWeight: AutoTiming._config.normalWeight,
         minTradesEnforce: AutoTiming._config.minTradesEnforce,
         minTradesShow: AutoTiming._config.minTradesShow,
+        // FIX-2026-08-31: surface active hold metric so the UI can label cells correctly
+        holdMetric: AutoTiming._config.holdMetric || 'median',
       },
     });
   } catch (err) {
@@ -304,6 +321,9 @@ function extractConfig(cfg) {
     autoTimingSuppressCooldownDays: cfg.autoTimingSuppressCooldownDays,
     autoTimingMinTradesEnforce: cfg.autoTimingMinTradesEnforce,
     autoTimingMinTradesShow: cfg.autoTimingMinTradesShow,
+    // FIX-2026-08-31: expose hold-metric selector to UI (default 'median' for
+    //   legacy configs that pre-date this field).
+    autoTimingHoldMetric: (cfg.autoTimingHoldMetric === 'p75') ? 'p75' : 'median',
     autoTimingBands: cfg.autoTimingBands,
     autoTimingMinNotionalFloorUSDT: cfg.autoTimingMinNotionalFloorUSDT,
     autoTimingMaxNotionalCeilingUSDT: cfg.autoTimingMaxNotionalCeilingUSDT,
