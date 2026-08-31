@@ -80,6 +80,38 @@ function _httpJson(method, targetUrl, body, headers = {}) {
   });
 }
 
+// Binary stream proxy: pipe admin's raw response (image/file bytes) through to client.
+// Used by GET /api/chat/attachments/:id so <img src=...> and downloads work without
+// buffering the file in memory.
+function _httpProxyBinary(method, targetUrl, rangeHeader, clientRes, headers = {}) {
+  return new Promise((resolve, reject) => {
+    const url = new URL(targetUrl);
+    const lib = url.protocol === 'https:' ? https : http;
+    const opts = {
+      method,
+      hostname: url.hostname,
+      port: url.port || (url.protocol === 'https:' ? 443 : 80),
+      path: url.pathname + url.search,
+      headers: { ...headers, ...(rangeHeader ? { Range: rangeHeader } : {}) },
+      timeout: 30000,
+    };
+    const req = lib.request(opts, (res) => {
+      // Copy status + content-type/content-length headers from admin
+      const passthrough = ['content-type', 'content-length', 'content-range', 'accept-ranges', 'cache-control', 'etag', 'last-modified'];
+      for (const h of passthrough) {
+        if (res.headers[h]) clientRes.setHeader(h, res.headers[h]);
+      }
+      clientRes.status(res.statusCode);
+      res.on('error', reject);
+      res.pipe(clientRes);
+      res.on('end', () => resolve({ status: res.statusCode }));
+    });
+    req.on('error', reject);
+    req.on('timeout', () => req.destroy(new Error('admin proxy binary timeout')));
+    req.end();
+  });
+}
+
 function _httpMultipart({ targetUrl, file, fileFieldName, headers }) {
   return new Promise((resolve, reject) => {
     const url = new URL(targetUrl);
@@ -167,8 +199,9 @@ router.get('/attachments/:id', requireAuth, async (req, res) => {
       return res.status(503).json({ ok: false, error: 'admin_disabled' });
     }
     const url = `${config.url}/api/admin/chat/attachments/${encodeURIComponent(req.params.id)}`;
-    const r = await _httpJson('GET', url, null, { 'X-License-Key': config.licenseKey });
-    res.status(r.status).json(r.json);
+    // FIX 2026-09-01: pipe admin's binary response through (was _httpJson which
+    // JSON-parsed a binary stream and corrupted the bytes — images wouldn't load).
+    await _httpProxyBinary('GET', url, req.headers.range, res, { 'X-License-Key': config.licenseKey });
   } catch (err) {
     res.status(err.status || 500).json({ ok: false, error: err.body || err.message });
   }
