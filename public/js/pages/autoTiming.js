@@ -564,7 +564,10 @@ function buildHeatmapModalBodyHTML(meta, matrix) {
         'weighted N: ' + n.toFixed(2) + ' (raw=' + scanned + ' over ' + lookback + 'd)',
         'win rate: ' + (wr * 100).toFixed(1) + '%',
         'pnl: ' + pnl.toFixed(4) + ' USDT',
+        // FIX-2026-08-31: show both metrics + indicate which is active for band bucketing
         'median hold: ' + holdMin.toFixed(1) + ' min',
+        'p75 hold: ' + (Number(m.p75HoldMin) || 0).toFixed(1) + ' min',
+        'hold metric (active): ' + (m.holdMetric || 'median'),
         'confidence: ' + (cell.confidence || '\xe2\x80\x94'),
         tier2 ? 'Tier 2: ever-bad \xc3\x97 ' + everBad : '',
         blocked ? 'BLOCKED \xe2\x80\x94 BUY skipped' : '',
@@ -587,7 +590,8 @@ function buildHeatmapModalBodyHTML(meta, matrix) {
   return '<div class="alert alert-info small py-2 px-3 mb-2">' +
     '<strong>\xf0\x9f\x93\x90 Aggregation:</strong> weighted N = trades \xc3\x97 <code>recentWeight</code>' + recentW + ' for last ' + recent + 'd, then <code>normalWeight</code>' + normalW + ' for days ' + (recent + 1) + '..' + lookback + '.' +
     '<br />\xe2\x80\xa2 Cell color (top strip) = win rate; left bar = action. Tier-2 cells show WR%%.' +
-    '<br />\xe2\x80\xa2 Hover any cell for full breakdown; click copies summary.' +
+    '<br />\xe2\x80\xa2 <strong>Hold metric (band bucket):</strong> ' + (meta.holdMetric || 'median') + ' \xe2\x80\x94 switching in Settings changes which band each cell falls into.' +
+    '<br />\xe2\x80\xa2 Hover any cell for full breakdown (both median + p75 hold shown); click copies summary.' +
     '</div>' +
     '<div class="at-hm-scroll">' +
     '<table class="at-hm-table" id="at-hm-table-body">' +
