@@ -154,3 +154,53 @@ describe('chatLocalStore (Phase 4)', () => {
     expect(chatLocalStore.getMessages('community')[0].id).toBe('cid-1');
   });
 });
+describe('chatLocalStore (Phase 4 chat v2)', () => {
+  test('addMessage stores color/icon/replyTo/attachment', () => {
+    chatLocalStore.addMessage({
+      id: 'v1',
+      scope: 'community',
+      fromAdmin: false,
+      fromMachineId: 'm1',
+      displayName: 'op',
+      text: 'hi',
+      color: '#22c55e',
+      icon: '🦊',
+      replyTo: { id: 'r1', displayName: 'admin', text: 'reply?' },
+      attachment: { id: 'att1', kind: 'image', name: 'a.png', mime: 'image/png', sizeBytes: 1024 },
+      createdAt: '2026-08-30T10:00:00.000Z',
+    });
+    const m = chatLocalStore.getMessages('community', null, 1)[0];
+    expect(m.color).toBe('#22c55e');
+    expect(m.icon).toBe('🦊');
+    expect(m.replyTo.id).toBe('r1');
+    expect(m.attachment.kind).toBe('image');
+  });
+
+  test('attachment URL defaults to /api/chat/attachments/:id', () => {
+    chatLocalStore.addMessage({
+      id: 'v2',
+      scope: 'community',
+      displayName: 'op',
+      text: 'see',
+      attachment: { id: 'att2', kind: 'text', name: 'b.txt', mime: 'text/plain', sizeBytes: 256 },
+      createdAt: '2026-08-30T10:01:00.000Z',
+    });
+    const m = chatLocalStore.getMessages('community', null, 1)[0];
+    expect(m.attachment.url).toBe('/api/chat/attachments/att2');
+  });
+
+  test('missing v2 fields default to null', () => {
+    chatLocalStore.addMessage({
+      id: 'v3',
+      scope: 'community',
+      displayName: 'op',
+      text: 'plain',
+      createdAt: '2026-08-30T10:02:00.000Z',
+    });
+    const m = chatLocalStore.getMessages('community', null, 1)[0];
+    expect(m.color).toBe(null);
+    expect(m.icon).toBe(null);
+    expect(m.replyTo).toBe(null);
+    expect(m.attachment).toBe(null);
+  });
+});

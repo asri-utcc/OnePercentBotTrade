@@ -139,6 +139,111 @@
       transition: opacity 0.3s;
     }
     .chat-saved.show { opacity: 1; }
+    /* ── Phase 4 chat v2 ───────────────────────────────────────── */
+    .chat-msg-icon { font-size: 14px; line-height: 1; }
+    .chat-msg-time-burst { font-weight: 600; color: #cfe1ff; }
+    .chat-msg-flash { animation: chat-flash 1.2s ease-out 1; }
+    @keyframes chat-flash {
+      0%   { box-shadow: 0 0 0 4px rgba(255, 220, 60, 0.6); }
+      100% { box-shadow: 0 0 0 0   rgba(255, 220, 60, 0); }
+    }
+    .chat-day-divider {
+      display: flex; align-items: center; gap: 12px;
+      margin: 14px auto 10px; width: 80%;
+      color: var(--text-soft, #8b95a5);
+      font-size: 11px; letter-spacing: 0.05em;
+    }
+    .chat-day-divider::before,
+    .chat-day-divider::after { content: ''; flex: 1; height: 1px; background: rgba(255,255,255,0.1); }
+    .chat-msg-quote {
+      font-size: 11px; color: var(--text-soft, #aab2c5);
+      border-left: 3px solid rgba(255,255,255,0.25);
+      padding: 4px 8px; margin-bottom: 4px;
+      background: rgba(255,255,255,0.04); border-radius: 4px;
+      cursor: pointer;
+    }
+    .chat-attachment-thumb {
+      display: block; margin: 6px 0; border-radius: 8px;
+      overflow: hidden; background: rgba(0,0,0,0.3);
+      max-width: 240px; cursor: pointer; text-decoration: none;
+    }
+    .chat-attachment-thumb img { display: block; max-width: 240px; max-height: 200px; object-fit: cover; }
+    .chat-attachment-meta { padding: 4px 8px; font-size: 10px; color: #aab2c5; background: rgba(0,0,0,0.4); }
+    .chat-attachment-link {
+      display: inline-block; padding: 6px 10px; border-radius: 6px;
+      background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.1);
+      color: var(--text-bright); font-size: 12px; text-decoration: none; margin: 4px 0;
+    }
+    .chat-attachment-preview-overlay {
+      position: fixed; inset: 0; background: rgba(0,0,0,0.8);
+      display: flex; align-items: center; justify-content: center; z-index: 9000;
+    }
+    .chat-attachment-preview-modal {
+      background: #1a1d24; border-radius: 12px; padding: 16px;
+      max-width: 92vw; max-height: 90vh; overflow: auto;
+      box-shadow: 0 10px 40px rgba(0,0,0,0.5);
+    }
+    .chat-attachment-preview-head {
+      display: flex; align-items: center; justify-content: space-between;
+      margin-bottom: 12px; font-size: 13px; color: #cfe1ff;
+    }
+    .chat-attachment-preview-head button,
+    .chat-attachment-download {
+      background: rgba(255,255,255,0.1); border: 0; color: #fff;
+      padding: 4px 10px; border-radius: 6px; margin-left: 6px;
+      cursor: pointer; text-decoration: none; font-size: 12px;
+    }
+    .chat-attachment-preview-text {
+      padding: 40px; text-align: center; color: #cfe1ff; font-size: 16px;
+    }
+    .chat-identity-row {
+      display: flex; flex-wrap: wrap; gap: 12px;
+      padding: 6px 10px; background: rgba(0,0,0,0.2); border-radius: 6px;
+      align-items: center;
+    }
+    .chat-identity-block { display: flex; gap: 4px; align-items: center; flex-wrap: wrap; }
+    .chat-identity-label { font-size: 11px; color: var(--text-soft); margin-right: 4px; }
+    .chat-swatch {
+      width: 18px; height: 18px; border-radius: 50%;
+      border: 1px solid rgba(255,255,255,0.2); cursor: pointer;
+    }
+    .chat-icon-btn {
+      width: 24px; height: 24px; border-radius: 4px;
+      background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1);
+      cursor: pointer; font-size: 14px;
+    }
+    .chat-icon-btn:hover { background: rgba(255,255,255,0.12); }
+    .chat-reply-banner {
+      font-size: 12px; background: rgba(74,158,255,0.15);
+      border: 1px solid rgba(74,158,255,0.3); color: var(--text-bright);
+      padding: 6px 10px; border-radius: 6px; margin-bottom: 6px;
+      display: flex; align-items: center; gap: 6px;
+    }
+    .chat-reply-cancel { margin-left: auto; background: transparent; border: 0; color: var(--text-soft); cursor: pointer; }
+    .chat-quota-bar {
+      font-size: 11px; color: var(--text-soft);
+      padding: 4px 10px; background: rgba(0,0,0,0.2); border-radius: 4px;
+    }
+    .chat-quota-bar.hidden { display: none; }
+    .chat-file-btn {
+      width: 38px; height: 38px;
+      background: rgba(255,255,255,0.05); border: 1px solid var(--border-soft);
+      border-radius: 8px; cursor: pointer; font-size: 18px;
+    }
+    .chat-file-input.hidden { display: none; }
+    .chat-file-preview {
+      display: flex; align-items: center; gap: 8px;
+      padding: 6px 10px; background: rgba(0,0,0,0.2);
+      border-radius: 6px; font-size: 12px;
+    }
+    .chat-file-preview.hidden { display: none; }
+    .chat-file-preview img {
+      max-width: 60px; max-height: 60px; border-radius: 4px; object-fit: cover;
+    }
+    .chat-file-clear {
+      background: transparent; border: 0; color: var(--text-soft);
+      cursor: pointer; font-size: 12px; margin-left: auto;
+    }
   </style>
 </head>
 <body>
@@ -164,11 +269,17 @@
       </div>
       <div id="chat-status" class="chat-status hidden"></div>
       <div id="chat-messages" class="chat-messages"></div>
+      <div id="chat-identity-row" class="chat-identity-row"></div>
+      <div id="chat-reply-banner" class="chat-reply-banner hidden"></div>
+      <div id="chat-quota-bar" class="chat-quota-bar hidden"></div>
       <div class="chat-meta-row">
         <span id="chat-send-count">0 / 2000</span>
         <span id="chat-thread-meta"></span>
       </div>
       <form id="chat-send-form" class="chat-send-form">
+        <button id="chat-file-btn" type="button" class="chat-file-btn" title="แนบไฟล์">📎</button>
+        <input id="chat-file-input" type="file" accept=".png,.jpg,.jpeg,.txt,.json,.csv,.md" class="chat-file-input hidden" />
+        <div id="chat-file-preview" class="chat-file-preview hidden"></div>
         <textarea id="chat-send-text" placeholder="พิมพ์ข้อความ..." maxlength="2000"></textarea>
         <button id="chat-send-btn" type="submit">Send</button>
       </form>
@@ -180,6 +291,6 @@
   <script src="/js/ws-client.js?v=2026-08-29-fix3"></script>
   <script>window.NAV_ACTIVE = 'chat';</script>
   <script src="/js/partials/nav.js"></script>
-  <script src="/js/pages/chat.js?v=2026-08-30-enter"></script>
+  <script src="/js/pages/chat.js?v=2026-08-31-v2"></script>
 </body>
 </html>
