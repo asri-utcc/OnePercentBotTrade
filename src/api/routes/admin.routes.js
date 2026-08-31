@@ -93,6 +93,9 @@ router.put('/app-config', requireAuth, async (req, res) => {
       autoDeleteBotDays: 'number',
       autoDeleteBotWarningDays: 'number',
       cbVersion: 'string',
+      // FIX-2026-08-31: System-level Auto-Timing master (AppConfig.autoTimingEnabled)
+      //   Master switch for the heatmap-driven entry gate; per-bot opt-in lives on Bot.autoTimingEnabled.
+      autoTimingEnabled: 'boolean',
       // FIX-2026-08-08 (rev2): DPS tunables (15 numbers)
       dpsMinSize: 'number', dpsMaxSize: 'number',
       dpsMinLayers: 'number', dpsMaxLayers: 'number',

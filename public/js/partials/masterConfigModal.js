@@ -368,6 +368,14 @@
                   <input type="number" class="form-control form-control-sm" id="mc-auto-delete-warndays" value="${cfg.autoDeleteBotWarningDays ?? 3}" min="1" max="30" step="1" />
                 </div>
               </div>
+              <div class="col-md-4">
+                <div class="bot-settings-option h-100">
+                  <label class="form-check form-switch d-flex align-items-start gap-2 mb-0" style="cursor:pointer;">
+                    <input type="checkbox" class="form-check-input" id="mc-master-auto-timing" ${cfg.autoTimingEnabled === true ? 'checked' : ''} />
+                    <span>⏱️ <strong>Auto-Timing Master</strong><small class="text-muted-3 d-block">เปิด Auto-Timing (heatmap-driven entry gate) ทั้งระบบ · เปิดใบ้ bot-level จะ inherit ค่านี้</small></span>
+                  </label>
+                </div>
+              </div>
             </div>
             <div class="bot-settings-actions mt-3">
               <button type="button" class="btn btn-sm btn-outline-warning" id="mc-save-master">💾 บันทึกค่าระบบ</button>
@@ -492,6 +500,9 @@
       autoDeleteBotDays: parseInt(document.getElementById('mc-auto-delete-days').value, 10),
       autoDeleteBotWarningDays: parseInt(document.getElementById('mc-auto-delete-warndays').value, 10),
       cbVersion: cbVerEl ? cbVerEl.value : undefined,
+      // FIX-2026-08-31: System-level Auto-Timing master (AppConfig.autoTimingEnabled)
+      //   Distinct from mc-autoTimingEnabled (per-bot tristate) below.
+      autoTimingEnabled: document.getElementById('mc-master-auto-timing').checked,
     };
     status.textContent = '⏳ กำลังบันทึก…';
     status.style.color = 'var(--text-3)';
