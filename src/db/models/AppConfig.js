@@ -388,7 +388,7 @@ const appConfigSchema = new mongoose.Schema(
     autoTimingSuppressCooldownDays: { type: Number, default: 90, min: 30, max: 365 },
     autoTimingMinTradesEnforce:  { type: Number,  default: 10, min: 1, max: 100 },
     autoTimingMinTradesShow:     { type: Number,  default: 3,  min: 1, max: 50 },
-    autoTimingBands:             { type: Object,  default: () => require('../core/autoTimingDefaults').getDefaultBandsClone() },
+    autoTimingBands:             { type: Object,  default: () => require('../../core/autoTimingDefaults').getDefaultBandsClone() },
     autoTimingMinNotionalFloorUSDT:   { type: Number, default: 10, min: 1 },
     autoTimingMaxNotionalCeilingUSDT: { type: Number, default: 200, min: 10 },
     autoTimingLastRunAt:         { type: Date,    default: null },

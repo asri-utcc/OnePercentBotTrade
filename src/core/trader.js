@@ -3737,6 +3737,11 @@ class Trader {
 
   // ─── BUY logic ─────────────────────────────────────
   async placeBuy(signalDoc, candle) {
+    // FIX-2026-08-31: hoist claimedBuy to function scope so the outer catch (L4594) can see it.
+    //   Previously declared deep inside the outer try at L4258, but the catch block in some
+    //   hot-reload scenarios reported `claimedBuy is not defined` (ReferenceError). Hoisting
+    //   guarantees visibility in every nested try/catch/finally within this function.
+    let claimedBuy = false;
     try {
       // FIX-2026-08-26 Phase 2f: phone-home-down gate (position-safety clause)
       //   - per user design 2026-08-26: if admin server unreachable for >48h,
@@ -4186,7 +4191,10 @@ class Trader {
       //     and emitted the early-return when skipReason='floor', so we only see
       //     either `in_range` or `capped_high` here (never `skipped_low`).
       //   - notionalMult === 1 → no-op (most common case for allow/limit-down/etc.)
-      if (autoTimingDecision && autoTimingDecision.notionalMult !== 1 && autoTimingDecision.notionalFinal > 0) {
+      // FIX-2026-08-31: use this._autoTimingDecision (cached in onCandleClosed at L3486-3487) instead
+      //   of local variable — `autoTimingDecision` is not in scope here (defined in onCandleClosed).
+      if (this._autoTimingDecision && this._autoTimingDecision.notionalMult !== 1 && this._autoTimingDecision.notionalFinal > 0) {
+        const autoTimingDecision = this._autoTimingDecision;
         const before = buyNotionalUSDT;
         buyNotionalUSDT = autoTimingDecision.notionalFinal;
         logger.info({
@@ -4255,7 +4263,7 @@ class Trader {
       const requiredNotional = parseFloat(buyPrice) * parseFloat(qty);
       const feeBufferRate = fees.getMakerRate();
       const requiredWithBuffer = requiredNotional * (1 + feeBufferRate);
-      let claimedBuy = false; // FIX-2026-08-21: track for release on early-return
+      // FIX-2026-08-31: claimedBuy now hoisted to top of placeBuy() — removed duplicate.
 
       try {
         const account = await binanceRest.getAccount();
