@@ -30,12 +30,16 @@ const MAX_NAME_LENGTH = 32;
 
 function _badRequest(res, msg) { return res.status(400).json({ error: msg }); }
 
-// POST /api/chat/send — body: { scope: 'community'|'dm', text, clientId? }
+// POST /api/chat/send — body: { scope: 'community'|'dm', text, clientId?, replyTo?, attachment?, color?, icon? }
 router.post('/send', requireAuth, async (req, res) => {
   try {
     const scope = req.body?.scope === 'dm' ? 'dm' : 'community';
     const text = String(req.body?.text || '').slice(0, MAX_TEXT_LENGTH);
-    if (!text.trim()) return _badRequest(res, 'text required');
+    const replyTo = req.body?.replyTo || null;
+    const attachment = req.body?.attachment || null;
+    const color = req.body?.color || null;
+    const icon = req.body?.icon || null;
+    if (!text.trim() && !attachment) return _badRequest(res, 'text or attachment required');
     if (text.length > MAX_TEXT_LENGTH) return _badRequest(res, `text exceeds ${MAX_TEXT_LENGTH}`);
     const clientId = req.body?.clientId ? String(req.body.clientId).slice(0, 80) : undefined;
 
@@ -52,6 +56,7 @@ router.post('/send', requireAuth, async (req, res) => {
         displayName: chatLocalStore.resolveDisplayName(),
         text,
         createdAt: nowIso,
+        color, icon, replyTo, attachment,
       });
       return res.json({
         ok: true,
@@ -64,10 +69,11 @@ router.post('/send', requireAuth, async (req, res) => {
           text,
           displayName: chatLocalStore.resolveDisplayName(),
           createdAt: nowIso,
+          color, icon, replyTo, attachment,
         },
       });
     }
-    const result = adminMonitor.chatOutbox.enqueue({ scope, text, clientId });
+    const result = adminMonitor.chatOutbox.enqueue({ scope, text, clientId, color, icon, replyTo, attachment });
     res.json({ ok: true, queued: true, id: result.id });
   } catch (err) {
     res.status(500).json({ error: err.message });

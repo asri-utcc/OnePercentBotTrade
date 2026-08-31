@@ -403,6 +403,16 @@ const appConfigSchema = new mongoose.Schema(
     //   - Set from Settings section / chat.html; persisted across restart
     // ═══════════════════════════════════════════════════════════════════════
     chatDisplayName: { type: String, default: '', maxlength: 32 },
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Phase 4 CHAT-V2-2026-08-31: Per-operator chat identity
+    //   - chatColor: hex (#RRGGBB) from admin's OPERATOR_COLORS allowlist (no red)
+    //   - chatIcon:  emoji from admin's SYSTEM_ICONS allowlist
+    //   - Both empty → admin resolves defaults from machineId hash at write time
+    //   - Per-operator (admin may override; operator's own value wins if set)
+    // ═══════════════════════════════════════════════════════════════════════
+    chatColor: { type: String, default: '', maxlength: 16 },
+    chatIcon:  { type: String, default: '', maxlength: 8 },
   },
   { timestamps: true }
 );

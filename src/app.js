@@ -44,6 +44,8 @@ const rateLimitRoutes = require('./api/routes/rateLimit.routes');
 const consentRoutes = require('./api/routes/consent.routes');
 // Phase 4-2026-08-29: Chat routes — community room + DM to admin
 const chatRoutes = require('./api/routes/chat.routes');
+// Phase 4 CHAT-V2-2026-08-31: Chat attachments/identity/quota (multipart upload + identity get/put)
+const chatAttachmentRoutes = require('./api/routes/chatAttachments.routes');
 
 function createApp() {
   const app = express();
@@ -163,6 +165,8 @@ app.use('/api/consent', consentRoutes);
 
 // Phase 4-2026-08-29: Chat routes (requireAuth) — community + DM to admin
 app.use('/api/chat', chatRoutes);
+// Phase 4 CHAT-V2-2026-08-31: Chat v2 routes (attachments/identity/quota) — same /api/chat prefix
+app.use('/api/chat', chatAttachmentRoutes);
 
 // FIX-2026-08-26: App version endpoint — public, used by navbar to show user what version is running
 app.get('/api/app/version', (_req, res) => {

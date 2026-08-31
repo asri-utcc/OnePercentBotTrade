@@ -69,6 +69,24 @@ function addMessage(msg) {
     if (newId && existing.id && existing.id === newId) return false;
     if (newClientId && existing.clientId && existing.clientId === newClientId) return false;
   }
+  const attachment = msg.attachment && msg.attachment.id
+    ? {
+        id: String(msg.attachment.id),
+        kind: msg.attachment.kind || null,
+        name: msg.attachment.name || null,
+        mime: msg.attachment.mime || null,
+        sizeBytes: msg.attachment.sizeBytes || 0,
+        url: msg.attachment.url || `/api/chat/attachments/${msg.attachment.id}`,
+      }
+    : null;
+  const replyTo = msg.replyTo && msg.replyTo.id
+    ? {
+        id: String(msg.replyTo.id),
+        displayName: msg.replyTo.displayName || null,
+        text: msg.replyTo.text || null,
+        createdAt: msg.replyTo.createdAt || null,
+      }
+    : null;
   buf.push({
     id: newId,
     clientId: newClientId,
@@ -80,6 +98,12 @@ function addMessage(msg) {
     text: _trimText(msg.text),
     readByAdmin: !!msg.readByAdmin,
     createdAt: msg.createdAt || new Date().toISOString(),
+    // Phase 4 chat v2
+    color: msg.color || null,
+    icon: msg.icon || null,
+    replyTo,
+    attachment,
+    deletedAt: msg.deletedAt || null,
   });
   if (buf.length > MAX_PER_SCOPE) buf.splice(0, buf.length - MAX_PER_SCOPE);
   // DM from admin increments unread; community doesn't (always visible)
