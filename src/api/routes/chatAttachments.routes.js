@@ -198,9 +198,12 @@ router.get('/attachments/:id', requireAuth, async (req, res) => {
     if (!config.enabled || !config.licenseKey) {
       return res.status(503).json({ ok: false, error: 'admin_disabled' });
     }
-    const url = `${config.url}/api/admin/chat/attachments/${encodeURIComponent(req.params.id)}`;
-    // FIX 2026-09-01: pipe admin's binary response through (was _httpJson which
-    // JSON-parsed a binary stream and corrupted the bytes — images wouldn't load).
+    // FIX 2026-09-01: hit the bot-facing proxy endpoint (admin's
+    // /api/admin/chat/attachments/:id is gated by requireAdmin — X-License-Key
+    // doesn't bypass). New route /api/instances/:machineId/chat/attachments/:attId
+    // uses requireLicense + machine ownership check.
+    const url = `${config.url}/api/instances/${encodeURIComponent(getMachineId())}/chat/attachments/${encodeURIComponent(req.params.id)}`;
+    // Pipe admin's binary response through (was _httpJson which JSON-parsed bytes — corrupted images)
     await _httpProxyBinary('GET', url, req.headers.range, res, { 'X-License-Key': config.licenseKey });
   } catch (err) {
     res.status(err.status || 500).json({ ok: false, error: err.body || err.message });

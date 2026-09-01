@@ -312,7 +312,7 @@
         <div class="chat-attachment-preview-head">
           <span>📎 ${_escape(name)}</span>
           <div>
-            <a href="${_escape(url)}" download="${_escape(name)}" class="chat-attachment-download">⬇ Download</a>
+            <a href="#" data-action="download" class="chat-attachment-download">⬇ Download</a>
             <button class="chat-attachment-close">✕</button>
           </div>
         </div>
@@ -323,8 +323,32 @@
     overlay.addEventListener('click', (e) => {
       if (e.target === overlay || e.target.classList.contains('chat-attachment-close')) {
         document.body.removeChild(overlay);
+        return;
+      }
+      // FIX 2026-09-01: download via fetch+blob so same-origin cookie auth is
+      // sent (browser direct <a download href> ignores cookies → "needs authorization")
+      const dl = e.target.closest('[data-action="download"]');
+      if (dl) {
+        e.preventDefault();
+        _downloadAttachment(url, name).catch((err) => {
+          alert('Download failed: ' + (err && err.message || 'unknown'));
+        });
       }
     });
+  }
+
+  async function _downloadAttachment(url, name) {
+    const r = await fetch(url, { credentials: 'same-origin' });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const blob = await r.blob();
+    const blobUrl = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = blobUrl;
+    a.download = name || 'download';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
   }
 
   // ── Reply/quote ──
