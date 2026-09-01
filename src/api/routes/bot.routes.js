@@ -49,6 +49,23 @@ const { requireBotActionPassword } = require('../middleware/auth');
 // Returns { error } on rejection, { value } on accept. value is null for null input.
 const _AT_OVERRIDE_KEY_RE = /^([0-6]):([0-9]|1[0-9]|2[0-3])$/;
 const _AT_OVERRIDE_VALUES = new Set(['allow', 'limit', 'encourage', 'stimulate', 'suppress']);
+
+/**
+ * FIX-2026-09-01 audit C9: shared tristate coercion for autoTimingEnabled.
+ *   Frontend may send booleans, the strings 'true'/'false', or the string 'null'
+ *   (per tristate UI). The Bot schema is `null|true|false` (null = inherit master,
+ *   true/false = explicit). Coerce so both PATCH and bulk-update write paths
+ *   store a valid tristate value regardless of input format.
+ *   - true / 'true' / 1 / '1'              → true
+ *   - false / 'false' / 0 / '0'            → false
+ *   - null / 'null' / '' / undefined       → null
+ *   - everything else (e.g. 'enabled')     → null (defensive — unknown text → inherit)
+ */
+function _coerceAutoTimingEnabled(v) {
+  if (v === true || v === 'true' || v === 1 || v === '1') return true;
+  if (v === false || v === 'false' || v === 0 || v === '0') return false;
+  return null;
+}
 function _validateAutoTimingOverrideCell(v) {
   if (v === null) return { value: null };
   if (typeof v !== 'object' || Array.isArray(v)) {
@@ -1294,6 +1311,13 @@ router.put('/:id', requireAuth, async (req, res) => {
           } else {
             bot[k] = parseInt(data[k], 10);
           }
+        } else if (k === 'autoTimingEnabled') {
+          // FIX-2026-09-01 audit C9: tristate coercion in PATCH path.
+          //   Bulk-update already has this; PATCH was using catch-all `bot[k] = data[k]`
+          //   which stored raw strings like 'true' -> broke the tristate schema
+          //   (null = inherit, true/false = explicit). Coerce via shared helper
+          //   so both write paths behave identically.
+          bot[k] = _coerceAutoTimingEnabled(data[k]);
         } else {
           bot[k] = data[k];
         }
@@ -2197,7 +2221,7 @@ router.post('/bulk-update', requireAuth, async (req, res) => {
     // FIX-2026-08-30: Auto-Timing tristate (null = inherit master, true/false = explicit)
     if ('autoTimingEnabled' in update) {
       const v = update.autoTimingEnabled;
-      update.autoTimingEnabled = (v === true || v === 'true') ? true : (v === false || v === 'false') ? false : null;
+      update.autoTimingEnabled = _coerceAutoTimingEnabled(v);
     }
     // FIX-2026-09-01 audit C9: validate the per-bot cell override map.
     //   Uses the shared helper at the top of the file (same as PATCH route) so
