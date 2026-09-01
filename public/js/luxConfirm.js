@@ -41,7 +41,20 @@
 
       const modalEl = document.getElementById('confirmActionModal');
       if (!modalEl) {
-        // Fallback if markup missing — degrade gracefully to native confirm.
+        // FIX 2026-09-01 audit H10: fallback when modal markup missing — use themed
+        // AdminModalAlert (themed modal) instead of native window.confirm().
+        // If AdminModalAlert itself is missing (very early load), degrade to native
+        // prompt as last-resort.
+        if (window.AdminModalAlert && typeof window.AdminModalAlert.confirm === 'function') {
+          window.AdminModalAlert.confirm({
+            title,
+            message: message || sub,
+            level: variant === 'danger' ? 'error' : 'warn',
+            okLabel: confirmLabel || 'ยืนยัน',
+          }).then((ok) => resolve(ok ? '' : null));
+          return;
+        }
+        // Last-resort: native confirm (defensive — should never hit in practice)
         // eslint-disable-next-line no-alert
         const ok = window.confirm((message || sub) + (requirePassword ? ' (กรุณาตอบ OK แล้วใส่รหัสที่ป้อนอัตโนมัติ)' : ''));
         return resolve(ok ? '' : null);

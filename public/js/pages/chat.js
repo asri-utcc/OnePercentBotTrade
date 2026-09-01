@@ -363,7 +363,9 @@
       if (dl) {
         e.preventDefault();
         _downloadAttachment(url, name).catch((err) => {
-          alert('Download failed: ' + (err && err.message || 'unknown'));
+          // FIX 2026-09-01 audit C11: use themed modal instead of native alert()
+          // (native alert blocks UI thread + violates bot-toast-modal-alert pattern)
+          AdminModalAlert.alert('Download failed: ' + (err && err.message || 'unknown'), 'error');
         });
       }
     });
