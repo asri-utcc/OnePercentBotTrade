@@ -123,6 +123,12 @@ function _check() {
   }
 }
 
+// FIX-2026-09-01 audit C13: store the bound listener so stop() can remove it.
+//   Without this, every start() (e.g. adminMonitor config reload) added another
+//   listener but stop() never removed them — EventEmitter kept firing each one,
+//   causing duplicate recordContact() calls and skewed lastContactAt timestamps.
+let _contactSuccessListener = null;
+
 function start() {
   if (interval) return;
   if (!isEnabled()) {
@@ -130,7 +136,11 @@ function start() {
     return;
   }
   // listen to eventBus for contact-success events (emitted by heartbeat/command/validate modules)
-  eventBus.on('admin:contact_success', (payload) => recordContact(payload?.source || 'unknown'));
+  // FIX-2026-09-01 audit C13: bind once and store the reference so stop() can remove it.
+  if (!_contactSuccessListener) {
+    _contactSuccessListener = (payload) => recordContact(payload?.source || 'unknown');
+    eventBus.on('admin:contact_success', _contactSuccessListener);
+  }
   // initial check
   _check();
   interval = setInterval(_check, TICK_MS);
@@ -146,6 +156,12 @@ function stop() {
     clearInterval(interval);
     interval = null;
     logger.info('phoneHomeMonitor: stopped');
+  }
+  // FIX-2026-09-01 audit C13: detach the contact_success listener so the next
+  // start() (e.g. config reload) doesn't accumulate duplicate handlers.
+  if (_contactSuccessListener) {
+    eventBus.off('admin:contact_success', _contactSuccessListener);
+    _contactSuccessListener = null;
   }
 }
 
