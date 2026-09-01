@@ -495,6 +495,29 @@ a:hover { color: var(--gold-2); text-decoration: none; }
   z-index: 0;
 }
 .at-hm-table tbody td.at-hm-cell .at-hm-wr-strip { z-index: 1; }
+/* FIX-2026-09-01: pnl-strip replaces wr-strip — top 4px layer, same z-index as wr-strip.
+   Color set inline (red/yellow/green based on pnl/trade). */
+.at-hm-table tbody td.at-hm-cell .at-hm-pnl-strip {
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  height: 4px;
+  pointer-events: none;
+  z-index: 1;
+  border-top-left-radius: 2px;
+  border-top-right-radius: 2px;
+}
+/* FIX-2026-09-01: PnL per trade value shown below the action dot. Small mono font,
+   colored by sign: green for profit, red for loss. */
+.at-hm-table tbody td.at-hm-cell .at-hm-pnl-val {
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  margin-top: 0;
+  letter-spacing: 0.01em;
+  font-weight: 600;
+}
+.at-hm-table tbody td.at-hm-cell .at-hm-pnl-val { color: rgba(255,255,255,0.9); }
+.at-hm-act-allow.at-hm-act-allow ~ .at-hm-pnl-val,
+.at-hm-table tbody td.at-hm-cell .at-hm-act-dot.at-act-allow + .at-hm-n + .at-hm-pnl-val { color: #00e5b8; }
 .at-hm-table tbody td.at-hm-cell .at-hm-act-dot,
 .at-hm-table tbody td.at-hm-cell .at-hm-n,
 .at-hm-table tbody td.at-hm-cell .at-hm-wr-pct,

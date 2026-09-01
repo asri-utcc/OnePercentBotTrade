@@ -567,9 +567,13 @@ function buildHeatmapModalBodyHTML(meta, matrix) {
       const blocked = !!cell.blocked;
       const everBad = cell.tier2EverBadCount || 0;
       const actEmoji = actionBadgeEmoji(action);
-      // WR strip opacity: 0.3..1.0 wr -> 0.20..0.85 opacity; below minShow = faded strip
-      const wrOpacity = (n >= minShow) ? Math.min(0.85, Math.max(0.20, 0.20 + (wr - 0.3) * 1.0)) : 0.10;
-      const wrColor = wr >= 0.6 ? '#00e5b8' : wr <= 0.4 ? '#ff4d6d' : '#f5b800';
+      // FIX-2026-09-01: top strip is now PnL/trade (red/yellow/green) so Auto-Timing
+      //   modal agrees with Trade Analysis heatmap. WR is shown as small text + tooltip.
+      //   pnl/trade = cell.pnlUSDT / cell.n ; cap |pnl| at 2.0 USDT for opacity scale.
+      const pnlPerTrade = (n >= minShow && n > 0) ? (pnl / n) : 0;
+      const pnlOpacity = (n >= minShow) ? Math.min(0.85, Math.max(0.20, 0.20 + Math.min(1, Math.abs(pnlPerTrade) / 2.0) * 0.65)) : 0.10;
+      const pnlColor = pnlPerTrade > 0.02 ? '#00e5b8' : pnlPerTrade < -0.02 ? '#ff4d6d' : '#f5b800';
+      const pnlSign = pnlPerTrade >= 0 ? '+' : '';
       // FIX-2026-09-01: hold-band background rgb (default white if bandId unknown)
       const bandRgb = AT_HM_BAND_RGB[cell.bandId || 'lt10m'] || '255,255,255';
       const tier2Line = tier2 ? '<div class="at-hm-tier2" title="Tier 2 lock: ever-bad × ' + everBad + '">⛔ T2</div>' : '';
@@ -582,7 +586,8 @@ function buildHeatmapModalBodyHTML(meta, matrix) {
         'band: ' + bandId + ' (' + (AT_HM_BAND_LABEL[bandId] || '?') + ')',
         'weighted N: ' + n.toFixed(2) + ' (raw=' + scanned + ' over ' + lookback + 'd)',
         'win rate: ' + (wr * 100).toFixed(1) + '%',
-        'pnl: ' + pnl.toFixed(4) + ' USDT',
+        'pnl total: ' + pnl.toFixed(4) + ' USDT',
+        (n > 0 ? 'pnl/trade: ' + pnlSign + pnlPerTrade.toFixed(4) + ' USDT' : ''),
         // FIX-2026-08-31: show both metrics + indicate which is active for band bucketing
         'median hold: ' + holdMin.toFixed(1) + ' min',
         'p75 hold: ' + (Number(m.p75HoldMin) || 0).toFixed(1) + ' min',
@@ -597,9 +602,10 @@ function buildHeatmapModalBodyHTML(meta, matrix) {
         ' data-band="' + escapeHtml(cell.bandId || '') + '"' +
         ' data-day="' + day + '" data-hour="' + hour + '">' +
         '<div class="at-hm-band-bg" style="background-color: rgba(' + bandRgb + ', 0.18);"></div>' +
-        '<div class="at-hm-wr-strip" style="background-color:' + wrColor + '; opacity:' + wrOpacity + ';"></div>' +
+        '<div class="at-hm-pnl-strip" style="background-color:' + pnlColor + '; opacity:' + pnlOpacity + ';"></div>' +
         '<div class="at-hm-act-dot at-act-' + action + '">●</div>' +
         '<div class="at-hm-n">' + (n < minShow ? '·' : n.toFixed(0)) + '</div>' +
+        (n >= minShow ? '<div class="at-hm-pnl-val" title="PnL per trade">' + pnlSign + pnlPerTrade.toFixed(2) + '</div>' : '') +
         (tier2 ? '<div class="at-hm-wr-pct">WR ' + (wr * 100).toFixed(0) + '%</div>' : '') +
         tier2Line + blockLine +
         '</td>';
@@ -610,10 +616,10 @@ function buildHeatmapModalBodyHTML(meta, matrix) {
   return '<div class="alert alert-info small py-2 px-3 mb-2">' +
     '<strong>📐 Aggregation:</strong> weighted N = trades × <code>recentWeight</code>' + recentW + ' for last ' + recent + 'd, then <code>normalWeight</code>' + normalW + ' for days ' + (recent + 1) + '..' + lookback + '.' +
     '<br />• <strong>Cell background</strong> = hold-band color (blue ≤10m / green ≤1h / yellow ≤12h / orange ≤48h / red >48h) — matches Trade Analysis heatmap.' +
-    '<br />• <strong>Top strip</strong> = win rate (green ≥60%, yellow 40–60%, red ≤40%). Tier-2 cells show WR%.' +
-    '<br />• <strong>Center dot</strong> = action (allow / stimulate / encourage / limit / suppress).' +
+    '<br />• <strong>Top strip</strong> = PnL/trade (green +profit / yellow ≈0 / red −loss). Number below = USDT/trade.' +
+    '<br />• <strong>Center dot</strong> = action (allow / stimulate / encourage / limit / suppress). Tier-2 cells show WR%.' +
     '<br />• <strong>Hold metric (band bucket):</strong> ' + (meta.holdMetric || 'median') + ' — switching in Settings changes which band each cell falls into.' +
-    '<br />• Hover any cell for full breakdown (median + p75 hold shown); click copies summary.' +
+    '<br />• Hover any cell for full breakdown (median + p75 hold + pnl/trade); click copies summary.' +
     '</div>' +
     '<div class="at-hm-scroll">' +
     '<table class="at-hm-table" id="at-hm-table-body">' +
@@ -633,10 +639,10 @@ function buildHeatmapModalBodyHTML(meta, matrix) {
     '<span class="at-hm-legend-pill"><span class="at-hm-legend-dot at-act-encourage">\u25cf</span> encourage</span>' +
     '<span class="at-hm-legend-pill"><span class="at-hm-legend-dot at-act-limit">\u25cf</span> limit</span>' +
     '<span class="at-hm-legend-pill"><span class="at-hm-legend-dot at-act-suppress">\u25cf</span> suppress</span>' +
-    '<span class="ms-3"><strong>WR strip:</strong></span>' +
-    '<span class="at-hm-legend-fill" style="background-color:#00e5b8;">≥60%</span>' +
-    '<span class="at-hm-legend-fill" style="background-color:#f5b800;">40–60%</span>' +
-    '<span class="at-hm-legend-fill" style="background-color:#ff4d6d;">≤40%</span>' +
+    '<span class="ms-3"><strong>PnL/trade strip:</strong></span>' +
+    '<span class="at-hm-legend-fill" style="background-color:#00e5b8;">+ profit</span>' +
+    '<span class="at-hm-legend-fill" style="background-color:#f5b800;">≈ 0</span>' +
+    '<span class="at-hm-legend-fill" style="background-color:#ff4d6d;">− loss</span>' +
     '<span class="at-hm-legend-pill ms-3 at-hm-tier2">⛔ T2 = Tier 2 lock (ever-bad ≥ 10)</span>' +
     '<span class="at-hm-legend-pill at-hm-block">🚫 block</span>' +
     '</div>' +

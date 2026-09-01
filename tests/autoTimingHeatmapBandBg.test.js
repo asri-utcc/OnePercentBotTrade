@@ -126,8 +126,8 @@ describe('app.css — .at-hm-band-bg layer', () => {
   });
 });
 
-describe('settings.html — cache-buster bumped to 2026-09-01-band-bg', () => {
-  test('script tag uses v=2026-09-01-band-bg', () => {
-    expect(htmlRaw).toMatch(/autoTiming\.js\?v=2026-09-01-band-bg/);
+describe('settings.html — cache-buster bumped', () => {
+  test('script tag uses 2026-09-01-* cache-buster', () => {
+    expect(htmlRaw).toMatch(/autoTiming\.js\?v=2026-09-01-(band-bg|pnl-strip)/);
   });
 });
