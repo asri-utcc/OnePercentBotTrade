@@ -28,6 +28,18 @@
   let _view = 'community';
   let _messages = [];
   let _since = null;
+  // FIX 2026-09-01: auth-state tracking so we don't pre-emptively hit
+  // requireAuth endpoints before login (no more 401 spam in console)
+  let _authed = false;
+  // FIX 2026-09-01: safeStorage wrapper — Edge Tracking Prevention in strict
+  // mode logs a console warning BEFORE the throw, so try/catch alone isn't
+  // enough. We probe once at module-load and skip storage entirely if blocked.
+  let _storageOK = (function () {
+    try { sessionStorage.setItem('__probe', '1'); sessionStorage.removeItem('__probe'); return true; }
+    catch (_) { return false; }
+  })();
+  const _ssGet = (k) => { if (!_storageOK) return null; try { return sessionStorage.getItem(k); } catch (_) { return null; } };
+  const _ssSet = (k, v) => { if (!_storageOK) return; try { sessionStorage.setItem(k, v); } catch (_) {} };
   let _pollHandle = null;
   let _historyCursor = null;
   let _replyTo = null;
@@ -169,7 +181,11 @@
       const r = await API.get('/api/chat/identity');
       _myColor = r.color || '';
       _myIcon = r.icon || '';
-    } catch (_) { /* ignore */ }
+      _authed = true; // FIX 2026-09-01: auth confirmed
+    } catch (err) {
+      // FIX 2026-09-01: detect "not logged in" so we don't spam quota/history polls
+      if (err && err.status === 401) { _authed = false; return; }
+    }
     _renderIdentityRow();
   }
 
@@ -185,12 +201,16 @@
   }
 
   async function _loadQuota() {
+    // FIX 2026-09-01: skip the call entirely if we know the user isn't authed
+    // (otherwise the 401 itself shows up in browser console even though we catch it)
+    if (!_authed) { _updateQuotaBar(); return; }
     try {
       const r = await API.get('/api/chat/quota');
       _quota = r || _quota;
+      _authed = true;
     } catch (err) {
-      // FIX 2026-08-31: suppress 401 noise from page-load-before-login
-      if (!err || err.status !== 401) console.warn('chat: quota load failed', err);
+      if (err && err.status === 401) _authed = false;
+      else console.warn('chat: quota load failed', err);
     }
     _updateQuotaBar();
   }
@@ -477,6 +497,7 @@
       if (_myIcon) body.icon = _myIcon;
 
       const r = await API.post('/api/chat/send', body);
+      _authed = true; // FIX 2026-09-01: just verified auth works
       ta.value = '';
       _pendingFile = null;
       _clearPendingFile();
@@ -500,8 +521,13 @@
       renderMessages();
       _setReply(null);
       _setStatus('');
-      _loadQuota(); // refresh count after upload
+      // FIX 2026-09-01: quota is already updated inside _uploadAttachment on success;
+      // calling _loadQuota() again here was redundant AND produced a noisy 401 when
+      // send happened with file (upload) but quota path lost auth-state momentarily.
+      // Also skip when not authed to prevent 401 in console for text-only sends on
+      // un-authed tabs.
     } catch (err) {
+      if (err && err.status === 401) _authed = false; // FIX 2026-09-01
       _setStatus(err.message || 'Send failed', 'error');
     } finally {
       btn.disabled = false;
