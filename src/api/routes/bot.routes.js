@@ -42,6 +42,31 @@ function formatTpToXxx1(value) {
 
 const { requireBotActionPassword } = require('../middleware/auth');
 
+// FIX-2026-09-01 audit C9: shared validator for autoTimingOverrideCell.
+//   - Input must be a plain object or null
+//   - Keys must match 'd:h' (day 0..6, hour 0..23)
+//   - Values must be one of: allow, limit, encourage, stimulate, suppress
+// Returns { error } on rejection, { value } on accept. value is null for null input.
+const _AT_OVERRIDE_KEY_RE = /^([0-6]):([0-9]|1[0-9]|2[0-3])$/;
+const _AT_OVERRIDE_VALUES = new Set(['allow', 'limit', 'encourage', 'stimulate', 'suppress']);
+function _validateAutoTimingOverrideCell(v) {
+  if (v === null) return { value: null };
+  if (typeof v !== 'object' || Array.isArray(v)) {
+    return { error: 'autoTimingOverrideCell must be an object like { "0:4": "suppress" } or null' };
+  }
+  const out = {};
+  for (const [k, val] of Object.entries(v)) {
+    if (typeof k !== 'string' || !_AT_OVERRIDE_KEY_RE.test(k)) {
+      return { error: `autoTimingOverrideCell key '${k}' must be 'd:h' where d=0..6, h=0..23` };
+    }
+    if (typeof val !== 'string' || !_AT_OVERRIDE_VALUES.has(val)) {
+      return { error: `autoTimingOverrideCell value '${val}' for key '${k}' must be one of allow|limit|encourage|stimulate|suppress` };
+    }
+    out[k] = val;
+  }
+  return { value: out };
+}
+
 const router = express.Router();
 
 /**
@@ -1149,6 +1174,9 @@ router.put('/:id', requireAuth, async (req, res) => {
       'autoPauseAdjustEnabled',
       // FIX-2026-08-30: Auto-Timing (Phase 4) per-bot tristate (null|true|false = inherit/force-on/force-off)
       'autoTimingEnabled',
+      // FIX-2026-09-01 audit C9: per-bot cell override map. Keys 'd:h' (e.g. '0:4'),
+      //   values 'suppress'|'limit'|'allow'|'encourage'|'stimulate'. Validated below.
+      'autoTimingOverrideCell',
       // FIX-2026-08-06: CBv2 fields (cbv2Enabled, cbv2LockHours)
       // FIX-2026-08-08: Feature #1+3 (dynamicSizeEnabled, cbAutoUnlockEnabled, cbAutoUnlockThresholdPct)
       // FIX-2026-08-08: CBv3 fields (cbv3Enabled, cbv3LockHours) — added to whitelist for bulk update + bot-edit save
@@ -1215,6 +1243,13 @@ router.put('/:id', requireAuth, async (req, res) => {
         } else if (k === 'cbAutoUnlockThresholdPct') {
           // FIX-2026-08-08: Feature #3 — threshold Pct (0.5..5.0, default 1.0)
           bot[k] = Math.min(5.0, Math.max(0.5, parseFloat(data[k])));
+        } else if (k === 'autoTimingOverrideCell') {
+          // FIX-2026-09-01 audit C9: validate overrideCell — keys 'd:h' (day:hour),
+          //   values 'allow'|'limit'|'encourage'|'stimulate'|'suppress'. Store raw
+          //   (already coerced via the helper below). Reject malformed input.
+          const v = _validateAutoTimingOverrideCell(data[k]);
+          if (v.error) return res.status(400).json({ error: v.error });
+          bot[k] = v.value;
         } else if (k === 'autoPauseMin24hVolUsdt') {
           // FIX-2026-08-10: 24h volume guard for Auto Pause-Resume (0..1B USDT, default 1M, integer)
           bot[k] = Math.min(1_000_000_000, Math.max(0, Math.round(parseFloat(data[k]))));
@@ -2131,6 +2166,10 @@ router.post('/bulk-update', requireAuth, async (req, res) => {
       //   Was missing from this bulk-update whitelist — bulk-update on per-bot autoTiming returned 400
       //   'no valid fields in settings' even though the field was sent.
       'autoTimingEnabled',
+      // FIX-2026-09-01 audit C9: per-bot cell override map. Validated by
+      //   _validateAutoTimingOverrideCell() — see top of file. Sharing the same
+      //   validator between PATCH and bulk-update keeps both paths consistent.
+      'autoTimingOverrideCell',
       'suggestTpWindow', 'autoArmStopLossOnUKC', 'autoArmLossPct', 'autoArmAgeHours', 'slUkcTriggerOnProfit',
       'tpTrendMultiplier', 'tpTrendEnabled',
       'dcaEnabled', 'dcaMaxLayers',
@@ -2159,6 +2198,14 @@ router.post('/bulk-update', requireAuth, async (req, res) => {
     if ('autoTimingEnabled' in update) {
       const v = update.autoTimingEnabled;
       update.autoTimingEnabled = (v === true || v === 'true') ? true : (v === false || v === 'false') ? false : null;
+    }
+    // FIX-2026-09-01 audit C9: validate the per-bot cell override map.
+    //   Uses the shared helper at the top of the file (same as PATCH route) so
+    //   both write paths reject malformed input identically.
+    if ('autoTimingOverrideCell' in update) {
+      const v = _validateAutoTimingOverrideCell(update.autoTimingOverrideCell);
+      if (v.error) return res.status(400).json({ error: v.error });
+      update.autoTimingOverrideCell = v.value;
     }
     // FIX-2026-08-03 / EXT-2026-08-20: F1 auto-arm thresholds + profit trigger (bulk-update support)
     if (Number.isFinite(update.autoArmLossPct)) update.autoArmLossPct = Math.max(1, Math.min(99, update.autoArmLossPct));
