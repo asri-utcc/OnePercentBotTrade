@@ -108,6 +108,74 @@ const handlers = {
   },
 
   /**
+   * FIX-2026-09-01 audit C8: consent_suspended — admin flips Machine.suspendedByConsent=true
+   *   - Pauses botManager (stops timers + WS → no new BUYs)
+   *   - Sets a sticky `_consentSuspended` flag so resume() / force_reconsent resume
+   *     cannot accidentally re-enable trading while admin still considers consent revoked
+   *   - Emits 'consent:suspended' eventBus event so downstream listeners can log,
+   *     notify the user via Telegram, or push a dashboard alert
+   *   - Idempotent — safe to receive multiple times
+   *
+   * Companion admin-side change: when admin sets Machine.suspendedByConsent=true in
+   * /admin/:machineId (or via "Decline" handler), admin MUST queue this command
+   * via /api/instances/.../commands. The bot's own local consent overlay will also
+   * re-engage (existing flow) so the user must accept to resume.
+   */
+  async consent_suspended(payload, ctx) {
+    const reason = String(payload?.reason || 'consent_suspended');
+    const port = Number(payload?.port) || 6015;
+    ctx.botManager?.setConfig?.('_consentSuspended', true);
+    ctx.botManager?.setConfig?.('_consentSuspendedAt', Date.now());
+    ctx.botManager?.setConfig?.('_consentSuspendedReason', reason);
+    const r = await ctx.botManager?.pause?.(reason);
+    // Also clear local consent + re-engage the overlay so the user is forced to
+    // re-accept locally. Mirrors force_reconsent's forceReset() behavior so the
+    // user sees the overlay on their next page load. Local acceptance still
+    // requires admin to clear Machine.suspendedByConsent via consent_resumed.
+    let resetResult = { ok: false };
+    try {
+      const consentHandlers = require('../consent/handlers');
+      resetResult = await consentHandlers.forceReset({ source: 'admin_consent_suspended', port });
+    } catch (err) {
+      logger.warn({ err: err.message }, 'admin-monitor: consent_suspended forceReset threw');
+    }
+    ctx.eventBus?.emit?.('consent:suspended', { reason, ts: Date.now(), payload, resetResult });
+    logger.warn({
+      reason, alreadyPaused: !!(r && r.alreadyPaused),
+      fileDeleted: !!(resetResult && resetResult.fileDeleted),
+    }, 'admin: consent suspended — bot paused + local consent reset');
+    return {
+      ok: !!(r && r.ok) && !!resetResult.ok,
+      action: 'consent_suspended',
+      paused: !!(r && r.ok),
+      alreadyPaused: !!(r && r.alreadyPaused),
+      fileDeleted: !!(resetResult && resetResult.fileDeleted),
+      reason,
+    };
+  },
+
+  /**
+   * FIX-2026-09-01 audit C8: consent_resumed — admin clears Machine.suspendedByConsent=false
+   *   - Clears the sticky `_consentSuspended` flag
+   *   - Resumes botManager (only if it was paused)
+   *   - Emits 'consent:resumed' eventBus event
+   *
+   * Companion admin-side change: when admin flips Machine.suspendedByConsent=false,
+   * admin MUST queue this command so the bot clears its local flag too. This avoids
+   * a scenario where admin re-issues consent but bot remains stuck paused.
+   */
+  async consent_resumed(payload, ctx) {
+    const reason = String(payload?.reason || 'consent_resumed');
+    ctx.botManager?.setConfig?.('_consentSuspended', false);
+    ctx.botManager?.setConfig?.('_consentSuspendedAt', null);
+    ctx.botManager?.setConfig?.('_consentSuspendedReason', null);
+    const r = await ctx.botManager?.resume?.();
+    ctx.eventBus?.emit?.('consent:resumed', { reason, ts: Date.now(), payload });
+    logger.info({ reason, alreadyRunning: !!(r && r.alreadyRunning) }, 'admin: consent resumed — bot can resume');
+    return { ok: true, action: 'consent_resumed', resumed: !!(r && r.ok), alreadyRunning: !!(r && r.alreadyRunning), reason };
+  },
+
+  /**
    * Phase 4-2026-08-29: chat_message — admin→bot DM or community message.
    *   payload shape: { id, scope, text, displayName, createdAt, fromAdmin: true, toMachineId }
    *   - adds to local ring buffer (admin already canonical; this is a backup path
