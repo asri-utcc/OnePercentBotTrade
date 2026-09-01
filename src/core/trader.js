@@ -770,14 +770,30 @@ class Trader {
     //   - Only do this for SELL-side cancel paths (where we KNOW SELL was placed); skip for BUY-only
     //     cancel paths to avoid cancelling unrelated SELLs from previous trades
     //   - Heuristic: SELL price >= trade.buyPrice (sell above buy)
+    // FIX-2026-09-01 audit C16: scope the scan by this bot's clientOrderId prefix so
+    //   we never cancel a SELL order belonging to ANOTHER bot that happens to be
+    //   trading the same symbol on this shared Binance account. The original
+    //   qty/price heuristic was too loose — if bot A and bot B both opened
+    //   BTCUSDT positions, bot A's defensive scan could cancel bot B's SELL.
+    //   makeClientOrderId() sets prefix `b${botId.slice(-6)}-`, so we filter
+    //   openOrders by that exact prefix on each order's clientOrderId.
     if (reason && /partial|abort|cancel|orphan/i.test(reason)) {
       try {
         const openOrders = await binanceRest.getOpenOrders({ symbol: this.bot.symbol }).catch(() => []);
         const buyPrice = parseFloat(trade.buyPrice);
         const buyQty = parseFloat(trade.buyQty);
         const candidatesQty = result.orphans.length > 0 ? null : buyQty; // only scan if not already cancelled
+        // Per-bot prefix derived from makeClientOrderId: 'b' + last 6 chars of bot._id
+        const botPrefix = `b${this.bot._id.toString().slice(-6)}-`;
         for (const o of (openOrders || [])) {
           if (o.side !== 'SELL') continue;
+          // FIX-2026-09-01 audit C16: per-bot clientOrderId prefix gate.
+          //   Only consider orders that this bot itself placed. Without this gate,
+          //   a defensive scan could nuke a sibling bot's SELL on the same symbol.
+          //   Fallback for legacy orders that don't have clientOrderId: skip them
+          //   (safer than cancelling blindly).
+          const cid = o.clientOrderId || '';
+          if (!cid.startsWith(botPrefix)) continue;
           const oQty = parseFloat(o.origQty || o.quantity || 0);
           const oPrice = parseFloat(o.price || 0);
           const matchQty = !candidatesQty || Math.abs(oQty - candidatesQty) / Math.max(candidatesQty, 1e-12) < 0.01;
@@ -792,6 +808,7 @@ class Trader {
                   tradeId: trade._id && trade._id.toString(),
                   symbol: this.bot.symbol,
                   orderId: o.orderId, qty: oQty, price: oPrice,
+                  clientOrderId: cid,
                   reason, ctx,
                 }, 'trader: _cancelOrphanedSells — defensive cancel');
               }
