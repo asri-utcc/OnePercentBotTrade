@@ -10,6 +10,12 @@ const licenseService = require('../services/licenseService'); // FIX-2026-08-28 
 //   - singleton scheduler — start/stop hooked here; reloadConfig via admin PUT
 //   - master switch + tuning params live on AppConfig.autoPauseAdjust*
 const autoPauseAdjust = require('../services/autoPauseAdjust');
+// FIX-2026-09-01 audit C9: wire Auto-Timing minKcMult into auto-pause KC threshold
+//   When the current cell says minKcMult=1.5, the auto-pause triggers at
+//   autoPauseMinKcPct*1.5 (%KC can be 50% wider before we unpause) — i.e., for
+//   "low-volatility" cells, the bot stays paused longer (less likely to BUY into
+//   a thin-KC trap).
+const autoTiming = require('../services/autoTiming');
 const logger = require('../utils/logger');
 const Bot = require('../db/models/Bot');
 const Trade = require('../db/models/Trade');
@@ -1288,7 +1294,22 @@ async function checkAutoPauseBots() {
       const tail = kc.width.slice(-30).filter((w) => w != null && Number.isFinite(w));
       if (tail.length < 5) continue;
       const minKcPct = Math.min(...tail);
-      const kcThreshold = b.autoPauseMinKcPct != null ? b.autoPauseMinKcPct : 2;
+      // FIX-2026-09-01 audit C9: apply Auto-Timing minKcMult to the threshold.
+      //   - default kcMult = 1.0 (no change — backward compatible)
+      //   - minKcMult=1.5 → threshold = autoPauseMinKcPct * 1.5 → bot stays paused
+      //     longer for "low-volatility" cells (less likely to BUY into thin-KC trap)
+      //   - autoTiming.decideForBot() returns no-op when master disabled / bot
+      //     opted-out — so this is fail-OPEN and free unless Auto-Timing is active
+      let kcMult = 1;
+      try {
+        const atDec = await autoTiming.decideForBot(b, Date.now());
+        const m = atDec && Number.isFinite(atDec.minKcMult) ? atDec.minKcMult : 1;
+        if (m > 0 && m <= 5) kcMult = m;
+      } catch (_) {
+        // fail-OPEN — keep kcMult=1
+      }
+      const baseKcPct = b.autoPauseMinKcPct != null ? b.autoPauseMinKcPct : 2;
+      const kcThreshold = baseKcPct * kcMult;
       const volThreshold = b.autoPauseMin24hVolUsdt != null ? b.autoPauseMin24hVolUsdt : 1_000_000;
       const quoteVolume24h = volMap.get(String(b.symbol).toUpperCase()) || 0;
       const kcLow = minKcPct < kcThreshold;

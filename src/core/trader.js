@@ -1206,8 +1206,24 @@ class Trader {
     if (upperKC == null) return;
 
     const closePrice = parseFloat(candle.close);
-    // FIX: candle ต้องปิดเหนือ upperKC เท่านั้น → trigger
-    if (closePrice <= upperKC) return;
+    // FIX-2026-09-01 audit C9: wire slTightenPct from Auto-Timing decision.
+    //   Default 0 (no tightening). When the current cell says slTightenPct=8, the SL
+    //   triggers at `upperKC * 0.92` instead of `upperKC` — i.e., the SL fires
+    //   ~8% earlier in the band. This narrows the loss window for marginal cells
+    //   without touching users who leave slTightenPct=0. Fetch fresh because
+    //   _autoTimingDecision on `this` is only set during placeBuy().
+    let effectiveUpperKC = upperKC;
+    try {
+      const slDec = await autoTiming.decideForBot(this.bot, Date.now());
+      const slTightenPct = slDec && Number.isFinite(slDec.slTightenPct) ? slDec.slTightenPct : 0;
+      if (slTightenPct > 0 && slTightenPct < 100) {
+        effectiveUpperKC = upperKC * (1 - slTightenPct / 100);
+      }
+    } catch (_) {
+      // fail-OPEN — keep original threshold
+    }
+    // FIX: candle ต้องปิดเหนือ effectiveUpperKC เท่านั้น → trigger
+    if (closePrice <= effectiveUpperKC) return;
 
     // FIX-2026-08-02: DCA mode — SL-UKC applies per-stack using stack BEP
     //   - หา DCA stack trades ที่กำลัง selling + ขาดทุน (stackBep > closePrice)
@@ -1248,6 +1264,7 @@ class Trader {
         symbol: this.bot.symbol,
         timeframe: this.bot.timeframe,
         closePrice, upperKC: upperKC.toFixed(6),
+        effectiveUpperKC: effectiveUpperKC.toFixed(6),
         stacks: dcaTargets.length,
         stackIds: dcaTargets.map((t) => t.stackId?.toString() || t._id.toString()),
       }, 'trader: stop_loss_upper_kc DCA — force-closing losing stacks');
@@ -1305,7 +1322,8 @@ class Trader {
         symbol: this.bot.symbol,
         timeframe: this.bot.timeframe,
         closePrice, upperKC: upperKC.toFixed(6),
-      }, 'trader: stop_loss_upper_kc — close > upperKC but no losing trade to force-close');
+        effectiveUpperKC: effectiveUpperKC.toFixed(6),
+      }, 'trader: stop_loss_upper_kc — close > effectiveUpperKC but no losing trade to force-close');
       return;
     }
 
@@ -1314,9 +1332,10 @@ class Trader {
       symbol: this.bot.symbol,
       timeframe: this.bot.timeframe,
       closePrice, upperKC: upperKC.toFixed(6),
+      effectiveUpperKC: effectiveUpperKC.toFixed(6),
       targets: targets.length,
       tradeIds: targets.map((t) => t._id.toString()),
-    }, 'trader: stop_loss_upper_kc — close > upperKC, force-closing losing positions');
+    }, 'trader: stop_loss_upper_kc — close > effectiveUpperKC, force-closing losing positions');
 
     // FIX E6: loop ทีละ trade (atomic per-trade กัน race)
     for (const t of targets) {
