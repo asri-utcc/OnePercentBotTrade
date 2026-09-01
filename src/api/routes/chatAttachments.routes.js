@@ -217,7 +217,12 @@ router.get('/quota', requireAuth, async (req, res) => {
     if (!config.enabled || !config.licenseKey) {
       return res.json({ used: 0, limit: 5, remaining: 5, resetAt: null, adminDisabled: true });
     }
-    const url = `${config.url}/api/admin/chat/attachments-quota?machineId=${encodeURIComponent(getMachineId())}`;
+    // FIX 2026-09-01: hit the new bot-facing proxy endpoint at
+    //   /api/instances/<machineId>/chat/attachments-quota (gated by requireLicense)
+    // The admin's /api/admin/chat/attachments-quota is requireAdmin-gated, so
+    // X-License-Key would 401 -> client fell back to default 0/5 while the real
+    // upload route used the live count and returned quota_exceeded.
+    const url = `${config.url}/api/instances/${encodeURIComponent(getMachineId())}/chat/attachments-quota`;
     const r = await _httpJson('GET', url, null, { 'X-License-Key': config.licenseKey });
     res.status(r.status).json(r.json);
   } catch (err) {
