@@ -287,9 +287,21 @@
     const name = att.name || 'file';
     const sizeKb = Math.max(1, Math.round((att.sizeBytes || 0) / 1024));
     const safeUrl = att.url || `/api/chat/attachments/${encodeURIComponent(att.id)}`;
+    // FIX 2026-09-01: if the server has flagged the attachment as deleted
+    // (e.g. admin removed it, or quota reset cleaned it up), render a tombstone
+    // instead of an <img> that 404s in the console.
+    if (att.deleted) {
+      const icon = att.kind === 'image' ? '🖼' : '📄';
+      return `<div class="chat-attachment-tombstone">
+        <span class="chat-attachment-tombstone-icon">${icon}</span>
+        <span class="chat-attachment-tombstone-text"><del>${_escape(name)}</del> · removed</span>
+      </div>`;
+    }
     if (att.kind === 'image') {
+      // FIX 2026-09-01: onerror fallback in case the file disappears between the
+      // initial render and a later lazy-load (race during admin delete).
       return `<a href="${_escape(safeUrl)}" target="_blank" rel="noopener" class="chat-attachment-thumb" data-attachment-id="${_escape(att.id)}" data-attachment-kind="image" data-attachment-name="${_escape(name)}" data-attachment-url="${_escape(safeUrl)}">
-        <img src="${_escape(safeUrl)}" alt="${_escape(name)}" loading="lazy" />
+        <img src="${_escape(safeUrl)}" alt="${_escape(name)}" loading="lazy" onerror="this.closest('.chat-attachment-thumb').classList.add('chat-attachment-broken');this.replaceWith(Object.assign(document.createElement('div'),{className:'chat-attachment-tombstone',innerHTML:'<span class=\'chat-attachment-tombstone-icon\'>🖼</span><span class=\'chat-attachment-tombstone-text\'><del>'+this.alt.replace(/[<>&]/g,c=>({'<':'&lt;','>':'&gt;','&':'&amp;'})[c])+'</del> · removed</span>'}));" />
         <div class="chat-attachment-meta">🖼 ${_escape(name)} · ${sizeKb} KB</div>
       </a>`;
     }
