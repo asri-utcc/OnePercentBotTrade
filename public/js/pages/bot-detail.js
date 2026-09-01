@@ -602,16 +602,16 @@ function renderActiveTrade() {
   const buyStatusClass = STATE_COLORS[(t.buyStatus || '').toLowerCase()] || '';
 
   content.innerHTML = `
-    <div class="row"><span class="k">State</span><span class="v"><span class="status-pill is-${stateClass}">${t.state}</span>${t.state === 'sold' ? SellReasons.renderSellReasonPill(t.sellReason, t.sellReasonDetail) : ''}</span></div>
-    <div class="row"><span class="k">Symbol · TF</span><span class="v">${t.symbol} · ${t.timeframe}</span></div>
-    <div class="row"><span class="k">BUY OrderId</span><span class="v code" style="font-size:0.75rem;">${t.buyOrderId || '-'}</span></div>
+    <div class="row"><span class="k">State</span><span class="v"><span class="status-pill is-${escapeHtml(stateClass)}">${escapeHtml(t.state)}</span>${t.state === 'sold' ? SellReasons.renderSellReasonPill(t.sellReason, t.sellReasonDetail) : ''}</span></div>
+    <div class="row"><span class="k">Symbol · TF</span><span class="v">${escapeHtml(t.symbol)} · ${escapeHtml(t.timeframe)}</span></div>
+    <div class="row"><span class="k">BUY OrderId</span><span class="v code" style="font-size:0.75rem;">${escapeHtml(t.buyOrderId) || '-'}</span></div>
     <div class="row"><span class="k">BUY Price</span><span class="v">${t.buyPrice != null ? PriceFormat.format(t.buyPrice, t.symbol) : '-'}</span></div>
-    <div class="row"><span class="k">BUY Qty</span><span class="v">${t.buyQty != null ? t.buyQty.toFixed(6) : '-'}</span></div>
-    <div class="row"><span class="k">BUY Status</span><span class="v"><span class="status-pill is-${buyStatusClass}">${t.buyStatus || '-'}</span></span></div>
+    <div class="row"><span class="k">BUY Qty</span><span class="v">${t.buyQty != null ? Number(t.buyQty).toFixed(6) : '-'}</span></div>
+    <div class="row"><span class="k">BUY Status</span><span class="v"><span class="status-pill is-${escapeHtml(buyStatusClass)}">${escapeHtml(t.buyStatus) || '-'}</span></span></div>
     <div class="row"><span class="k">BUY Placed</span><span class="v" style="font-size:0.78rem;">${t.buyPlacedAt ? fmtTime(t.buyPlacedAt) : '-'}</span></div>
-    <div class="row"><span class="k">SELL OrderId</span><span class="v code" style="font-size:0.75rem;">${t.sellOrderId || '-'}</span></div>
+    <div class="row"><span class="k">SELL OrderId</span><span class="v code" style="font-size:0.75rem;">${escapeHtml(t.sellOrderId) || '-'}</span></div>
     <div class="row"><span class="k">Target Sell</span><span class="v">${t.targetSellPrice != null ? PriceFormat.format(t.targetSellPrice, t.symbol) : '-'}</span></div>
-    <div class="row"><span class="k">Retry</span><span class="v">${t.retryCount ?? 0} / ${detail.bot.retryMax ?? 1}</span></div>
+    <div class="row"><span class="k">Retry</span><span class="v">${Number(t.retryCount ?? 0)} / ${Number(detail.bot.retryMax ?? 1)}</span></div>
     ${t.error ? `<div class="row"><span class="k">Note</span><span class="v" style="color:var(--bear-1);font-size:0.78rem;">${escapeHtml(t.error)}</span></div>` : ''}
     <div class="retry-bar" title="Slots: ${usedSlots}/${retryMax}">${segs.join('')}</div>`;
 }
@@ -748,17 +748,17 @@ function renderTrades() {
     const pnlTxt = pnl != null ? `${pnl.toFixed(4)} (${(t.pnlPercent || 0).toFixed(2)}%)` : '-';
     return `
       <tr>
-        <td><span class="ts">${fmtDateTime(t.createdAt)}</span></td>
-        <td><span class="status-pill is-${sc}">${t.state}</span></td>
+        <td><span class="ts">${escapeHtml(fmtDateTime(t.createdAt))}</span></td>
+        <td><span class="status-pill is-${escapeHtml(sc)}">${escapeHtml(t.state)}</span></td>
         <td>${t.buyPrice != null ? `BUY ${PriceFormat.format(t.buyPrice, t.symbol)}` : '-'}${t.sellPrice != null ? ` → SELL ${PriceFormat.format(t.sellPrice, t.symbol)}` : ''}</td>
         <td class="num">${t.buyPrice != null ? PriceFormat.format(t.buyPrice, t.symbol) : '-'}</td>
-        <td class="num">${t.buyQty?.toFixed(6) ?? '-'}</td>
-        <td style="font-size:0.75rem;">${t.buyStatus || ''}${t.sellStatus ? ` → ${t.sellStatus}` : ''}</td>
-        <td class="num">${t.retryCount ?? 0}</td>
+        <td class="num">${t.buyQty != null ? Number(t.buyQty).toFixed(6) : '-'}</td>
+        <td style="font-size:0.75rem;">${escapeHtml(t.buyStatus) || ''}${t.sellStatus ? ` → ${escapeHtml(t.sellStatus)}` : ''}</td>
+        <td class="num">${Number(t.retryCount ?? 0)}</td>
         <td class="num">${t.sellPrice != null ? PriceFormat.format(t.sellPrice, t.symbol) : '-'}</td>
         <td class="num ${pnlCls}">${pnlTxt}</td>
         <td>${SellReasons.renderSellReasonPill(t.sellReason, t.sellReasonDetail)}</td>
-        <td><span class="code">${t.buyOrderId || '-'}</span></td>
+        <td><span class="code">${escapeHtml(t.buyOrderId) || '-'}</span></td>
       </tr>`;
   }).join('');
 

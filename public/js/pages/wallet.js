@@ -132,6 +132,12 @@
     if (n == null || !isFinite(n)) return '—';
     return `${Number(n).toFixed(1)}%`;
   }
+  // FIX-2026-09-01 audit C10: escapeHtml for live Binance data (symbol, orderId, clientOrderId).
+  // Wallet page is the highest-exposure page on the system — no helper existed previously.
+  function escapeHtml(s) {
+    if (s == null) return '';
+    return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  }
   function fmtSigned(n, fmt = 'usdt') {
     if (n == null || !isFinite(n)) return '—';
     const v = Number(n);
@@ -313,7 +319,7 @@
         return `<tr>
           <td>
             <div class="${iconCls}">
-              ${b.asset}
+              ${escapeHtml(b.asset)}
               ${stableBadge}
             </div>
             ${lockedTxt}
@@ -415,14 +421,14 @@
         ? clientOrderId.slice(0, 12) + '…' + clientOrderId.slice(-4)
         : clientOrderId;
       return `<tr>
-        <td><span class="${sideClass}">${side}</span></td>
-        <td><b>${o.symbol}</b></td>
-        <td><span class="wallet-order-type">${type}</span></td>
+        <td><span class="${sideClass}">${escapeHtml(side)}</span></td>
+        <td><b>${escapeHtml(o.symbol)}</b></td>
+        <td><span class="wallet-order-type">${escapeHtml(type)}</span></td>
         <td class="num">${isFinite(price) ? price.toFixed(price < 1 ? 6 : 4) : '—'}</td>
         <td class="num">${isFinite(origQty) ? fmtQty(origQty) : '—'}</td>
         <td class="num">
           <div class="d-flex align-items-center justify-content-end">
-            <span class="wallet-order-progress" title="${executedQty} / ${origQty} (${filledPct.toFixed(1)}%)">
+            <span class="wallet-order-progress" title="${escapeHtml(String(executedQty))} / ${escapeHtml(String(origQty))} (${filledPct.toFixed(1)}%)">
               <span class="wallet-order-progress-fill" style="width:${filledPct}%;"></span>
             </span>
             <span>${filledPct.toFixed(0)}%</span>
@@ -430,10 +436,10 @@
           <div class="wallet-row-meta">${fmtQty(executedQty)} filled</div>
         </td>
         <td class="num"><b>${fmtUsdt(totalQuote)}</b></td>
-        <td class="num">${age}</td>
+        <td class="num">${escapeHtml(age)}</td>
         <td>
-          <div class="wallet-row-meta" title="${orderId}">#${orderId.slice(-8)}</div>
-          <div class="wallet-row-meta" title="${clientOrderId}">${clientShort}</div>
+          <div class="wallet-row-meta" title="${escapeHtml(orderId)}">#${escapeHtml(orderId.slice(-8))}</div>
+          <div class="wallet-row-meta" title="${escapeHtml(clientOrderId)}">${escapeHtml(clientShort)}</div>
         </td>
       </tr>`;
     }).join('');

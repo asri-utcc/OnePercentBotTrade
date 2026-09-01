@@ -41,7 +41,7 @@ function render() {
     .some((until) => until && new Date(until).getTime() > Date.now());
   // FIX-2026-08-03: tab-based layout — Classic + DCA tabs (single <form> wraps both panels)
   container.innerHTML = `
-    <div class="lux-header"><span class="title">⚙️ ${escapeHtml(bot.name || bot.symbol)}</span><span class="text-muted-3" style="font-size:0.78rem;">${bot.symbol} · ${bot.timeframe}</span></div>
+    <div class="lux-header"><span class="title">⚙️ ${escapeHtml(bot.name || bot.symbol)}</span><span class="text-muted-3" style="font-size:0.78rem;">${escapeHtml(bot.symbol)} · ${escapeHtml(bot.timeframe)}</span></div>
     <div class="lux-body">
     <form id="edit-form">
       <!-- TAB BAR — reuses .lux-tabs pattern from bot-detail.html -->
@@ -62,11 +62,11 @@ function render() {
             <div class="bot-settings-grid">
               <div class="bot-settings-field is-full">
                 <label class="form-label" for="f-name">ชื่อบอท</label>
-                <input type="text" class="form-control" id="f-name" value="${bot.name || ''}" />
+                <input type="text" class="form-control" id="f-name" value="${escapeHtml(bot.name || '')}" />
               </div>
               <div class="bot-settings-field">
                 <label class="form-label">คู่เทรด (แก้ไขไม่ได้)</label>
-                <input type="text" class="form-control" value="${bot.symbol}" disabled />
+                <input type="text" class="form-control" value="${escapeHtml(bot.symbol)}" disabled />
               </div>
               <div class="bot-settings-field">
                 <label class="form-label" for="f-timeframe">กรอบเวลา (Timeframe)</label>
