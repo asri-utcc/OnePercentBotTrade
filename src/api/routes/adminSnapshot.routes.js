@@ -5,8 +5,11 @@
  *
  * GET /api/admin/snapshot — returns aggregated bot state for OnePercentBot-Admin
  *
- * Auth: requires X-License-Key header matching an active license issued by admin.
- *       (Same gating as the admin-monitor heartbeat — only licensed instances can read.)
+ * Auth: requires X-License-Key header matching the bot's own ADMIN_LICENSE_KEY
+ *       (verified via timingSafeEqual) OR a valid session cookie.
+ *       FIX-2026-09-01 audit C2: previously trusted header presence only —
+ *       any non-empty string was accepted. Now uses requireAuthOrLicenseKey
+ *       middleware which does timingSafeEqual against adminMonitorConfig.licenseKey.
  *
  * Excludes sensitive fields: binance API keys, encryption keys, telegram bot tokens,
  * session secrets, dashboard password, botActionPassword.
@@ -37,6 +40,9 @@ const Trade = require('../../db/models/Trade');
 const AppConfig = require('../../db/models/AppConfig');
 const tradeStats = require('../../core/tradeStats');
 const logger = require('../../utils/logger');
+// FIX-2026-09-01 audit C2: gate snapshot with requireAuthOrLicenseKey
+// (timingSafeEqual verify X-License-Key vs adminMonitorConfig.licenseKey).
+const { requireAuthOrLicenseKey } = require('../middleware/auth');
 
 const router = express.Router();
 
@@ -66,17 +72,13 @@ async function loadSafeConfig() {
   }
 }
 
-router.get('/', async (req, res) => {
+router.get('/', requireAuthOrLicenseKey, async (req, res) => {
   try {
-    const licenseKey = req.headers['x-license-key'];
-    if (!licenseKey) {
-      return res.status(401).json({ error: 'unauthorized', message: 'Missing X-License-Key header' });
-    }
-    // License validation: we trust the header presence here (admin already validated
-    // when the bot's heartbeat registered the machine). For belt-and-suspenders, we
-    // accept any non-empty key — the admin's per-machine route is the real gate.
-    // The bot is read-only — even if an attacker guesses a key, they only see
-    // public bot/position/PnL info. No secrets are exposed.
+    // FIX-2026-09-01 audit C2: gate moved to requireAuthOrLicenseKey middleware above.
+    // It enforces either:
+    //   - session cookie (existing browser flow)
+    //   - X-License-Key matching adminMonitorConfig.licenseKey (admin proxy)
+    // via timingSafeEqual — not just "header presence".
 
     // Run queries in parallel
     const [bots, todayMap, monthMap, activePosMap, allTime, safeConfig] = await Promise.all([
