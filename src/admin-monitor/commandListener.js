@@ -30,6 +30,14 @@ const logger = rootLogger.child ? rootLogger.child({ module: 'admin-monitor/list
 
 const processStartTime = Date.now();
 
+// FIX-2026-09-01 audit C1: command-replay protection window.
+//   Without this, any captured signed command (e.g. via unencrypted network or
+//   malicious bot extension) can be replayed until the command's Mongo expiresAt
+//   (default ttlSeconds=3600 = 1h). 5 min window is short enough to defeat
+//   mass-replay but generous enough for legitimate clock skew across the
+//   admin ↔ bot boundary.
+const MAX_COMMAND_SKEW_MS = 5 * 60 * 1000;
+
 /**
  * FIX-2026-08-27 Bug B: Verify HMAC-SHA256 signature from admin.
  *
@@ -39,6 +47,10 @@ const processStartTime = Date.now();
  *
  * Uses crypto.timingSafeEqual to prevent timing attacks.
  * If config.commandHmacSecret is null (licenseKey empty), all commands reject.
+ *
+ * FIX-2026-09-01 audit C1: also enforces an `issuedAt` skew window of
+ * MAX_COMMAND_SKEW_MS (5 min default) so a captured signed command cannot be
+ * replayed across the full 1h Mongo TTL window.
  */
 function verifySignature(cmd) {
   const { commandId, type, payload, issuedAt, signature } = cmd;
@@ -48,6 +60,15 @@ function verifySignature(cmd) {
   }
   if (!signature || typeof signature !== 'string') {
     return { ok: false, reason: 'missing_signature' };
+  }
+  // FIX-2026-09-01 audit C1: timestamp-window check BEFORE signature check
+  // (no point computing HMAC if we're going to reject by skew anyway).
+  if (typeof issuedAt !== 'number' || !Number.isFinite(issuedAt)) {
+    return { ok: false, reason: 'missing_issuedAt' };
+  }
+  const skew = Math.abs(Date.now() - issuedAt);
+  if (skew > MAX_COMMAND_SKEW_MS) {
+    return { ok: false, reason: `timestamp_skew:${skew}ms>${MAX_COMMAND_SKEW_MS}ms` };
   }
   const expected = crypto
     .createHmac('sha256', secret)

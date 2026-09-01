@@ -175,7 +175,7 @@ describe('commandListener._executeAndReport (HMAC verification)', () => {
       commandId: 'cmd-001',
       type: 'pause',
       payload: { reason: 'admin' },
-      issuedAt: 1234567890,
+      issuedAt: Date.now(),
     };
     cmd.signature = sign(cmd, 'shhh');
     await listener._executeAndReport(cmd);
@@ -189,7 +189,7 @@ describe('commandListener._executeAndReport (HMAC verification)', () => {
       commandId: 'cmd-002',
       type: 'kill',
       payload: {},
-      issuedAt: 999,
+      issuedAt: Date.now(),
       signature: 'deadbeef'.repeat(8),
     };
     await listener._executeAndReport(cmd);
@@ -203,7 +203,7 @@ describe('commandListener._executeAndReport (HMAC verification)', () => {
       commandId: 'cmd-003',
       type: 'pause',
       payload: {},
-      issuedAt: 999,
+      issuedAt: Date.now(),
     };
     await listener._executeAndReport(cmd);
     expect(mockExecute).not.toHaveBeenCalled();
@@ -216,7 +216,7 @@ describe('commandListener._executeAndReport (HMAC verification)', () => {
       commandId: 'cmd-004',
       type: 'pause',
       payload: {},
-      issuedAt: 999,
+      issuedAt: Date.now(),
       signature: 'a'.repeat(64),
     };
     await listener._executeAndReport(cmd);
@@ -230,7 +230,7 @@ describe('commandListener._executeAndReport (HMAC verification)', () => {
       commandId: 'cmd-005',
       type: 'pause',
       payload: {},
-      issuedAt: 999,
+      issuedAt: Date.now(),
       signature: 'aabb',
     };
     await listener._executeAndReport(cmd);
@@ -244,7 +244,7 @@ describe('commandListener._executeAndReport (HMAC verification)', () => {
       commandId: 'cmd-006',
       type: 'pause',
       payload: {},
-      issuedAt: 999,
+      issuedAt: Date.now(),
       signature: 'NOT-HEX-STRING',
     };
     await listener._executeAndReport(cmd);
@@ -258,7 +258,7 @@ describe('commandListener._executeAndReport (HMAC verification)', () => {
       commandId: 'cmd-007',
       type: 'pause',
       payload: { reason: 'safe' },
-      issuedAt: 1,
+      issuedAt: Date.now(),
     };
     cmd.signature = sign(cmd, 'shhh');
     cmd.payload = { reason: 'TAMPERED' };
@@ -274,12 +274,113 @@ describe('commandListener._executeAndReport (HMAC verification)', () => {
       commandId: 'cmd-008',
       type: 'pause',
       payload: {},
-      issuedAt: 42,
+      issuedAt: Date.now(),
     };
     const derivedSecret = crypto.createHash('sha256').update('lic-derived:cmd-hmac:v1').digest('hex');
     cmd.signature = sign(cmd, derivedSecret);
     await listener._executeAndReport(cmd);
     expect(mockExecute).toHaveBeenCalled();
+  });
+
+  // FIX-2026-09-01 audit C1: timestamp-skew replay protection
+  // Without this, a captured signed command could be replayed for the full
+  // Mongo ttlSeconds window (default 1h). The 5-min MAX_COMMAND_SKEW_MS window
+  // ensures replays are short-lived while tolerating legitimate clock drift.
+  test('issuedAt older than 5 min → rejected (timestamp_skew)', async () => {
+    setEnv({ licenseKey: 'lic-abc', secret: 'shhh' });
+    const { listener } = loadFresh();
+    const cmd = {
+      commandId: 'cmd-replay-1',
+      type: 'kill',
+      payload: { force: true },
+      issuedAt: Date.now() - 6 * 60 * 1000, // 6 min ago — past 5-min skew window
+    };
+    cmd.signature = sign(cmd, 'shhh');
+    await listener._executeAndReport(cmd);
+    expect(mockExecute).not.toHaveBeenCalled();
+  });
+
+  test('issuedAt in the future (clock skew from attacker) → rejected', async () => {
+    setEnv({ licenseKey: 'lic-abc', secret: 'shhh' });
+    const { listener } = loadFresh();
+    const cmd = {
+      commandId: 'cmd-future-1',
+      type: 'kill',
+      payload: {},
+      issuedAt: Date.now() + 6 * 60 * 1000, // 6 min in the future
+    };
+    cmd.signature = sign(cmd, 'shhh');
+    await listener._executeAndReport(cmd);
+    expect(mockExecute).not.toHaveBeenCalled();
+  });
+
+  test('issuedAt within 5 min → accepted (legitimate)', async () => {
+    setEnv({ licenseKey: 'lic-abc', secret: 'shhh' });
+    const { listener } = loadFresh();
+    const cmd = {
+      commandId: 'cmd-recent-1',
+      type: 'pause',
+      payload: {},
+      issuedAt: Date.now() - 60 * 1000, // 1 min ago — well within window
+    };
+    cmd.signature = sign(cmd, 'shhh');
+    await listener._executeAndReport(cmd);
+    expect(mockExecute).toHaveBeenCalled();
+  });
+
+  test('issuedAt missing (undefined) → rejected (missing_issuedAt)', async () => {
+    setEnv({ licenseKey: 'lic-abc', secret: 'shhh' });
+    const { listener } = loadFresh();
+    const cmd = {
+      commandId: 'cmd-no-issued',
+      type: 'pause',
+      payload: {},
+      // no issuedAt field
+    };
+    cmd.signature = sign({ ...cmd, issuedAt: Date.now() }, 'shhh'); // signature over placeholder
+    await listener._executeAndReport(cmd);
+    expect(mockExecute).not.toHaveBeenCalled();
+  });
+
+  test('issuedAt non-numeric (string) → rejected (missing_issuedAt)', async () => {
+    setEnv({ licenseKey: 'lic-abc', secret: 'shhh' });
+    const { listener } = loadFresh();
+    const cmd = {
+      commandId: 'cmd-string-issued',
+      type: 'pause',
+      payload: {},
+      issuedAt: 'not-a-number',
+    };
+    cmd.signature = sign(cmd, 'shhh');
+    await listener._executeAndReport(cmd);
+    expect(mockExecute).not.toHaveBeenCalled();
+  });
+
+  test('MAX_COMMAND_SKEW_MS = 5 min is exactly tolerated at boundary', async () => {
+    // At exactly 5 min - 1s, the command should pass; at 5 min + 1s, reject.
+    setEnv({ licenseKey: 'lic-abc', secret: 'shhh' });
+    const { listener } = loadFresh();
+
+    const justInside = {
+      commandId: 'cmd-edge-1',
+      type: 'pause',
+      payload: {},
+      issuedAt: Date.now() - (5 * 60 * 1000 - 1000),
+    };
+    justInside.signature = sign(justInside, 'shhh');
+    await listener._executeAndReport(justInside);
+    expect(mockExecute).toHaveBeenCalledTimes(1);
+
+    const justOutside = {
+      commandId: 'cmd-edge-2',
+      type: 'pause',
+      payload: {},
+      issuedAt: Date.now() - (5 * 60 * 1000 + 1000),
+    };
+    justOutside.signature = sign(justOutside, 'shhh');
+    await listener._executeAndReport(justOutside);
+    // Should remain at 1 (edge-2 rejected)
+    expect(mockExecute).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -300,7 +401,7 @@ describe('commandListener._poll (HTTP fetch)', () => {
       commandId: 'cmd-poll-1',
       type: 'pause',
       payload: { reason: 'from-poll' },
-      issuedAt: 1,
+      issuedAt: Date.now(),
     };
     cmd.signature = sign(cmd, 'shhh');
 
