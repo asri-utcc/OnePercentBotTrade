@@ -28,8 +28,34 @@ const { HOLD_BANDS } = require('../../core/holdBands');
 const { aggregateByCell } = require('../../services/autoTiming');
 const Trade = require('../../db/models/Trade');
 const logger = require('../../utils/logger');
+let licenseService = null;
+try { licenseService = require('../../services/licenseService'); } catch (_) { /* optional */ }
 
 const router = express.Router();
+
+// FIX-2026-09-01 audit C10: license gate for ALL autoTiming endpoints.
+//   The 8 routes below are gated as a single block (router.use) so:
+//     1. Operators on a basic-tier license cannot read Auto-Timing config,
+//        flip the master toggle, run-now, or change per-bot overrides.
+//     2. The check happens BEFORE the handler runs (no DB read on basic tier).
+//     3. Single source of truth — the FEATURE_KEY constant matches the one
+//        used in src/services/autoTiming.js start() and AppConfig.js schema.
+//   Response: 403 with code LICENSE_FEATURE_DISABLED + the feature name. The
+//   frontend already checks this code in settings.js (autoTiming section).
+const AUTO_TIMING_FEATURE_KEY = 'autoTiming';
+router.use((req, res, next) => {
+  if (!licenseService || typeof licenseService.isFeatureEnabled !== 'function') {
+    return next(); // fail-OPEN if licenseService missing (dev/test environments)
+  }
+  if (!licenseService.isFeatureEnabled(AUTO_TIMING_FEATURE_KEY)) {
+    return res.status(403).json({
+      error: 'License นี้ปิดใช้งาน Auto-Timing — ติดต่อ admin',
+      code: 'LICENSE_FEATURE_DISABLED',
+      feature: AUTO_TIMING_FEATURE_KEY,
+    });
+  }
+  next();
+});
 
 // Whitelist of fields the PUT /config accepts (P2 audit hardening — never trust client keys)
 const PUT_FIELDS = [
