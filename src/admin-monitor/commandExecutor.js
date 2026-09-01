@@ -9,7 +9,7 @@
  * Supported commands:
  *   - pause:             stop opening new positions (existing positions still managed)
  *   - resume:            re-enable trading
- *   - kill:              graceful shutdown of bot
+ *   - kill:              graceful shutdown of bot (force: true → immediate exit)
  *   - force_close_all:   close all open positions immediately (delegate to botManager)
  *   - show_message:      notify user — emit admin:message (→ dashboard toast) + try Telegram
  *   - update_config:     apply a config patch (limited safe keys only)
@@ -39,11 +39,32 @@ const handlers = {
   },
 
   async kill(payload, ctx) {
-    logger.warn({ reason: payload?.reason }, 'admin: kill command received — shutting down');
-    ctx.botManager?.kill?.();
-    // Schedule graceful shutdown
-    setTimeout(() => process.exit(0), 1000);
-    return { ok: true, action: 'killing' };
+    const reason = payload?.reason || 'admin_kill';
+    const force = payload?.force === true; // FIX-2026-09-01 audit C12: opt-in force exit
+    logger.warn({ reason, force }, 'admin: kill command received — shutting down');
+    if (force) {
+      // Immediate hard exit — used by emergency / unreachable admin path.
+      // Skips graceful flush of activeTime, WS close, DB disconnect, etc.
+      logger.error({ reason }, 'admin: kill FORCE=true — exiting immediately (no graceful flush)');
+      setTimeout(() => process.exit(1), 100);
+      return { ok: true, action: 'killing_force', reason };
+    }
+    // Default: graceful shutdown — signal SIGTERM and let server.js handle it.
+    // SIGTERM triggers the same shutdown() used by SIGINT, which:
+    //   - stops all schedulers (healthMonitor, autoReserve, autoTiming, ...)
+    //   - flushes botManager activeTime on shutdown
+    //   - closes Binance WS + REST
+    //   - closes HTTP server + DB connection
+    //   - force-exits after 10s if any step hangs
+    setTimeout(() => {
+      try {
+        process.kill(process.pid, 'SIGTERM');
+      } catch (err) {
+        logger.warn({ err: err.message }, 'admin: kill SIGTERM failed — falling back to process.exit(1)');
+        process.exit(1);
+      }
+    }, 100);
+    return { ok: true, action: 'killing_graceful', reason };
   },
 
   async force_close_all(payload, ctx) {

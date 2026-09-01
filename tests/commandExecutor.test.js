@@ -77,19 +77,62 @@ describe('commandExecutor.pause / resume', () => {
   });
 });
 
-describe('commandExecutor.kill (FIX process.exit)', () => {
-  test('schedules process.exit + calls botManager.kill', async () => {
+describe('commandExecutor.kill (FIX-2026-09-01 audit C12: graceful vs force)', () => {
+  test('default (force=false) signals SIGTERM (graceful path)', async () => {
     jest.useFakeTimers();
+    const killSpy = jest.spyOn(process, 'kill').mockImplementation(() => true);
     const exitSpy = jest.spyOn(process, 'exit').mockImplementation(() => {});
     try {
       const ctx = buildCtx();
       const r = await executor.execute({ commandId: 'k1', type: 'kill', payload: { reason: 'test' } }, ctx);
-      expect(ctx.botManager.kill).toHaveBeenCalled();
-      expect(r.action).toBe('killing');
-      // Advance fake clock to flush the scheduled process.exit
-      jest.advanceTimersByTime(2000);
+      expect(ctx.botManager.kill).not.toHaveBeenCalled(); // botManager has no .kill() — we use SIGTERM
+      expect(r.action).toBe('killing_graceful');
+      expect(r.reason).toBe('test');
+      // Advance fake clock to flush the scheduled process.kill
+      jest.advanceTimersByTime(200);
+      expect(killSpy).toHaveBeenCalledWith(process.pid, 'SIGTERM');
+      expect(exitSpy).not.toHaveBeenCalled();
     } finally {
       jest.useRealTimers();
+      killSpy.mockRestore();
+      exitSpy.mockRestore();
+    }
+  });
+
+  test('force=true calls process.exit(1) immediately (no graceful flush)', async () => {
+    jest.useFakeTimers();
+    const exitSpy = jest.spyOn(process, 'exit').mockImplementation(() => {});
+    const killSpy = jest.spyOn(process, 'kill').mockImplementation(() => true);
+    try {
+      const ctx = buildCtx();
+      const r = await executor.execute({ commandId: 'k2', type: 'kill', payload: { reason: 'emergency', force: true } }, ctx);
+      expect(r.action).toBe('killing_force');
+      expect(r.reason).toBe('emergency');
+      jest.advanceTimersByTime(200);
+      expect(exitSpy).toHaveBeenCalledWith(1);
+      // SIGTERM must NOT have been called in force mode
+      expect(killSpy).not.toHaveBeenCalled();
+    } finally {
+      jest.useRealTimers();
+      exitSpy.mockRestore();
+      killSpy.mockRestore();
+    }
+  });
+
+  test('force=false is the safe default — even if no reason is provided', async () => {
+    jest.useFakeTimers();
+    const killSpy = jest.spyOn(process, 'kill').mockImplementation(() => true);
+    const exitSpy = jest.spyOn(process, 'exit').mockImplementation(() => {});
+    try {
+      const ctx = buildCtx();
+      const r = await executor.execute({ commandId: 'k3', type: 'kill', payload: {} }, ctx);
+      expect(r.action).toBe('killing_graceful');
+      expect(r.reason).toBe('admin_kill');
+      jest.advanceTimersByTime(200);
+      expect(killSpy).toHaveBeenCalled();
+    } finally {
+      jest.useRealTimers();
+      killSpy.mockRestore();
       exitSpy.mockRestore();
     }
   });
