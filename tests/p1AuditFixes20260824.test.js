@@ -108,15 +108,26 @@ describe('P1-3: trader.js reconcileKlines per-candle try/catch', () => {
 });
 
 describe('P1-4: trader.js _botUpdatedHandler preservedKeys add CBv3/CBv5 + F1 auto-arm', () => {
-  test('preservedKeys array includes cbv3LastFiredAt, cbv5LastFiredAt, autoArmedAt, autoArmLossPct, autoArmAgeHours', () => {
+  test('preservedKeys array includes cbv3LastFiredAt, cbv5LastFiredAt, autoArmedAt (timestamps)', () => {
     const handlerIdx = traderSrc.indexOf('this._botUpdatedHandler = async');
     expect(handlerIdx).toBeGreaterThan(0);
-    const section = traderSrc.slice(handlerIdx, handlerIdx + 2000);
+    const section = traderSrc.slice(handlerIdx, handlerIdx + 3000);
     expect(section).toMatch(/'cbv3LastFiredAt'/);
     expect(section).toMatch(/'cbv5LastFiredAt'/);
     expect(section).toMatch(/'autoArmedAt'/);
-    expect(section).toMatch(/'autoArmLossPct'/);
-    expect(section).toMatch(/'autoArmAgeHours'/);
+  });
+
+  // FIX-2026-09-01 audit H13: autoArmLossPct / autoArmAgeHours are tunables
+  //   (changed via PUT /api/bots/:id). They MUST propagate to in-memory bot
+  //   on bot:updated, so they are NOT in preservedKeys. The P1 test that
+  //   asserted the opposite is updated here.
+  test('preservedKeys does NOT include the tunable config fields autoArmLossPct/autoArmAgeHours', () => {
+    const handlerIdx = traderSrc.indexOf('this._botUpdatedHandler = async');
+    expect(handlerIdx).toBeGreaterThan(0);
+    // Read far enough to cover the array + the H13 comment block
+    const section = traderSrc.slice(handlerIdx, handlerIdx + 3500);
+    expect(section).not.toMatch(/'autoArmLossPct'/);
+    expect(section).not.toMatch(/'autoArmAgeHours'/);
   });
 
   test('contains FIX-2026-08-24 (P1 audit) comment about CB suppression collapse', () => {

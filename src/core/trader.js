@@ -557,7 +557,17 @@ class Trader {
           //   pattern (seen on 1000CAT incident). preserveKeys ensures the in-memory
           //   snapshot stays authoritative for these "live runtime" timestamps.
           'cbv3LastFiredAt', 'cbv5LastFiredAt',
-          'autoArmedAt', 'autoArmLossPct', 'autoArmAgeHours',
+          'autoArmedAt',
+          // FIX-2026-09-01 audit H13: do NOT preserve autoArmLossPct / autoArmAgeHours.
+          //   These are tunable config fields that the admin can change live via
+          //   PUT /api/bots/:id (bot.routes.js whitelists them at line 1187). The
+          //   trader reads them on every tick (trader.js:864-865, 899-900, 909-910).
+          //   If they are in preservedKeys, the in-memory value never refreshes —
+          //   the admin changes 10→15 in the UI, the DB row updates, bot:updated
+          //   fires, but the trader keeps using the stale 10. Removing them from
+          //   the preserved list lets the standard blacklist-or-whitelist refresh
+          //   (line 562-568) propagate the new values.
+          // The TIMESTAMP autoArmedAt above is still preserved (suppression window).
         ];
         for (const k of Object.keys(fresh)) {
           if (preservedKeys.includes(k)) continue;
