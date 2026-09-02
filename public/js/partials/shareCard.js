@@ -489,12 +489,12 @@
         `}
       </g>
 
-      <!-- Usable balance -->
+      <!-- Usable balance (USDT-first — ใช้ USDT เป็นหลัก) -->
       <g transform="translate(350, 140)">
         <rect width="330" height="120" rx="14" fill="${t.cardBg}" stroke="${t.cardBorder}" stroke-width="1"/>
         <text x="20" y="30" font-size="12" fill="${t.textMuted}" letter-spacing="1">เงินคงเหลือ (USABLE)</text>
-        <text x="20" y="68" font-size="32" font-weight="800" fill="${t.accent}">${fmtThb(usableThb, { dp: 0 })}</text>
-        <text x="20" y="98" font-size="14" fill="${t.textDim}">${fmtUsdt(usableUsdt, { dp: 2 })}</text>
+        <text x="20" y="68" font-size="32" font-weight="800" fill="${t.accent}">${fmtUsdt(usableUsdt, { dp: 2 })}</text>
+        <text x="20" y="98" font-size="14" fill="${t.textDim}">${fmtThb(usableThb, { dp: 0 })}</text>
         <text x="310" y="80" text-anchor="end" font-size="32">💰</text>
       </g>
     </g>

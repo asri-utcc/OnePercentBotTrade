@@ -352,7 +352,7 @@
     // Always include today's snapshot, even if other fetches fail (graceful degradation)
 
     const [positionsRes, walletRes] = await Promise.allSettled([
-      API.get('/api/bot/positions?noPrediction=1').catch(() => null),
+      API.get('/api/bots/positions?noPrediction=1').catch(() => null),
       API.get('/api/wallet/balances').catch(() => null),
     ]);
 
