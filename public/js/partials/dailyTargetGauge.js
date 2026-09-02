@@ -337,13 +337,92 @@
       }
       shareCardLoading = true;
       const s = document.createElement('script');
-      s.src = '/js/partials/shareCard.js?v=2026-09-02-h1';
+      s.src = '/js/partials/shareCard.js?v=2026-09-02-h2';
       s.async = true;
       s.onload = () => resolve(window.ShareCard);
       s.onerror = () => reject(new Error('shareCard.js load failed'));
       document.head.appendChild(s);
     });
   }
+
+  // Fetch ข้อมูล positions + wallet + FX rate มารวมกับ lastData
+  // (lastData มาจาก /api/daily-target — มี todayPnl, winRate, fxRate ครบ)
+  async function buildSharePayload() {
+    const base = lastData ? { ...lastData } : { ts: Date.now() };
+    // Always include today's snapshot, even if other fetches fail (graceful degradation)
+
+    const [positionsRes, walletRes] = await Promise.allSettled([
+      API.get('/api/bot/positions?noPrediction=1').catch(() => null),
+      API.get('/api/wallet/balances').catch(() => null),
+    ]);
+
+    // ── Positions ───────────────────────────────────────────────────
+    if (positionsRes.status === 'fulfilled' && positionsRes.value && positionsRes.value.positions) {
+      const p = positionsRes.value;
+      base.holdingCount = p.count || 0;
+      base.totalCostUsdt = p.totalCostUsdt || 0;
+      base.totalUnrealizedUsdt = p.totalUnrealizedUsdt || 0;
+      base.totalUnrealizedThb = p.totalUnrealizedThb || null;
+
+      // cost = sum of buyQuoteQty per position (for "ต้นทุน" display)
+      let costUsdt = 0;
+      let worst = null; // { symbol, unrealizedUsdt, unrealizedThb, pct }
+      for (const pos of p.positions) {
+        const uUsdt = Number(pos._unrealizedUsdt) || 0;
+        const uThb = pos._unrealizedThb != null ? Number(pos._unrealizedThb) : (uUsdt * (Number(base.fxRate) || 0));
+        const cost = Number(pos.buyQuoteQty) || ((Number(pos.buyPrice) || 0) * (Number(pos.buyQty) || 0));
+        costUsdt += cost;
+        // worst = most negative unrealized
+        if (!worst || uUsdt < worst.unrealizedUsdt) {
+          const entry = Number(pos.buyPrice) || 0;
+          const pct = entry > 0 ? ((Number(pos.currentPrice) - entry) / entry) * 100 : 0;
+          worst = {
+            symbol: pos.symbol || '',
+            unrealizedUsdt: uUsdt,
+            unrealizedThb: uThb,
+            pct,
+          };
+        }
+      }
+      base.holdingCostUsdt = costUsdt;
+      base.holdingCostThb = costUsdt * (Number(base.fxRate) || 0);
+      base.worstPosition = worst && worst.unrealizedUsdt < 0 ? worst : null;
+    } else {
+      base.holdingCount = 0;
+      base.holdingCostUsdt = 0;
+      base.holdingCostThb = 0;
+      base.totalUnrealizedUsdt = 0;
+      base.totalUnrealizedThb = null;
+      base.worstPosition = null;
+    }
+
+    // ── Wallet / usable balance (USDT only) ────────────────────────
+    if (walletRes.status === 'fulfilled' && walletRes.value && Array.isArray(walletRes.value.balances)) {
+      const usdtRow = walletRes.value.balances.find((r) => r.asset === 'USDT');
+      // free = usable, locked = in open sell orders
+      const freeUsdt = usdtRow ? (Number(usdtRow.free) || 0) : 0;
+      base.usableUsdt = freeUsdt;
+      base.usableThb = freeUsdt * (Number(base.fxRate) || 0);
+    } else {
+      base.usableUsdt = 0;
+      base.usableThb = 0;
+    }
+
+    // fallback fxRate from wallet response (in case daily-target didn't include)
+    if ((!base.fxRate || base.fxRate <= 0) && walletRes.status === 'fulfilled' && walletRes.value) {
+      base.fxRate = walletRes.value.fxRate || base.fxRate;
+      // recompute THB values if needed
+      if (base.holdingCostUsdt && !base.holdingCostThb) {
+        base.holdingCostThb = base.holdingCostUsdt * base.fxRate;
+      }
+      if (base.totalUnrealizedUsdt != null && base.totalUnrealizedThb == null) {
+        base.totalUnrealizedThb = base.totalUnrealizedUsdt * base.fxRate;
+      }
+    }
+
+    return base;
+  }
+
   if (elShareBtn) {
     elShareBtn.addEventListener('click', async (e) => {
       e.stopPropagation();
@@ -357,7 +436,9 @@
       elShareBtn.textContent = '⏳ กำลังโหลด...';
       try {
         const ShareCard = await loadShareCard();
-        ShareCard.showPreview(lastData);
+        elShareBtn.textContent = '⏳ กำลังดึงข้อมูล...';
+        const payload = await buildSharePayload();
+        ShareCard.showPreview(payload);
       } catch (err) {
         console.warn('ShareCard load failed', err);
         elShareBtn.textContent = '❌ โหลดไม่สำเร็จ';

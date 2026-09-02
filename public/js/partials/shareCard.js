@@ -1,169 +1,175 @@
 'use strict';
 
 /**
- * 2026-09-02: Shareable Daily PnL Card
+ * 2026-09-02: Shareable Daily PnL Card (v2 — THB-first + portfolio status)
  * ────────────────────────────────────────────────────────────────────────────
- * สร้าง shareable card (SVG 800×1000) จาก dailyTarget data เพื่อให้ผู้ใช้ download
- * เป็น PNG แล้วเอาไปแชร์ให้เพื่อนๆ ดูความสำเร็จ/ความล้มเหลวของวันนี้
+ * สร้าง shareable card (SVG 800×1000) จาก dailyTarget + positions + wallet data
+ * เพื่อให้ผู้ใช้ download เป็น PNG แล้วเอาไปแชร์โซเชียล
  *
- * - ไม่ต้องพึ่ง html2canvas (เพิ่ม dependency ใหม่)
- * - Theme เปลี่ยนตาม zone:
- *     achieved: rainbow gradient + 🏆 + "ทะลุเป้าแล้ว 🎉" (ลูกเล่นโดดเด่น)
- *     hot:      bull-green gradient + 🚀
- *     warming:  gold gradient + 🔥
- *     cold:     steel-blue + 🥶
- *     loss:     red + 💔 "ขาดทุนวันนี้"
- * - ขนาด 800×1000 (เหมาะแชร์ IG/FB/Twitter/Discord)
- * - มี preview modal + ปุ่ม download PNG
+ * Data shape (assembled by dailyTargetGauge.js):
+ *   {
+ *     // from /api/daily-target
+ *     targetThb, todayPnlUsdt, todayPnlThb, fxRate, pct, zone,
+ *     todayTrades, todayWins, todayLosses, winRate,
+ *     todayGrossProfit, todayGrossLoss, ts,
  *
- * Public API (บน window.ShareCard):
- *   - ShareCard.buildSvg(data)        → SVG string
- *   - ShareCard.downloadPng(svg, fn)  → trigger download
- *   - ShareCard.showPreview(data)     → เปิด modal preview
+ *     // from /api/bot/positions
+ *     holdingCount, holdingCostUsdt, holdingCostThb,
+ *     totalUnrealizedUsdt, totalUnrealizedThb,
+ *     worstPosition: { symbol, unrealizedUsdt, unrealizedThb, pct } | null,
  *
- * ใช้ร่วมกับ dailyTargetGauge.js — ปุ่ม "📸 สร้างการ์ด" ใน popover จะเรียก
- * ShareCard.showPreview(window.__dtb.data)
+ *     // from /api/wallet/balances (USDT row only — usable)
+ *     usableUsdt, usableThb,
+ *   }
+ *
+ * Themes (5 zones — สีแตกต่างกันชัดเจน):
+ *   - achieved (≥100%): RAINBOW + ANIMATED FIREWORKS + 🏆 (จุดพลุหลายดอก)
+ *   - hot      (≥70%):  green-teal vibrant + 🚀
+ *   - warming  (≥30%):  gold-amber + 🔥
+ *   - cold     (≥0%):   blue-purple slate + 🥶
+ *   - loss     (<0%):   red-crimson + 💔
+ *
+ * Layout (THB-first):
+ *   1. Header (logo + date)
+ *   2. Zone badge + headline
+ *   3. HERO PnL (THB big + USDT subtitle)
+ *   4. Progress bar (target)
+ *   5. PORTFOLIO STATUS (2x2: holding / loss-total / worst-position / usable)
+ *   6. TODAY TRADING (4 mini stats)
+ *   7. Footer (hashtag)
+ *
+ * ใช้:
+ *   ShareCard.showPreview(data) — เปิด preview modal + download
+ *   ShareCard.buildSvg(data)    — return SVG string
+ *   ShareCard.downloadPng(svg, fn) — trigger download PNG
  */
 
 (function () {
   const W = 800;
   const H = 1000;
 
-  // ─── Theme per zone ────────────────────────────────────────────────────
+  // ─── Zone themes ──────────────────────────────────────────────────────
   const ZONE_THEMES = {
     achieved: {
-      // rainbow + gold (ลูกเล่นโดดเด่นกว่าโซนอื่น)
-      label: 'ทะลุเป้าแล้ว! 🎉',
+      label: 'ทะลุเป้าแล้ว!',
       emoji: '🏆',
       badge: '🎉 TARGET ACHIEVED 🎉',
-      bg: 'achieved-bg',
-      glow: 'achieved-glow',
-      confetti: true,
       headline: 'ทะลุเป้าแล้ว!',
-      headlineSub: 'วันนี้คุณคือผู้ชนะ 🏆',
+      headlineSub: 'วันนี้คุณคือผู้ชนะ',
+      bg: 'achieved-bg',
+      confetti: true,
+      fireworks: true, // จุดพลุ
     },
     hot: {
       label: 'ใกล้เป้าแล้ว!',
       emoji: '🚀',
       badge: '🔥 HOT',
-      bg: 'hot-bg',
-      glow: 'hot-glow',
-      confetti: false,
       headline: 'ใกล้เป้าแล้ว!',
-      headlineSub: 'อีกนิดเดียว — ลุยต่อ 🚀',
+      headlineSub: 'อีกนิดเดียว — ลุยต่อ',
+      bg: 'hot-bg',
+      confetti: false,
+      fireworks: false,
     },
     warming: {
       label: 'กำลังอุ่นเครื่อง',
       emoji: '🔥',
       badge: '🔥 WARMING',
-      bg: 'warming-bg',
-      glow: 'warming-glow',
-      confetti: false,
       headline: 'กำลังอุ่นเครื่อง',
-      headlineSub: 'เก็บกำไรต่อเนื่อง 🔥',
+      headlineSub: 'เก็บกำไรต่อเนื่อง',
+      bg: 'warming-bg',
+      confetti: false,
+      fireworks: false,
     },
     cold: {
-      label: 'ยังเย็น — ลุยต่อ!',
+      label: 'ยังเย็น — ลุยต่อ',
       emoji: '🥶',
       badge: '🥶 COLD',
-      bg: 'cold-bg',
-      glow: 'cold-glow',
-      confetti: false,
       headline: 'ยังเย็นอยู่',
       headlineSub: 'วันนี้ยังไม่หมด — ลุยต่อ!',
+      bg: 'cold-bg',
+      confetti: false,
+      fireworks: false,
     },
     loss: {
       label: 'ขาดทุนวันนี้',
       emoji: '💔',
       badge: '💔 LOSS',
-      bg: 'loss-bg',
-      glow: 'loss-glow',
-      confetti: false,
       headline: 'ขาดทุนวันนี้',
-      headlineSub: 'พรุ่งนี้เริ่มใหม่ — สู้ต่อ 💪',
+      headlineSub: 'พรุ่งนี้เริ่มใหม่ — สู้ต่อ',
+      bg: 'loss-bg',
+      confetti: false,
+      fireworks: false,
     },
   };
 
-  // ─── Palette (locked colors สำหรับ SVG เพราะ CSS vars ใช้ใน DOM เท่านั้น) ─
+  // ─── Color palette (locked — SVG ไม่ใช้ CSS vars) ────────────────────
+  // achieved ใช้สีสันมากที่สุด + rainbow
   const PALETTE = {
     achieved: {
-      bgFrom:    '#1a0f3a',
-      bgTo:      '#3d1a5c',
-      accent:    '#ffd76a',
-      accent2:   '#f5b800',
-      positive:  '#00e5b8',
-      negative:  '#ff4d6d',
-      cardBg:    'rgba(255,255,255,0.06)',
-      cardBorder:'rgba(255,215,106,0.35)',
-      text:      '#ffffff',
-      textDim:   'rgba(255,255,255,0.72)',
-      textMuted: 'rgba(255,255,255,0.45)',
-      progressTrack: 'rgba(255,255,255,0.10)',
-      progressFill:  ['#f5b800', '#00e5b8', '#5dc4ff', '#ffd76a'],
+      bgFrom: '#1a0f3a', bgTo: '#3d1a5c',
+      accent: '#ffd76a', accent2: '#f5b800',
+      positive: '#00e5b8', negative: '#ff4d6d',
+      cardBg: 'rgba(255,255,255,0.07)',
+      cardBorder: 'rgba(255,215,106,0.40)',
+      text: '#ffffff',
+      textDim: 'rgba(255,255,255,0.78)',
+      textMuted: 'rgba(255,255,255,0.50)',
+      progressTrack: 'rgba(255,255,255,0.12)',
+      progressFill: ['#f5b800', '#00e5b8', '#5dc4ff', '#ffd76a'],
+      accentGlow: '#ffd76a',
+      radialBurst: ['#f5b800', '#ffd76a', '#00e5b8', '#5dc4ff', '#a78bfa', '#ff4d6d', '#ffffff'],
     },
     hot: {
-      bgFrom:    '#001a1a',
-      bgTo:      '#003d33',
-      accent:    '#00e5b8',
-      accent2:   '#80ffd0',
-      positive:  '#00e5b8',
-      negative:  '#ff4d6d',
-      cardBg:    'rgba(0,229,184,0.06)',
-      cardBorder:'rgba(0,229,184,0.30)',
-      text:      '#ffffff',
-      textDim:   'rgba(255,255,255,0.78)',
-      textMuted: 'rgba(255,255,255,0.50)',
-      progressTrack: 'rgba(0,229,184,0.12)',
-      progressFill:  ['#00e5b8', '#80ffd0'],
+      bgFrom: '#003322', bgTo: '#005544',
+      accent: '#00ffd0', accent2: '#00b894',
+      positive: '#00e5b8', negative: '#ff4d6d',
+      cardBg: 'rgba(0,229,184,0.08)',
+      cardBorder: 'rgba(0,229,184,0.35)',
+      text: '#ffffff',
+      textDim: 'rgba(255,255,255,0.82)',
+      textMuted: 'rgba(255,255,255,0.55)',
+      progressTrack: 'rgba(0,229,184,0.14)',
+      progressFill: ['#00b894', '#00ffd0'],
     },
     warming: {
-      bgFrom:    '#1f1500',
-      bgTo:      '#3d2c00',
-      accent:    '#ffd76a',
-      accent2:   '#f5b800',
-      positive:  '#00e5b8',
-      negative:  '#ff4d6d',
-      cardBg:    'rgba(245,184,0,0.06)',
-      cardBorder:'rgba(245,184,0,0.30)',
-      text:      '#ffffff',
-      textDim:   'rgba(255,255,255,0.78)',
-      textMuted: 'rgba(255,255,255,0.50)',
-      progressTrack: 'rgba(245,184,0,0.12)',
-      progressFill:  ['#f5b800', '#ffd76a'],
+      bgFrom: '#2d1c00', bgTo: '#5c3d00',
+      accent: '#ffd76a', accent2: '#f5b800',
+      positive: '#00e5b8', negative: '#ff4d6d',
+      cardBg: 'rgba(245,184,0,0.08)',
+      cardBorder: 'rgba(245,184,0,0.35)',
+      text: '#ffffff',
+      textDim: 'rgba(255,255,255,0.82)',
+      textMuted: 'rgba(255,255,255,0.55)',
+      progressTrack: 'rgba(245,184,0,0.14)',
+      progressFill: ['#f5b800', '#ffd76a'],
     },
     cold: {
-      bgFrom:    '#0a1024',
-      bgTo:      '#15203d',
-      accent:    '#90b0d8',
-      accent2:   '#5b7290',
-      positive:  '#00e5b8',
-      negative:  '#ff4d6d',
-      cardBg:    'rgba(255,255,255,0.04)',
-      cardBorder:'rgba(144,176,216,0.25)',
-      text:      '#ffffff',
-      textDim:   'rgba(255,255,255,0.78)',
-      textMuted: 'rgba(255,255,255,0.50)',
-      progressTrack: 'rgba(144,176,216,0.15)',
-      progressFill:  ['#5b7290', '#90b0d8'],
+      bgFrom: '#0a1428', bgTo: '#1a2848',
+      accent: '#8ab4ff', accent2: '#5b7290',
+      positive: '#00e5b8', negative: '#ff4d6d',
+      cardBg: 'rgba(138,180,255,0.06)',
+      cardBorder: 'rgba(138,180,255,0.30)',
+      text: '#ffffff',
+      textDim: 'rgba(255,255,255,0.82)',
+      textMuted: 'rgba(255,255,255,0.55)',
+      progressTrack: 'rgba(138,180,255,0.14)',
+      progressFill: ['#5b7290', '#8ab4ff'],
     },
     loss: {
-      bgFrom:    '#1f0008',
-      bgTo:      '#3d0014',
-      accent:    '#ff85a0',
-      accent2:   '#ff4d6d',
-      positive:  '#00e5b8',
-      negative:  '#ff4d6d',
-      cardBg:    'rgba(255,77,109,0.06)',
-      cardBorder:'rgba(255,77,109,0.30)',
-      text:      '#ffffff',
-      textDim:   'rgba(255,255,255,0.78)',
-      textMuted: 'rgba(255,255,255,0.50)',
-      progressTrack: 'rgba(255,77,109,0.12)',
-      progressFill:  ['#ff4d6d', '#ff85a0'],
+      bgFrom: '#2a000a', bgTo: '#4d0018',
+      accent: '#ff85a0', accent2: '#ff4d6d',
+      positive: '#00e5b8', negative: '#ff4d6d',
+      cardBg: 'rgba(255,77,109,0.08)',
+      cardBorder: 'rgba(255,77,109,0.35)',
+      text: '#ffffff',
+      textDim: 'rgba(255,255,255,0.82)',
+      textMuted: 'rgba(255,255,255,0.55)',
+      progressTrack: 'rgba(255,77,109,0.14)',
+      progressFill: ['#ff4d6d', '#ff85a0'],
     },
   };
 
-  // ─── Helpers ───────────────────────────────────────────────────────────
+  // ─── Helpers ──────────────────────────────────────────────────────────
   function escapeXml(s) {
     if (s == null) return '';
     return String(s).replace(/[<>&"']/g, (c) => ({
@@ -171,256 +177,367 @@
     }[c]));
   }
 
-  function fmtThb(n) {
-    if (n == null || !isFinite(n)) return '฿0.00';
-    const sign = n < 0 ? '-' : '';
-    const abs = Math.abs(Number(n));
-    return `${sign}฿${abs.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  function fmtThb(n, opts = {}) {
+    if (n == null || !isFinite(n)) return opts.fallback || '฿0.00';
+    const v = Number(n);
+    const sign = v < 0 ? '−' : '';
+    const abs = Math.abs(v);
+    const dp = opts.dp != null ? opts.dp : (abs >= 100000 ? 0 : abs >= 100 ? 1 : 2);
+    const parts = abs.toFixed(dp).split('.');
+    parts[0] = parts[0].replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+    return `${sign}฿${parts.join('.')}`;
   }
 
-  function fmtUsdt(n) {
-    if (n == null || !isFinite(n)) return '0.0000 USDT';
-    const sign = n < 0 ? '-' : '';
-    const abs = Math.abs(Number(n));
-    return `${sign}${abs.toFixed(4)} USDT`;
+  function fmtUsdt(n, opts = {}) {
+    if (n == null || !isFinite(n)) return opts.fallback || '0.00 USDT';
+    const v = Number(n);
+    const sign = v < 0 ? '−' : '+'; // realized มักมี + สำหรับกำไร
+    const abs = Math.abs(v);
+    const dp = opts.dp != null ? opts.dp : 2;
+    return `${sign}${abs.toFixed(dp)} USDT`;
+  }
+
+  function fmtUsdtSigned(n, opts = {}) {
+    // explicit sign for subtitle (always show +/-)
+    if (n == null || !isFinite(n)) return opts.fallback || '0.00 USDT';
+    const v = Number(n);
+    const sign = v < 0 ? '−' : '+';
+    const abs = Math.abs(v);
+    const dp = opts.dp != null ? opts.dp : 2;
+    return `${sign}${abs.toFixed(dp)} USDT`;
   }
 
   function fmtPct(n) {
     if (n == null || !isFinite(n)) return '0%';
     const v = Number(n);
-    return `${v.toFixed(v >= 100 ? 0 : 1)}%`;
+    return `${v.toFixed(Math.abs(v) >= 100 ? 0 : 1)}%`;
+  }
+
+  function fmtCount(n) {
+    return Number(n || 0).toString();
   }
 
   function bkkDateStr(isoMs) {
     try {
       const d = new Date(Number(isoMs) || Date.now());
-      // Convert to BKK (UTC+7)
       const bkk = new Date(d.getTime() + 7 * 60 * 60_000);
       const months = ['ม.ค.', 'ก.พ.', 'มี.ค.', 'เม.ย.', 'พ.ค.', 'มิ.ย.',
                       'ก.ค.', 'ส.ค.', 'ก.ย.', 'ต.ค.', 'พ.ย.', 'ธ.ค.'];
-      const day = bkk.getUTCDate();
-      const mon = months[bkk.getUTCMonth()];
-      const yr = bkk.getUTCFullYear() + 543; // พ.ศ.
-      return `${day} ${mon} ${yr}`;
+      return `${bkk.getUTCDate()} ${months[bkk.getUTCMonth()]} ${bkk.getUTCFullYear() + 543}`;
     } catch (_) { return ''; }
   }
 
-  // ─── SVG primitives ────────────────────────────────────────────────────
-  function buildDefns(theme) {
-    const gradId = `bg-${Math.random().toString(36).slice(2, 9)}`;
-    const progId = `prog-${Math.random().toString(36).slice(2, 9)}`;
-    const accId  = `acc-${Math.random().toString(36).slice(2, 9)}`;
-    const stripeId = `stripe-${Math.random().toString(36).slice(2, 9)}`;
+  // ─── SVG defs (gradients + filters) ───────────────────────────────────
+  function buildDefs(t, nonce) {
+    const gradId = `bg-${nonce}`;
+    const progId = `prog-${nonce}`;
+    const accId  = `acc-${nonce}`;
+    const stripeId = `stripe-${nonce}`;
+    const glowId = `glow-${nonce}`;
 
-    const fillStops = theme.progressFill.map((c, i) => {
-      const offset = (i / Math.max(1, theme.progressFill.length - 1)) * 100;
+    const fillStops = t.progressFill.map((c, i) => {
+      const offset = (i / Math.max(1, t.progressFill.length - 1)) * 100;
       return `<stop offset="${offset}%" stop-color="${c}"/>`;
     }).join('');
 
     return `
       <defs>
         <linearGradient id="${gradId}" x1="0" y1="0" x2="1" y2="1">
-          <stop offset="0%" stop-color="${theme.bgFrom}"/>
-          <stop offset="100%" stop-color="${theme.bgTo}"/>
+          <stop offset="0%" stop-color="${t.bgFrom}"/>
+          <stop offset="100%" stop-color="${t.bgTo}"/>
         </linearGradient>
-        <linearGradient id="${progId}" x1="0" y1="0" x2="1" y2="0">
-          ${fillStops}
-        </linearGradient>
+        <linearGradient id="${progId}" x1="0" y1="0" x2="1" y2="0">${fillStops}</linearGradient>
         <linearGradient id="${accId}" x1="0" y1="0" x2="1" y2="0">
-          <stop offset="0%" stop-color="${theme.accent}"/>
-          <stop offset="100%" stop-color="${theme.accent2}"/>
+          <stop offset="0%" stop-color="${t.accent}"/>
+          <stop offset="100%" stop-color="${t.accent2}"/>
         </linearGradient>
         <pattern id="${stripeId}" patternUnits="userSpaceOnUse" width="40" height="40" patternTransform="rotate(45)">
-          <rect width="40" height="40" fill="${theme.accent}" opacity="0.04"/>
+          <rect width="40" height="40" fill="${t.accent}" opacity="0.05"/>
         </pattern>
+        <filter id="${glowId}" x="-50%" y="-50%" width="200%" height="200%">
+          <feGaussianBlur stdDeviation="6" result="blur"/>
+          <feMerge>
+            <feMergeNode in="blur"/>
+            <feMergeNode in="SourceGraphic"/>
+          </feMerge>
+        </filter>
       </defs>
-    `.replace(/<!--[\s\S]*?-->/g, ''); // strip any accidental comments
+    `;
   }
 
-  // Confetti dots for achieved zone
-  function buildConfetti() {
+  // ─── Static confetti (for non-firework zones) ─────────────────────────
+  function buildStaticConfetti() {
     const colors = ['#f5b800', '#ffd76a', '#00e5b8', '#5dc4ff', '#a78bfa', '#ff4d6d'];
     const dots = [];
-    const N = 36;
-    for (let i = 0; i < N; i++) {
+    for (let i = 0; i < 28; i++) {
       const x = Math.random() * W;
       const y = Math.random() * H;
-      const r = 4 + Math.random() * 8;
+      const r = 3 + Math.random() * 6;
       const c = colors[i % colors.length];
-      const op = 0.4 + Math.random() * 0.5;
-      const rot = Math.random() * 360;
-      dots.push(`<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="${r.toFixed(1)}" fill="${c}" opacity="${op.toFixed(2)}" transform="rotate(${rot.toFixed(0)} ${x.toFixed(1)} ${y.toFixed(1)})"/>`);
-    }
-    // Trophy sparkle stars
-    for (let i = 0; i < 8; i++) {
-      const x = 200 + Math.random() * 400;
-      const y = 280 + Math.random() * 200;
-      const sz = 6 + Math.random() * 10;
-      dots.push(`<path d="M ${x} ${y - sz} L ${x + sz * 0.3} ${y - sz * 0.3} L ${x + sz} ${y} L ${x + sz * 0.3} ${y + sz * 0.3} L ${x} ${y + sz} L ${x - sz * 0.3} ${y + sz * 0.3} L ${x - sz} ${y} L ${x - sz * 0.3} ${y - sz * 0.3} Z" fill="${colors[i % colors.length]}" opacity="0.8"/>`);
+      const op = 0.3 + Math.random() * 0.4;
+      dots.push(`<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="${r.toFixed(1)}" fill="${c}" opacity="${op.toFixed(2)}"/>`);
     }
     return dots.join('\n      ');
   }
 
-  // ─── Main SVG builder ──────────────────────────────────────────────────
+  // ─── Animated FIREWORKS (achieved zone — จุดพลุ!) ─────────────────────
+  // ใช้ SVG <animate> + <animateTransform> ทำให้ PNG export เป็น snapshot
+  // ของเฟรมที่ animation กำลังเล่นอยู่ (canvas.drawImage จะ render เฟรมปัจจุบัน)
+  function buildFireworks() {
+    const colors = ['#f5b800', '#ffd76a', '#00e5b8', '#5dc4ff', '#a78bfa', '#ff4d6d', '#ffffff'];
+    const bursts = [];
+    // 4 จุดพลุ กระจายทั่ว card (เลี่ยง hero area)
+    const positions = [
+      { x: 180, y: 200, begin: '0s' },
+      { x: 620, y: 180, begin: '1.2s' },
+      { x: 200, y: 480, begin: '0.6s' },
+      { x: 600, y: 500, begin: '1.8s' },
+    ];
+
+    for (const pos of positions) {
+      const N = 14; // rays per burst
+      const rays = [];
+      const particles = [];
+      for (let i = 0; i < N; i++) {
+        const angle = (Math.PI * 2 * i) / N;
+        const dist = 60 + Math.random() * 30;
+        const ex = Math.cos(angle) * dist;
+        const ey = Math.sin(angle) * dist;
+        const c = colors[i % colors.length];
+        // Ray line — scale from 0 → 1 over duration
+        rays.push(`
+          <line x1="0" y1="0" x2="${ex.toFixed(1)}" y2="${ey.toFixed(1)}"
+                stroke="${c}" stroke-width="2" stroke-linecap="round" opacity="0">
+            <animate attributeName="opacity" values="0;1;0" dur="2s" repeatCount="indefinite" begin="${pos.begin}"/>
+            <animateTransform attributeName="transform" type="scale" values="0;1.2;1.1" dur="2s" repeatCount="indefinite" begin="${pos.begin}" additive="sum"/>
+          </line>
+        `);
+        // Sparkle particle (small circle) — fades with delay
+        particles.push(`
+          <circle cx="${ex.toFixed(1)}" cy="${ey.toFixed(1)}" r="2.5" fill="${c}" opacity="0">
+            <animate attributeName="opacity" values="0;1;0" dur="2s" repeatCount="indefinite" begin="${pos.begin}" calcMode="spline" keySplines="0.2 0 0.4 1; 0.6 0 0.8 1"/>
+            <animate attributeName="r" values="0;3.5;1.5" dur="2s" repeatCount="indefinite" begin="${pos.begin}"/>
+          </circle>
+        `);
+      }
+      // Center flash
+      const flash = `
+        <circle cx="0" cy="0" r="6" fill="#ffffff" opacity="0" filter="url(#glow-ach)">
+          <animate attributeName="opacity" values="0;1;0" dur="2s" repeatCount="indefinite" begin="${pos.begin}"/>
+          <animate attributeName="r" values="0;14;4" dur="2s" repeatCount="indefinite" begin="${pos.begin}"/>
+        </circle>
+      `;
+      bursts.push(`
+        <g transform="translate(${pos.x}, ${pos.y})">
+          ${rays.join('')}
+          ${particles.join('')}
+          ${flash}
+        </g>
+      `);
+    }
+    return bursts.join('\n      ');
+  }
+
+  // ─── Main SVG builder ─────────────────────────────────────────────────
   function buildSvg(d) {
     const zone = ZONE_THEMES[d.zone] ? d.zone : 'cold';
     const t = PALETTE[zone];
     const meta = ZONE_THEMES[zone];
 
+    // Data extraction
+    const fxRate = Number(d.fxRate) || 0;
     const todayPnlUsdt = Number(d.todayPnlUsdt) || 0;
-    const todayPnlThb  = Number(d.todayPnlThb) || 0;
-    const targetThb    = Number(d.targetThb) || 100;
-    const pct          = Number(d.pct) || 0;
-    const trades       = Number(d.todayTrades) || 0;
-    const wins         = Number(d.todayWins) || 0;
-    const losses       = Number(d.todayLosses) || 0;
-    const winRate      = Number(d.winRate) || 0;
-    const grossWinUsdt = Number(d.todayGrossProfit) || 0;
-    const grossLossUsdt= Number(d.todayGrossLoss) || 0;
-    const grossWinThb  = grossWinUsdt * (Number(d.fxRate) || 0);
-    const grossLossThb = Math.abs(grossLossUsdt) * (Number(d.fxRate) || 0);
+    const todayPnlThb = Number(d.todayPnlThb) || 0;
+    const targetThb = Number(d.targetThb) || 100;
+    const pct = Number(d.pct) || 0;
+    const trades = Number(d.todayTrades) || 0;
+    const wins = Number(d.todayWins) || 0;
+    const losses = Number(d.todayLosses) || 0;
+    const winRate = Number(d.winRate) || 0;
 
-    const defns = buildDefns(t);
-    const gradMatch = defns.match(/id="(bg-[a-z0-9]+)"/);
-    const gradId = gradMatch ? gradMatch[1] : 'bg';
-    const progMatch = defns.match(/id="(prog-[a-z0-9]+)"/);
-    const progId = progMatch ? progMatch[1] : 'prog';
-    const accMatch = defns.match(/id="(acc-[a-z0-9]+)"/);
-    const accId = accMatch ? accMatch[1] : 'acc';
-    const stripeMatch = defns.match(/id="(stripe-[a-z0-9]+)"/);
-    const stripeId = stripeMatch ? stripeMatch[1] : 'stripe';
+    // New: portfolio status
+    const holdingCount = Number(d.holdingCount) || 0;
+    const holdingCostUsdt = Number(d.holdingCostUsdt) || 0;
+    const holdingCostThb = holdingCostUsdt * fxRate;
+    const totalUnrealizedUsdt = Number(d.totalUnrealizedUsdt) || 0;
+    const totalUnrealizedThb = Number(d.totalUnrealizedThb) || (totalUnrealizedUsdt * fxRate);
+    const worst = d.worstPosition || null;
+    const usableUsdt = Number(d.usableUsdt) || 0;
+    const usableThb = Number(d.usableThb) || (usableUsdt * fxRate);
 
     const isProfit = todayPnlUsdt >= 0;
-    const pnlSign  = isProfit ? '+' : '−';
     const pnlColor = isProfit ? t.positive : t.negative;
 
-    // Progress width — clamp 0..100 for visual, even if pct > 100
+    // Progress (clamped 0..100)
     const pctClamped = Math.max(0, Math.min(100, pct));
-    const progX = 80;
-    const progW = W - 160;
-    const progH = 22;
-    const progY = 540;
+    const progX = 80, progW = W - 160, progH = 22, progY = 460;
 
     const dateStr = bkkDateStr(d.ts || Date.now());
-    const achievedSparkle = zone === 'achieved';
+    const nonce = Math.random().toString(36).slice(2, 9);
+    const defs = buildDefs(t, nonce);
+
+    // For fireworks, use a fixed filter id (so animation refs work)
+    const fireworksFilterId = `glow-ach`;
+
+    // Choose headline ending
+    const headlineSub = meta.headlineSub;
+    const headline = meta.headline;
+
+    // Hero: THB is BIG, USDT is subtitle
+    const heroThb = fmtThb(todayPnlThb, { dp: 0 });
+    const heroUsdt = fmtUsdtSigned(todayPnlUsdt, { dp: 2 });
 
     const svg = `<?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" font-family="-apple-system, 'Segoe UI', 'Helvetica Neue', Arial, sans-serif">
-  ${defns}
+<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}"
+     font-family="-apple-system, 'Segoe UI', 'Helvetica Neue', Arial, 'Noto Sans Thai', sans-serif">
+  ${defs}
+  ${zone === 'achieved' ? `<filter id="${fireworksFilterId}" x="-50%" y="-50%" width="200%" height="200%">
+    <feGaussianBlur stdDeviation="4" result="b"/>
+    <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+  </filter>` : ''}
 
-  <!-- Background gradient -->
-  <rect width="${W}" height="${H}" fill="url(#${gradId})"/>
-  <rect width="${W}" height="${H}" fill="url(#${stripeId})"/>
+  <!-- Background -->
+  <rect width="${W}" height="${H}" fill="url(#bg-${nonce})"/>
+  <rect width="${W}" height="${H}" fill="url(#stripe-${nonce})"/>
 
-  ${meta.confetti ? `<!-- Achieved confetti -->
-  <g opacity="0.85">${buildConfetti()}</g>` : ''}
+  ${meta.confetti && !meta.fireworks ? `<g>${buildStaticConfetti()}</g>` : ''}
+  ${meta.fireworks ? `<g opacity="0.95">${buildFireworks()}</g>` : ''}
 
   <!-- Top accent strip -->
-  <rect x="0" y="0" width="${W}" height="6" fill="url(#${accId})"/>
+  <rect x="0" y="0" width="${W}" height="6" fill="url(#acc-${nonce})"/>
 
-  <!-- Header: brand -->
+  <!-- Header: brand + date -->
   <g transform="translate(60, 70)">
-    <!-- Shield+1% mini logo -->
-    <g transform="translate(0, 0)">
-      <path d="M 24 0 L 48 8 L 48 28 Q 48 44 24 56 Q 0 44 0 28 L 0 8 Z"
-            fill="url(#${accId})" opacity="0.95"/>
+    <g>
+      <path d="M 24 0 L 48 8 L 48 28 Q 48 44 24 56 Q 0 44 0 28 L 0 8 Z" fill="url(#acc-${nonce})" opacity="0.95"/>
       <text x="24" y="34" text-anchor="middle" font-size="22" font-weight="900" fill="${t.bgFrom}">1%</text>
     </g>
     <text x="68" y="32" font-size="22" font-weight="700" fill="${t.text}">OnePercent<tspan fill="${t.accent}">%</tspan>BotTrade</text>
-    <text x="68" y="52" font-size="14" fill="${t.textDim}">Daily Trading Report</text>
+    <text x="68" y="52" font-size="13" fill="${t.textDim}">Daily Trading Report</text>
   </g>
 
-  <!-- Date pill (top right) -->
   <g transform="translate(${W - 60}, 70)">
-    <rect x="-180" y="0" width="180" height="36" rx="18" fill="${t.cardBg}" stroke="${t.cardBorder}" stroke-width="1"/>
-    <text x="-90" y="23" text-anchor="middle" font-size="14" fill="${t.textDim}">📅 ${escapeXml(dateStr)}</text>
+    <rect x="-200" y="0" width="200" height="36" rx="18" fill="${t.cardBg}" stroke="${t.cardBorder}" stroke-width="1"/>
+    <text x="-100" y="23" text-anchor="middle" font-size="14" fill="${t.textDim}">📅 ${escapeXml(dateStr)}</text>
   </g>
 
   <!-- Zone badge -->
-  <g transform="translate(${W / 2}, 200)">
-    <rect x="-160" y="-30" width="320" height="60" rx="30" fill="${t.cardBg}" stroke="${t.cardBorder}" stroke-width="2"/>
-    <text x="0" y="8" text-anchor="middle" font-size="28" fill="${t.accent}">${meta.emoji} ${escapeXml(meta.badge)}</text>
+  <g transform="translate(${W / 2}, 175)">
+    <rect x="-180" y="-30" width="360" height="60" rx="30" fill="${t.cardBg}" stroke="${t.cardBorder}" stroke-width="2"/>
+    <text x="0" y="8" text-anchor="middle" font-size="24" fill="${t.accent}" font-weight="700">${meta.emoji} ${escapeXml(meta.badge)}</text>
   </g>
 
-  <!-- Hero: Big PnL number -->
-  <g transform="translate(${W / 2}, 320)">
-    <text x="0" y="0" text-anchor="middle" font-size="22" font-weight="500" fill="${t.textDim}" letter-spacing="2">${escapeXml(meta.headline.toUpperCase())}</text>
-    <text x="0" y="80" text-anchor="middle" font-size="22" fill="${t.textMuted}">${escapeXml(meta.headlineSub)}</text>
+  <!-- Headline -->
+  <g transform="translate(${W / 2}, 235)">
+    <text x="0" y="0" text-anchor="middle" font-size="22" font-weight="700" fill="${t.text}">${escapeXml(headline)}</text>
+    <text x="0" y="26" text-anchor="middle" font-size="14" fill="${t.textDim}">${escapeXml(headlineSub)}</text>
+  </g>
 
-    <!-- Big PnL (USDT) -->
-    <text x="0" y="170" text-anchor="middle" font-size="92" font-weight="900" fill="${pnlColor}" letter-spacing="-2">${pnlSign}${fmtUsdt(todayPnlUsdt).replace(' USDT', '')}</text>
-    <text x="0" y="200" text-anchor="middle" font-size="18" fill="${t.textDim}">USDT</text>
-
-    <!-- THB equivalent -->
-    <text x="0" y="240" text-anchor="middle" font-size="20" fill="${t.textDim}">${fmtThb(todayPnlThb)}</text>
+  <!-- HERO: PnL THB (big) + USDT subtitle -->
+  <g transform="translate(${W / 2}, 365)">
+    <text x="0" y="0" text-anchor="middle" font-size="86" font-weight="900" fill="${pnlColor}" letter-spacing="-3">${heroThb}</text>
+    <text x="0" y="40" text-anchor="middle" font-size="22" fill="${t.textDim}" font-weight="600">${heroUsdt}</text>
   </g>
 
   <!-- Progress bar -->
   <g transform="translate(${progX}, ${progY})">
-    <text x="0" y="-10" font-size="13" fill="${t.textDim}">🎯 เป้า ${fmtThb(targetThb)}</text>
-    <text x="${progW}" y="-10" text-anchor="end" font-size="13" font-weight="700" fill="${t.accent}">${fmtPct(pct)}</text>
+    <text x="0" y="-12" font-size="13" fill="${t.textDim}">🎯 เป้า ${fmtThb(targetThb, { dp: 0 })}</text>
+    <text x="${progW}" y="-12" text-anchor="end" font-size="14" font-weight="700" fill="${t.accent}">${fmtPct(pct)}</text>
     <rect x="0" y="0" width="${progW}" height="${progH}" rx="${progH / 2}" fill="${t.progressTrack}" stroke="${t.cardBorder}" stroke-width="1"/>
-    ${pctClamped > 0 ? `<rect x="0" y="0" width="${(progW * pctClamped / 100).toFixed(1)}" height="${progH}" rx="${progH / 2}" fill="url(#${progId})"/>` : ''}
+    ${pctClamped > 0 ? `<rect x="0" y="0" width="${(progW * pctClamped / 100).toFixed(1)}" height="${progH}" rx="${progH / 2}" fill="url(#prog-${nonce})"/>` : ''}
   </g>
 
-  <!-- Stats grid 2×2 -->
-  <g transform="translate(60, 640)">
-    <!-- Trades -->
-    <g transform="translate(0, 0)">
-      <rect width="320" height="100" rx="14" fill="${t.cardBg}" stroke="${t.cardBorder}" stroke-width="1"/>
-      <text x="20" y="32" font-size="13" fill="${t.textMuted}" letter-spacing="1">TRADES</text>
-      <text x="20" y="72" font-size="38" font-weight="800" fill="${t.text}">${trades}</text>
-      <text x="20" y="92" font-size="12" fill="${t.textDim}">${wins}W / ${losses}L</text>
-      <text x="300" y="68" text-anchor="end" font-size="40">📊</text>
-    </g>
+  <!-- Portfolio Status section -->
+  <g transform="translate(60, 540)">
+    <text x="0" y="0" font-size="13" font-weight="700" fill="${t.accent}" letter-spacing="2">📊 PORTFOLIO STATUS</text>
+    <line x1="170" y1="-5" x2="${W - 120}" y2="-5" stroke="${t.cardBorder}" stroke-width="1"/>
 
-    <!-- Win rate -->
-    <g transform="translate(340, 0)">
-      <rect width="320" height="100" rx="14" fill="${t.cardBg}" stroke="${t.cardBorder}" stroke-width="1"/>
-      <text x="20" y="32" font-size="13" fill="${t.textMuted}" letter-spacing="1">WIN RATE</text>
-      <text x="20" y="72" font-size="38" font-weight="800" fill="${trades > 0 ? t.positive : t.textMuted}">${trades > 0 ? fmtPct(winRate) : '—'}</text>
-      <text x="20" y="92" font-size="12" fill="${t.textDim}">${trades > 0 ? `${wins} ชนะ / ${losses} แพ้` : 'ยังไม่มีไม้'}</text>
-      <text x="300" y="68" text-anchor="end" font-size="40">${trades > 0 && winRate >= 50 ? '🎯' : '🎲'}</text>
-    </g>
+    <!-- 2x2 grid -->
+    <g transform="translate(0, 20)">
+      <!-- Holding positions -->
+      <g transform="translate(0, 0)">
+        <rect width="330" height="120" rx="14" fill="${t.cardBg}" stroke="${t.cardBorder}" stroke-width="1"/>
+        <text x="20" y="30" font-size="12" fill="${t.textMuted}" letter-spacing="1">ถืออยู่ (HOLDING)</text>
+        <text x="20" y="68" font-size="34" font-weight="800" fill="${t.text}">${holdingCount} <tspan font-size="16" font-weight="500" fill="${t.textDim}">positions</tspan></text>
+        <text x="20" y="98" font-size="16" fill="${t.textDim}">ต้นทุน ${fmtThb(holdingCostThb, { dp: 0 })}</text>
+        <text x="310" y="80" text-anchor="end" font-size="32">💼</text>
+      </g>
 
-    <!-- Gross win -->
-    <g transform="translate(0, 120)">
-      <rect width="320" height="100" rx="14" fill="${t.cardBg}" stroke="${t.cardBorder}" stroke-width="1"/>
-      <text x="20" y="32" font-size="13" fill="${t.textMuted}" letter-spacing="1">+ GROSS WIN</text>
-      <text x="20" y="72" font-size="32" font-weight="800" fill="${t.positive}">${fmtThb(grossWinThb)}</text>
-      <text x="20" y="92" font-size="12" fill="${t.textDim}">${grossWinUsdt > 0 ? `+${grossWinUsdt.toFixed(4)} USDT` : '—'}</text>
-      <text x="300" y="68" text-anchor="end" font-size="40">💰</text>
-    </g>
+      <!-- Total unrealized loss -->
+      <g transform="translate(350, 0)">
+        <rect width="330" height="120" rx="14" fill="${t.cardBg}" stroke="${t.cardBorder}" stroke-width="1"/>
+        <text x="20" y="30" font-size="12" fill="${t.textMuted}" letter-spacing="1">ขาดทุนรวม (UNREALIZED)</text>
+        <text x="20" y="68" font-size="32" font-weight="800" fill="${totalUnrealizedUsdt < 0 ? t.negative : (totalUnrealizedUsdt > 0 ? t.positive : t.textMuted)}">
+          ${totalUnrealizedUsdt < 0 ? '−' : totalUnrealizedUsdt > 0 ? '+' : ''}${fmtThb(Math.abs(totalUnrealizedThb), { dp: 0 })}
+        </text>
+        <text x="20" y="98" font-size="14" fill="${t.textDim}">${fmtUsdtSigned(totalUnrealizedUsdt, { dp: 2 })}</text>
+        <text x="310" y="80" text-anchor="end" font-size="32">${totalUnrealizedUsdt < 0 ? '📉' : totalUnrealizedUsdt > 0 ? '📈' : '➖'}</text>
+      </g>
 
-    <!-- Gross loss -->
-    <g transform="translate(340, 120)">
-      <rect width="320" height="100" rx="14" fill="${t.cardBg}" stroke="${t.cardBorder}" stroke-width="1"/>
-      <text x="20" y="32" font-size="13" fill="${t.textMuted}" letter-spacing="1">− GROSS LOSS</text>
-      <text x="20" y="72" font-size="32" font-weight="800" fill="${grossLossUsdt < 0 ? t.negative : t.textMuted}">${grossLossUsdt < 0 ? '−' : ''}${fmtThb(grossLossThb)}</text>
-      <text x="20" y="92" font-size="12" fill="${t.textDim}">${grossLossUsdt < 0 ? `${grossLossUsdt.toFixed(4)} USDT` : '—'}</text>
-      <text x="300" y="68" text-anchor="end" font-size="40">📉</text>
+      <!-- Worst position -->
+      <g transform="translate(0, 140)">
+        <rect width="330" height="120" rx="14" fill="${t.cardBg}" stroke="${t.cardBorder}" stroke-width="1"/>
+        <text x="20" y="30" font-size="12" fill="${t.textMuted}" letter-spacing="1">ขาดทุนสุด (WORST)</text>
+        ${worst ? `
+          <text x="20" y="62" font-size="22" font-weight="800" fill="${t.text}">${escapeXml(worst.symbol || '—')}</text>
+          <text x="20" y="92" font-size="22" font-weight="700" fill="${t.negative}">−${fmtThb(Math.abs(worst.unrealizedThb || 0), { dp: 0 })}</text>
+          <text x="20" y="112" font-size="13" fill="${t.textDim}">−${Math.abs(Number(worst.unrealizedUsdt) || 0).toFixed(2)} USDT${worst.pct != null ? ' · ' + fmtPct(worst.pct) : ''}</text>
+          <text x="310" y="80" text-anchor="end" font-size="32">😱</text>
+        ` : `
+          <text x="20" y="72" font-size="22" font-weight="600" fill="${t.textMuted}">ไม่มี position</text>
+          <text x="310" y="80" text-anchor="end" font-size="32">😌</text>
+        `}
+      </g>
+
+      <!-- Usable balance -->
+      <g transform="translate(350, 140)">
+        <rect width="330" height="120" rx="14" fill="${t.cardBg}" stroke="${t.cardBorder}" stroke-width="1"/>
+        <text x="20" y="30" font-size="12" fill="${t.textMuted}" letter-spacing="1">เงินคงเหลือ (USABLE)</text>
+        <text x="20" y="68" font-size="32" font-weight="800" fill="${t.accent}">${fmtThb(usableThb, { dp: 0 })}</text>
+        <text x="20" y="98" font-size="14" fill="${t.textDim}">${fmtUsdt(usableUsdt, { dp: 2 })}</text>
+        <text x="310" y="80" text-anchor="end" font-size="32">💰</text>
+      </g>
     </g>
   </g>
 
-  <!-- Footer / branding -->
-  <g transform="translate(${W / 2}, 920)">
-    <line x1="-200" y1="0" x2="200" y2="0" stroke="${t.cardBorder}" stroke-width="1"/>
-    <text x="0" y="30" text-anchor="middle" font-size="14" font-weight="700" fill="${t.text}">
-      #OnePercentBotTrade
-    </text>
-    <text x="0" y="52" text-anchor="middle" font-size="11" fill="${t.textMuted}">
-      ${achievedSparkle ? '✨ ทุกวันคือโอกาส — วันนี้คุณทำได้! ✨' : 'วันนี้คืออีกหนึ่งบทเรียน — สู้ต่อพรุ่งนี้'}
-    </text>
+  <!-- TODAY TRADING section -->
+  <g transform="translate(60, 850)">
+    <text x="0" y="0" font-size="13" font-weight="700" fill="${t.accent}" letter-spacing="2">📈 TODAY TRADING</text>
+    <line x1="160" y1="-5" x2="${W - 120}" y2="-5" stroke="${t.cardBorder}" stroke-width="1"/>
+
+    <g transform="translate(0, 20)">
+      <g transform="translate(0, 0)">
+        <text x="80" y="32" text-anchor="middle" font-size="32" font-weight="800" fill="${t.text}">${trades}</text>
+        <text x="80" y="52" text-anchor="middle" font-size="11" fill="${t.textMuted}" letter-spacing="1">TRADES</text>
+      </g>
+      <g transform="translate(170, 0)">
+        <text x="80" y="32" text-anchor="middle" font-size="32" font-weight="800" fill="${trades > 0 ? t.positive : t.textMuted}">${trades > 0 ? fmtPct(winRate) : '—'}</text>
+        <text x="80" y="52" text-anchor="middle" font-size="11" fill="${t.textMuted}" letter-spacing="1">WIN RATE</text>
+      </g>
+      <g transform="translate(340, 0)">
+        <text x="80" y="32" text-anchor="middle" font-size="28" font-weight="800" fill="${t.positive}">${wins}</text>
+        <text x="80" y="52" text-anchor="middle" font-size="11" fill="${t.textMuted}" letter-spacing="1">ชนะ</text>
+      </g>
+      <g transform="translate(510, 0)">
+        <text x="80" y="32" text-anchor="middle" font-size="28" font-weight="800" fill="${losses > 0 ? t.negative : t.textMuted}">${losses}</text>
+        <text x="80" y="52" text-anchor="middle" font-size="11" fill="${t.textMuted}" letter-spacing="1">แพ้</text>
+      </g>
+    </g>
+  </g>
+
+  <!-- Footer -->
+  <g transform="translate(${W / 2}, 970)">
+    <text x="0" y="0" text-anchor="middle" font-size="13" font-weight="700" fill="${t.text}">#OnePercentBotTrade</text>
+    ${zone === 'achieved' ? `<text x="0" y="20" text-anchor="middle" font-size="11" fill="${t.textMuted}">✨ ทุกวันคือโอกาส — วันนี้คุณทำได้! ✨</text>` : ''}
   </g>
 </svg>`;
     return svg;
   }
 
-  // ─── SVG → PNG conversion ──────────────────────────────────────────────
+  // ─── SVG → PNG ────────────────────────────────────────────────────────
   function svgStringToPngBlob(svgString) {
     return new Promise((resolve, reject) => {
       try {
-        // Add XML declaration if missing
         if (!svgString.startsWith('<?xml')) {
           svgString = '<?xml version="1.0" encoding="UTF-8"?>' + svgString;
         }
@@ -428,22 +545,26 @@
         const url = URL.createObjectURL(blob);
         const img = new Image();
         img.onload = () => {
-          const canvas = document.createElement('canvas');
-          canvas.width = W;
-          canvas.height = H;
-          const ctx = canvas.getContext('2d');
-          ctx.imageSmoothingEnabled = true;
-          ctx.imageSmoothingQuality = 'high';
-          ctx.drawImage(img, 0, 0, W, H);
-          URL.revokeObjectURL(url);
-          canvas.toBlob((pngBlob) => {
-            if (pngBlob) resolve(pngBlob);
-            else reject(new Error('canvas.toBlob returned null'));
-          }, 'image/png', 0.95);
+          // render twice with a tiny delay so the animation has time to advance
+          // (helps PNG snapshot capture animated fireworks mid-burst)
+          setTimeout(() => {
+            const canvas = document.createElement('canvas');
+            canvas.width = W;
+            canvas.height = H;
+            const ctx = canvas.getContext('2d');
+            ctx.imageSmoothingEnabled = true;
+            ctx.imageSmoothingQuality = 'high';
+            ctx.drawImage(img, 0, 0, W, H);
+            URL.revokeObjectURL(url);
+            canvas.toBlob((pngBlob) => {
+              if (pngBlob) resolve(pngBlob);
+              else reject(new Error('canvas.toBlob returned null'));
+            }, 'image/png', 0.95);
+          }, 200);
         };
-        img.onerror = (e) => {
+        img.onerror = () => {
           URL.revokeObjectURL(url);
-          reject(new Error('SVG image failed to load: ' + (e && e.message)));
+          reject(new Error('SVG image failed to load'));
         };
         img.src = url;
       } catch (err) {
@@ -481,7 +602,7 @@
     return blob;
   }
 
-  // ─── Preview Modal ─────────────────────────────────────────────────────
+  // ─── Preview Modal ────────────────────────────────────────────────────
   function ensureModal() {
     let modal = document.getElementById('share-card-modal');
     if (modal) return modal;
@@ -514,11 +635,9 @@
     `;
     document.body.appendChild(modal);
 
-    // Wire close handlers
     modal.querySelectorAll('[data-close]').forEach((el) => {
       el.addEventListener('click', closePreview);
     });
-    // Esc to close
     document.addEventListener('keydown', (e) => {
       if (e.key === 'Escape' && modal.classList.contains('is-open')) {
         closePreview();
@@ -538,7 +657,6 @@
     const dlBtn = document.getElementById('share-card-download');
     const svg = buildSvg(d);
 
-    // Show as data URL in img tag (preview before download)
     const blob = new Blob([svg], { type: 'image/svg+xml;charset=utf-8' });
     const url = URL.createObjectURL(blob);
     img.src = url;
@@ -546,7 +664,6 @@
     img.dataset.filename = defaultFilename(d);
     img.dataset.url = url;
 
-    // Wire download button (replace handler to avoid duplicate)
     const newDl = dlBtn.cloneNode(true);
     dlBtn.parentNode.replaceChild(newDl, dlBtn);
     newDl.addEventListener('click', async () => {
@@ -582,7 +699,7 @@
     }
   }
 
-  // ─── Public API ────────────────────────────────────────────────────────
+  // ─── Public API ───────────────────────────────────────────────────────
   window.ShareCard = {
     buildSvg,
     downloadPng,
@@ -590,5 +707,7 @@
     closePreview,
     ZONE_THEMES,
     PALETTE,
+    fmtThb,
+    fmtUsdt,
   };
 })();
