@@ -53,7 +53,7 @@
 
   const desktopHtml = `
     <div class="d-flex align-items-center gap-2 flex-wrap" style="max-width: 1400px; margin: 0 auto;">
-      <a class="brand" href="/bots.html">
+      <a class="brand" href="/chart-monitor.html">
         <img src="/favicon.svg" alt="OnePercentBotTrade" class="brand-logo" />
         <span>OnePercent<span style="color:var(--gold-1);">%</span>BotTrade</span>
       </a>
@@ -82,13 +82,14 @@
         <a class="chat-pill" id="nav-chat-pill" href="/chat.html" title="Community + DM กับ admin" style="display:none;">
           💬 <span id="nav-chat-badge" class="chat-badge hidden">0</span>
         </a>
-        ${active !== 'login' ? `<button class="btn-lux btn-sm" id="logout-btn" type="button">Logout</button>` : ''}
+        ${active !== 'login' ? `<button class="btn-lux btn-sm d-none d-md-inline-block" id="logout-btn" type="button">Logout</button>` : ''}
         <button class="nav-toggle d-md-none" type="button" id="nav-toggle" aria-label="Toggle menu">☰</button>
       </div>
     </div>
     <div class="mobile-menu d-md-none" id="mobile-menu" style="display:none;">
       <div class="d-flex flex-column gap-1">
         ${links.map((l) => `<a class="nav-pill ${active === l.key ? 'active' : ''}" href="${l.href}">${l.label}</a>`).join('')}
+        ${active !== 'login' ? `<button class="nav-pill nav-pill-logout" id="logout-btn-mobile" type="button">🚪 Logout</button>` : ''}
       </div>
     </div>`;
 
@@ -104,15 +105,16 @@
     });
   }
 
-  // logout handler (if present)
-  const lo = document.getElementById('logout-btn');
-  if (lo) {
-    lo.addEventListener('click', async (e) => {
-      e.preventDefault();
-      try { await API.post('/api/auth/logout', {}); } catch (_) {}
-      location.href = '/login.html';
-    });
+  // logout handler (header button on desktop + mobile menu button)
+  async function handleLogout(e) {
+    e.preventDefault();
+    try { await API.post('/api/auth/logout', {}); } catch (_) {}
+    location.href = '/login.html';
   }
+  const loDesktop = document.getElementById('logout-btn');
+  if (loDesktop) loDesktop.addEventListener('click', handleLogout);
+  const loMobile = document.getElementById('logout-btn-mobile');
+  if (loMobile) loMobile.addEventListener('click', handleLogout);
 
   // ws status pill class swap
   const wsEl = document.getElementById('ws-status');

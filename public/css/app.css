@@ -866,6 +866,28 @@ a:hover { color: var(--gold-2); text-decoration: none; }
   padding: 0.65rem 1rem 1rem;
 }
 .app-nav .mobile-menu .nav-pill { width: 100%; justify-content: flex-start; }
+/* FIX-2026-09-02: logout button moved into mobile nav list.
+   Reuse nav-pill shape but reset native button chrome + add subtle danger hue. */
+.app-nav .nav-pill.nav-pill-logout {
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--text-2) !important;
+  text-align: left;
+  cursor: pointer;
+  font-family: inherit;
+}
+.app-nav .mobile-menu .nav-pill.nav-pill-logout {
+  margin-top: 0.4rem;
+  border-top: 1px solid var(--border-soft);
+  border-radius: 0;
+  color: var(--bear-1, #ff4d6d) !important;
+  padding-top: 0.7rem;
+}
+.app-nav .nav-pill.nav-pill-logout:hover {
+  background: rgba(255, 77, 109, 0.10);
+  border-color: rgba(255, 77, 109, 0.30);
+  color: var(--bear-1, #ff4d6d) !important;
+}
 
 /* ============================================================
    CARDS
