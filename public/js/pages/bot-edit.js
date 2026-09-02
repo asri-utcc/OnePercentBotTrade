@@ -84,6 +84,18 @@ function render() {
                 <label class="form-label" for="f-maxtrades">จำนวนไม้สูงสุด</label>
                 <input type="number" class="form-control" id="f-maxtrades" value="${bot.maxTrades}" step="1" min="1" max="100" />
               </div>
+              <!-- FIX-2026-09-02: Round-down Capital (opt-in per-bot) — ลด notional ให้พอดียอดคงเหลือเมื่อเงินไม่พอ -->
+              <div class="bot-settings-option is-full">
+                <label class="form-check form-switch mb-0">
+                  <input type="checkbox" class="form-check-input" id="f-round-down-capital-enabled" ${bot.roundDownCapitalEnabled ? 'checked' : ''} />
+                  <span class="form-check-label">💸 <strong>Round-down ทุนเมื่อเงินไม่พอ</strong> — ปรับ notional ลงเพื่อให้เปิด order ได้</span>
+                </label>
+                <div class="bot-settings-dependent">
+                  <label class="form-label" for="f-round-down-capital-min">ขั้นต่ำที่ round ได้ (USDT)</label>
+                  <input type="number" class="form-control form-control-sm" id="f-round-down-capital-min" value="${bot.roundDownCapitalMin ?? 5.5}" step="0.1" min="1" max="10000" />
+                  <small class="text-muted">ถ้า round แล้ว &lt; min → ยังคง skip signal (default 5.5)</small>
+                </div>
+              </div>
             </div>
           </div>
         </details>
@@ -1201,6 +1213,9 @@ async function save(e) {
     martingaleEnabled: document.getElementById('f-martingale-enabled').checked,
     martingaleMultiplier: parseFloat(document.getElementById('f-martingale-multiplier').value) || 1.5,
     martingaleMaxLayerNotional: parseFloat(document.getElementById('f-martingale-max-notional').value) || 100,
+    // FIX-2026-09-02: Round-down Capital (opt-in per-bot) — ลด notional ให้พอดียอดคงเหลือ
+    roundDownCapitalEnabled: document.getElementById('f-round-down-capital-enabled').checked,
+    roundDownCapitalMin: parseFloat(document.getElementById('f-round-down-capital-min').value) || 5.5,
   };
   try {
     await API.put(`/api/bots/${botId}`, data);

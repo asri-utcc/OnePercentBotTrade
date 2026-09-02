@@ -260,6 +260,21 @@ const botSchema = new mongoose.Schema(
     },
 
     // ═══════════════════════════════════════════════════════════════════════
+    // FIX-2026-09-02: Round-down Capital (opt-in per-bot — ลด notional ให้พอดี
+    //   กับยอด USDT ที่ใช้ได้ เมื่อเงินไม่พอ)
+    //   - เดิม: ถ้า available USDT < capitalPerTrade + fee buffer → skip signal
+    //   - ใหม่: ถ้า enabled + adjusted >= roundDownCapitalMin → place BUY
+    //     ด้วย notional ที่ round ลง (2 decimals) เพื่อให้เปิด order ได้
+    //   - roundDownCapitalMin: ขั้นต่ำที่ยอม (USDT) — ถ้า round แล้ว < min
+    //     → ยังคง skip เหมือนเดิม (กัน order เล็กเกินไป)
+    //   - default OFF + min=5.5 USDT → opt-in, ไม่กระทบบอทเดิม
+    //   - ทำงานใน trader.placeBuy() balance-check block — single source of truth
+    //     ครอบคลุม DCA layer 2/3 / DPS-resized / AutoTiming-notional ทุก path
+    // ═══════════════════════════════════════════════════════════════════════
+    roundDownCapitalEnabled: { type: Boolean, default: false },
+    roundDownCapitalMin:     { type: Number,  default: 5.5, min: 1, max: 10000 },
+
+    // ═══════════════════════════════════════════════════════════════════════
     // FIX-2026-08-08: Feature #2 — CBv3 (CBv2 + ST3 same-candle on upper-TF)
     //   - global routing: AppConfig.cbVersion = 'v2' | 'v3' (default 'v3')
     //     - 'v2' → only CBv2 handler fires (CBv3 returns early)

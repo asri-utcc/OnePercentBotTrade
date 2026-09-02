@@ -51,6 +51,17 @@ describe('botConfigIO — constants', () => {
     expect(ALLOWED_FIELD_KEYS).toContain('defaultSymbol');
     expect(ALLOWED_FIELD_KEYS).toContain('defaultTimeframe');
   });
+  // FIX-2026-09-02: Round-down Capital fields must be whitelisted for export/import
+  test('ALLOWED_FIELD_KEYS contains roundDownCapital keys (FIX-2026-09-02)', () => {
+    expect(ALLOWED_FIELD_KEYS).toContain('roundDownCapitalEnabled');
+    expect(ALLOWED_FIELD_KEYS).toContain('roundDownCapitalMin');
+  });
+  test('NUMBER_FIELDS contains roundDownCapitalMin (FIX-2026-09-02)', () => {
+    expect(NUMBER_FIELDS.has('roundDownCapitalMin')).toBe(true);
+  });
+  test('BOOLEAN_FIELDS contains roundDownCapitalEnabled (FIX-2026-09-02)', () => {
+    expect(BOOLEAN_FIELDS.has('roundDownCapitalEnabled')).toBe(true);
+  });
   test('NUMBER_FIELDS / BOOLEAN_FIELDS / STRING_FIELDS are disjoint Sets', () => {
     const num = [...NUMBER_FIELDS];
     const bool = [...BOOLEAN_FIELDS];
@@ -306,6 +317,8 @@ describe('botConfigIO — full round-trip (export → parse → sanitize)', () =
       cbv5KcMult: 1.2,
       defaultSymbol: 'BTCUSDT',
       defaultTimeframe: '5m',
+      roundDownCapitalEnabled: true,
+      roundDownCapitalMin: 7.5,
     };
     const payload = buildExportPayload({ type: 'bot', settings: original });
     const text = JSON.stringify(payload);

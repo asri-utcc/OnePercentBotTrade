@@ -1205,6 +1205,12 @@ router.put('/:id', requireAuth, async (req, res) => {
       'cbv5StrictBreak', 'cbv5UseVolume',
       'cbv5VolMaLen', 'cbv5VolMultiplier',
       'cbv5DebounceCandles',
+      // FIX-2026-09-02: Round-down Capital (opt-in per-bot) — when balance
+      //   is insufficient, round notional down to fit available USDT.
+      //   - roundDownCapitalEnabled: default false (opt-in)
+      //   - roundDownCapitalMin: minimum notional (USDT) — if round-down would
+      //     yield < min, signal is still skipped (default 5.5, clamp 1..10000)
+      'roundDownCapitalEnabled', 'roundDownCapitalMin',
     ];
 
     for (const k of allowed) {
@@ -1318,6 +1324,12 @@ router.put('/:id', requireAuth, async (req, res) => {
           //   (null = inherit, true/false = explicit). Coerce via shared helper
           //   so both write paths behave identically.
           bot[k] = _coerceAutoTimingEnabled(data[k]);
+        } else if (k === 'roundDownCapitalEnabled') {
+          // FIX-2026-09-02: Round-down Capital toggle (default false — strict opt-in)
+          bot[k] = data[k] === true || data[k] === 'true';
+        } else if (k === 'roundDownCapitalMin') {
+          // FIX-2026-09-02: Round-down minimum notional (USDT, clamp 1..10000, default 5.5)
+          bot[k] = Math.min(10000, Math.max(1, parseFloat(data[k])));
         } else {
           bot[k] = data[k];
         }
@@ -2210,6 +2222,9 @@ router.post('/bulk-update', requireAuth, async (req, res) => {
       'cbv5StrictBreak', 'cbv5UseVolume',
       'cbv5VolMaLen', 'cbv5VolMultiplier',
       'cbv5DebounceCandles',
+      // FIX-2026-09-02: Round-down Capital (opt-in per-bot) — when balance
+      //   is insufficient, round notional down to fit available USDT.
+      'roundDownCapitalEnabled', 'roundDownCapitalMin',
     ];
     const update = {};
     for (const k of allowed) {
@@ -2265,6 +2280,9 @@ router.post('/bulk-update', requireAuth, async (req, res) => {
     if (Number.isFinite(update.cbv5VolMaLen)) update.cbv5VolMaLen = Math.max(5, Math.min(100, Math.floor(update.cbv5VolMaLen)));
     if (Number.isFinite(update.cbv5VolMultiplier)) update.cbv5VolMultiplier = Math.max(1.0, Math.min(10, update.cbv5VolMultiplier));
     if (Number.isFinite(update.cbv5DebounceCandles)) update.cbv5DebounceCandles = Math.max(1, Math.min(20, Math.floor(update.cbv5DebounceCandles)));
+    // FIX-2026-09-02: Round-down Capital field clamps (mirror PATCH route)
+    if ('roundDownCapitalEnabled' in update) update.roundDownCapitalEnabled = update.roundDownCapitalEnabled === true || update.roundDownCapitalEnabled === 'true';
+    if (Number.isFinite(update.roundDownCapitalMin)) update.roundDownCapitalMin = Math.max(1, Math.min(10000, update.roundDownCapitalMin));
 
     // FIX-2026-08-03: bulk-update Martingale-requires-DCA validation
     //   - bulk mode applies same settings to many bots — must check that after merge,

@@ -2269,6 +2269,9 @@ async function createBot() {
     tpTrendEnabled: document.getElementById('nb-tp-trend-enabled').checked, // FIX-2026-08-01: per-bot TP trend ×N master toggle (default true)
     tpTrendMultiplier: parseFloat(document.getElementById('nb-tp-trend-multiplier').value) || 2, // FIX-2026-07-31 (F2): per-bot TP ×N multiplier (1..10, default 2)
     autoUpdateTp: document.getElementById('nb-auto-update-tp').checked, // FIX-2026-07-23: TP auto-update toggle
+    // FIX-2026-09-02: Round-down Capital (opt-in per-bot) — ลด notional ให้พอดียอดคงเหลือ
+    roundDownCapitalEnabled: document.getElementById('nb-round-down-capital-enabled') ? document.getElementById('nb-round-down-capital-enabled').checked : false,
+    roundDownCapitalMin: parseFloat(document.getElementById('nb-round-down-capital-min')?.value) || 5.5,
     // FIX-2026-07-31: ส่ง enabled ตาม checkbox — atomic create + enable ใน 1 round-trip
     enabled: document.getElementById('nb-auto-enable').checked === true,
     password: document.getElementById('nb-password').value || undefined, // up-front pw if user typed it

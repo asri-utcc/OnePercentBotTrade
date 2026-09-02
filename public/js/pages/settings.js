@@ -292,6 +292,11 @@ function renderBotDefaultsSection() {
         <label class="form-label">จำนวนไม้</label>
         <input type="number" class="form-control" id="bd-maxtrades" value="${d.maxTrades}" step="1" min="1" max="1000" />
       </div>
+      <!-- FIX-2026-09-02: Round-down Capital — min notional threshold (USDT) -->
+      <div class="col-md-3">
+        <label class="form-label" for="bd-round-down-capital-min">📉 Round-down min (USDT)</label>
+        <input type="number" class="form-control" id="bd-round-down-capital-min" value="${d.roundDownCapitalMin ?? 5.5}" step="0.1" min="1" max="10000" />
+      </div>
       <div class="col-md-3">
         <label class="form-label">TP % (default — ระบบจะคำนวณ ✨ Get ให้อัตโนมัติ)</label>
         <input type="number" class="form-control" id="bd-tp" value="${d.tpPercent}" step="0.001" min="0.001" />
@@ -393,6 +398,13 @@ function renderBotDefaultsSection() {
         <label class="form-check form-switch">
           <input type="checkbox" class="form-check-input" id="bd-auto-pause-enabled" ${d.autoPauseEnabled ? 'checked' : ''} />
           <span class="form-check-label">⏸️ Auto-pause on low Min-%KC</span>
+        </label>
+      </div>
+      <!-- FIX-2026-09-02: Round-down Capital toggle (opt-in per-bot) -->
+      <div class="col-md-4">
+        <label class="form-check form-switch">
+          <input type="checkbox" class="form-check-input" id="bd-round-down-capital-enabled" ${d.roundDownCapitalEnabled ? 'checked' : ''} />
+          <span class="form-check-label">💸 Round-down ทุนเมื่อเงินไม่พอ</span>
         </label>
       </div>
       <div class="col-md-4">
@@ -2733,6 +2745,9 @@ const BD_RECOMMENDED = {
   tpTrendMultiplier: 2,
   autoUpdateTp: true,
   stopLossOnUpperKC: false,
+  // FIX-2026-09-02: Round-down Capital (opt-in per-bot — default OFF, min 5.5 USDT)
+  roundDownCapitalEnabled: false,
+  roundDownCapitalMin: 5.5,
 };
 
 async function saveBotDefaults() {
@@ -2800,6 +2815,9 @@ async function saveBotDefaults() {
     tpTrendMultiplier: num('bd-tp-trend-multiplier'),
     autoUpdateTp: isChecked('bd-auto-update-tp'),
     stopLossOnUpperKC: isChecked('bd-stop-loss-upper-kc'),
+    // FIX-2026-09-02: Round-down Capital (opt-in per-bot)
+    roundDownCapitalEnabled: isChecked('bd-round-down-capital-enabled'),
+    roundDownCapitalMin: num('bd-round-down-capital-min'),
   };
 
   // validate ranges (mirror backend clamps)
@@ -2823,6 +2841,8 @@ async function saveBotDefaults() {
   if (!Number.isFinite(payload.autoArmLossPct) || payload.autoArmLossPct < 1 || payload.autoArmLossPct > 99) errors.push('Auto-arm loss 1..99');
   if (!Number.isFinite(payload.autoArmAgeHours) || payload.autoArmAgeHours < 0.5 || payload.autoArmAgeHours > 999) errors.push('Auto-arm age 0.5..999');
   if (!Number.isFinite(payload.tpTrendMultiplier) || payload.tpTrendMultiplier < 1 || payload.tpTrendMultiplier > 10) errors.push('TP trend mult 1..10');
+  // FIX-2026-09-02: Round-down min notional threshold (USDT, 1..10000)
+  if (!Number.isFinite(payload.roundDownCapitalMin) || payload.roundDownCapitalMin < 1 || payload.roundDownCapitalMin > 10000) errors.push('Round-down min 1..10000');
   if (errors.length > 0) {
     setStatus('bd-status', '❌ ' + errors.join(' · '), true);
     return;

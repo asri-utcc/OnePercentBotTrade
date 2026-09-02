@@ -487,6 +487,8 @@ const BOT_DEFAULTS_CLAMP = {
   autoArmLossPct:            { min: 1,     max: 99 },
   autoArmAgeHours:           { min: 0.5,   max: 999 },
   tpTrendMultiplier:         { min: 1,     max: 10 },
+  // FIX-2026-09-02: Round-down Capital (opt-in per-bot) — min threshold (USDT)
+  roundDownCapitalMin:       { min: 1,     max: 10000 },
 };
 
 // Schema defaults (mirror POST /api/bots logic — แหล่ง single source of truth)
@@ -543,6 +545,9 @@ const BOT_DEFAULTS_SCHEMA = {
   stopLossOnUpperKC: false,
   // FIX-2026-08-30 / Phase 4: Auto-Timing per-bot tristate (null = inherit master)
   autoTimingEnabled: null,
+  // FIX-2026-09-02: Round-down Capital (opt-in per-bot — default OFF, min 5.5 USDT)
+  roundDownCapitalEnabled: false,
+  roundDownCapitalMin: 5.5,
   defaultSymbol: 'BNBUSDT',
   defaultTimeframe: '3m',
 };
@@ -583,6 +588,8 @@ router.put('/bot-defaults', requireAuth, async (req, res) => {
       'safeTradeEnabled', 'safeTradeTrendlineEnabled', 'safeTradeNoTradeEnabled',
       'autoPauseEnabled', 'autoPauseAdjustEnabled', 'autoArmStopLossOnUKC',
       'slUkcTriggerOnProfit', 'tpTrendEnabled', 'autoUpdateTp', 'stopLossOnUpperKC',
+      // FIX-2026-09-02: Round-down Capital toggle (opt-in per-bot)
+      'roundDownCapitalEnabled',
     ];
     // FIX-2026-08-30 / Phase 4: 3-state tri fields — accepts true/false/null (null = inherit)
     const TRISTATE_FIELDS = ['autoTimingEnabled'];
@@ -595,6 +602,8 @@ router.put('/bot-defaults', requireAuth, async (req, res) => {
       'cbv5VolMaLen', 'cbv5VolMultiplier', 'cbv5DebounceCandles',
       'cbAutoUnlockThresholdPct',
       'autoPauseMinKcPct', 'autoPauseMin24hVolUsdt', 'autoArmLossPct', 'autoArmAgeHours', 'tpTrendMultiplier',
+      // FIX-2026-09-02: Round-down minimum notional threshold (USDT)
+      'roundDownCapitalMin',
     ];
     const STRING_FIELDS = ['defaultSymbol', 'defaultTimeframe'];
 

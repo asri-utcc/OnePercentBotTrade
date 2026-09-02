@@ -290,3 +290,46 @@ describe('botDefaults — CBv5 default OFF (FIX-2026-09-02)', () => {
     expect(p.cbv5Enabled).toBe(false);
   });
 });
+
+// FIX-2026-09-02: Round-down Capital — regression guard for defaults & overrides
+//   - User opt-in feature (default OFF), min defaults to 5.5 USDT
+//   - Used in trader.placeBuy() to reduce notional when balance is insufficient
+//   - Strict boolean semantics (must be === true to enable — same as cbv5Enabled)
+describe('botDefaults — Round-down Capital (FIX-2026-09-02)', () => {
+  test('no override, no botDefaults, no tier → roundDownCapitalEnabled=false (opt-in)', () => {
+    const p = buildBotCreatePayload();
+    expect(p.roundDownCapitalEnabled).toBe(false);
+  });
+  test('default roundDownCapitalMin = 5.5', () => {
+    const p = buildBotCreatePayload();
+    expect(p.roundDownCapitalMin).toBe(5.5);
+  });
+  test('explicit override=true → roundDownCapitalEnabled=true', () => {
+    const p = buildBotCreatePayload({ overrides: { roundDownCapitalEnabled: true } });
+    expect(p.roundDownCapitalEnabled).toBe(true);
+  });
+  test('botDefaults.roundDownCapitalEnabled=true → true (admin set in Settings)', () => {
+    const p = buildBotCreatePayload({ botDefaults: { roundDownCapitalEnabled: true } });
+    expect(p.roundDownCapitalEnabled).toBe(true);
+  });
+  test('strict: botDefaults.roundDownCapitalEnabled=1 → false (must be === true)', () => {
+    const p = buildBotCreatePayload({ botDefaults: { roundDownCapitalEnabled: 1 } });
+    expect(p.roundDownCapitalEnabled).toBe(false);
+  });
+  test('explicit override=false → roundDownCapitalEnabled=false (preserved)', () => {
+    const p = buildBotCreatePayload({ overrides: { roundDownCapitalEnabled: false } });
+    expect(p.roundDownCapitalEnabled).toBe(false);
+  });
+  test('clamps min above 10000 → 10000', () => {
+    const p = buildBotCreatePayload({ overrides: { roundDownCapitalMin: 99999 } });
+    expect(p.roundDownCapitalMin).toBe(10000);
+  });
+  test('clamps min below 1 → 1', () => {
+    const p = buildBotCreatePayload({ overrides: { roundDownCapitalMin: 0.5 } });
+    expect(p.roundDownCapitalMin).toBe(1);
+  });
+  test('botDefaults.roundDownCapitalMin=12 → 12', () => {
+    const p = buildBotCreatePayload({ botDefaults: { roundDownCapitalMin: 12 } });
+    expect(p.roundDownCapitalMin).toBe(12);
+  });
+});

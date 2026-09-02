@@ -287,6 +287,18 @@
                   <label class="lux-form-label" for="nb-maxtrades">จำนวนไม้สูงสุด</label>
                   <input type="number" class="form-control" id="nb-maxtrades" value="1" step="1" min="1" max="100" />
                 </div>
+                <!-- FIX-2026-09-02: Round-down Capital (opt-in per-bot) -->
+                <div class="bot-settings-option is-full">
+                  <label class="form-check form-switch">
+                    <input class="form-check-input" type="checkbox" id="nb-round-down-capital-enabled" />
+                    <span class="form-check-label">💸 <strong>Round-down ทุนเมื่อเงินไม่พอ</strong></span>
+                  </label>
+                  <div class="bot-settings-dependent">
+                    <label class="lux-form-label" for="nb-round-down-capital-min">ขั้นต่ำ (USDT)</label>
+                    <input type="number" class="form-control" id="nb-round-down-capital-min" value="5.5" step="0.1" min="1" max="10000" />
+                    <small class="text-muted">ถ้า round แล้ว &lt; min → ยังคง skip signal (default 5.5)</small>
+                  </div>
+                </div>
                 <div class="bot-settings-option is-full">
                   <label class="form-check form-switch">
                     <input class="form-check-input" type="checkbox" id="nb-auto-enable" checked />

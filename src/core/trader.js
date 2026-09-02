@@ -23,6 +23,7 @@ const telegramNotifier = require('../services/telegramNotifier');
 const phoneHomeMonitor = require('../admin-monitor/phoneHomeMonitor'); // FIX-2026-08-26 Phase 2f
 const licenseService = require('../services/licenseService'); // FIX-2026-08-27 Phase 3a C2: license features + max-capital gate
 const autoTiming = require('../services/autoTiming'); // FIX-2026-08-30 Phase 4: Auto-Timing (heatmap-driven entry gate)
+const roundDownCapital = require('../services/roundDownCapital'); // FIX-2026-09-02: Round-down Capital math (single source of truth)
 const logger = require('../utils/logger');
 const Bot = require('../db/models/Bot');
 const Trade = require('../db/models/Trade');
@@ -4268,11 +4269,13 @@ class Trader {
         return;
       }
 
-      const { qty } = symbolInfo.calcQtyFromCapital({
+      const { qty: qtyOrig } = symbolInfo.calcQtyFromCapital({
         symbol: this.bot.symbol,
         capitalUSDT: buyNotionalUSDT,
         price: parseFloat(refPrice.toString()),
       });
+      // FIX-2026-09-02: qty may be overridden below by Round-down Capital retry path
+      let qty = qtyOrig;
 
       // 4. floor price ตาม tickSize — รับประกันว่า price < ask (post-only safe)
       const buyPrice = symbolInfo.floorPrice(refPrice, tickSize).toString();
@@ -4296,9 +4299,13 @@ class Trader {
       //     - buyCommitment.claimBuy(notional) → synchronous atomic increment
       //     - ถ้า over-commit → fail signal, return (no order placed)
       //     - on order fail/cancel → releaseBuy(notional) ใน finally-style cleanup
-      const requiredNotional = parseFloat(buyPrice) * parseFloat(qty);
+      const requiredNotionalOrig = parseFloat(buyPrice) * parseFloat(qty);
+      // FIX-2026-09-02: requiredNotional may be overridden below by Round-down Capital retry path
+      let requiredNotional = requiredNotionalOrig;
       const feeBufferRate = fees.getMakerRate();
-      const requiredWithBuffer = requiredNotional * (1 + feeBufferRate);
+      const requiredWithBufferOrig = requiredNotional * (1 + feeBufferRate);
+      // FIX-2026-09-02: requiredWithBuffer may be overridden below by Round-down Capital retry path
+      let requiredWithBuffer = requiredWithBufferOrig;
       // FIX-2026-08-31: claimedBuy now hoisted to top of placeBuy() — removed duplicate.
 
       try {
@@ -4315,12 +4322,87 @@ class Trader {
         const committed = buyCommitment.getCommitted();
         const availableForNewBuy = Math.max(0, freeUsdt - reserveUsdt - committed);
         if (availableForNewBuy < requiredWithBuffer) {
-          const reason = `insufficient USDT balance: free ${freeUsdt.toFixed(4)}, reserve ${reserveUsdt.toFixed(4)}, in-flight committed ${committed.toFixed(4)} → available ${availableForNewBuy.toFixed(4)}, need ${requiredWithBuffer.toFixed(4)} (notional ${requiredNotional.toFixed(4)} + fee buffer)`;
-          logger.warn({ botId: this.bot._id.toString(), freeUsdt, reserveUsdt, committed, requiredWithBuffer }, 'trader: balance check failed');
-          await Signal.updateOne({ _id: signalDoc._id }, { outcome: 'skipped', note: reason });
-          this.buyInFlight = false; // FIX-2026-07-21: release on early-return
-          await this.failSignal(signalDoc, reason);
-          return;
+          // ════════════════════════════════════════════════════════════════════
+          // FIX-2026-09-02: Round-down Capital (opt-in per-bot)
+          //   - ถ้า bot.roundDownCapitalEnabled === true → ลอง round down notional
+          //     ให้ <= availableForNewBuy แล้วเปิด BUY ด้วยยอดที่ round แล้ว
+          //   - ถ้า round แล้ว < roundDownCapitalMin (default 5.5 USDT) → skip
+          //     เหมือนเดิม (กัน order เล็กเกินไป)
+          //   - ถ้า feature OFF → behavior เดิม 100% (backward compatible)
+          //   - ทำงานในจุดเดียวกัน → ครอบคลุม DCA layer 2/3 / DPS-resized /
+          //     AutoTiming-notional ทุก path ที่ผ่าน placeBuy() อัตโนมัติ
+          // ════════════════════════════════════════════════════════════════════
+          if (this.bot.roundDownCapitalEnabled === true) {
+            // FIX-2026-09-02: delegate the math to roundDownCapital service (single source of truth,
+            //   also unit-tested). Resolve min with fallback, compute adjusted notional floored
+            //   to 2 decimals, check against min.
+            const rdc = roundDownCapital.computeAdjustedNotional({
+              availableForNewBuy,
+              feeBufferRate,
+              minRound: this.bot.roundDownCapitalMin,
+            });
+            if (rdc.belowMin) {
+              const reason = `${rdc.reason} (free ${freeUsdt.toFixed(4)}, reserve ${reserveUsdt.toFixed(4)}, in-flight committed ${committed.toFixed(4)} → available ${availableForNewBuy.toFixed(4)}, need ${requiredWithBuffer.toFixed(4)})`;
+              logger.warn({ botId: this.bot._id.toString(), freeUsdt, reserveUsdt, committed, requiredWithBuffer, adjustedNotional: rdc.adjusted, minRound: rdc.minRound }, 'trader: balance check failed (round-down below min)');
+              await Signal.updateOne({ _id: signalDoc._id }, { outcome: 'skipped', note: reason });
+              this.buyInFlight = false; // FIX-2026-07-21: release on early-return
+              await this.failSignal(signalDoc, reason);
+              return;
+            }
+            const adjustedNotional = rdc.adjusted;
+            // Re-calc qty with adjusted notional (price stays the same → re-validate)
+            const adjCalc = symbolInfo.calcQtyFromCapital({
+              symbol: this.bot.symbol,
+              capitalUSDT: adjustedNotional,
+              price: parseFloat(refPrice.toString()),
+            });
+            const adjQty = adjCalc.qty;
+            const adjVal = symbolInfo.validateOrder({ symbol: this.bot.symbol, price: buyPrice, qty: adjQty });
+            if (!adjVal.ok) {
+              const reason = `insufficient USDT balance + round-down retry: validation failed (${adjVal.reason})`;
+              logger.warn({ botId: this.bot._id.toString(), adjustedNotional, adjQty, reason: adjVal.reason }, 'trader: round-down retry validation failed');
+              await Signal.updateOne({ _id: signalDoc._id }, { outcome: 'skipped', note: reason });
+              this.buyInFlight = false;
+              await this.failSignal(signalDoc, reason);
+              return;
+            }
+            const adjReqNotional = parseFloat(buyPrice) * parseFloat(adjQty);
+            const adjReqWithBuffer = adjReqNotional * (1 + feeBufferRate);
+            // Claim with the adjusted notional (cap still = availableForNewBuy)
+            const adjClaimed = buyCommitment.claimBuy(adjReqWithBuffer, availableForNewBuy);
+            if (!adjClaimed) {
+              const reason = `insufficient USDT balance + round-down retry: claim race-lost (committed=${(buyCommitment.getCommitted()).toFixed(4)} + required=${adjReqWithBuffer.toFixed(4)} > available=${availableForNewBuy.toFixed(4)})`;
+              logger.warn({ botId: this.bot._id.toString(), availableForNewBuy, adjReqWithBuffer, committed: buyCommitment.getCommitted() }, 'trader: round-down retry claim race-lost');
+              await Signal.updateOne({ _id: signalDoc._id }, { outcome: 'skipped', note: reason });
+              this.buyInFlight = false;
+              await this.failSignal(signalDoc, reason);
+              return;
+            }
+            // Success — override qty/notional/buffer for downstream place order
+            logger.info({
+              botId: this.bot._id.toString(),
+              symbol: this.bot.symbol,
+              originalNotional: Number(requiredNotionalOrig.toFixed(4)),
+              adjustedNotional: Number(adjReqNotional.toFixed(4)),
+              savedUsdt: Number((requiredNotionalOrig - adjReqNotional).toFixed(4)),
+              minRound: rdc.minRound,
+              availableForNewBuy: Number(availableForNewBuy.toFixed(4)),
+              adjQty: String(adjQty),
+            }, 'trader: round-down capital to fit available balance');
+            qty = adjQty;
+            requiredNotional = adjReqNotional;
+            requiredWithBuffer = adjReqWithBuffer;
+            claimedBuy = true;
+            // fall through to place order below
+          } else {
+            // Original behavior (feature OFF)
+            const reason = `insufficient USDT balance: free ${freeUsdt.toFixed(4)}, reserve ${reserveUsdt.toFixed(4)}, in-flight committed ${committed.toFixed(4)} → available ${availableForNewBuy.toFixed(4)}, need ${requiredWithBuffer.toFixed(4)} (notional ${requiredNotional.toFixed(4)} + fee buffer)`;
+            logger.warn({ botId: this.bot._id.toString(), freeUsdt, reserveUsdt, committed, requiredWithBuffer }, 'trader: balance check failed');
+            await Signal.updateOne({ _id: signalDoc._id }, { outcome: 'skipped', note: reason });
+            this.buyInFlight = false; // FIX-2026-07-21: release on early-return
+            await this.failSignal(signalDoc, reason);
+            return;
+          }
         }
         // Atomic claim — sync increment prevents concurrent bot from over-spending
         // FIX-2026-08-29 (P0 audit): pass `availableForNewBuy` as maxAllowed cap so concurrent

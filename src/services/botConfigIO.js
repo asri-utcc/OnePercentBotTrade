@@ -41,6 +41,8 @@ const NUMBER_FIELDS = new Set([
   'autoPauseMinKcPct', 'autoPauseMin24hVolUsdt',
   'autoArmLossPct', 'autoArmAgeHours',
   'tpTrendMultiplier',
+  // FIX-2026-09-02: Round-down Capital (opt-in per-bot) — minimum notional threshold
+  'roundDownCapitalMin',
 ]);
 
 const BOOLEAN_FIELDS = new Set([
@@ -58,6 +60,8 @@ const BOOLEAN_FIELDS = new Set([
   'autoTimingEnabled',
   'autoArmStopLossOnUKC', 'slUkcTriggerOnProfit',
   'tpTrendEnabled', 'autoUpdateTp', 'stopLossOnUpperKC',
+  // FIX-2026-09-02: Round-down Capital (opt-in per-bot)
+  'roundDownCapitalEnabled',
 ]);
 
 const STRING_FIELDS = new Set([

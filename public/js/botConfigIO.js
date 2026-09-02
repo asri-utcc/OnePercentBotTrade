@@ -32,6 +32,8 @@
     'autoPauseMinKcPct', 'autoPauseMin24hVolUsdt',
     'autoArmLossPct', 'autoArmAgeHours',
     'tpTrendMultiplier',
+    // FIX-2026-09-02: Round-down Capital (opt-in per-bot) — minimum notional threshold
+    'roundDownCapitalMin',
   ]);
 
   const BOOLEAN_FIELDS = new Set([
@@ -49,6 +51,8 @@
     // FIX-2026-08-30: Auto-Timing (Phase 4) per-bot tristate (null|true|false = inherit/force-on/force-off)
     'autoTimingEnabled',
     'tpTrendEnabled', 'autoUpdateTp', 'stopLossOnUpperKC',
+    // FIX-2026-09-02: Round-down Capital (opt-in per-bot)
+    'roundDownCapitalEnabled',
   ]);
 
   const STRING_FIELDS = new Set([
@@ -74,6 +78,8 @@
     'cbv5StrictBreak', 'cbv5UseVolume',
     'cbv5VolMaLen', 'cbv5VolMultiplier', 'cbv5DebounceCandles',
     'defaultSymbol', 'defaultTimeframe',
+    // FIX-2026-09-02: Round-down Capital (opt-in per-bot) — Master Config / Bot Defaults / Template support
+    'roundDownCapitalEnabled', 'roundDownCapitalMin',
   ];
 
   // ──────────────────────────────────────────────────────────────────────────

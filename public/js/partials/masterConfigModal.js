@@ -31,6 +31,8 @@
   const FIELDS = [
     { id: 'mc-capitalPerTrade', key: 'capitalPerTrade', section: 'basic', order: 10, type: 'number', step: '0.01', min: '0.00000001', label: '💵 ทุนต่อไม้ (USDT)' },
     { id: 'mc-maxTrades', key: 'maxTrades', section: 'basic', order: 20, type: 'number', step: '1', min: '1', max: '1000', label: '🔢 จำนวนไม้สูงสุด' },
+    // FIX-2026-09-02: Round-down Capital — ขั้นต่ำที่ยอมให้ round-down (USDT, default 5.5)
+    { id: 'mc-roundDownCapitalMin', key: 'roundDownCapitalMin', section: 'basic', order: 25, type: 'number', step: '0.1', min: '1', max: '10000', label: '📉 ขั้นต่ำที่ round-down ทุนได้ (USDT)' },
     { id: 'mc-timeframe', key: 'timeframe', section: 'basic', order: 30, type: 'select', options: TIMEFRAMES, label: '⏰ กรอบเวลา (Timeframe) · เปลี่ยนแล้ว restart trader' },
     { id: 'mc-retryTimeMin', key: 'retryTimeMin', section: 'entry', order: 10, type: 'number', step: '0.1', min: '0.1', max: '60', label: '⏱️ เวลารอก่อนลองซื้อใหม่ (นาที)' },
     { id: 'mc-retryMax', key: 'retryMax', section: 'entry', order: 20, type: 'number', step: '1', min: '0', max: '10', label: '🔁 จำนวนครั้งที่ลองใหม่สูงสุด' },
@@ -72,6 +74,8 @@
   ];
 
   const TOGGLES = [
+    // FIX-2026-09-02: Round-down Capital — basic section (อยู่ใกล้ capitalPerTrade)
+    { id: 'mc-roundDownCapitalEnabled', key: 'roundDownCapitalEnabled', section: 'basic', order: 26, label: '💸 Round-down ทุนให้พอดีกับยอดคงเหลือ (เมื่อเงินไม่พอ)' },
     { id: 'mc-s1OnlyDown', key: 's1OnlyDown', section: 'entry', order: 50, label: '📉 S1 เฉพาะ bg 2→3 (ขาลง)' },
     { id: 'mc-xs1Enabled', key: 'xs1Enabled', section: 'entry', order: 60, label: '🚫 XS1 anti-dump gate' },
     { id: 'mc-autoUpdateTp', key: 'autoUpdateTp', section: 'tp', order: 30, label: '⏰ อัปเดต TP% ทุกต้นชั่วโมง' },

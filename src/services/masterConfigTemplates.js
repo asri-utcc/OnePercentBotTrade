@@ -46,6 +46,8 @@ const ALLOWED_TEMPLATE_FIELDS = [
   // FIX-2026-08-14: Add defaultSymbol + defaultTimeframe so Bot Defaults can be exported/imported
   // via the same template pipeline. These keys are stored on AppConfig.botDefaults (not on Bot docs).
   'defaultSymbol', 'defaultTimeframe',
+  // FIX-2026-09-02: Round-down Capital (opt-in per-bot) — Master Config / Bot Defaults / Template support
+  'roundDownCapitalEnabled', 'roundDownCapitalMin',
 ];
 
 function newTemplateId() {
