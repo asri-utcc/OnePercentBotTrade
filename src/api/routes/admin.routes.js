@@ -109,14 +109,26 @@ router.put('/app-config', requireAuth, async (req, res) => {
       dpsDryRun: 'boolean',
     };
     const set = {};
+    // FIX-2026-09-01 audit H15: track unknown keys so admin sees a warning
+    //   when they POST a field that's not in the whitelist (previously was
+    //   silently dropped — admin thinks they updated a setting but nothing
+    //   changed; common cause of "I set DPS but it's still using the old
+    //   value" bug reports).
+    const unknownKeys = [];
+    const whitelistKeys = new Set(Object.keys(whitelist));
+    for (const k of Object.keys(req.body || {})) {
+      if (!whitelistKeys.has(k)) unknownKeys.push(k);
+    }
     for (const [k, t] of Object.entries(whitelist)) {
       if (req.body[k] === undefined) continue;
       if (t === 'boolean') set[k] = !!req.body[k];
       else if (t === 'number') {
         const n = parseFloat(req.body[k]);
         if (Number.isFinite(n)) set[k] = n;
+        else if (!unknownKeys.includes(k)) unknownKeys.push(k); // bad type
       } else if (t === 'string') {
         if (typeof req.body[k] === 'string') set[k] = req.body[k];
+        else if (!unknownKeys.includes(k)) unknownKeys.push(k); // bad type
       }
     }
     // validate cbVersion enum
@@ -166,8 +178,17 @@ router.put('/app-config', requireAuth, async (req, res) => {
     // invalidate caches so next read picks up new value
     masterConfig.invalidateCache();
     cbVersion.invalidateCache();
+    if (unknownKeys.length > 0) {
+      logger.warn({ botId: null, unknownKeys }, 'admin: app-config PUT — unknown keys rejected (not in whitelist)');
+    }
     logger.info({ botId: null, set }, 'admin: app-config updated');
-    res.json({ ok: true, config: updated });
+    res.json({
+      ok: true,
+      config: updated,
+      // FIX-2026-09-01 audit H15: surface rejected keys so the admin UI can show
+      //   a warning toast instead of silently dropping the field.
+      unknownKeys: unknownKeys.length > 0 ? unknownKeys : undefined,
+    });
   } catch (err) {
     logger.warn({ err: err.message }, 'admin: PUT app-config failed');
     res.status(500).json({ error: err.message });
