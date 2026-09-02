@@ -241,8 +241,9 @@ const appConfigSchema = new mongoose.Schema(
         cbv2LockHours: 8,
         cbv3Enabled: true,
         cbv3LockHours: 8,
-        // FIX-2026-08-10: CBv5 (Support Zone Circuit Breaker) defaults — independent of cbVersion
-        cbv5Enabled: true,
+        // FIX-2026-09-02: CBv5 default OFF (was true; mismatch with buildBotCreatePayload fallback created
+        //   20-bot fleet-wide divergence where cbEnabled=false users were force-closed by CBv5).
+        cbv5Enabled: false,
         cbv5LockHours: 4,
         cbv5KcLen: 20,
         cbv5KcMult: 1.2,

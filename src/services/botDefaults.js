@@ -194,8 +194,10 @@ function buildBotCreatePayload({ overrides = {}, botDefaults = {}, fallbacks = {
     cbv2LockHours: pickScalar(o, b, 'cbv2LockHours', 8, { clamp: [0.5, 168] }),
     cbv3Enabled: pickBool(o, b, 'cbv3Enabled', true),
     cbv3LockHours: pickScalar(o, b, 'cbv3LockHours', 8, { clamp: [0.5, 168] }),
-    // FIX-2026-08-10: CBv5 (Support Zone Circuit Breaker) — independent of cbVersion
-    cbv5Enabled: pickBool(o, b, 'cbv5Enabled', true),
+    // FIX-2026-09-02: CBv5 default OFF (was lenient true → invisible divergence from cbEnabled=false caused
+    //   20 bots to be force-closed by CBv5 when users thought CB was off). Tier presets still override (admins
+    //   can opt-in for paid tiers; user override + botDefaults must be strictly true to turn on).
+    cbv5Enabled: pickBool(o, b, 'cbv5Enabled', false, { strict: true }),
     cbv5LockHours: pickScalar(o, b, 'cbv5LockHours', 4, { clamp: [0.5, 168] }),
     cbv5KcLen: pickScalar(o, b, 'cbv5KcLen', 20, { clamp: [5, 100], int: true }),
     cbv5KcMult: pickScalar(o, b, 'cbv5KcMult', 1.2, { clamp: [0.5, 5.0] }),
@@ -239,6 +241,13 @@ function buildBotCreatePayload({ overrides = {}, botDefaults = {}, fallbacks = {
 
     // ── Dynamic Position Sizing ──
     dynamicSizeEnabled: pickBool(o, b, 'dynamicSizeEnabled', true),
+
+    // ── FIX-2026-09-02: Round-down Capital (opt-in per-bot) ──
+    //   - เมื่อเงินไม่พอ: round notional ลงให้ <= available USDT เพื่อเปิด order ได้
+    //   - ถ้า round แล้ว < roundDownCapitalMin → ยังคง skip signal (กัน order เล็กเกินไป)
+    //   - default OFF (opt-in, ไม่กระทบบอทเดิม) + min=5.5 USDT ตามที่ user ระบุ
+    roundDownCapitalEnabled: pickBool(o, b, 'roundDownCapitalEnabled', false, { strict: true }),
+    roundDownCapitalMin: pickScalar(o, b, 'roundDownCapitalMin', 5.5, { clamp: [1, 10000] }),
 
     // ── Auto Unlock Cooldown ──
     cbAutoUnlockEnabled: pickBool(o, b, 'cbAutoUnlockEnabled', false, { strict: true }),

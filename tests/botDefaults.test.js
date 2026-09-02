@@ -242,3 +242,51 @@ describe('botDefaults — getBotDefaultsFromDoc (sync helper for tests/admin)', 
     expect(getBotDefaultsFromDoc(undefined)).toEqual({});
   });
 });
+
+// FIX-2026-09-02: CBv5 default OFF — regression guard for fleet-wide invisible divergence
+//   - 20 bots had cbEnabled=false but cbv5Enabled=true (created when user thought CB was off)
+//   - User reported "OGUSDT" (was actually 0GUSDT/0G-New Beta) got force-closed by CBv5
+//   - Fix: pickBool strict + fallback=false; CBv5 is opt-in
+describe('botDefaults — CBv5 default OFF (FIX-2026-09-02)', () => {
+  test('no override, no botDefaults, no tier → cbv5Enabled=false (was true)', () => {
+    const p = buildBotCreatePayload({});
+    expect(p.cbv5Enabled).toBe(false);
+  });
+  test('user has cbEnabled=false → cbv5Enabled also false (was: true)', () => {
+    // Simulates the bug: user disables CB master but defaults sneak CBv5 on
+    const p = buildBotCreatePayload({
+      overrides: { cbEnabled: false },
+      botDefaults: { cbEnabled: false },
+    });
+    expect(p.cbEnabled).toBe(false);
+    expect(p.cbv5Enabled).toBe(false);
+  });
+  test('explicit override=true → cbv5Enabled=true (opt-in still works)', () => {
+    const p = buildBotCreatePayload({ overrides: { cbv5Enabled: true } });
+    expect(p.cbv5Enabled).toBe(true);
+  });
+  test('botDefaults.cbv5Enabled=true → cbv5Enabled=true (admin opt-in via Settings)', () => {
+    const p = buildBotCreatePayload({ botDefaults: { cbv5Enabled: true } });
+    expect(p.cbv5Enabled).toBe(true);
+  });
+  test('tier preset cbv5Enabled=true (basic/pro/ent) → cbv5Enabled=true (admin set paid tier)', () => {
+    expect(buildBotCreatePayload({ tier: 'basic' }).cbv5Enabled).toBe(true);
+    expect(buildBotCreatePayload({ tier: 'pro' }).cbv5Enabled).toBe(true);
+    expect(buildBotCreatePayload({ tier: 'enterprise' }).cbv5Enabled).toBe(true);
+  });
+  test('strict: botDefaults.cbv5Enabled=1 → false (must be === true)', () => {
+    const p = buildBotCreatePayload({ botDefaults: { cbv5Enabled: 1 } });
+    expect(p.cbv5Enabled).toBe(false);
+  });
+  test('explicit override=false → cbv5Enabled=false', () => {
+    const p = buildBotCreatePayload({ overrides: { cbv5Enabled: false } });
+    expect(p.cbv5Enabled).toBe(false);
+  });
+  test('precedence: explicit user override=false wins over tier preset=true', () => {
+    // Documented precedence (strongest first): overrides > tierPreset > botDefaults > fallback.
+    // Even though pro tier preset sets cbv5Enabled=true, an explicit user override=false
+    // still wins — explicit choice always beats implicit preset.
+    const p = buildBotCreatePayload({ overrides: { cbv5Enabled: false }, tier: 'pro' });
+    expect(p.cbv5Enabled).toBe(false);
+  });
+});

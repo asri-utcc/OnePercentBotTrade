@@ -2232,8 +2232,10 @@ async function createBot() {
     cbv2LockHours: (window._newBotCbVersion || 'v3') === 'v2' ? parseFloat(document.getElementById('nb-cbv2-lock-hours').value) : 8,
     cbv3Enabled: (window._newBotCbVersion || 'v3') === 'v3' ? document.getElementById('nb-cbv3-enabled').checked : true,
     cbv3LockHours: (window._newBotCbVersion || 'v3') === 'v3' ? parseFloat(document.getElementById('nb-cbv3-lock-hours').value) || 8 : 8,
-    // FIX-2026-08-10: CBv5 (Support Zone + Deepest Low + Volume Filter) — independent of cbVersion
-    cbv5Enabled: document.getElementById('nb-cbv5-enabled') ? document.getElementById('nb-cbv5-enabled').checked : true,
+    // FIX-2026-09-02: CBv5 default OFF (was incorrectly defaulted to true when checkbox absent from DOM,
+    //   and HTML default was `checked` — both caused cbv5Enabled=true on bots when user thought CB was off).
+    //   CBv5 is opt-in; tier presets (basic/pro/ent) still override to true if admin configured them so.
+    cbv5Enabled: document.getElementById('nb-cbv5-enabled') ? document.getElementById('nb-cbv5-enabled').checked : false,
     cbv5LockHours: parseFloat(document.getElementById('nb-cbv5-lock-hours').value) || 4,
     cbv5KcLen: parseInt(document.getElementById('nb-cbv5-kc-len').value, 10) || 20,
     cbv5KcMult: parseFloat(document.getElementById('nb-cbv5-kc-mult').value) || 1.2,

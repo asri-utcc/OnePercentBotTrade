@@ -502,10 +502,10 @@
                     <small class="text-muted">0.5–168 ชม. · Active version: <span id="nb-cbv-version-badge" class="lux-badge lux-badge-warn">v3</span></small>
                   </div>
                 </div>
-                <!-- FIX-2026-08-10: CBv5 (Support Zone Circuit Breaker) — independent of cbVersion -->
+                <!-- FIX-2026-09-02: CBv5 default OFF (was incorrectly `checked` by default — created invisible divergence from cbEnabled=false). CB/CBv2/CBv3 are managed by applyCbVersionToNewBot(); CBv5 is opt-in. -->
                 <div id="nb-cbv5-section" class="bot-settings-option is-full">
                   <label class="form-check form-switch mb-0">
-                    <input class="form-check-input" type="checkbox" id="nb-cbv5-enabled" checked />
+                    <input class="form-check-input" type="checkbox" id="nb-cbv5-enabled" />
                     <span class="form-check-label">💎 <strong>CBv5</strong> — Support Zone + Deepest Low + Volume</span>
                   </label>
                   <div class="bot-settings-dependent">
