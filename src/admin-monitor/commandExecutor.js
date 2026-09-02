@@ -129,6 +129,67 @@ const handlers = {
   },
 
   /**
+   * FIX-2026-09-01 audit H5: revalidate_license — admin pushed a tier/license edit
+   *   (PATCH /api/licenses/:key or POST /apply-template), so the bot should NOT
+   *   keep using the stale 1h-cached license until REVALIDATE_MS fires.
+   *
+   *   - Calls licenseGate.validate({ throwOnFail:false }) synchronously — updates
+   *     `_lastValidLicense` immediately on success.
+   *   - If validation fails (revoked/expired/invalid), bot pauses via existing
+   *     licenseGate logic (which calls _botManager.pause('license_invalidated')).
+   *   - If license was previously invalid and is now restored, licenseGate._tick
+   *     resumes the bot.
+   *   - Emits 'license:revalidated' event so listeners (e.g. dashboardWs) can
+   *     re-broadcast the new tier/features to the UI without waiting for the next
+   *     heartbeat.
+   *   - Idempotent — safe to receive multiple times (admin could queue from both
+   *     PATCH and apply-template in one edit).
+   */
+  async revalidate_license(payload, ctx) {
+    const reason = String(payload?.reason || 'admin_license_edit');
+    const changes = Array.isArray(payload?.changes) ? payload.changes.map(String) : [];
+    let licenseGate;
+    try {
+      licenseGate = require('./licenseGate');
+    } catch (e) {
+      logger.warn({ err: e.message }, 'admin-monitor: revalidate_license require failed');
+      return { ok: false, error: 'licenseGate_unavailable' };
+    }
+    let validation = null;
+    let validated = false;
+    try {
+      validation = await licenseGate.validate({ throwOnFail: false });
+      validated = validation !== null;
+    } catch (err) {
+      logger.warn({ err: err.message }, 'admin-monitor: revalidate_license validate() threw');
+    }
+    const newTier = validation?.license?.tier || null;
+    const newFeatures = validation?.license?.features || null;
+    ctx.eventBus?.emit?.('license:revalidated', {
+      reason,
+      changes,
+      validated,
+      tier: newTier,
+      features: newFeatures,
+      ts: Date.now(),
+    });
+    logger.warn({
+      reason,
+      changes,
+      validated,
+      tier: newTier,
+      machineStatus: validation?.machine?.status,
+    }, 'admin-monitor: license revalidated (H5 — tier/edit push)');
+    return {
+      ok: validated,
+      action: 'revalidate_license',
+      validated,
+      tier: newTier,
+      changes,
+    };
+  },
+
+  /**
    * FIX-2026-09-01 audit C8: consent_suspended — admin flips Machine.suspendedByConsent=true
    *   - Pauses botManager (stops timers + WS → no new BUYs)
    *   - Sets a sticky `_consentSuspended` flag so resume() / force_reconsent resume
