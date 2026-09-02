@@ -152,9 +152,28 @@ describe('licenseService.getTotalDeployedUsdt + withinMaxCapital (FIX-2026-08-27
     expect(Bot.find).toHaveBeenCalledTimes(2);
   });
 
-  test('DB error → returns 0 (fail-open, does not throw)', async () => {
+  test('DB error with COLD cache → returns 0 (cold-fail, does not throw)', async () => {
+    // FIX-2026-09-01 audit H4: cold cache (no lastGoodValue) falls back to 0.
+    // The previous "always 0" behavior is now reserved for the cold-cache branch;
+    // warm-cache blips return the last known good value (see next test +
+    // tests/totalDeployedFailLkg.test.js for full coverage).
+    licenseService._resetCacheForTesting();
     Bot.find.mockReturnValueOnce({ lean: () => Promise.reject(new Error('mongo down')) });
     expect(await licenseService.getTotalDeployedUsdt()).toBe(0);
+  });
+
+  test('DB error with WARM cache → returns lastGoodValue (fail-LKG, audit-H4)', async () => {
+    // FIX-2026-09-01 audit H4: after the cache has been warmed at least once,
+    // a subsequent Mongo blip returns the lastGoodValue instead of 0. This is
+    // critical for withinMaxCapital — 0 would let every BUY pass during a
+    // 5-minute outage (cap check: 0 + additional <= cap → always true).
+    licenseService._resetCacheForTesting();
+    // Warm the cache: success path populates lastGoodValue + lastGoodAt
+    Bot.find.mockReturnValueOnce({ lean: () => Promise.resolve([{ capitalPerTrade: 10, maxTrades: 5 }]) });
+    expect(await licenseService.getTotalDeployedUsdt()).toBe(50);
+    // Now simulate Mongo blip within the 5-min fail-LKG window
+    Bot.find.mockReturnValueOnce({ lean: () => Promise.reject(new Error('mongo blip')) });
+    expect(await licenseService.getTotalDeployedUsdt()).toBe(50);
   });
 
   test('withinMaxCapital: under cap → true', () => {

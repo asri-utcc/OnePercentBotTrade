@@ -30,7 +30,17 @@ const licenseGate = require('../admin-monitor/licenseGate');
 const logger = require('../utils/logger');
 
 const TOTAL_DEPLOYED_CACHE_MS = 30 * 1000;
-const _totalDeployedCache = { value: 0, at: 0 };
+// FIX-2026-09-01 audit H4: on Mongo blip, extend the cache window up to
+//   FAIL_LKG_MS so a transient blip doesn't return 0 (= unlimited) for
+//   every BUY until Mongo recovers. The last KNOWN-GOOD value (still
+//   inside the cache) is returned as a defensive approximation.
+//   This is fail-LAST-KNOWN-GOOD (not fail-open, not fail-closed): a bot
+//   that has not yet warmed the cache (cold start during Mongo outage)
+//   still returns 0, but that's the existing fallback behavior.
+//   Operators see a loud warn log per blip so a sustained outage is
+//   visible in PM2 logs.
+const FAIL_LKG_MS = 5 * 60 * 1000;
+const _totalDeployedCache = { value: 0, at: 0, lastGoodValue: 0, lastGoodAt: 0 };
 
 function _getLicense() {
   // licenseGate.lastLicense is the admin-issued License doc (NOT including
@@ -193,9 +203,36 @@ async function getTotalDeployedUsdt() {
     }
     _totalDeployedCache.value = total;
     _totalDeployedCache.at = now;
+    _totalDeployedCache.lastGoodValue = total;
+    _totalDeployedCache.lastGoodAt = now;
     return total;
   } catch (err) {
-    logger.warn({ err: err.message }, 'licenseService: getTotalDeployedUsdt query failed, treating as 0 (fail-open)');
+    // FIX-2026-09-01 audit H4: on Mongo blip, return the last KNOWN-GOOD
+    //   value (lastGoodValue, still fresh within FAIL_LKG_MS) instead of
+    //   0. The previous behavior returned 0 unconditionally, which made
+    //   `withinMaxCapital(total + additional <= cap)` always pass — so a
+    //   5-minute Mongo blip during a BUY hot-path opened the door to
+    //   unlimited new positions.
+    //   fail-LAST-KNOWN-GOOD: a bot that warmed the cache BEFORE the blip
+    //   is protected by the last good count. A bot warming the cache
+    //   DURING the blip with no prior value falls back to 0 (acceptable —
+    //   same as cold start behavior).
+    const lastGoodAge = _totalDeployedCache.lastGoodAt
+      ? now - _totalDeployedCache.lastGoodAt
+      : Infinity;
+    if (lastGoodAge <= FAIL_LKG_MS && _totalDeployedCache.lastGoodValue > 0) {
+      _totalDeployedCache.at = now + (FAIL_LKG_MS - TOTAL_DEPLOYED_CACHE_MS);
+      logger.warn({
+        err: err.message,
+        lastGoodValue: _totalDeployedCache.lastGoodValue,
+        lastGoodAgeMs: lastGoodAge,
+      }, 'licenseService: getTotalDeployedUsdt Mongo blip — returning last-known-good (fail-LKG)');
+      return _totalDeployedCache.lastGoodValue;
+    }
+    logger.warn({
+      err: err.message,
+      lastGoodAgeMs: lastGoodAge,
+    }, 'licenseService: getTotalDeployedUsdt query failed AND no recent cached value (treating as 0)');
     return 0;
   }
 }
@@ -218,6 +255,19 @@ function getTotalDeployedUsdtCached() {
  */
 function invalidateDeployedCache() {
   _totalDeployedCache.at = 0;
+}
+
+/**
+ * Test-only: clear ALL cache fields including fail-LKG (lastGoodValue/lastGoodAt).
+ * Production code only ever needs invalidateDeployedCache() — this helper exists
+ * so unit tests can isolate scenarios (a stale lastGoodValue from a prior test
+ * would otherwise bleed into the next "Mongo error → 0" assertion).
+ */
+function _resetCacheForTesting() {
+  _totalDeployedCache.value = 0;
+  _totalDeployedCache.at = 0;
+  _totalDeployedCache.lastGoodValue = 0;
+  _totalDeployedCache.lastGoodAt = 0;
 }
 
 /**
@@ -258,4 +308,5 @@ module.exports = {
   withinMaxCapital,
   invalidateDeployedCache,
   snapshot,
+  _resetCacheForTesting,
 };
