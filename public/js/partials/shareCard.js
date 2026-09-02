@@ -217,6 +217,18 @@
     return Number(n || 0).toString();
   }
 
+  // เวลาที่ generate ภาพ (BKK) — format "📸 สร้างเมื่อ 14:35:42 น."
+  function generatedAtStr(isoMs) {
+    try {
+      const d = new Date(Number(isoMs) || Date.now());
+      const bkk = new Date(d.getTime() + 7 * 60 * 60_000);
+      const hh = String(bkk.getUTCHours()).padStart(2, '0');
+      const mm = String(bkk.getUTCMinutes()).padStart(2, '0');
+      const ss = String(bkk.getUTCSeconds()).padStart(2, '0');
+      return `📸 สร้างเมื่อ ${hh}:${mm}:${ss} น.`;
+    } catch (_) { return '📸 สร้างเมื่อ —'; }
+  }
+
   function bkkDateStr(isoMs) {
     try {
       const d = new Date(Number(isoMs) || Date.now());
@@ -529,6 +541,7 @@
   <g transform="translate(${W / 2}, 970)">
     <text x="0" y="0" text-anchor="middle" font-size="13" font-weight="700" fill="${t.text}">#OnePercentBotTrade</text>
     ${zone === 'achieved' ? `<text x="0" y="20" text-anchor="middle" font-size="11" fill="${t.textMuted}">✨ ทุกวันคือโอกาส — วันนี้คุณทำได้! ✨</text>` : ''}
+    <text x="0" y="${zone === 'achieved' ? 40 : 22}" text-anchor="middle" font-size="10" fill="${t.textMuted}" opacity="0.85">${escapeXml(generatedAtStr(d.generatedAt || d.ts || Date.now()))}</text>
   </g>
 </svg>`;
     return svg;
@@ -624,12 +637,18 @@
         </div>
         <div class="share-card-actions">
           <button type="button" class="share-card-btn share-card-btn-secondary" data-close>ยกเลิก</button>
+          <button type="button" class="share-card-btn share-card-btn-telegram" id="share-card-telegram" title="ส่งการ์ดนี้ไปยัง Telegram chat ที่ตั้งค่าไว้">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor" aria-hidden="true">
+              <path d="M9.78 18.65l.28-4.23 7.68-6.92c.34-.31-.07-.46-.52-.19L7.74 13.3 3.64 12c-.88-.25-.89-.86.2-1.3l15.97-6.16c.73-.33 1.43.18 1.15 1.3l-2.72 12.81c-.19.91-.74 1.13-1.5.71L12.6 16.3l-1.99 1.93c-.23.23-.42.42-.83.42z"/>
+            </svg>
+            ส่งไป Telegram
+          </button>
           <button type="button" class="share-card-btn share-card-btn-primary" id="share-card-download">
             💾 ดาวน์โหลด PNG
           </button>
         </div>
         <div class="share-card-hint">
-          การ์ดนี้ออกแบบมาสำหรับแชร์ไปยังโซเชียลมีเดีย (IG/FB/Discord/Line) — ดาวน์โหลดแล้วอัปโหลดได้เลย
+          การ์ดนี้ออกแบบมาสำหรับแชร์ไปยังโซเชียลมีเดีย (IG/FB/Discord/Line/Telegram)
         </div>
       </div>
     `;
@@ -655,13 +674,19 @@
     const modal = ensureModal();
     const img = document.getElementById('share-card-preview-img');
     const dlBtn = document.getElementById('share-card-download');
-    const svg = buildSvg(d);
+    const tgBtn = document.getElementById('share-card-telegram');
+
+    // Stamp generation time (BKK) so the SVG footer + caption both reflect it
+    const dataWithTs = { ...d, generatedAt: Date.now() };
+    const svg = buildSvg(dataWithTs);
+    const caption = buildTelegramCaption(dataWithTs);
 
     const blob = new Blob([svg], { type: 'image/svg+xml;charset=utf-8' });
     const url = URL.createObjectURL(blob);
     img.src = url;
     img.dataset.svg = svg;
-    img.dataset.filename = defaultFilename(d);
+    img.dataset.caption = caption;
+    img.dataset.filename = defaultFilename(dataWithTs);
     img.dataset.url = url;
 
     const newDl = dlBtn.cloneNode(true);
@@ -683,8 +708,101 @@
       }
     });
 
+    // Wire Telegram button (clone to drop stale handlers)
+    if (tgBtn) {
+      const newTg = tgBtn.cloneNode(true);
+      tgBtn.parentNode.replaceChild(newTg, tgBtn);
+      newTg.addEventListener('click', async () => {
+        await sendToTelegramHandler(svg, img.dataset.caption, newTg);
+      });
+    }
+
     modal.classList.add('is-open');
     document.body.classList.add('share-card-modal-open');
+  }
+
+  // Build Telegram caption (HTML parse mode)
+  // Format: emoji + headline + PnL THB + USDT + zone + tags
+  function buildTelegramCaption(d) {
+    const zone = ZONE_THEMES[d.zone] ? d.zone : 'cold';
+    const meta = ZONE_THEMES[zone];
+    const fxRate = Number(d.fxRate) || 0;
+    const pnlUsdt = Number(d.todayPnlUsdt) || 0;
+    const pnlThb = Number(d.todayPnlThb) || (pnlUsdt * fxRate);
+    const isProfit = pnlUsdt >= 0;
+    const sign = isProfit ? '+' : '−';
+    const trades = Number(d.todayTrades) || 0;
+    const wins = Number(d.todayWins) || 0;
+    const losses = Number(d.todayLosses) || 0;
+    const winRate = Number(d.winRate) || 0;
+    const holdingCount = Number(d.holdingCount) || 0;
+    const totalUnrealizedUsdt = Number(d.totalUnrealizedUsdt) || 0;
+    const worst = d.worstPosition;
+    const usableUsdt = Number(d.usableUsdt) || 0;
+
+    const safeHtml = (s) => escapeXml(String(s));
+    const lines = [];
+    lines.push(`${meta.emoji} <b>${safeHtml(meta.headline)}</b>`);
+    lines.push(`<b>PnL: ${sign}${fmtUsdt(pnlUsdt, { dp: 2 }).replace(' USDT', '')} USDT (${fmtThb(pnlThb, { dp: 0 })})</b>`);
+    lines.push('');
+    lines.push(`📊 Trades: <b>${trades}</b> (${wins}W / ${losses}L) · Win rate: <b>${trades > 0 ? fmtPct(winRate) : '—'}</b>`);
+    lines.push(`💼 Holding: <b>${holdingCount}</b> positions · Loss: <b>${fmtUsdt(totalUnrealizedUsdt, { dp: 2 })}</b>`);
+    if (worst && worst.symbol && worst.unrealizedUsdt < 0) {
+      lines.push(`😱 Worst: <b>${safeHtml(worst.symbol)}</b> ${fmtUsdt(worst.unrealizedUsdt, { dp: 2 })}`);
+    }
+    lines.push(`💰 Usable: <b>${fmtUsdt(usableUsdt, { dp: 2 })}</b>`);
+    lines.push('');
+    lines.push(`<i>#OnePercentBotTrade · ${generatedAtStr(d.generatedAt || d.ts || Date.now())}</i>`);
+
+    // Telegram caption hard limit 1024 chars
+    const cap = lines.join('\n');
+    return cap.length > 1024 ? cap.slice(0, 1021) + '…' : cap;
+  }
+
+  async function sendToTelegramHandler(svgString, caption, btn) {
+    if (!btn) return;
+    const original = btn.innerHTML;
+    try {
+      btn.disabled = true;
+      btn.innerHTML = '⏳ กำลังแปลงเป็น PNG...';
+      // Re-rasterize fresh PNG (the blob we showed is SVG, not PNG)
+      const pngBlob = await svgStringToPngBlob(svgString);
+      if (!pngBlob) throw new Error('PNG conversion failed');
+      btn.innerHTML = '⏳ กำลังส่งไป Telegram...';
+      // base64 encode for POST
+      const arrayBuf = await pngBlob.arrayBuffer();
+      const bytes = new Uint8Array(arrayBuf);
+      let bin = '';
+      // chunk to avoid call stack overflow on large buffers
+      const CHUNK = 0x8000;
+      for (let i = 0; i < bytes.length; i += CHUNK) {
+        bin += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK));
+      }
+      const pngBase64 = btoa(bin);
+      const res = await fetch('/api/share-card/send-telegram', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pngBase64, caption }),
+        credentials: 'same-origin',
+      });
+      const json = await res.json().catch(() => ({}));
+      if (res.ok && json.ok) {
+        btn.innerHTML = '✅ ส่งแล้ว!';
+        setTimeout(() => {
+          btn.disabled = false;
+          btn.innerHTML = original;
+        }, 2200);
+      } else {
+        throw new Error(json.error || `HTTP ${res.status}`);
+      }
+    } catch (err) {
+      console.error('ShareCard telegram send failed', err);
+      btn.innerHTML = `❌ ${err.message || 'ล้มเหลว'}`;
+      setTimeout(() => {
+        btn.disabled = false;
+        btn.innerHTML = original;
+      }, 2500);
+    }
   }
 
   function closePreview() {
@@ -705,6 +823,8 @@
     downloadPng,
     showPreview,
     closePreview,
+    sendToTelegram: sendToTelegramHandler,
+    buildTelegramCaption,
     ZONE_THEMES,
     PALETTE,
     fmtThb,

@@ -874,6 +874,80 @@ function sendTelegram(token, chatId, text, opts = {}) {
   });
 }
 
+// ─── sendPhoto (multipart/form-data) ──────────────────
+// 2026-09-02: shareCard → Telegram photo upload
+//   - Accepts PNG buffer (caller must validate size + magic bytes)
+//   - caption optional (Telegram limit 1024 chars — caller enforces)
+//   - 1 retry on transient errors (429 / 5xx) — same as sendMessage
+function sendTelegramPhoto(token, chatId, photoBuffer, caption = '') {
+  return new Promise((resolve) => {
+    let attempt = 0;
+    const tryOnce = () => {
+      attempt += 1;
+      // Build multipart/form-data body manually (no extra deps)
+      const boundary = `----formdata-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      const parts = [];
+      // chat_id field
+      parts.push(Buffer.from(
+        `--${boundary}\r\nContent-Disposition: form-data; name="chat_id"\r\n\r\n${chatId}\r\n`,
+      ));
+      // caption field (optional)
+      if (caption) {
+        const capBuf = Buffer.from(caption, 'utf8');
+        parts.push(Buffer.from(
+          `--${boundary}\r\nContent-Disposition: form-data; name="caption"\r\n\r\n`,
+        ));
+        parts.push(capBuf);
+        parts.push(Buffer.from('\r\n'));
+      }
+      // photo file field
+      parts.push(Buffer.from(
+        `--${boundary}\r\nContent-Disposition: form-data; name="photo"; filename="share-card.png"\r\nContent-Type: image/png\r\n\r\n`,
+      ));
+      parts.push(photoBuffer);
+      parts.push(Buffer.from(`\r\n--${boundary}--\r\n`));
+      const body = Buffer.concat(parts);
+
+      const req = https.request({
+        method: 'POST',
+        hostname: 'api.telegram.org',
+        path: `/bot${token}/sendPhoto`,
+        headers: {
+          'Content-Type': `multipart/form-data; boundary=${boundary}`,
+          'Content-Length': body.length,
+        },
+        timeout: TELEGRAM_API_TIMEOUT_MS,
+      }, (res) => {
+        let buf = '';
+        res.on('data', (c) => (buf += c));
+        res.on('end', () => {
+          if (res.statusCode >= 200 && res.statusCode < 300) {
+            return resolve(true);
+          }
+          const transient = res.statusCode === 429 || res.statusCode >= 500;
+          if (transient && attempt < 2) {
+            return setTimeout(tryOnce, 500);
+          }
+          logger.warn(
+            { status: res.statusCode, body: buf.slice(0, 300) },
+            'telegramNotifier: sendPhoto failed',
+          );
+          resolve(false);
+        });
+      });
+      req.on('timeout', () => req.destroy(new Error('timeout')));
+      req.on('error', (err) => {
+        if (attempt < 2) return setTimeout(tryOnce, 500);
+        logger.warn({ err: err.message }, 'telegramNotifier: sendPhoto network error');
+        resolve(false);
+      });
+      req.write(body);
+      req.end();
+    };
+    tryOnce();
+  });
+}
+
 // ─── Event handlers ───────────────────────────────────
 function bindEventHandlers() {
   if (bound) return;
@@ -1757,4 +1831,6 @@ module.exports = {
   // FIX-2026-08-05: expose BNB cache สำหรับ /api/account/bnb-status route (shared cache, no extra Binance call)
   getBnbBalanceCached,
   invalidateBnbBalanceCache,
+  // 2026-09-02: shareCard → Telegram photo upload (multipart/form-data)
+  sendTelegramPhoto,
 };

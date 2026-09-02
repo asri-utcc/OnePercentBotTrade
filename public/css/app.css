@@ -4928,6 +4928,27 @@ small.text-muted {
 .share-card-modal .share-card-btn-primary:disabled {
   opacity: 0.65; cursor: wait;
 }
+
+/* FIX-2026-09-02: Telegram blue gradient button — ส่งการ์ดไป Telegram */
+.share-card-modal .share-card-btn-telegram {
+  background: linear-gradient(135deg, #29b6f6 0%, #0288d1 100%);
+  color: #ffffff;
+  border-color: #29b6f6;
+  box-shadow: 0 0 0 1px rgba(41,182,246,0.20), 0 4px 16px rgba(41,182,246,0.20);
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+}
+.share-card-modal .share-card-btn-telegram svg {
+  flex-shrink: 0;
+}
+.share-card-modal .share-card-btn-telegram:hover:not(:disabled) {
+  transform: translateY(-1px);
+  box-shadow: 0 0 0 1px rgba(41,182,246,0.40), 0 8px 24px rgba(41,182,246,0.35);
+}
+.share-card-modal .share-card-btn-telegram:disabled {
+  opacity: 0.65; cursor: wait;
+}
 .share-card-modal .share-card-hint {
   padding: 0.65rem 1.25rem 1rem;
   font-size: 0.72rem;

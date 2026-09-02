@@ -162,6 +162,8 @@ app.use('/api/admin/snapshot', require('./api/routes/adminSnapshot.routes'));
 
 // FIX-2026-08-26 Phase 2c-v2: Consent routes (public; first-run users can decide pre-login)
 app.use('/api/consent', consentRoutes);
+// 2026-09-02: Share Daily PnL Card — POST /api/share-card/send-telegram
+app.use('/api/share-card', require('./api/routes/shareCard.routes'));
 
 // Phase 4-2026-08-29: Chat routes (requireAuth) — community + DM to admin
 app.use('/api/chat', chatRoutes);
