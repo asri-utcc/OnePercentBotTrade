@@ -4788,6 +4788,171 @@ small.text-muted {
   .daily-target-bar .dtb-bar-track { height: 14px; }
 }
 
+/* ── FIX-2026-09-02: Share Daily PnL Card ─────────────────────────────────
+   ปุ่ม "📸 สร้างการ์ดแชร์" ใน popover ของ daily-target-bar + preview modal
+   - ใช้ SVG generator (shareCard.js) แทน html2canvas เพื่อไม่ต้องเพิ่ม dep
+   - รองรับ preview ก่อน download PNG 800×1000 */
+.daily-target-bar .dtb-share {
+  display: block;
+  width: 100%;
+  margin-top: 0.6rem;
+  padding: 0.55rem 0.85rem;
+  background: linear-gradient(135deg, rgba(245,184,0,0.16) 0%, rgba(245,184,0,0.06) 100%);
+  border: 1px solid rgba(245,184,0,0.45);
+  border-radius: 10px;
+  color: var(--gold-1);
+  font-family: var(--font-sans);
+  font-size: 0.8rem;
+  font-weight: 700;
+  cursor: pointer;
+  transition: all 0.18s ease;
+  text-align: center;
+}
+.daily-target-bar .dtb-share:hover:not(:disabled) {
+  background: linear-gradient(135deg, rgba(245,184,0,0.26) 0%, rgba(245,184,0,0.10) 100%);
+  border-color: var(--gold-1);
+  transform: translateY(-1px);
+  box-shadow: var(--shadow-gold);
+}
+.daily-target-bar .dtb-share:active:not(:disabled) { transform: translateY(0); }
+.daily-target-bar .dtb-share:disabled { opacity: 0.6; cursor: wait; }
+
+/* ── Share card preview modal ─────────────────────────────────────────── */
+.share-card-modal {
+  position: fixed; inset: 0; z-index: 1100;
+  display: none;
+  align-items: center; justify-content: center;
+  padding: 1rem;
+}
+.share-card-modal.is-open { display: flex; }
+.share-card-modal .share-card-backdrop {
+  position: absolute; inset: 0;
+  background: rgba(5, 8, 16, 0.78);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  animation: share-card-fade-in 0.18s ease;
+}
+.share-card-modal .share-card-dialog {
+  position: relative;
+  background: linear-gradient(180deg, var(--bg-2) 0%, var(--bg-3) 100%);
+  border: 1px solid var(--border-mid);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-3);
+  max-width: 880px;
+  width: 100%;
+  max-height: calc(100vh - 2rem);
+  display: flex; flex-direction: column;
+  animation: share-card-slide-up 0.22s cubic-bezier(.2,.8,.2,1);
+  overflow: hidden;
+}
+.share-card-modal .share-card-header {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 1rem 1.25rem;
+  border-bottom: 1px solid var(--border-soft);
+  flex: 0 0 auto;
+}
+.share-card-modal .share-card-header h3 {
+  margin: 0; font-size: 1.05rem; font-weight: 700;
+  color: var(--text-1);
+}
+.share-card-modal .share-card-close {
+  background: transparent;
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  width: 32px; height: 32px;
+  color: var(--text-3);
+  font-size: 1rem;
+  cursor: pointer;
+  transition: all 0.18s ease;
+}
+.share-card-modal .share-card-close:hover {
+  color: var(--text-1);
+  border-color: var(--border-strong);
+}
+.share-card-modal .share-card-preview-wrap {
+  flex: 1 1 auto;
+  padding: 1.25rem;
+  overflow: auto;
+  display: flex; align-items: center; justify-content: center;
+  background:
+    linear-gradient(45deg, rgba(255,255,255,0.02) 25%, transparent 25%),
+    linear-gradient(-45deg, rgba(255,255,255,0.02) 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, rgba(255,255,255,0.02) 75%),
+    linear-gradient(-45deg, transparent 75%, rgba(255,255,255,0.02) 75%);
+  background-size: 20px 20px;
+  background-position: 0 0, 0 10px, 10px -10px, -10px 0;
+}
+.share-card-modal #share-card-preview-img {
+  max-width: 100%;
+  max-height: calc(100vh - 220px);
+  height: auto;
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-3);
+  display: block;
+}
+.share-card-modal .share-card-actions {
+  display: flex; gap: 0.6rem; justify-content: flex-end;
+  padding: 1rem 1.25rem;
+  border-top: 1px solid var(--border-soft);
+  flex: 0 0 auto;
+}
+.share-card-modal .share-card-btn {
+  padding: 0.55rem 1.1rem;
+  border-radius: 10px;
+  font-family: var(--font-sans);
+  font-size: 0.85rem;
+  font-weight: 700;
+  cursor: pointer;
+  transition: all 0.18s ease;
+  border: 1px solid transparent;
+}
+.share-card-modal .share-card-btn-secondary {
+  background: transparent;
+  border-color: var(--border-soft);
+  color: var(--text-2);
+}
+.share-card-modal .share-card-btn-secondary:hover {
+  color: var(--text-1);
+  border-color: var(--border-strong);
+}
+.share-card-modal .share-card-btn-primary {
+  background: linear-gradient(135deg, var(--gold-1) 0%, var(--gold-2) 100%);
+  color: #1a0f3a;
+  border-color: var(--gold-1);
+  box-shadow: var(--shadow-gold);
+}
+.share-card-modal .share-card-btn-primary:hover:not(:disabled) {
+  transform: translateY(-1px);
+  box-shadow: 0 0 0 1px rgba(245,184,0,0.30), 0 8px 28px rgba(245,184,0,0.28);
+}
+.share-card-modal .share-card-btn-primary:disabled {
+  opacity: 0.65; cursor: wait;
+}
+.share-card-modal .share-card-hint {
+  padding: 0.65rem 1.25rem 1rem;
+  font-size: 0.72rem;
+  color: var(--text-4);
+  text-align: center;
+  border-top: 1px dashed var(--border-soft);
+  flex: 0 0 auto;
+}
+body.share-card-modal-open { overflow: hidden; }
+
+@keyframes share-card-fade-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+@keyframes share-card-slide-up {
+  from { opacity: 0; transform: translateY(12px) scale(0.98); }
+  to   { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+@media (max-width: 600px) {
+  .share-card-modal .share-card-dialog { max-height: 100vh; border-radius: 0; }
+  .share-card-modal .share-card-actions { flex-direction: column-reverse; }
+  .share-card-modal .share-card-btn { width: 100%; }
+}
+
 /* ── FIX-2026-08-06: CBv2 cooldown banner (HYBRID — บอทยัง enabled) ─── */
 .bot-card-v2 .bc-cbv2-cooldown {
   margin-top: 0.5rem; margin-bottom: 0.55rem;

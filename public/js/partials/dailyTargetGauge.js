@@ -82,6 +82,9 @@
       <div class="dtb-popover-hint">
         🎯 เป้าหมาย THB/วัน — ตั้งค่าได้ที่ปุ่ม ✎ ขวาบน หรือใน <a href="/settings.html">Settings</a>
       </div>
+      <button type="button" class="dtb-share" id="dtb-share-btn" title="สร้างการ์ดแชร์ผลประจำวัน (PNG 800×1000)">
+        📸 สร้างการ์ดแชร์
+      </button>
     </div>
   `;
 
@@ -102,6 +105,7 @@
   const elEditSave  = document.getElementById('dtb-target-save');
   const elEditCancel= document.getElementById('dtb-target-cancel');
   const elInfoBtn   = document.getElementById('dtb-info-btn');
+  const elShareBtn  = document.getElementById('dtb-share-btn');
   const elPopover   = document.getElementById('dtb-popover');
   const popPnlUsdt  = document.getElementById('dtb-pop-pnl-usdt');
   const popPnl      = document.getElementById('dtb-pop-pnl');
@@ -317,6 +321,54 @@
     e.stopPropagation();
     elPopover.classList.toggle('is-open');
   });
+
+  // ─── Share card (lazy-load shareCard.js ครั้งแรกที่กดปุ่ม) ───────────────
+  let shareCardLoading = false;
+  function loadShareCard() {
+    return new Promise((resolve, reject) => {
+      if (window.ShareCard) return resolve(window.ShareCard);
+      if (shareCardLoading) {
+        // รอจนกว่า script จะ load เสร็จ
+        const check = setInterval(() => {
+          if (window.ShareCard) { clearInterval(check); resolve(window.ShareCard); }
+        }, 50);
+        setTimeout(() => { clearInterval(check); reject(new Error('ShareCard load timeout')); }, 5000);
+        return;
+      }
+      shareCardLoading = true;
+      const s = document.createElement('script');
+      s.src = '/js/partials/shareCard.js?v=2026-09-02-h1';
+      s.async = true;
+      s.onload = () => resolve(window.ShareCard);
+      s.onerror = () => reject(new Error('shareCard.js load failed'));
+      document.head.appendChild(s);
+    });
+  }
+  if (elShareBtn) {
+    elShareBtn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      if (!lastData) {
+        elShareBtn.textContent = '⏳ รอข้อมูล...';
+        setTimeout(() => { if (elShareBtn) elShareBtn.textContent = '📸 สร้างการ์ดแชร์'; }, 1200);
+        return;
+      }
+      const original = elShareBtn.textContent;
+      elShareBtn.disabled = true;
+      elShareBtn.textContent = '⏳ กำลังโหลด...';
+      try {
+        const ShareCard = await loadShareCard();
+        ShareCard.showPreview(lastData);
+      } catch (err) {
+        console.warn('ShareCard load failed', err);
+        elShareBtn.textContent = '❌ โหลดไม่สำเร็จ';
+      } finally {
+        setTimeout(() => {
+          elShareBtn.disabled = false;
+          elShareBtn.textContent = original;
+        }, 600);
+      }
+    });
+  }
   document.addEventListener('click', (e) => {
     if (!elBar.contains(e.target) && !elPopover.contains(e.target)) {
       elPopover.classList.remove('is-open');
