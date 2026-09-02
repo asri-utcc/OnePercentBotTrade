@@ -38,7 +38,13 @@ const WSClient = {
 
     this.ws.onclose = () => {
       this._setStatus('🔴 offline (reconnecting)');
-      setTimeout(() => this._connect(), this.reconnectDelay);
+      // FIX-2026-09-01 audit H12: add ±25% jitter to the reconnect delay so
+      //   multiple tabs/browsers hitting the same backend outage don't all
+      //   reconnect at exactly the same instant (thundering-herd). Cap stays
+      //   at 30s; on the next successful connect we reset to the base delay.
+      const base = this.reconnectDelay;
+      const jittered = Math.round(base * (0.75 + Math.random() * 0.5));
+      setTimeout(() => this._connect(), jittered);
       this.reconnectDelay = Math.min(this.reconnectDelay * 2, 30000);
     };
 
