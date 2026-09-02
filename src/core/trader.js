@@ -4523,6 +4523,52 @@ class Trader {
         recvWindow: config_recvWindow(),
       }).catch((err) => ({ error: binanceRest.formatBinanceError(err) }));
 
+      // FIX-2026-09-01 audit H8: race protection — before entering the -2010 retry
+      //   loop, query Binance for the original order status. If the original
+      //   order actually got FILLED (race between orderResp error return and
+      //   WS event delivery — Binance can reject on stale post-only check, then
+      //   accept on the actual placement), the previous code would blindly
+      //   send a 2nd BUY order with a new clientOrderId → DOUBLE POSITION on
+      //   the same signal. Fix: replace orderResp with the Binance-filled order
+      //   (which has orderId/status/executedQty/transactTime matching the rest
+      //   of the code path), exit the retry loop, and let the WS handler or
+      //   deadline-finalizer process the fill normally.
+      if (orderResp.error && orderResp.error.code === -2010) {
+        try {
+          const liveOrder = await binanceRest.getOrder({
+            symbol: this.bot.symbol,
+            origClientOrderId: clientOrderId,
+          });
+          if (liveOrder && (liveOrder.status === 'FILLED' || liveOrder.status === 'PARTIALLY_FILLED')) {
+            logger.warn({
+              botId: this.bot._id.toString(),
+              symbol: this.bot.symbol,
+              clientOrderId,
+              binanceStatus: liveOrder.status,
+              orderId: liveOrder.orderId,
+              executedQty: liveOrder.executedQty,
+            }, 'trader: H8 — original BUY order actually filled (race) — aborting retry, treating as success');
+            orderResp = liveOrder; // overwrite error with filled order; rest of code path treats as success
+          } else if (liveOrder) {
+            logger.info({
+              botId: this.bot._id.toString(),
+              clientOrderId,
+              binanceStatus: liveOrder.status,
+            }, 'trader: H8 — original order NOT filled (still pending/cancelled) — proceeding with retry');
+          }
+        } catch (statusErr) {
+          // getOrder failed (network blip) — log and proceed with retry. Better to risk
+          // a duplicate than to skip a fill. The WS _handleBuyFilled is idempotent via
+          // trade._id state filter (state='placed' guard), so even if a duplicate order
+          // goes through, the second _handleBuyFilled call is a no-op.
+          logger.warn({
+            botId: this.bot._id.toString(),
+            clientOrderId,
+            err: statusErr.message,
+          }, 'trader: H8 — getOrder pre-retry check failed (non-fatal, proceeding with retry)');
+        }
+      }
+
       // FIX-2026-08-09 (rev2): retry path — loop สูงสุด 2 ครั้ง
       //   - แต่ละรอบ: backoff (jitter ±20%) → refetch bookTicker → ลองด้วย ask - tickSize
       //   - ถ้า retry สำเร็จ: update trade.buyPrice + sync Map<clientOrderId> ทันที (P3.2)
