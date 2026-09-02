@@ -35,10 +35,17 @@ describe('licenseService.isFeatureEnabled (FIX-2026-08-27 C2)', () => {
     licenseService.invalidateDeployedCache();
   });
 
-  test('returns false for ALL features when no license', () => {
-    expect(licenseService.isFeatureEnabled('telegram')).toBe(false);
-    expect(licenseService.isFeatureEnabled('autoReserve')).toBe(false);
-    expect(licenseService.isFeatureEnabled('cbv5')).toBe(false);
+  test('FIX-2026-09-01 audit H3: safety features ON, premium OFF when no license', () => {
+    // FIX-2026-09-01 audit H3: previously ALL features defaulted OFF when
+    // no license was loaded (silently disabling CB/CBv5/safeTrade during
+    // the boot window before first heartbeat). Now safety=ON + premium=OFF.
+    expect(licenseService.isFeatureEnabled('telegram')).toBe(true);    // safety
+    expect(licenseService.isFeatureEnabled('cbv5')).toBe(true);         // safety
+    expect(licenseService.isFeatureEnabled('cb')).toBe(true);           // safety
+    expect(licenseService.isFeatureEnabled('safeTrade')).toBe(true);    // safety
+    expect(licenseService.isFeatureEnabled('autoReserve')).toBe(false); // premium
+    expect(licenseService.isFeatureEnabled('autoAddBot')).toBe(false);   // premium
+    expect(licenseService.isFeatureEnabled('autoTiming')).toBe(false);  // premium
   });
 
   test('legacy license (no features field) → telegram+cbv5 ON, autoReserve OFF', () => {

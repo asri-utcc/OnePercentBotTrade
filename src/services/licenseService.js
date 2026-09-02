@@ -48,8 +48,15 @@ function _getLicense() {
 function _getFeatures() {
   const lic = _getLicense();
   if (!lic) {
-    // No license → no features. Defensive default: lock everything.
-    return _allFeatures(false);
+    // FIX-2026-09-01 audit H3: per-feature default when no license is set.
+    //   Safety features (CB/CBv5/safeTrade/telegram/...) default ON even
+    //   before the first heartbeat validates the license — fail-OPEN for
+    //   safety prevents a brief NO-protection window (e.g. bot boot,
+    //   license renewal gap) where CB would silently disable and the
+    //   bot could over-trade or skip circuit breakers.
+    //   Premium features (autoReserve/autoAddBot/autoTiming/...) default
+    //   OFF — they're admin-gated, never accidentally free.
+    return _safetyOnPremiumOff();
   }
   const f = lic.features || {};
   return {
@@ -66,6 +73,33 @@ function _getFeatures() {
     dps: f.dps !== false,
     configBackup: f.configBackup !== false,
     autoTiming: f.autoTiming === true,
+  };
+}
+
+/**
+ * FIX-2026-09-01 audit H3: split default-on (safety) vs default-off (premium).
+ *   Used only when `_getLicense()` returns null (boot window before first
+ *   admin heartbeat). Once a license IS loaded, the per-field semantics
+ *   in `_getFeatures()` apply (legacy ON-premium = match `!== false`,
+ *   new premium = strict `=== true`).
+ */
+function _safetyOnPremiumOff() {
+  return {
+    // Safety ON (defensive — better to over-protect than under)
+    telegram: true,
+    cbv5: true,
+    safeTrade: true,
+    cb: true,
+    telegramLogin: true,
+    chartMonitor: true,
+    dps: true,
+    configBackup: true,
+    // Premium OFF (admin-gated, never accidentally free)
+    autoReserve: false,
+    autoAddBot: false,
+    autoUpdateTp: false,
+    autoPauseMinKc: false,
+    autoTiming: false,
   };
 }
 
