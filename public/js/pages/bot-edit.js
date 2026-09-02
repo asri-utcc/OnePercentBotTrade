@@ -371,7 +371,7 @@ function render() {
               <!-- FIX-2026-08-10: CBv5 (Support Zone Circuit Breaker) — independent of cbVersion -->
               <div class="bot-settings-option is-full" id="cbv5-section">
                 <label class="form-check form-switch mb-0">
-                  <input type="checkbox" class="form-check-input" id="f-cbv5-enabled" ${bot.cbv5Enabled !== false ? 'checked' : ''} />
+                  <input type="checkbox" class="form-check-input" id="f-cbv5-enabled" ${bot.cbv5Enabled === true ? 'checked' : ''} />
                   <span class="form-check-label">💎 <strong>CBv5</strong> — Support Zone + Deepest Low + Volume</span>
                 </label>
                 <div class="bot-settings-dependent">

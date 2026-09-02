@@ -311,7 +311,7 @@ const botSchema = new mongoose.Schema(
     //   - manual unlock via POST /api/bots/:id/unlock-cbv2 (HYBRID — clears all 3 versions)
     //   - watchdog Phase 5 covers DISABLED/PAUSED bots (gated by bot.cbv5Enabled)
     // ═══════════════════════════════════════════════════════════════════════
-    cbv5Enabled: { type: Boolean, default: true },
+    cbv5Enabled: { type: Boolean, default: false }, // FIX-2026-09-02: align with buildBotCreatePayload strict semantics (was default: true, caused invisible divergence with cbEnabled=false)
     cbv5LockHours: { type: Number, default: 4, min: 0.5, max: 168 },
     cbv5LockedUntil: { type: Date, default: null },
     cbv5LockReason: { type: String, default: null }, // 'cbv5_panic' | null
