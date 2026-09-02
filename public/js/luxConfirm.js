@@ -41,10 +41,13 @@
 
       const modalEl = document.getElementById('confirmActionModal');
       if (!modalEl) {
-        // FIX 2026-09-01 audit H10: fallback when modal markup missing — use themed
-        // AdminModalAlert (themed modal) instead of native window.confirm().
-        // If AdminModalAlert itself is missing (very early load), degrade to native
-        // prompt as last-resort.
+        // FIX-2026-09-01 audit H10: fallback when neither #confirmActionModal nor
+        //   AdminModalAlert is available — build a minimal inline themed modal
+        //   dynamically. The previous code fell back to window.confirm() which
+        //   violates the project rule "no native dialogs" (browser-styled popup
+        //   that the dashboard's CSS can't theme + can't show password input).
+        //   The inline modal is themed, supports password input, and is removed
+        //   from the DOM after the user dismisses it.
         if (window.AdminModalAlert && typeof window.AdminModalAlert.confirm === 'function') {
           window.AdminModalAlert.confirm({
             title,
@@ -54,10 +57,12 @@
           }).then((ok) => resolve(ok ? '' : null));
           return;
         }
-        // Last-resort: native confirm (defensive — should never hit in practice)
-        // eslint-disable-next-line no-alert
-        const ok = window.confirm((message || sub) + (requirePassword ? ' (กรุณาตอบ OK แล้วใส่รหัสที่ป้อนอัตโนมัติ)' : ''));
-        return resolve(ok ? '' : null);
+        // Last-resort: themed inline modal (no native dialogs allowed anywhere)
+        _ensureInlineModal({
+          variant, icon, title, message: message || sub, sub,
+          requirePassword, confirmLabel, confirmGlyph,
+        }).then((pw) => resolve(pw));
+        return;
       }
 
       const header = document.getElementById('cam-header');
@@ -255,4 +260,56 @@
   window.luxAlert = luxAlert;
   window.bindPasswordToggles = bindPasswordToggles;
   window.callBotWithPassword = callBotWithPassword;
+
+  /**
+   * FIX-2026-09-01 audit H10: minimal inline themed modal — used when BOTH
+   *   #confirmActionModal and AdminModalAlert are unavailable. Builds a
+   *   themed overlay in the DOM, resolves with the user's choice (password
+   *   string or null on cancel), then removes the modal. Never falls back
+   *   to native confirm()/prompt() — those violate the project rule.
+   */
+  function _ensureInlineModal({ variant, icon, title, message, sub, requirePassword, confirmLabel, confirmGlyph }) {
+    return new Promise((resolve) => {
+      const id = `luxInlineModal_${Date.now()}`;
+      const overlay = document.createElement('div');
+      overlay.id = id;
+      overlay.className = `lux-inline-modal-overlay lux-inline-is-${variant || 'warning'}`;
+      overlay.innerHTML = `
+        <div class="lux-inline-modal">
+          <div class="lux-inline-modal-header">
+            <span class="lux-inline-icon">${icon || '⚠️'}</span>
+            <h3 class="lux-inline-title">${title || 'ยืนยัน'}</h3>
+          </div>
+          <div class="lux-inline-modal-body">
+            <p class="lux-inline-message">${message || sub || ''}</p>
+            ${requirePassword ? '<input type="password" class="lux-inline-pw" placeholder="รหัสยืนยัน" autocomplete="off" />' : ''}
+          </div>
+          <div class="lux-inline-modal-footer">
+            <button type="button" class="lux-inline-cancel">ยกเลิก</button>
+            <button type="button" class="lux-inline-confirm">${confirmGlyph || '✓'} ${confirmLabel || 'ยืนยัน'}</button>
+          </div>
+        </div>
+      `;
+      document.body.appendChild(overlay);
+
+      const pwInput = overlay.querySelector('.lux-inline-pw');
+      const confirmBtn = overlay.querySelector('.lux-inline-confirm');
+      const cancelBtn = overlay.querySelector('.lux-inline-cancel');
+      const finish = (val) => {
+        try { document.body.removeChild(overlay); } catch (_) {}
+        document.removeEventListener('keydown', onKey);
+        resolve(val);
+      };
+      const onKey = (e) => {
+        if (e.key === 'Escape') { e.preventDefault(); finish(null); }
+        else if (e.key === 'Enter' && pwInput) { e.preventDefault(); confirmBtn.click(); }
+      };
+      document.addEventListener('keydown', onKey);
+      confirmBtn.addEventListener('click', () => finish(requirePassword ? (pwInput ? pwInput.value : '') : ''));
+      cancelBtn.addEventListener('click', () => finish(null));
+      overlay.addEventListener('click', (e) => { if (e.target === overlay) finish(null); });
+      // Focus the appropriate field
+      setTimeout(() => { (pwInput || confirmBtn).focus(); }, 50);
+    });
+  }
 })();

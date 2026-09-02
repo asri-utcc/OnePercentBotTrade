@@ -43,19 +43,27 @@ describe('audit-C11 chat.js — no native alert()', () => {
   });
 });
 
-describe('audit-H10 luxConfirm.js — no native window.confirm() in fallback', () => {
+describe('audit-H10 luxConfirm.js — no native window.confirm() anywhere', () => {
   test('fallback uses AdminModalAlert.confirm as primary', () => {
     // The fallback block (when #confirmActionModal is missing) must call
-    // AdminModalAlert.confirm first; native confirm only as last-resort.
+    // AdminModalAlert.confirm first; if that fails, fall through to _ensureInlineModal.
     expect(luxCode).toMatch(/window\.AdminModalAlert.*\.confirm\(/s);
   });
 
-  test('admin-modal-alert missing branch retains defensive native confirm (documented)', () => {
-    // We keep a defensive native-confirm as a true last-resort (when both
-    // modal markup AND AdminModalAlert are missing). Verify the code path exists;
-    // the documentation comment is checked against the raw (unstripped) source below.
-    expect(luxCode).toMatch(/window\.confirm\(/);
-    expect(luxRaw).toMatch(/Last-resort:\s*native confirm/);
+  test('native window.confirm() is REMOVED — even as last-resort', () => {
+    // FIX-2026-09-01 audit H10: window.confirm() violates the project rule
+    // "no native dialogs" (browser-styled popup that the dashboard's CSS
+    // can't theme + can't show password input). The previous defensive
+    // last-resort native-confirm has been removed entirely; replaced by
+    // _ensureInlineModal() which builds a themed inline modal on the fly.
+    expect(luxCode).not.toMatch(/window\.confirm\(/);
+  });
+
+  test('inline modal fallback _ensureInlineModal exists and is documented', () => {
+    // The inline-modal fallback must exist and the comment must mention
+    // "Last-resort" + "themed inline modal".
+    expect(luxCode).toMatch(/function\s+_ensureInlineModal\s*\(/);
+    expect(luxRaw).toMatch(/Last-resort:\s*themed inline modal/);
   });
 
   test('AdminModalAlert.confirm variant mapped from danger→error', () => {
