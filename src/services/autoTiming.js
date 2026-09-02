@@ -423,9 +423,16 @@ class AutoTiming {
     }, { openFromCell, tradesFromCellToday });
 
     // FIX-2026-08-30 / Phase 4: emit suppressHit event with anti-spam latch 1/bot/day/cell
+    // FIX-2026-09-01 audit H6: todayKey must use LOCAL-time date to match bucket.day/hour.
+    //   The previous code used toISOString().slice(0,10) — that's UTC. For a bot
+    //   running in BKK (+7), Monday 06:30 local = Sunday 23:30 UTC → todayKey
+    //   rolled to the previous day, breaking the "1 per bot per day per cell" latch:
+    //   two Suppress hits on Monday 06:30 and Monday 23:30 (same day, same cells)
+    //   got different todayKeys → user received duplicate Telegram messages.
+    //   bucketOf() uses local-time getDay()/getHours(), so the latch day must too.
     if (decision.blocked) {
       const latchKey = `${bot._id || bot.id}:${bucket.day}:${bucket.hour}`;
-      const todayKey = new Date(msOf(now)).toISOString().slice(0, 10); // YYYY-MM-DD
+      const todayKey = _localDateKey(msOf(now));
       const fullKey = `${latchKey}:${todayKey}`;
       if (!this._autoTimingSuppressLatched || !this._autoTimingSuppressLatched.has(fullKey)) {
         if (!this._autoTimingSuppressLatched) this._autoTimingSuppressLatched = new Set();
@@ -564,6 +571,21 @@ function bucketOf(date) {
 
 function msOf(date) {
   return date instanceof Date ? date.getTime() : Number(date);
+}
+
+/**
+ * FIX-2026-09-01 audit H6: local-time YYYY-MM-DD string for the suppressHit
+ *   latch. bucketOf() uses d.getDay()/d.getHours() (LOCAL), so the latch day
+ *   must also be local. Previously the code used toISOString().slice(0,10)
+ *   (UTC) — which disagrees with bucket.day for any timezone east/west of
+ *   the date line. For BKK (+7): Monday 06:30 local → Sunday in UTC.
+ */
+function _localDateKey(msOrDate) {
+  const d = msOrDate instanceof Date ? msOrDate : new Date(msOrDate);
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
 }
 
 function aggregateByCell(trades, config, nowMs) {
