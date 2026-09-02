@@ -3021,13 +3021,32 @@ small.text-muted {
   box-shadow: var(--shadow-3), 0 0 0 1px rgba(255,255,255,0.04) inset;
   overflow: hidden;
   color: var(--text-1);
+  /* FIX-2026-09-01 audit H11: pin header + footer, scroll body when content
+     is taller than viewport. Without this, the footer (#cam-confirm / #cam-cancel)
+     scrolls off-screen and the user can't see the buttons they're supposed to
+     click. Flex-column + flex-shrink:0 is the standard Bootstrap pattern. */
+  display: flex;
+  flex-direction: column;
+  max-height: calc(100vh - 3rem);
 }
-.modal-content.lux-modal .modal-body { padding: 1.25rem 1.4rem 0.6rem; }
+.modal-content.lux-modal .modal-header,
+.modal-content.lux-modal .modal-footer { flex-shrink: 0; }
+.modal-content.lux-modal .modal-body {
+  padding: 1.25rem 1.4rem 0.6rem;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
 .modal-content.lux-modal .modal-footer.lux-modal-footer {
   padding: 0.85rem 1.4rem 1.15rem;
   border-top: 1px solid var(--border-soft);
   background: rgba(0,0,0,0.18);
   gap: 0.55rem;
+  /* Keep the footer visually anchored even when the body scrolls. */
+  position: sticky;
+  bottom: 0;
+  z-index: 1;
 }
 
 /* Header */
