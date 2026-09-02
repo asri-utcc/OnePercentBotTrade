@@ -71,6 +71,16 @@ class AutoTiming {
       openFromCell: new Map(), // key → count of currently-open positions from this cell
       tradesFromCellToday: new Map(), // key → count of BUYs filled today (local day) from this cell
     };
+    // FIX-2026-09-01 audit H7: telemetry write throttle — per-bot state to avoid
+    //   2 DB writes (Bot.updateOne + AutoTimingLog.create) on every BUY.
+    //   - _lastPersistAt[botId] = last time we wrote any telemetry for this bot
+    //   - _lastPersistSig[botId] = signature of last persisted decision
+    //   A new persist is triggered when EITHER the decision signature CHANGES
+    //   (state-change event — important) OR 60s have elapsed (periodic refresh).
+    //   Suppress decisions ALWAYS persist regardless of throttle (critical audit).
+    this._lastPersistAt = new Map();
+    this._lastPersistSig = new Map();
+    this._PERSIST_INTERVAL_MS = 60 * 1000; // 1 min periodic heartbeat
   }
 
   async start() {
@@ -459,43 +469,62 @@ class AutoTiming {
     }
 
     // Telemetry: persist last decision + log append
-    try {
-      await Bot.updateOne({ _id: bot._id }, {
-        $set: {
-          autoTimingLastEvaluatedAt: new Date(),
-          autoTimingLastDecision: {
-            day: bucket.day, hour: bucket.hour,
-            bandId: decision.bandId, action: decision.effectiveAction,
-            blocked: decision.blocked, reason: decision.reason,
-            source: decision.source,
+    // FIX-2026-09-01 audit H7: throttle the 2 writes per BUY. Before this fix,
+    //   every BUY → Bot.updateOne + AutoTimingLog.create = 2 DB writes. With
+    //   active bots opening BUYs every candle (every 3m/5m), this adds up to
+    //   thousands of writes/day per bot, mostly redundant (same decision
+    //   repeated). Throttle: write on state-change, OR every 60s, OR on
+    //   Suppress (always — critical audit).
+    const botId = String(bot._id || bot.id);
+    const nowMs = msOf(now);
+    const decisionSig = `${decision.effectiveAction}|${decision.blocked ? 1 : 0}|${decision.reason || ''}|${bucket.day}|${bucket.hour}`;
+    const lastAt = this._lastPersistAt.get(botId) || 0;
+    const lastSig = this._lastPersistSig.get(botId) || '';
+    const elapsed = nowMs - lastAt;
+    const sigChanged = lastSig !== decisionSig;
+    const isSuppress = decision.blocked === true;
+    const shouldPersist = sigChanged || isSuppress || elapsed >= this._PERSIST_INTERVAL_MS;
+    if (shouldPersist) {
+      try {
+        await Bot.updateOne({ _id: bot._id }, {
+          $set: {
+            autoTimingLastEvaluatedAt: new Date(),
+            autoTimingLastDecision: {
+              day: bucket.day, hour: bucket.hour,
+              bandId: decision.bandId, action: decision.effectiveAction,
+              blocked: decision.blocked, reason: decision.reason,
+              source: decision.source,
+            },
           },
-        },
-      });
-      const logPromise = AutoTimingLog.create({
-        botId: String(bot._id || bot.id),
-        ts: new Date(msOf(now)),
-        day: bucket.day, hour: bucket.hour,
-        action: decision.effectiveAction,
-        source: decision.source,
-        blocked: decision.blocked,
-        skipReason: decision.skipReason,
-        bandId: decision.bandId,
-        bandSnapshot: pickBandSnapshot(decision.band),
-        overrideApplied: decision.overrideApplied,
-        nWeighted: cellStats ? cellStats.n : 0,
-        winRate: cellStats ? cellStats.winRate : 0,
-        medianHoldMin: cellStats ? cellStats.medianHoldMin : 0,
-        // FIX-2026-08-31: persist p75HoldMin alongside median so the UI can show
-        //   both, and so future A/B tests don't need to recompute aggregations.
-        p75HoldMin: cellStats ? (cellStats.p75HoldMin || 0) : 0,
-        confidence: decision.confidence,
-        note: decision.reason,
-      });
-      if (logPromise && typeof logPromise.catch === 'function') {
-        logPromise.catch((err) => logger.warn({ err: err.message }, 'autoTiming: log append failed'));
+        });
+        const logPromise = AutoTimingLog.create({
+          botId,
+          ts: new Date(nowMs),
+          day: bucket.day, hour: bucket.hour,
+          action: decision.effectiveAction,
+          source: decision.source,
+          blocked: decision.blocked,
+          skipReason: decision.skipReason,
+          bandId: decision.bandId,
+          bandSnapshot: pickBandSnapshot(decision.band),
+          overrideApplied: decision.overrideApplied,
+          nWeighted: cellStats ? cellStats.n : 0,
+          winRate: cellStats ? cellStats.winRate : 0,
+          medianHoldMin: cellStats ? cellStats.medianHoldMin : 0,
+          // FIX-2026-08-31: persist p75HoldMin alongside median so the UI can show
+          //   both, and so future A/B tests don't need to recompute aggregations.
+          p75HoldMin: cellStats ? (cellStats.p75HoldMin || 0) : 0,
+          confidence: decision.confidence,
+          note: decision.reason,
+        });
+        if (logPromise && typeof logPromise.catch === 'function') {
+          logPromise.catch((err) => logger.warn({ err: err.message }, 'autoTiming: log append failed'));
+        }
+        this._lastPersistAt.set(botId, nowMs);
+        this._lastPersistSig.set(botId, decisionSig);
+      } catch (err) {
+        logger.warn({ err: err.message }, 'autoTiming: telemetry write failed');
       }
-    } catch (err) {
-      logger.warn({ err: err.message }, 'autoTiming: telemetry write failed');
     }
 
     return decision;
