@@ -3914,14 +3914,47 @@ class Trader {
         // schedule retry ตอน cooldown หมด (กัน drop signal ที่อาจ valid)
         // FIX-2026-07-31 (BUG-14): track handle (T5) + clear ใน stop() — fixed candle stale (placeBuy
         //   ใช้ candle จาก outer scope → หลัง cooldown อาจเป็น candle เก่า → re-evaluate ด้วย fresh kline)
+        // FIX-2026-09-01 audit H14: actually fetch the fresh kline for this symbol at retry time.
+        //   - If a newer candle has been closed in the meantime (closeTime > signalDoc.candleCloseTime),
+        //     the signal is for a candle that's no longer the latest → drop it (don't re-evaluate with
+        //     stale candle). The signal stays marked 'cooldown' so onCandleClosed for the new candle
+        //     will see the latest state and decide.
+        //   - If the same candle is still latest → use the fresh kline fields (close, volume, kc upper/lower)
+        //     so the placeBuy logic downstream sees fresh data, not the snapshot from minutes ago.
+        //   - This prevents a 5m bot from re-evaluating a 5m-candle that closed 20 minutes ago with the
+        //     prices at the time of close (a stale-candle BUY is effectively a phantom signal).
+        const signalCandleCloseTime = signalDoc?.candleCloseTime || (candle && candle.closeTime);
         clearTimeout(this.buyCooldownTimer);
-        this.buyCooldownTimer = setTimeout(() => {
+        this.buyCooldownTimer = setTimeout(async () => {
           this.buyCooldownTimer = null;
-          if (this.running && this.bot.enabled && !this.buyInFlight) {
-            logger.info({ botId: this.bot._id.toString() }, 'trader: cooldown expired — re-evaluating placeBuy');
-            // re-enter placeBuy — internal guards จะเช็คอีกครั้ง
-            this.placeBuy(signalDoc, candle).catch((err) =>
-              logger.warn({ err: err.message }, 'trader: cooldown retry failed'));
+          if (!this.running || !this.bot.enabled || this.buyInFlight) return;
+          logger.info({ botId: this.bot._id.toString() }, 'trader: cooldown expired — re-evaluating placeBuy with fresh kline');
+          try {
+            const freshKlines = await binanceRest.getKlines({ symbol: this.bot.symbol, interval: this.bot.timeframe, limit: 2 });
+            const latestClosed = freshKlines && freshKlines.length > 0 ? freshKlines[freshKlines.length - 1] : null;
+            if (!latestClosed || latestClosed.closeTime !== signalCandleCloseTime) {
+              logger.info({
+                botId: this.bot._id.toString(),
+                signalCandleCloseTime,
+                latestCandleCloseTime: latestClosed ? latestClosed.closeTime : null,
+              }, 'trader: cooldown retry — signal candle no longer latest; dropping stale retry');
+              await Signal.updateOne({ _id: signalDoc._id }, { outcome: 'skipped', note: 'cooldown_retry_stale_candle' });
+              return;
+            }
+            // Build a fresh candle object preserving the shape callers expect.
+            const freshCandle = {
+              openTime: latestClosed.openTime,
+              closeTime: latestClosed.closeTime,
+              open: latestClosed.open,
+              high: latestClosed.high,
+              low: latestClosed.low,
+              close: latestClosed.close,
+              volume: latestClosed.volume,
+              closeTimeMs: latestClosed.closeTime,
+            };
+            await this.placeBuy(signalDoc, freshCandle);
+          } catch (err) {
+            logger.warn({ err: err.message }, 'trader: cooldown retry failed');
           }
         }, waitMs);
         if (typeof this.buyCooldownTimer.unref === 'function') this.buyCooldownTimer.unref();
