@@ -534,7 +534,8 @@ const BOT_DEFAULTS_SCHEMA = {
   cbv2LockHours: 8,
   cbv3Enabled: true,
   cbv3LockHours: 8,
-  cbv5Enabled: true,
+  // FIX-2026-09-03: CBv5 opt-in across all tiers (was true) — see src/services/tierTemplates.js
+  cbv5Enabled: false,
   cbv5LockHours: 4,
   cbv5KcLen: 20,
   cbv5KcMult: 1.2,

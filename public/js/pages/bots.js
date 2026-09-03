@@ -792,21 +792,23 @@ function setupEventHandlers() {
   //   - Frontend mirror so user sees instant feedback before submit
   //   - Server-side buildBotCreatePayload already applies tier on POST (single source of truth)
   const TIER_PRESETS_FRONTEND = {
+    // FIX-2026-09-03: CBv5 opt-in across all tiers (was cbv5Enabled:true).
+    //   Mirror of src/services/tierTemplates.js. User directive: "ปิด CBv5 ใน tier preset ทั้งหมด".
     basic: {
       capitalPerTrade: 5, maxTrades: 3, tpPercent: 0.281, retryMax: 1, retryTimeMin: 0.5,
-      cbv5Enabled: true, cbv5LockHours: 8, cbAutoUnlockEnabled: false, cbv3Enabled: false,
+      cbv5Enabled: false, cbv5LockHours: 8, cbAutoUnlockEnabled: false, cbv3Enabled: false,
       autoArmStopLossOnUKC: true, autoUpdateTp: false,
       dcaEnabled: false, martingaleEnabled: false,
     },
     pro: {
       capitalPerTrade: 10, maxTrades: 10, tpPercent: 0.5, retryMax: 3, retryTimeMin: 0.2,
-      cbv5Enabled: true, cbv5LockHours: 4, cbAutoUnlockEnabled: true, cbv3Enabled: true,
+      cbv5Enabled: false, cbv5LockHours: 4, cbAutoUnlockEnabled: true, cbv3Enabled: true,
       autoArmStopLossOnUKC: true, autoUpdateTp: true,
       dcaEnabled: false, martingaleEnabled: false,
     },
     enterprise: {
       capitalPerTrade: 25, maxTrades: 20, tpPercent: 1.0, retryMax: 8, retryTimeMin: 0.1,
-      cbv5Enabled: true, cbv5LockHours: 2, cbAutoUnlockEnabled: true, cbv3Enabled: true,
+      cbv5Enabled: false, cbv5LockHours: 2, cbAutoUnlockEnabled: true, cbv3Enabled: true,
       autoArmStopLossOnUKC: true, autoUpdateTp: true,
       dcaEnabled: false, martingaleEnabled: false, stopLossOnUpperKC: true,
     },

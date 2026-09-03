@@ -205,13 +205,23 @@ describe('buildBotCreatePayload — tier integration (FIX-2026-08-27)', () => {
     expect(p.capitalPerTrade).toBe(99);
   });
 
-  test('cbv5Enabled differs across tiers (basic/pro=true, all inherit)', () => {
+  test('cbv5Enabled=false across all tiers (FIX-2026-09-03: opt-in only)', () => {
+    // Regression guard for fleet-wide silent divergence (20 bots had cbEnabled=false but cbv5Enabled=true).
+    // User directive 2026-09-02: "ปิด CBv5 ใน tier preset ทั้งหมด".
+    // Tier presets must NOT silently enable CBv5; admin must explicitly opt-in per-bot.
     const basic = buildBotCreatePayload({ tier: 'basic', fallbacks: {} });
     const pro = buildBotCreatePayload({ tier: 'pro', fallbacks: {} });
     const ent = buildBotCreatePayload({ tier: 'enterprise', fallbacks: {} });
-    expect(basic.cbv5Enabled).toBe(true);
-    expect(pro.cbv5Enabled).toBe(true);
-    expect(ent.cbv5Enabled).toBe(true);
+    expect(basic.cbv5Enabled).toBe(false);
+    expect(pro.cbv5Enabled).toBe(false);
+    expect(ent.cbv5Enabled).toBe(false);
+  });
+
+  test('cbv5LockHours still present (hint for opt-in re-enable)', () => {
+    // Lock hours are still in the preset so if admin re-enables per-bot, defaults are sensible.
+    expect(TIER_PRESETS.basic.cbv5LockHours).toBe(8);
+    expect(TIER_PRESETS.pro.cbv5LockHours).toBe(4);
+    expect(TIER_PRESETS.enterprise.cbv5LockHours).toBe(2);
   });
 
   test('basic tier keeps capitalPerTrade=5 even when botDefaults.capitalPerTrade differs', () => {

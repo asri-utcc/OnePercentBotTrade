@@ -1277,7 +1277,8 @@ router.put('/:id', requireAuth, async (req, res) => {
           // FIX-2026-08-10: 24h volume guard for Auto Pause-Resume (0..1B USDT, default 1M, integer)
           bot[k] = Math.min(1_000_000_000, Math.max(0, Math.round(parseFloat(data[k]))));
         } else if (k === 'cbv5Enabled' || k === 'cbv5StrictBreak' || k === 'cbv5UseVolume') {
-          // FIX-2026-08-14: CBv5 boolean toggles — default true (cbv5Enabled) / true (strictBreak, useVolume)
+          // FIX-2026-09-03: CBv5 boolean toggles — strict opt-in (was default true).
+          //   Mirrors buildBotCreatePayload: only === true / 'true' enables; everything else → false.
           bot[k] = data[k] === true || data[k] === 'true';
         } else if (k === 'cbv5LockHours') {
           // FIX-2026-08-14: CBv5 lock duration (0.5..168, default 4)

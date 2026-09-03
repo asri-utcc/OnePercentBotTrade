@@ -269,10 +269,12 @@ describe('botDefaults — CBv5 default OFF (FIX-2026-09-02)', () => {
     const p = buildBotCreatePayload({ botDefaults: { cbv5Enabled: true } });
     expect(p.cbv5Enabled).toBe(true);
   });
-  test('tier preset cbv5Enabled=true (basic/pro/ent) → cbv5Enabled=true (admin set paid tier)', () => {
-    expect(buildBotCreatePayload({ tier: 'basic' }).cbv5Enabled).toBe(true);
-    expect(buildBotCreatePayload({ tier: 'pro' }).cbv5Enabled).toBe(true);
-    expect(buildBotCreatePayload({ tier: 'enterprise' }).cbv5Enabled).toBe(true);
+  test('tier preset cbv5Enabled=false across all tiers (FIX-2026-09-03: was true)', () => {
+    // User directive 2026-09-02: "ปิด CBv5 ใน tier preset ทั้งหมด" — opt-in only.
+    // Tier presets must NOT silently enable CBv5; admin must explicitly set per-bot if wanted.
+    expect(buildBotCreatePayload({ tier: 'basic' }).cbv5Enabled).toBe(false);
+    expect(buildBotCreatePayload({ tier: 'pro' }).cbv5Enabled).toBe(false);
+    expect(buildBotCreatePayload({ tier: 'enterprise' }).cbv5Enabled).toBe(false);
   });
   test('strict: botDefaults.cbv5Enabled=1 → false (must be === true)', () => {
     const p = buildBotCreatePayload({ botDefaults: { cbv5Enabled: 1 } });

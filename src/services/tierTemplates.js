@@ -34,11 +34,15 @@ const TIER_PRESETS = Object.freeze({
     retryMax: 1,
     retryTimeMin: 0.5,
 
-    cbv5Enabled: true,
+    // FIX-2026-09-03: CBv5 was defaulting ON even when user disabled master Circuit Breaker.
+    //   20 bots had cbEnabled=false but cbv5Enabled=true (silent divergence), causing real losses.
+    //   User directive (2026-09-02): "ปิด CBv5 ใน tier preset ทั้งหมด" — opt-in only.
+    //   cbv5LockHours kept as hint in case admin wants to re-enable; field still settable per-bot.
+    cbv5Enabled: false,
     cbv5LockHours: 8,           // wider cooldown
     cbAutoUnlockEnabled: false, // strict — manual unlock only
     cbAutoUnlockThresholdPct: 1.0,
-    cbv3Enabled: false,         // simpler — CBv5 only
+    cbv3Enabled: false,         // simpler — CBv3 only (CBv5 must be opt-in)
     cbv3LockHours: 8,
 
     dynamicSizeEnabled: true,
@@ -60,7 +64,8 @@ const TIER_PRESETS = Object.freeze({
     retryMax: 3,
     retryTimeMin: 0.2,
 
-    cbv5Enabled: true,
+    // FIX-2026-09-03: see basic tier above — CBv5 now opt-in across all tiers.
+    cbv5Enabled: false,
     cbv5LockHours: 4,
     cbAutoUnlockEnabled: true,
     cbAutoUnlockThresholdPct: 1.0,
@@ -86,7 +91,8 @@ const TIER_PRESETS = Object.freeze({
     retryMax: 8,
     retryTimeMin: 0.1,
 
-    cbv5Enabled: true,
+    // FIX-2026-09-03: see basic tier above — CBv5 now opt-in across all tiers.
+    cbv5Enabled: false,
     cbv5LockHours: 2,           // tight — operator on standby
     cbAutoUnlockEnabled: true,
     cbAutoUnlockThresholdPct: 0.8,

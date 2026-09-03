@@ -2714,8 +2714,8 @@ const BD_RECOMMENDED = {
   cbv2LockHours: 8,
   cbv3Enabled: true,
   cbv3LockHours: 8,
-  // FIX-2026-08-14: CBv5 Advanced Setup defaults
-  cbv5Enabled: true,
+  // FIX-2026-09-03: CBv5 opt-in (was true) — see src/services/tierTemplates.js
+  cbv5Enabled: false,
   cbv5LockHours: 4,
   cbv5KcLen: 20,
   cbv5KcMult: 1.2,
