@@ -4364,6 +4364,13 @@ class Trader {
         }
         const committed = buyCommitment.getCommitted();
         const availableForNewBuy = Math.max(0, freeUsdt - reserveUsdt - committed);
+        // FIX-2026-09-03: Round-down retry path does its OWN claimBuy inside the round-down
+        //   branch (L4415). If we don't skip the second claim below, we DOUBLE-COUNT the
+        //   round-down amount (committed += adjReqWithBuffer TWICE), and when the 2nd claim
+        //   race-loses we return at L4466 WITHOUT releasing the 1st claim → permanent leak
+        //   of adjReqWithBuffer USDT. This was the root cause of the user's report that
+        //   committed=8.1524 / 7.0378 stuck for hours after a successful round-down.
+        let roundDownClaimed = false;
         if (availableForNewBuy < requiredWithBuffer) {
           // ════════════════════════════════════════════════════════════════════
           // FIX-2026-09-02: Round-down Capital (opt-in per-bot)
@@ -4436,6 +4443,9 @@ class Trader {
             requiredNotional = adjReqNotional;
             requiredWithBuffer = adjReqWithBuffer;
             claimedBuy = true;
+            // FIX-2026-09-03: mark round-down already-claimed so the post-if atomic claim
+            //   at L4470-4481 below SKIPS its own claimBuy — otherwise we'd double-count.
+            roundDownClaimed = true;
             // fall through to place order below
           } else {
             // Original behavior (feature OFF)
@@ -4454,19 +4464,26 @@ class Trader {
         //   would both pass the `availableForNewBuy >= requiredWithBuffer` check (both saw
         //   the same committed=0) and both call claimBuy — both returned true (no-op) —
         //   both placed BUYs — committed total exceeded reserve.
-        const claimed = buyCommitment.claimBuy(requiredWithBuffer, availableForNewBuy);
-        if (!claimed) {
-          // Race lost — another bot claimed in the gap between our getAccount() and our claim.
-          // Fail-closed: skip signal + release buyInFlight + clear bot status.
-          const reason = `buyCommitment race-lost: another bot claimed in window (committed=${(buyCommitment.getCommitted()).toFixed(4)} + required=${requiredWithBuffer.toFixed(4)} > available=${availableForNewBuy.toFixed(4)})`;
-          logger.warn({ botId: this.bot._id.toString(), availableForNewBuy, requiredWithBuffer, committed: buyCommitment.getCommitted() }, 'trader: balance check claim race-lost — skipping BUY to protect reserve');
-          await Signal.updateOne({ _id: signalDoc._id }, { outcome: 'skipped', note: reason });
-          this.buyInFlight = false;
-          await this.failSignal(signalDoc, reason);
-          return;
+        // FIX-2026-09-03: Skip this claim when Round-down retry already claimed at L4415
+        //   (roundDownClaimed=true). Without this guard, we'd double-count the round-down
+        //   amount and (when the 2nd claim race-loses at L4473) leak the round-down claim.
+        if (!roundDownClaimed) {
+          const claimed = buyCommitment.claimBuy(requiredWithBuffer, availableForNewBuy);
+          if (!claimed) {
+            // Race lost — another bot claimed in the gap between our getAccount() and our claim.
+            // Fail-closed: skip signal + release buyInFlight + clear bot status.
+            const reason = `buyCommitment race-lost: another bot claimed in window (committed=${(buyCommitment.getCommitted()).toFixed(4)} + required=${requiredWithBuffer.toFixed(4)} > available=${availableForNewBuy.toFixed(4)})`;
+            logger.warn({ botId: this.bot._id.toString(), availableForNewBuy, requiredWithBuffer, committed: buyCommitment.getCommitted() }, 'trader: balance check claim race-lost — skipping BUY to protect reserve');
+            await Signal.updateOne({ _id: signalDoc._id }, { outcome: 'skipped', note: reason });
+            this.buyInFlight = false;
+            await this.failSignal(signalDoc, reason);
+            return;
+          }
+          claimedBuy = true;
+          logger.debug({ botId: this.bot._id.toString(), freeUsdt, reserveUsdt, committed: buyCommitment.getCommitted(), requiredWithBuffer }, 'trader: balance check ok (claim acquired)');
+        } else {
+          logger.debug({ botId: this.bot._id.toString(), committed: buyCommitment.getCommitted(), adjReqWithBuffer: requiredWithBuffer }, 'trader: round-down already claimed — skipping 2nd claimBuy (double-count guard)');
         }
-        claimedBuy = true;
-        logger.debug({ botId: this.bot._id.toString(), freeUsdt, reserveUsdt, committed: buyCommitment.getCommitted(), requiredWithBuffer }, 'trader: balance check ok (claim acquired)');
       } catch (balErr) {
         // FIX-2026-08-21: fail-closed on balance check fail
         //   - กัน race ระหว่างบอท (Binance API hiccup ไม่ควรทำให้ reserve หลุด)
