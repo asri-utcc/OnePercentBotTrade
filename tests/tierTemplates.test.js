@@ -56,22 +56,41 @@ describe('tierTemplates — TIER_PRESETS structure (FIX-2026-08-27)', () => {
     expect(TIER_PRESETS.pro.tpPercent).toBeLessThan(TIER_PRESETS.enterprise.tpPercent);
   });
 
-  test('cbAutoUnlockEnabled progresses: basic=false, pro=true, ent=true', () => {
-    expect(TIER_PRESETS.basic.cbAutoUnlockEnabled).toBe(false);
-    expect(TIER_PRESETS.pro.cbAutoUnlockEnabled).toBe(true);
-    expect(TIER_PRESETS.enterprise.cbAutoUnlockEnabled).toBe(true);
+  test('NO *Enabled safety/feature toggles in any tier preset (FIX-2026-09-04)', () => {
+    // User directive: "ให้ผู้ใช้เป็นผู้ตั้ง ไม่ผูกกับ preset tier ใดๆ"
+    // Tier presets must not silently enable ANY safety/feature toggle.
+    const forbidden = [
+      'cbv5Enabled', 'cbv3Enabled', 'cbAutoUnlockEnabled',
+      'dynamicSizeEnabled', 'autoArmStopLossOnUKC', 'autoUpdateTp',
+      'dcaEnabled', 'martingaleEnabled',
+      'safeTradeTrendlineEnabled', 'safeTradeNoTradeEnabled',
+      'stopLossOnUpperKC', 'xs1Enabled', 'tpTrendEnabled',
+    ];
+    ['basic', 'pro', 'enterprise'].forEach(t => {
+      forbidden.forEach(f => {
+        expect(TIER_PRESETS[t][f]).toBeUndefined();
+      });
+    });
   });
 
-  test('autoUpdateTp progresses: basic=false, pro=true, ent=true', () => {
-    expect(TIER_PRESETS.basic.autoUpdateTp).toBe(false);
-    expect(TIER_PRESETS.pro.autoUpdateTp).toBe(true);
-    expect(TIER_PRESETS.enterprise.autoUpdateTp).toBe(true);
+  test('lock-hour + threshold hints remain (numeric only)', () => {
+    expect(TIER_PRESETS.basic.cbv5LockHours).toBe(8);
+    expect(TIER_PRESETS.basic.cbv3LockHours).toBe(8);
+    expect(TIER_PRESETS.basic.cbAutoUnlockThresholdPct).toBe(1.0);
+    expect(TIER_PRESETS.pro.cbv5LockHours).toBe(4);
+    expect(TIER_PRESETS.pro.cbv3LockHours).toBe(8);
+    expect(TIER_PRESETS.enterprise.cbv5LockHours).toBe(2);
+    expect(TIER_PRESETS.enterprise.cbv3LockHours).toBe(4);
+    expect(TIER_PRESETS.enterprise.cbAutoUnlockThresholdPct).toBe(0.8);
   });
 
-  test('dcaEnabled opt-in even for enterprise (risky feature)', () => {
-    expect(TIER_PRESETS.basic.dcaEnabled).toBe(false);
-    expect(TIER_PRESETS.pro.dcaEnabled).toBe(false);
-    expect(TIER_PRESETS.enterprise.dcaEnabled).toBe(false);
+  test('size/limit defaults still tier-progressive', () => {
+    expect(TIER_PRESETS.basic.capitalPerTrade).toBeLessThan(TIER_PRESETS.pro.capitalPerTrade);
+    expect(TIER_PRESETS.pro.capitalPerTrade).toBeLessThan(TIER_PRESETS.enterprise.capitalPerTrade);
+    expect(TIER_PRESETS.basic.maxTrades).toBeLessThan(TIER_PRESETS.pro.maxTrades);
+    expect(TIER_PRESETS.pro.maxTrades).toBeLessThan(TIER_PRESETS.enterprise.maxTrades);
+    expect(TIER_PRESETS.basic.tpPercent).toBeLessThan(TIER_PRESETS.pro.tpPercent);
+    expect(TIER_PRESETS.pro.tpPercent).toBeLessThan(TIER_PRESETS.enterprise.tpPercent);
   });
 });
 
@@ -205,23 +224,20 @@ describe('buildBotCreatePayload — tier integration (FIX-2026-08-27)', () => {
     expect(p.capitalPerTrade).toBe(99);
   });
 
-  test('cbv5Enabled=false across all tiers (FIX-2026-09-03: opt-in only)', () => {
-    // Regression guard for fleet-wide silent divergence (20 bots had cbEnabled=false but cbv5Enabled=true).
-    // User directive 2026-09-02: "ปิด CBv5 ใน tier preset ทั้งหมด".
-    // Tier presets must NOT silently enable CBv5; admin must explicitly opt-in per-bot.
-    const basic = buildBotCreatePayload({ tier: 'basic', fallbacks: {} });
-    const pro = buildBotCreatePayload({ tier: 'pro', fallbacks: {} });
-    const ent = buildBotCreatePayload({ tier: 'enterprise', fallbacks: {} });
-    expect(basic.cbv5Enabled).toBe(false);
-    expect(pro.cbv5Enabled).toBe(false);
-    expect(ent.cbv5Enabled).toBe(false);
-  });
-
-  test('cbv5LockHours still present (hint for opt-in re-enable)', () => {
-    // Lock hours are still in the preset so if admin re-enables per-bot, defaults are sensible.
-    expect(TIER_PRESETS.basic.cbv5LockHours).toBe(8);
-    expect(TIER_PRESETS.pro.cbv5LockHours).toBe(4);
-    expect(TIER_PRESETS.enterprise.cbv5LockHours).toBe(2);
+  test('NO safety/feature *Enabled is true across all tiers (FIX-2026-09-04)', () => {
+    // Regression guard for fleet-wide silent divergence: 28 (New Beta) bots had
+    //   cbEnabled=false but cbv3Enabled=true → LISTA got hit today.
+    // User directive: "ให้ผู้ใช้เป็นผู้ตั้ง ไม่ผูกกับ preset tier ใดๆ"
+    // Circuit-breaker family only — verified by also testing buildBotCreatePayload:
+    // - tier preset no longer contributes any *Enabled
+    // - botDefaults uses strict + fallback=false for cbv3Enabled/cbv2Enabled/cbv5Enabled/cbAutoUnlockEnabled
+    ['basic', 'pro', 'enterprise'].forEach(t => {
+      const p = buildBotCreatePayload({ tier: t, fallbacks: {} });
+      expect(p.cbv5Enabled).toBe(false);
+      expect(p.cbv3Enabled).toBe(false);
+      expect(p.cbv2Enabled).toBe(false);
+      expect(p.cbAutoUnlockEnabled).toBe(false);
+    });
   });
 
   test('basic tier keeps capitalPerTrade=5 even when botDefaults.capitalPerTrade differs', () => {
@@ -234,10 +250,13 @@ describe('buildBotCreatePayload — tier integration (FIX-2026-08-27)', () => {
     expect(p.capitalPerTrade).toBe(5);
   });
 
-  test('enterprise tier unlocks stopLossOnUpperKC (basic=false)', () => {
+  test('lock-hour hints flow from tier to botDefaults merge', () => {
+    // Verify numeric hints still propagate (cbv5LockHours is NOT an *Enabled flag)
     const basic = buildBotCreatePayload({ tier: 'basic', fallbacks: {} });
+    const pro = buildBotCreatePayload({ tier: 'pro', fallbacks: {} });
     const ent = buildBotCreatePayload({ tier: 'enterprise', fallbacks: {} });
-    expect(basic.stopLossOnUpperKC).toBe(false);
-    expect(ent.stopLossOnUpperKC).toBe(true);
+    expect(basic.cbv5LockHours).toBe(8);
+    expect(pro.cbv5LockHours).toBe(4);
+    expect(ent.cbv5LockHours).toBe(2);
   });
 });

@@ -276,6 +276,28 @@ describe('botDefaults — CBv5 default OFF (FIX-2026-09-02)', () => {
     expect(buildBotCreatePayload({ tier: 'pro' }).cbv5Enabled).toBe(false);
     expect(buildBotCreatePayload({ tier: 'enterprise' }).cbv5Enabled).toBe(false);
   });
+
+  // FIX-2026-09-04: CBv3/CBv2 default OFF — same silent divergence pattern as CBv5.
+  //   28 (New Beta) bots had cbEnabled=false but cbv3Enabled=true → LISTA hit today.
+  //   cbv2Enabled default was lenient true → 2 (bAdd) bots had cbEnabled:false, cbv2Enabled:true.
+  test('CBv3 default OFF — no override/botDefaults/tier → cbv3Enabled=false', () => {
+    expect(buildBotCreatePayload({}).cbv3Enabled).toBe(false);
+  });
+  test('CBv2 default OFF — no override/botDefaults/tier → cbv2Enabled=false', () => {
+    expect(buildBotCreatePayload({}).cbv2Enabled).toBe(false);
+  });
+  test('CBv3 explicit override=true → cbv3Enabled=true (opt-in still works)', () => {
+    expect(buildBotCreatePayload({ overrides: { cbv3Enabled: true } }).cbv3Enabled).toBe(true);
+  });
+  test('CBv2 explicit override=true → cbv2Enabled=true (opt-in still works)', () => {
+    expect(buildBotCreatePayload({ overrides: { cbv2Enabled: true } }).cbv2Enabled).toBe(true);
+  });
+  test('CBv3 strict: botDefaults.cbv3Enabled=1 → false (must be === true)', () => {
+    expect(buildBotCreatePayload({ botDefaults: { cbv3Enabled: 1 } }).cbv3Enabled).toBe(false);
+  });
+  test('CBv2 strict: botDefaults.cbv2Enabled=1 → false (must be === true)', () => {
+    expect(buildBotCreatePayload({ botDefaults: { cbv2Enabled: 1 } }).cbv2Enabled).toBe(false);
+  });
   test('strict: botDefaults.cbv5Enabled=1 → false (must be === true)', () => {
     const p = buildBotCreatePayload({ botDefaults: { cbv5Enabled: 1 } });
     expect(p.cbv5Enabled).toBe(false);

@@ -791,26 +791,21 @@ function setupEventHandlers() {
   // FIX-2026-08-27 Phase 3b-1: Tier preset application (mirrors src/services/tierTemplates.js)
   //   - Frontend mirror so user sees instant feedback before submit
   //   - Server-side buildBotCreatePayload already applies tier on POST (single source of truth)
+  // FIX-2026-09-04: REWORKED — tier preset only sets SIZE/LIMIT defaults. NO *Enabled flags.
+  //   User directive: "ให้ผู้ใช้เป็นผู้ตั้ง ไม่ผูกกับ preset tier ใดๆ"
+  //   Mirror of src/services/tierTemplates.js. Safety/feature toggles must be set by user.
   const TIER_PRESETS_FRONTEND = {
-    // FIX-2026-09-03: CBv5 opt-in across all tiers (was cbv5Enabled:true).
-    //   Mirror of src/services/tierTemplates.js. User directive: "ปิด CBv5 ใน tier preset ทั้งหมด".
     basic: {
       capitalPerTrade: 5, maxTrades: 3, tpPercent: 0.281, retryMax: 1, retryTimeMin: 0.5,
-      cbv5Enabled: false, cbv5LockHours: 8, cbAutoUnlockEnabled: false, cbv3Enabled: false,
-      autoArmStopLossOnUKC: true, autoUpdateTp: false,
-      dcaEnabled: false, martingaleEnabled: false,
+      cbv5LockHours: 8, cbv3LockHours: 8, cbAutoUnlockThresholdPct: 1.0,
     },
     pro: {
       capitalPerTrade: 10, maxTrades: 10, tpPercent: 0.5, retryMax: 3, retryTimeMin: 0.2,
-      cbv5Enabled: false, cbv5LockHours: 4, cbAutoUnlockEnabled: true, cbv3Enabled: true,
-      autoArmStopLossOnUKC: true, autoUpdateTp: true,
-      dcaEnabled: false, martingaleEnabled: false,
+      cbv5LockHours: 4, cbv3LockHours: 8, cbAutoUnlockThresholdPct: 1.0,
     },
     enterprise: {
       capitalPerTrade: 25, maxTrades: 20, tpPercent: 1.0, retryMax: 8, retryTimeMin: 0.1,
-      cbv5Enabled: false, cbv5LockHours: 2, cbAutoUnlockEnabled: true, cbv3Enabled: true,
-      autoArmStopLossOnUKC: true, autoUpdateTp: true,
-      dcaEnabled: false, martingaleEnabled: false, stopLossOnUpperKC: true,
+      cbv5LockHours: 2, cbv3LockHours: 4, cbAutoUnlockThresholdPct: 0.8,
     },
   };
   function applyTierPresetToNewBot(tier) {
@@ -820,7 +815,7 @@ function setupEventHandlers() {
       return;
     }
     const set = (id, val) => { const el = document.getElementById(id); if (el != null && val != null) el.value = val; };
-    const setChecked = (id, val) => { const el = document.getElementById(id); if (el) el.checked = !!val; };
+    // FIX-2026-09-04: Only size/limit fields from preset. NO *Enabled flags set.
     set('nb-capital', preset.capitalPerTrade);
     set('nb-maxtrades', preset.maxTrades);
     set('nb-tp', preset.tpPercent);
@@ -828,13 +823,6 @@ function setupEventHandlers() {
     set('nb-retry-max', preset.retryMax);
     set('nb-cbv5-lock-hours', preset.cbv5LockHours);
     set('nb-cbv3-lock-hours', preset.cbv3LockHours);
-    setChecked('nb-cb-auto-unlock-enabled', preset.cbAutoUnlockEnabled);
-    setChecked('nb-cbv3-enabled', preset.cbv3Enabled);
-    setChecked('nb-cbv5-enabled', preset.cbv5Enabled);
-    setChecked('nb-auto-update-tp', preset.autoUpdateTp);
-    setChecked('nb-auto-arm-stop-loss-ukc', preset.autoArmStopLossOnUKC);
-    if (preset.stopLossOnUpperKC != null) setChecked('nb-stop-loss-upper-kc', preset.stopLossOnUpperKC);
-    if (preset.dcaEnabled != null) setChecked('nb-dca-enabled', preset.dcaEnabled);
   }
 
   // FIX-2026-08-14: Import/Export file-based for New Bot modal
@@ -2030,7 +2018,7 @@ function renderBotCard(b) {
       ${b.warning ? `<div class="bc-warn"><span class="bc-warn-msg">⏰ ${escapeHtml(b.warning)}</span><button class="bc-warn-dismiss" type="button" title="ปิดการแจ้งเตือนนี้" aria-label="dismiss" onclick="dismissBotWarning('${b._id}', this)">×</button></div>` : ''}
       ${hasCbv2Lock ? `<div class="bc-cbv2-cooldown"><span class="bc-cbv2-cooldown-msg">⏸ CBv2 cooldown until ${new Date(b.cbv2LockedUntil).toLocaleString()} <span class="text-muted">(${escapeHtml(b.cbv2LockReason || 'cbv2_panic')})</span> — <a href="/bot-edit.html?id=${b._id}">🔓 ปลด cooldown</a></span></div>` : ''}
       ${hasCbv3Lock ? `<div class="bc-cbv3-cooldown"><span class="bc-cbv3-cooldown-msg">⏸ CBv3 cooldown until ${new Date(b.cbv3LockedUntil).toLocaleString()} <span class="text-muted">(${escapeHtml(b.cbv3LockReason || 'cbv3_panic')})</span> — <a href="/bot-edit.html?id=${b._id}">🔓 ปลด cooldown</a></span></div>` : ''}
-      ${b.dynamicSizeEnabled === true ? `<div class="bc-dps-indicator" title="DPS — size ${b.dynamicSizeEffective || b.dynamicSizeCurrent || '?'} / layers ${b.dynamicLayersEffective || b.dynamicLayersCurrent || '?'}${b.dynamicSizeInCooldown ? ' (cooldown)' : ''}"><span class="bc-dps-label">📊 DPS</span><span class="bc-dps-value">$${b.dynamicSizeEffective || b.dynamicSizeCurrent || '?'} × ${b.dynamicLayersEffective || b.dynamicLayersCurrent || '?'} layers${b.dynamicSizeInCooldown ? ' ⏸' : ''}</span></div>` : ''}
+      ${b.dynamicSizeEnabled === true ? `<div class="bc-dps-indicator" title="DPS — size ${b.dynamicSizeEffective || b.dynamicSizeCurrent || '?'}${b.dynamicSizeInCooldown ? ' (cooldown)' : ''}"><span class="bc-dps-label">📊 DPS</span><span class="bc-dps-value">$${b.dynamicSizeEffective || b.dynamicSizeCurrent || '?'}${b.dynamicSizeInCooldown ? ' ⏸' : ''}</span></div>` : ''}
       <div class="bc-actions">
         <a href="/bot-detail.html?id=${b._id}" class="btn-lux btn-info btn-sm">📊 Detail</a>
         ${isDeleted
@@ -2230,9 +2218,11 @@ async function createBot() {
     cbEnabled: document.getElementById('nb-cb-enabled').checked, // FIX-2026-08-01: per-bot Circuit-breaker panic-sell toggle (default true) — เดิมชื่อ sls1Enabled
     // FIX-2026-08-08: only send the ACTIVE CB version's fields (other section is display:none)
     //   - cached cbVersion via window._mcCache?.cbVersion (set by applyCbVersionToNewBot)
-    cbv2Enabled: (window._newBotCbVersion || 'v3') === 'v2' ? document.getElementById('nb-cbv2-enabled').checked : true,
+    // FIX-2026-09-04: CBv2/CBv3 opt-in (FIX-2026-09-02 for cbv5). Was `: true` fallback when checkbox
+    //   missing → silent divergence. Now falls back to `false` (checkbox unchecked by default in HTML).
+    cbv2Enabled: (window._newBotCbVersion || 'v3') === 'v2' ? document.getElementById('nb-cbv2-enabled').checked : false,
     cbv2LockHours: (window._newBotCbVersion || 'v3') === 'v2' ? parseFloat(document.getElementById('nb-cbv2-lock-hours').value) : 8,
-    cbv3Enabled: (window._newBotCbVersion || 'v3') === 'v3' ? document.getElementById('nb-cbv3-enabled').checked : true,
+    cbv3Enabled: (window._newBotCbVersion || 'v3') === 'v3' ? document.getElementById('nb-cbv3-enabled').checked : false,
     cbv3LockHours: (window._newBotCbVersion || 'v3') === 'v3' ? parseFloat(document.getElementById('nb-cbv3-lock-hours').value) || 8 : 8,
     // FIX-2026-09-02: CBv5 default OFF (was incorrectly defaulted to true when checkbox absent from DOM,
     //   and HTML default was `checked` — both caused cbv5Enabled=true on bots when user thought CB was off).

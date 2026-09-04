@@ -190,9 +190,12 @@ function buildBotCreatePayload({ overrides = {}, botDefaults = {}, fallbacks = {
 
     // ── Circuit Breaker ──
     cbEnabled: pickBool(o, b, 'cbEnabled', true),
-    cbv2Enabled: pickBool(o, b, 'cbv2Enabled', true),
+    // FIX-2026-09-04: CBv2/CBv3 default OFF — user directive "ให้ผู้ใช้เป็นผู้ตั้ง ไม่ผูกกับ preset tier ใดๆ".
+    //   Was lenient default true → 28 (New Beta) bots had cbEnabled=false but cbv3Enabled=true.
+    //   LISTA got hit by CBv3 today. Mirrors cbv5Enabled fix (round 1, 2026-09-02).
+    cbv2Enabled: pickBool(o, b, 'cbv2Enabled', false, { strict: true }),
     cbv2LockHours: pickScalar(o, b, 'cbv2LockHours', 8, { clamp: [0.5, 168] }),
-    cbv3Enabled: pickBool(o, b, 'cbv3Enabled', true),
+    cbv3Enabled: pickBool(o, b, 'cbv3Enabled', false, { strict: true }),
     cbv3LockHours: pickScalar(o, b, 'cbv3LockHours', 8, { clamp: [0.5, 168] }),
     // FIX-2026-09-02: CBv5 default OFF (was lenient true → invisible divergence from cbEnabled=false caused
     //   20 bots to be force-closed by CBv5 when users thought CB was off). Tier presets still override (admins

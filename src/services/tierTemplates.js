@@ -2,112 +2,73 @@
 
 /**
  * FIX-2026-08-27 Phase 3b-1: Per-tier Bot Presets
+ * FIX-2026-09-04: REWORKED — tier preset no longer sets safety/feature toggles.
  *
  * When admin sets a License.tier (basic/pro/enterprise), new bots should be
- * pre-filled with sane defaults for that tier. Without this, every bot creation
- * is a manual 30-field tuning exercise and most users stick with the wrong
- * defaults for their tier (e.g. enterprise users using basic-tier capital=5).
+ * pre-filled with TIER-APPROPRIATE SIZING (capital, maxTrades, tpPercent, retries).
  *
  * Precedence (per field), bottom = strongest:
  *   1. fallback      — env-level config.defaults (last-resort safe)
  *   2. botDefaults   — AppConfig.botDefaults from Settings section 1️⃣
- *   3. tierPreset    — THIS FILE (admin-set tier wins over user-global)
+ *   3. tierPreset    — THIS FILE (admin-set tier sizing wins over user-global)
  *   4. overrides     — explicit user form input / scan result (wins)
  *
- * Rationale: admin-set tier is "what the customer paid for" — it should
- * override generic user defaults, but never override explicit per-field choices.
+ * **CRITICAL (FIX-2026-09-04):** Tier preset does NOT auto-enable ANY safety/feature toggle.
+ *   All *Enabled fields (cbv5Enabled, cbv3Enabled, dynamicSizeEnabled, autoArmStopLossOnUKC,
+ *   autoUpdateTp, cbAutoUnlockEnabled, dcaEnabled, martingaleEnabled, safeTradeTrendlineEnabled,
+ *   safeTradeNoTradeEnabled, stopLossOnUpperKC) are EXPLICITLY OMITTED from presets.
+ *   Rationale: silent divergence caused 28 (New Beta) bots to have cbEnabled=false but
+ *   cbv3Enabled=true; user got hit on LISTA today (-X USDT). User directive:
+ *   "ให้ผู้ใช้เป็นผู้ตั้ง ไม่ผูกกับ preset tier ใดๆ"
+ *   Lock-hours + threshold-pct kept as numeric hints for when user opts-in.
  *
  * Pattern (per tier):
  *   - capitalPerTrade: matches the typical wallet scale of that tier
  *   - maxTrades: aligns with License.maxBots (basic=10, pro=30, ent=50)
  *   - tpPercent: higher tiers → higher target (more risk appetite)
- *   - risk features (DCA, martingale, SL-UKC auto-arm): opt-in even for top tier
- *   - automation features (auto-update-TP, cb-auto-unlock): progressive unlock
+ *   - cbv*LockHours: tighter for higher tier (operator can intervene)
+ *   - NO safety/feature *Enabled flags — user must opt-in per-bot
  */
 
 const TIER_PRESETS = Object.freeze({
   basic: Object.freeze({
-    // Conservative — small positions, conservative risk
+    // FIX-2026-09-04: Tier preset now ONLY sets size/limit defaults — never safety/feature toggles.
+    //   User directive: "ให้ผู้ใช้เป็นผู้ตั้ง ไม่ผูกกับ preset tier ใดๆ"
+    //   All *Enabled flags removed — user must explicitly opt-in per-bot (CB, DPS, DCA, etc.).
+    //   Lock-hours + threshold fields kept as numeric "hints" for when user does opt-in.
     capitalPerTrade: 5,
     maxTrades: 3,
     tpPercent: 0.281,           // floor (low-vol regime default)
     retryMax: 1,
     retryTimeMin: 0.5,
 
-    // FIX-2026-09-03: CBv5 was defaulting ON even when user disabled master Circuit Breaker.
-    //   20 bots had cbEnabled=false but cbv5Enabled=true (silent divergence), causing real losses.
-    //   User directive (2026-09-02): "ปิด CBv5 ใน tier preset ทั้งหมด" — opt-in only.
-    //   cbv5LockHours kept as hint in case admin wants to re-enable; field still settable per-bot.
-    cbv5Enabled: false,
-    cbv5LockHours: 8,           // wider cooldown
-    cbAutoUnlockEnabled: false, // strict — manual unlock only
+    cbv5LockHours: 8,           // hint if user opts-in to CBv5
+    cbv3LockHours: 8,           // hint if user opts-in to CBv3
     cbAutoUnlockThresholdPct: 1.0,
-    cbv3Enabled: false,         // simpler — CBv3 only (CBv5 must be opt-in)
-    cbv3LockHours: 8,
-
-    dynamicSizeEnabled: true,
-    autoArmStopLossOnUKC: true,
-    autoUpdateTp: false,        // static TP — predictable
-
-    dcaEnabled: false,
-    martingaleEnabled: false,
-    safeTradeTrendlineEnabled: false,
-    safeTradeNoTradeEnabled: false,
-    stopLossOnUpperKC: false,
   }),
 
   pro: Object.freeze({
-    // Standard — full features but still opt-in for risky ones
     capitalPerTrade: 10,
     maxTrades: 10,
     tpPercent: 0.5,
     retryMax: 3,
     retryTimeMin: 0.2,
 
-    // FIX-2026-09-03: see basic tier above — CBv5 now opt-in across all tiers.
-    cbv5Enabled: false,
     cbv5LockHours: 4,
-    cbAutoUnlockEnabled: true,
-    cbAutoUnlockThresholdPct: 1.0,
-    cbv3Enabled: true,
     cbv3LockHours: 8,
-
-    dynamicSizeEnabled: true,
-    autoArmStopLossOnUKC: true,
-    autoUpdateTp: true,         // dynamic TP — market-aware
-
-    dcaEnabled: false,          // opt-in
-    martingaleEnabled: false,   // opt-in
-    safeTradeTrendlineEnabled: false,
-    safeTradeNoTradeEnabled: false,
-    stopLossOnUpperKC: false,
+    cbAutoUnlockThresholdPct: 1.0,
   }),
 
   enterprise: Object.freeze({
-    // Aggressive — max bots, advanced features ON
     capitalPerTrade: 25,
     maxTrades: 20,
     tpPercent: 1.0,
     retryMax: 8,
     retryTimeMin: 0.1,
 
-    // FIX-2026-09-03: see basic tier above — CBv5 now opt-in across all tiers.
-    cbv5Enabled: false,
     cbv5LockHours: 2,           // tight — operator on standby
-    cbAutoUnlockEnabled: true,
-    cbAutoUnlockThresholdPct: 0.8,
-    cbv3Enabled: true,
     cbv3LockHours: 4,
-
-    dynamicSizeEnabled: true,
-    autoArmStopLossOnUKC: true,
-    autoUpdateTp: true,
-
-    dcaEnabled: false,          // still opt-in
-    martingaleEnabled: false,   // still opt-in
-    safeTradeTrendlineEnabled: true,
-    safeTradeNoTradeEnabled: true,
-    stopLossOnUpperKC: true,
+    cbAutoUnlockThresholdPct: 0.8,
   }),
 });
 
