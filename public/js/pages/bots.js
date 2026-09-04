@@ -656,6 +656,31 @@ function setupEventHandlers() {
     });
   }
 
+  // FIX-2026-09-04: DLC mutex in New Bot modal — DCA ON blocks DLC (server also enforces 400)
+  //   - watched change: any DCA flip (Martingale has no New Bot UI toggle — fall back to server check)
+  function refreshNbDlcUi() {
+    const cb = document.getElementById('nb-dlc-enabled');
+    const baseLoss = document.getElementById('nb-dlc-base-loss-pct');
+    const warn = document.getElementById('nb-dlc-warning');
+    if (!cb) return;
+    const dcaOn = document.getElementById('nb-dca-enabled')?.checked;
+    if (dcaOn) {
+      cb.disabled = true; cb.checked = false;
+      if (baseLoss) baseLoss.disabled = true;
+      if (warn) warn.style.display = '';
+    } else {
+      cb.disabled = false;
+      if (baseLoss) baseLoss.disabled = false;
+      if (warn) warn.style.display = 'none';
+    }
+  }
+  const nbDcaEl = document.getElementById('nb-dca-enabled');
+  if (nbDcaEl && !nbDcaEl._dlcBound) {
+    nbDcaEl._dlcBound = true;
+    nbDcaEl.addEventListener('change', refreshNbDlcUi);
+  }
+  refreshNbDlcUi();
+
   // FIX-2026-08-08: apply cbVersion to new-bot modal — hide the inactive CB version
   //   - fetched from /api/admin/app-config
   //   - shows only the active version's section + matching badge text
@@ -733,6 +758,9 @@ function setupEventHandlers() {
       setChecked('nb-cbv5-use-volume', d.cbv5UseVolume);
       setChecked('nb-cb-auto-unlock-enabled', d.cbAutoUnlockEnabled);
       setChecked('nb-dynamic-size-enabled', d.dynamicSizeEnabled);
+      // FIX-2026-09-04: DLC default values from botDefaults
+      setChecked('nb-dlc-enabled', d.dlcEnabled);
+      set('nb-dlc-base-loss-pct', d.dlcBaseLossPct);
       setChecked('nb-safe-trade-enabled', d.safeTradeEnabled);
       setChecked('nb-safe-trade-trendline-enabled', d.safeTradeTrendlineEnabled);
       setChecked('nb-safe-trade-no-trade-enabled', d.safeTradeNoTradeEnabled);
@@ -2233,6 +2261,11 @@ async function createBot() {
     cbAutoUnlockThresholdPct: parseFloat(document.getElementById('nb-cb-auto-unlock-threshold') ? document.getElementById('nb-cb-auto-unlock-threshold').value : 1.0) || 1.0,
     // FIX-2026-08-08: Feature #1 — Dynamic Position Sizing (default ON)
     dynamicSizeEnabled: document.getElementById('nb-dynamic-size-enabled') ? document.getElementById('nb-dynamic-size-enabled').checked : true,
+    // FIX-2026-09-04: Dynamic Layer Control (DLC) — opt-in position-aware layer gate
+    //   - if absent from DOM (legacy/newer layout) → default OFF
+    //   - server enforces mutex with dcaEnabled/martingaleEnabled via 400
+    dlcEnabled: document.getElementById('nb-dlc-enabled') ? document.getElementById('nb-dlc-enabled').checked : false,
+    dlcBaseLossPct: document.getElementById('nb-dlc-base-loss-pct') ? parseFloat(document.getElementById('nb-dlc-base-loss-pct').value) || -10 : -10,
     safeTradeEnabled: document.getElementById('nb-safe-trade-enabled').checked, // FIX-2026-08-01: per-bot safe-trade filter (default ON)
     safeTradeTrendlineEnabled: document.getElementById('nb-safe-trade-trendline-enabled').checked, // FIX-2026-08-03: Safe-trade filter #2 (LuxAlgo trendline) — opt-in, default OFF
     safeTradeNoTradeEnabled: document.getElementById('nb-safe-trade-no-trade-enabled').checked, // FIX-2026-08-05: Safe-trade filter #3 (no-trade engulfing/SS) — opt-in, default OFF
