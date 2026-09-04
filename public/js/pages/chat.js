@@ -11,8 +11,6 @@
  *   - color + icon rendering (operator's persisted identity)
  *   - day-divider + burst timestamp suppression
  *   - reply/quote inline above message body
- *   - attachment rendering (image thumb / file link → modal preview)
- *   - 📎 button → file picker → upload (500KB cap, 5/day quota)
  *   - color swatch picker + icon dropdown (settings row)
  */
 
@@ -45,8 +43,6 @@
   let _replyTo = null;
   let _myColor = '';
   let _myIcon = '';
-  let _pendingFile = null;
-  let _quota = { used: 0, limit: 5, remaining: 5, resetAt: null };
 
   // ── Helpers ──
   function _el(id) { return document.getElementById(id); }
@@ -112,17 +108,6 @@
     if (!ta || !counter) return;
     const n = (ta.value || '').length;
     counter.textContent = `${n} / 2000`;
-  }
-
-  function _updateQuotaBar() {
-    const bar = _el('chat-quota-bar');
-    if (!bar) return;
-    if (_quota.limit == null) {
-      bar.classList.add('hidden');
-      return;
-    }
-    bar.classList.remove('hidden');
-    bar.innerHTML = `📁 <strong>${_quota.used}/${_quota.limit}</strong> used today · resets at 00:00 BKK`;
   }
 
   // ── Identity rendering row (compact chip → popover) ──
@@ -200,21 +185,6 @@
     try { await API.put('/api/chat/identity', { icon: i }); } catch (_) {}
   }
 
-  async function _loadQuota() {
-    // FIX 2026-09-01: skip the call entirely if we know the user isn't authed
-    // (otherwise the 401 itself shows up in browser console even though we catch it)
-    if (!_authed) { _updateQuotaBar(); return; }
-    try {
-      const r = await API.get('/api/chat/quota');
-      _quota = r || _quota;
-      _authed = true;
-    } catch (err) {
-      if (err && err.status === 401) _authed = false;
-      else console.warn('chat: quota load failed', err);
-    }
-    _updateQuotaBar();
-  }
-
   // ── Rendering with day-divider + burst suppression ──
   function renderMessages() {
     const wrap = _el('chat-messages');
@@ -247,7 +217,6 @@
       const replyHtml = (m.replyTo && m.replyTo.id)
         ? `<div class="chat-msg-quote" data-reply-id="${_escape(m.replyTo.id)}">↪️ <strong>${_escape(m.replyTo.displayName || '')}</strong>: ${_escape((m.replyTo.text || '').slice(0, 80))}</div>`
         : '';
-      const attachHtml = _renderAttachment(m.attachment);
 
       const tsHtml = isFirstOfBurst
         ? `<span class="chat-msg-time chat-msg-time-burst" title="${_escape(_formatTimeExact(m.createdAt))}">${_escape(_formatTime(m.createdAt))}</span>`
@@ -262,7 +231,6 @@
             ${tsHtml}
           </div>
           ${replyHtml}
-          ${attachHtml}
           <div class="chat-msg-text">${_escape(m.text)}</div>
         </div>
       `);
@@ -282,32 +250,6 @@
     return `rgba(${r},${g},${b},0.06)`;
   }
 
-  function _renderAttachment(att) {
-    if (!att || !att.id) return '';
-    const name = att.name || 'file';
-    const sizeKb = Math.max(1, Math.round((att.sizeBytes || 0) / 1024));
-    const safeUrl = att.url || `/api/chat/attachments/${encodeURIComponent(att.id)}`;
-    // FIX 2026-09-01: if the server has flagged the attachment as deleted
-    // (e.g. admin removed it, or quota reset cleaned it up), render a tombstone
-    // instead of an <img> that 404s in the console.
-    if (att.deleted) {
-      const icon = att.kind === 'image' ? '🖼' : '📄';
-      return `<div class="chat-attachment-tombstone">
-        <span class="chat-attachment-tombstone-icon">${icon}</span>
-        <span class="chat-attachment-tombstone-text"><del>${_escape(name)}</del> · removed</span>
-      </div>`;
-    }
-    if (att.kind === 'image') {
-      // FIX 2026-09-01: onerror fallback in case the file disappears between the
-      // initial render and a later lazy-load (race during admin delete).
-      return `<a href="${_escape(safeUrl)}" target="_blank" rel="noopener" class="chat-attachment-thumb" data-attachment-id="${_escape(att.id)}" data-attachment-kind="image" data-attachment-name="${_escape(name)}" data-attachment-url="${_escape(safeUrl)}">
-        <img src="${_escape(safeUrl)}" alt="${_escape(name)}" loading="lazy" onerror="this.closest('.chat-attachment-thumb').classList.add('chat-attachment-broken');this.replaceWith(Object.assign(document.createElement('div'),{className:'chat-attachment-tombstone',innerHTML:'<span class=\'chat-attachment-tombstone-icon\'>🖼</span><span class=\'chat-attachment-tombstone-text\'><del>'+this.alt.replace(/[<>&]/g,c=>({'<':'&lt;','>':'&gt;','&':'&amp;'})[c])+'</del> · removed</span>'}));" />
-        <div class="chat-attachment-meta">🖼 ${_escape(name)} · ${sizeKb} KB</div>
-      </a>`;
-    }
-    return `<a href="${_escape(safeUrl)}" target="_blank" rel="noopener" class="chat-attachment-link" data-attachment-id="${_escape(att.id)}" data-attachment-kind="text" data-attachment-name="${_escape(name)}" data-attachment-url="${_escape(safeUrl)}">📄 ${_escape(name)} · ${sizeKb} KB</a>`;
-  }
-
   function _bindMessageHandlers(wrap) {
     wrap.querySelectorAll('.chat-msg-quote').forEach((q) => {
       q.addEventListener('click', () => {
@@ -320,69 +262,6 @@
         }
       });
     });
-    wrap.querySelectorAll('.chat-attachment-thumb, .chat-attachment-link').forEach((a) => {
-      a.addEventListener('click', (e) => {
-        e.preventDefault();
-        _showAttachmentPreview({
-          id: a.dataset.attachmentId,
-          kind: a.dataset.attachmentKind,
-          name: a.dataset.attachmentName,
-          url: a.dataset.attachmentUrl,
-        });
-      });
-    });
-  }
-
-  function _showAttachmentPreview({ id, kind, name, url }) {
-    const overlay = document.createElement('div');
-    overlay.className = 'chat-attachment-preview-overlay';
-    const body = (kind === 'image')
-      ? `<img src="${_escape(url)}" alt="${_escape(name)}" style="max-width:90vw;max-height:80vh;" />`
-      : `<div class="chat-attachment-preview-text">📄 <strong>${_escape(name)}</strong></div>`;
-    overlay.innerHTML = `
-      <div class="chat-attachment-preview-modal">
-        <div class="chat-attachment-preview-head">
-          <span>📎 ${_escape(name)}</span>
-          <div>
-            <a href="#" data-action="download" class="chat-attachment-download">⬇ Download</a>
-            <button class="chat-attachment-close">✕</button>
-          </div>
-        </div>
-        <div class="chat-attachment-preview-body">${body}</div>
-      </div>
-    `;
-    document.body.appendChild(overlay);
-    overlay.addEventListener('click', (e) => {
-      if (e.target === overlay || e.target.classList.contains('chat-attachment-close')) {
-        document.body.removeChild(overlay);
-        return;
-      }
-      // FIX 2026-09-01: download via fetch+blob so same-origin cookie auth is
-      // sent (browser direct <a download href> ignores cookies → "needs authorization")
-      const dl = e.target.closest('[data-action="download"]');
-      if (dl) {
-        e.preventDefault();
-        _downloadAttachment(url, name).catch((err) => {
-          // FIX 2026-09-01 audit C11: use themed modal instead of native alert()
-          // (native alert blocks UI thread + violates bot-toast-modal-alert pattern)
-          AdminModalAlert.alert('Download failed: ' + (err && err.message || 'unknown'), 'error');
-        });
-      }
-    });
-  }
-
-  async function _downloadAttachment(url, name) {
-    const r = await fetch(url, { credentials: 'same-origin' });
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    const blob = await r.blob();
-    const blobUrl = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = blobUrl;
-    a.download = name || 'download';
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
   }
 
   // ── Reply/quote ──
@@ -455,49 +334,14 @@
   }
 
   // ── Send ──
-  async function _uploadAttachment(file) {
-    const fd = new FormData();
-    fd.append('file', file);
-    const r = await fetch('/api/chat/attachments', {
-      method: 'POST',
-      body: fd,
-      credentials: 'same-origin',
-    });
-    const json = await r.json().catch(() => ({}));
-    if (!r.ok) {
-      // FIX 2026-08-31: extract string error (was producing "[object Object]"
-      // when admin returns {ok:false, error:{nested:...}})
-      let msg = json.message || json.error;
-      if (typeof msg !== 'string') {
-        msg = (msg && (msg.error || msg.message)) || `HTTP ${r.status}`;
-      }
-      const err = new Error(typeof msg === 'string' ? msg : `HTTP ${r.status}`);
-      err.status = r.status;
-      err.body = json;
-      throw err;
-    }
-    if (json.quota) _quota = json.quota;
-    _updateQuotaBar();
-    return json.attachment;
-  }
-
   async function sendMessage(e) {
     if (e) e.preventDefault();
     const ta = _el('chat-send-text');
     const text = (ta.value || '').trim();
-    if (!text && !_pendingFile) return;
+    if (!text) return;
     const btn = _el('chat-send-btn');
     btn.disabled = true;
     try {
-      let attachment = null;
-      if (_pendingFile) {
-        try {
-          attachment = await _uploadAttachment(_pendingFile);
-        } catch (err) {
-          _setStatus('Upload failed: ' + err.message, 'error');
-          return;
-        }
-      }
       const body = { scope: _view, text };
       if (_replyTo) {
         body.replyTo = {
@@ -506,15 +350,12 @@
           text: (String(_replyTo.text || '')).slice(0, 100),
         };
       }
-      if (attachment) body.attachment = attachment;
       if (_myColor) body.color = _myColor;
       if (_myIcon) body.icon = _myIcon;
 
       const r = await API.post('/api/chat/send', body);
       _authed = true; // FIX 2026-09-01: just verified auth works
       ta.value = '';
-      _pendingFile = null;
-      _clearPendingFile();
       _updateCharCount();
       const tempClientId = r && r.id ? r.id : null;
       _messages.push({
@@ -526,7 +367,6 @@
         color: _myColor || null,
         icon: _myIcon || null,
         replyTo: body.replyTo || null,
-        attachment: body.attachment || null,
         createdAt: new Date().toISOString(),
         clientId: tempClientId,
         _optimistic: true,
@@ -535,55 +375,12 @@
       renderMessages();
       _setReply(null);
       _setStatus('');
-      // FIX 2026-09-01: quota is already updated inside _uploadAttachment on success;
-      // calling _loadQuota() again here was redundant AND produced a noisy 401 when
-      // send happened with file (upload) but quota path lost auth-state momentarily.
-      // Also skip when not authed to prevent 401 in console for text-only sends on
-      // un-authed tabs.
     } catch (err) {
       if (err && err.status === 401) _authed = false; // FIX 2026-09-01
       _setStatus(err.message || 'Send failed', 'error');
     } finally {
       btn.disabled = false;
     }
-  }
-
-  function _clearPendingFile() {
-    const inp = _el('chat-file-input');
-    if (inp) inp.value = '';
-    const preview = _el('chat-file-preview');
-    if (preview) {
-      preview.classList.add('hidden');
-      preview.innerHTML = '';
-    }
-  }
-
-  function _onFileSelected(e) {
-    const file = e.target.files && e.target.files[0];
-    if (!file) {
-      _pendingFile = null;
-      _clearPendingFile();
-      return;
-    }
-    if (file.size > 500 * 1024) {
-      _setStatus('File too large (max 500KB)', 'error');
-      e.target.value = '';
-      return;
-    }
-    _pendingFile = file;
-    const preview = _el('chat-file-preview');
-    if (!preview) return;
-    preview.classList.remove('hidden');
-    if (file.type.startsWith('image/')) {
-      const url = URL.createObjectURL(file);
-      preview.innerHTML = `<img src="${url}" alt="preview" /> <span>${_escape(file.name)} · ${Math.round(file.size / 1024)} KB</span> <button type="button" class="chat-file-clear">✕</button>`;
-    } else {
-      preview.innerHTML = `<span>📄 ${_escape(file.name)} · ${Math.round(file.size / 1024)} KB</span> <button type="button" class="chat-file-clear">✕</button>`;
-    }
-    preview.querySelector('.chat-file-clear').addEventListener('click', () => {
-      _pendingFile = null;
-      _clearPendingFile();
-    });
   }
 
   // ── View switching ──
@@ -677,16 +474,9 @@
     _el('chat-tab-community').addEventListener('click', () => setView('community'));
     _el('chat-tab-dm').addEventListener('click', () => setView('dm'));
     _el('chat-display-name-save').addEventListener('click', saveDisplayName);
-    const fileInp = _el('chat-file-input');
-    if (fileInp) fileInp.addEventListener('change', _onFileSelected);
-    const fileBtn = _el('chat-file-btn');
-    if (fileBtn && fileInp) {
-      fileBtn.addEventListener('click', () => fileInp.click());
-    }
     window.addEventListener('chat:message', (e) => onLiveMessage(e.detail));
     loadDisplayName();
     _loadMyIdentity();
-    _loadQuota();
     loadHistory({ reset: true });
     startPolling();
     if (typeof WSClient !== 'undefined' && WSClient.start) WSClient.start();

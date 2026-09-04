@@ -42,11 +42,11 @@ let _intervalMs = DEFAULT_INTERVAL_MS;
 let _batchSize = DEFAULT_BATCH;
 let _drainInFlight = false;
 
-function enqueue({ scope, text, clientId, createdAt, displayName, color, icon, replyTo, attachment }) {
+function enqueue({ scope, text, clientId, createdAt, displayName, color, icon, replyTo }) {
   const safeScope = scope === 'dm' ? 'dm' : 'community';
   const safeText = String(text || '').slice(0, 2000);
-  if (!safeText.trim() && !attachment) {
-    throw new Error('text or attachment required');
+  if (!safeText.trim()) {
+    throw new Error('text required');
   }
   const safeClientId = String(clientId || randomUUID()).slice(0, 80);
   const safeCreatedAt = createdAt || new Date().toISOString();
@@ -61,7 +61,6 @@ function enqueue({ scope, text, clientId, createdAt, displayName, color, icon, r
     color: color || null,
     icon: icon || null,
     replyTo: replyTo || null,
-    attachment: attachment || null,
     _attempts: 0,
     _queuedAt: Date.now(),
   };
@@ -81,7 +80,6 @@ function enqueue({ scope, text, clientId, createdAt, displayName, color, icon, r
     color: msg.color,
     icon: msg.icon,
     replyTo: msg.replyTo,
-    attachment: msg.attachment,
   });
   return { queued: true, id: safeClientId };
 }
@@ -138,7 +136,6 @@ async function _postOne(msg) {
     color: msg.color,
     icon: msg.icon,
     replyTo: msg.replyTo,
-    attachment: msg.attachment,
   };
   return _httpJson('POST', url, body, {
     'X-License-Key': config.licenseKey,

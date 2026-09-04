@@ -27,19 +27,20 @@ const router = express.Router();
 
 const MAX_TEXT_LENGTH = 2000;
 const MAX_NAME_LENGTH = 32;
+const MAX_COLOR_LENGTH = 16;
+const MAX_ICON_LENGTH = 8;
 
 function _badRequest(res, msg) { return res.status(400).json({ error: msg }); }
 
-// POST /api/chat/send — body: { scope: 'community'|'dm', text, clientId?, replyTo?, attachment?, color?, icon? }
+// POST /api/chat/send — body: { scope: 'community'|'dm', text, clientId?, replyTo?, color?, icon? }
 router.post('/send', requireAuth, async (req, res) => {
   try {
     const scope = req.body?.scope === 'dm' ? 'dm' : 'community';
     const text = String(req.body?.text || '').slice(0, MAX_TEXT_LENGTH);
     const replyTo = req.body?.replyTo || null;
-    const attachment = req.body?.attachment || null;
     const color = req.body?.color || null;
     const icon = req.body?.icon || null;
-    if (!text.trim() && !attachment) return _badRequest(res, 'text or attachment required');
+    if (!text.trim()) return _badRequest(res, 'text required');
     if (text.length > MAX_TEXT_LENGTH) return _badRequest(res, `text exceeds ${MAX_TEXT_LENGTH}`);
     const clientId = req.body?.clientId ? String(req.body.clientId).slice(0, 80) : undefined;
 
@@ -56,7 +57,7 @@ router.post('/send', requireAuth, async (req, res) => {
         displayName: chatLocalStore.resolveDisplayName(),
         text,
         createdAt: nowIso,
-        color, icon, replyTo, attachment,
+        color, icon, replyTo,
       });
       return res.json({
         ok: true,
@@ -69,11 +70,11 @@ router.post('/send', requireAuth, async (req, res) => {
           text,
           displayName: chatLocalStore.resolveDisplayName(),
           createdAt: nowIso,
-          color, icon, replyTo, attachment,
+          color, icon, replyTo,
         },
       });
     }
-    const result = adminMonitor.chatOutbox.enqueue({ scope, text, clientId, color, icon, replyTo, attachment });
+    const result = adminMonitor.chatOutbox.enqueue({ scope, text, clientId, color, icon, replyTo });
     res.json({ ok: true, queued: true, id: result.id });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -157,6 +158,44 @@ router.put('/display-name', requireAuth, async (req, res) => {
     res.json({ ok: true, displayName: clean, resolved: clean });
   } catch (err) {
     res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/chat/identity — returns own chat color/icon (moved here 2026-09-04 after
+//   attachments feature was removed; previously lived in chatAttachments.routes.js)
+router.get('/identity', requireAuth, async (req, res) => {
+  try {
+    const cfg = await AppConfig.findOne({ key: 'singleton' }).lean();
+    res.json({
+      displayName: (cfg && cfg.chatDisplayName) || '',
+      color: (cfg && cfg.chatColor) || '',
+      icon: (cfg && cfg.chatIcon) || '',
+    });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// PUT /api/chat/identity — body: { color?, icon? }
+router.put('/identity', requireAuth, async (req, res) => {
+  try {
+    const { color, icon } = req.body || {};
+    const update = {};
+    if (color !== undefined) update.chatColor = String(color || '').slice(0, MAX_COLOR_LENGTH);
+    if (icon !== undefined) update.chatIcon = String(icon || '').slice(0, MAX_ICON_LENGTH);
+    if (Object.keys(update).length === 0) return _badRequest(res, 'no fields');
+    const cfg = await AppConfig.findOneAndUpdate(
+      { key: 'singleton' },
+      { $set: update },
+      { upsert: true, new: true }
+    ).lean();
+    res.json({
+      ok: true,
+      color: cfg.chatColor || '',
+      icon: cfg.chatIcon || '',
+    });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
   }
 });
 

@@ -69,16 +69,6 @@ function addMessage(msg) {
     if (newId && existing.id && existing.id === newId) return false;
     if (newClientId && existing.clientId && existing.clientId === newClientId) return false;
   }
-  const attachment = msg.attachment && msg.attachment.id
-    ? {
-        id: String(msg.attachment.id),
-        kind: msg.attachment.kind || null,
-        name: msg.attachment.name || null,
-        mime: msg.attachment.mime || null,
-        sizeBytes: msg.attachment.sizeBytes || 0,
-        url: msg.attachment.url || `/api/chat/attachments/${msg.attachment.id}`,
-      }
-    : null;
   const replyTo = msg.replyTo && msg.replyTo.id
     ? {
         id: String(msg.replyTo.id),
@@ -102,7 +92,6 @@ function addMessage(msg) {
     color: msg.color || null,
     icon: msg.icon || null,
     replyTo,
-    attachment,
     deletedAt: msg.deletedAt || null,
   });
   if (buf.length > MAX_PER_SCOPE) buf.splice(0, buf.length - MAX_PER_SCOPE);

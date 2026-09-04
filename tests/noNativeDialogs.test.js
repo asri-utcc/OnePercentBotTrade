@@ -5,11 +5,12 @@
  * all confirm/alert/prompt UX must go through AdminModalAlert (themed modal) — never
  * native window.confirm/alert/prompt (blocks UI thread, breaks themed UX, security risk).
  *
- *   - chat.js:366 — was `alert('Download failed: ...')` → AdminModalAlert.alert(...)
  *   - luxConfirm.js:46 — was `window.confirm(...)` fallback → AdminModalAlert.confirm(...)
  *
- * Contract tests verify no remaining native dialogs in the 2 changed files + chat.js
- * sends to AdminModalAlert.alert with error level.
+ * Chat v2 attachment download-failure flow was REMOVED 2026-09-04 when the chat
+ * attachment feature was deleted (chat.html no longer uploads/downloads files).
+ *
+ * Contract tests verify no remaining native dialogs in the changed files.
  */
 'use strict';
 
@@ -35,11 +36,6 @@ describe('audit-C11 chat.js — no native alert()', () => {
     // Allow comments (stripped above) + check actual code.
     // Allow string literals — only check that no callable alert() exists.
     expect(chatCode).not.toMatch(/[^.\w]alert\s*\(/);
-  });
-
-  test('download failure uses AdminModalAlert.alert', () => {
-    expect(chatCode).toMatch(/AdminModalAlert\.alert\(\s*['"]Download failed:/);
-    expect(chatCode).toMatch(/AdminModalAlert\.alert\([^,]+,\s*['"]error['"]\)/);
   });
 });
 
