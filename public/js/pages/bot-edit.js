@@ -211,6 +211,30 @@ function render() {
                 </small>
               </div>
               <div class="bot-settings-option">
+                <label class="form-check form-switch">
+                  <input type="checkbox" class="form-check-input" id="f-dlc-enabled" ${bot.dlcEnabled === true ? 'checked' : ''} />
+                  <span class="form-check-label">🪜 <strong>Dynamic Layer Control (DLC)</strong></span>
+                </label>
+                <div id="dlc-warning" class="alert alert-warning py-1 px-2 mt-1" style="display:none; font-size:0.85rem;">
+                  ⚠️ ปิด DCA/Martingale ก่อนเปิด DLC (DLC จัดการ layers แยก — ใช้ร่วมกับ DCA ไม่ได้)
+                </div>
+                <small class="text-muted d-block mt-1">
+                  เปิดไม้ใหม่ได้ก็ต่อเมื่อ position ค้างขาดทุนตาม threshold แบบขั้นบันได
+                  <br />เปิด DLC จะ snapshot <code>maxTrades</code> ปัจจุบัน → reset เป็น 1
+                </small>
+                <div class="row g-2 mt-1">
+                  <div class="col-md-5">
+                    <label class="form-label small mb-0">📉 Base Loss % (ติดลบ)</label>
+                    <input type="number" class="form-control form-control-sm" id="f-dlc-base-loss-pct"
+                           min="-95" max="-1" step="0.5" value="${bot.dlcBaseLossPct ?? -10}" />
+                  </div>
+                </div>
+                <small class="text-muted d-block mt-1">
+                  k=ไม้ค้างอยู่, threshold[เก่าสุด→ใหม่สุด] = base × (k, k-1, ..., 1) × (-1)
+                  <br />เช่น base=-10, k=2 → pos#1 ต้อง &lt; -20%, pos#2 ต้อง &lt; -10%
+                </small>
+              </div>
+              <div class="bot-settings-option">
                 <label class="form-check form-switch mb-0">
                   <input type="checkbox" class="form-check-input" id="f-auto-pause-enabled" ${bot.autoPauseEnabled !== false ? 'checked' : ''} />
                   <span class="form-check-label">⏸️ <strong>หยุดบอทเมื่อ Min-%KC หรือ 24h Vol ต่ำ</strong></span>
@@ -1056,6 +1080,38 @@ function render() {
   }
   refreshDcaUi();
 
+  // FIX-2026-09-04: Dynamic Layer Control (DLC) — UI dependency on DCA/Martingale
+  //   - DLC ON + DCA/Martingale ON = conflict (enforced server-side too)
+  //   - when DCA or Martingale flips ON → DLC checkbox disabled + unchecked + warning shown
+  //   - when both flip OFF → DLC checkbox re-enabled
+  function refreshDlcUi() {
+    const cb = document.getElementById('f-dlc-enabled');
+    const baseLoss = document.getElementById('f-dlc-base-loss-pct');
+    const warn = document.getElementById('dlc-warning');
+    if (!cb) return;
+    const dcaOn = document.getElementById('f-dca-enabled')?.checked;
+    const martOn = document.getElementById('f-martingale-enabled')?.checked;
+    const blocked = dcaOn || martOn;
+    if (blocked) {
+      cb.disabled = true;
+      cb.checked = false;
+      if (baseLoss) baseLoss.disabled = true;
+      if (warn) warn.style.display = '';
+    } else {
+      // re-enable only when bot is currently NOT in DLC mode (otherwise leave checked state alone)
+      cb.disabled = false;
+      if (baseLoss) baseLoss.disabled = false;
+      if (warn) warn.style.display = 'none';
+    }
+  }
+  // Wire: re-evaluate DLC UI whenever DCA or Martingale toggles
+  const _dcaForDlc = document.getElementById('f-dca-enabled');
+  if (_dcaForDlc) _dcaForDlc.addEventListener('change', refreshDlcUi);
+  const _martForDlc = document.getElementById('f-martingale-enabled');
+  if (_martForDlc) _martForDlc.addEventListener('change', refreshDlcUi);
+  // Initial render
+  refreshDlcUi();
+
   // FIX-2026-08-03: Backtest stats toggle
   const _statsBtn = document.getElementById('dca-show-stats-btn');
   if (_statsBtn) {
@@ -1183,6 +1239,10 @@ async function save(e) {
     cbAutoUnlockThresholdPct: parseFloat(document.getElementById('f-cb-auto-unlock-threshold').value),
     // FIX-2026-08-08: Feature #1 — Dynamic Position Sizing toggle
     dynamicSizeEnabled: document.getElementById('f-dynamic-size-enabled').checked,
+    // FIX-2026-09-04: Feature — Dynamic Layer Control (DLC) — position-aware layer gate
+    //   server-side snapshot/restore of maxTrades handled by bot.routes.js
+    dlcEnabled: document.getElementById('f-dlc-enabled').checked,
+    dlcBaseLossPct: parseFloat(document.getElementById('f-dlc-base-loss-pct').value) || -10,
     safeTradeEnabled: document.getElementById('f-safe-trade-enabled').checked, // FIX-2026-08-01: per-bot safe-trade filter (default ON)
     safeTradeTrendlineEnabled: document.getElementById('f-safe-trade-trendline-enabled').checked, // FIX-2026-08-03: Safe-trade filter #2 (LuxAlgo trendline) — opt-in, default OFF
     safeTradeNoTradeEnabled: document.getElementById('f-safe-trade-no-trade-enabled').checked, // FIX-2026-08-05: Safe-trade filter #3 (no-trade engulfing/SS) — opt-in, default OFF

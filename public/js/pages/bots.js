@@ -2007,6 +2007,7 @@ function renderBotCard(b) {
       ${hasCbv2Lock ? `<div class="bc-cbv2-cooldown"><span class="bc-cbv2-cooldown-msg">⏸ CBv2 cooldown until ${new Date(b.cbv2LockedUntil).toLocaleString()} <span class="text-muted">(${escapeHtml(b.cbv2LockReason || 'cbv2_panic')})</span> — <a href="/bot-edit.html?id=${b._id}">🔓 ปลด cooldown</a></span></div>` : ''}
       ${hasCbv3Lock ? `<div class="bc-cbv3-cooldown"><span class="bc-cbv3-cooldown-msg">⏸ CBv3 cooldown until ${new Date(b.cbv3LockedUntil).toLocaleString()} <span class="text-muted">(${escapeHtml(b.cbv3LockReason || 'cbv3_panic')})</span> — <a href="/bot-edit.html?id=${b._id}">🔓 ปลด cooldown</a></span></div>` : ''}
       ${b.dynamicSizeEnabled === true ? `<div class="bc-dps-indicator" title="DPS — size ${b.dynamicSizeEffective || b.dynamicSizeCurrent || '?'}${b.dynamicSizeInCooldown ? ' (cooldown)' : ''}"><span class="bc-dps-label">📊 DPS</span><span class="bc-dps-value">$${b.dynamicSizeEffective || b.dynamicSizeCurrent || '?'}${b.dynamicSizeInCooldown ? ' ⏸' : ''}</span></div>` : ''}
+      ${b.dlcEnabled === true ? `<div class="bc-dps-indicator" title="DLC — base loss ${b.dlcBaseLossPct ?? -10}% · maxTrades=${b.maxTrades}"><span class="bc-dps-label">🪜 DLC</span><span class="bc-dps-value">${b.dlcBaseLossPct ?? -10}%</span></div>` : ''}
       <div class="bc-actions">
         <a href="/bot-detail.html?id=${b._id}" class="btn-lux btn-info btn-sm">📊 Detail</a>
         ${isDeleted

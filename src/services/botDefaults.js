@@ -245,6 +245,13 @@ function buildBotCreatePayload({ overrides = {}, botDefaults = {}, fallbacks = {
     // ── Dynamic Position Sizing ──
     dynamicSizeEnabled: pickBool(o, b, 'dynamicSizeEnabled', true),
 
+    // ── FIX-2026-09-04: Dynamic Layer Control (DLC) — position-aware layer gate ──
+    //   - default OFF (opt-in; master kill-switch `masterDlcEnabled` also default OFF)
+    //   - mutually exclusive with dcaEnabled/martingaleEnabled (enforced in routes + UI)
+    //   - dlcBaseLossPct clamp to schema range (-95..-1) to prevent inverted thresholds
+    dlcEnabled: pickBool(o, b, 'dlcEnabled', false, { strict: true }),
+    dlcBaseLossPct: pickScalar(o, b, 'dlcBaseLossPct', -10, { clamp: [-95, -1] }),
+
     // ── FIX-2026-09-02: Round-down Capital (opt-in per-bot) ──
     //   - เมื่อเงินไม่พอ: round notional ลงให้ <= available USDT เพื่อเปิด order ได้
     //   - ถ้า round แล้ว < roundDownCapitalMin → ยังคง skip signal (กัน order เล็กเกินไป)

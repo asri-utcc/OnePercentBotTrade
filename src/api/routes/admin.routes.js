@@ -596,6 +596,8 @@ router.put('/bot-defaults', requireAuth, async (req, res) => {
       's1OnlyDown', 'xs1Enabled', 'cbEnabled', 'cbv2Enabled', 'cbv3Enabled',
       'cbv5Enabled', 'cbv5StrictBreak', 'cbv5UseVolume',
       'cbAutoUnlockEnabled', 'dynamicSizeEnabled',
+      // FIX-2026-09-04: Dynamic Layer Control (DLC) — admin bulk whitelist
+      'dlcEnabled',
       'safeTradeEnabled', 'safeTradeTrendlineEnabled', 'safeTradeNoTradeEnabled',
       'autoPauseEnabled', 'autoPauseAdjustEnabled', 'autoArmStopLossOnUKC',
       'slUkcTriggerOnProfit', 'tpTrendEnabled', 'autoUpdateTp', 'stopLossOnUpperKC',
@@ -653,6 +655,17 @@ router.put('/bot-defaults', requireAuth, async (req, res) => {
     // DPS mutually exclusive with DCA/Martingale
     if (update.dynamicSizeEnabled !== false && (update.dcaEnabled === true || update.martingaleEnabled === true)) {
       return res.status(400).json({ error: 'dynamicSizeEnabled is mutually exclusive with dcaEnabled/martingaleEnabled' });
+    }
+    // FIX-2026-09-04: DLC mutex with DCA/Martingale (admin bulk-update path)
+    //   - use merged state (not just update) so existing DCA/Martingale defaults are respected
+    if (update.dlcEnabled === true) {
+      const _cfg = await AppConfig.findOne({ key: 'singleton' }).lean();
+      const _prev = _readBotDefaults(_cfg);
+      const _mergedDca = update.dcaEnabled !== undefined ? update.dcaEnabled : (_prev && _prev.dcaEnabled);
+      const _mergedMartingale = update.martingaleEnabled !== undefined ? update.martingaleEnabled : (_prev && _prev.martingaleEnabled);
+      if (_mergedDca === true || _mergedMartingale === true) {
+        return res.status(400).json({ error: 'dlcEnabled is mutually exclusive with dcaEnabled/martingaleEnabled (Dynamic Layer Control manages its own layers)' });
+      }
     }
 
     // merge กับ defaults เดิมเพื่อไม่ให้ field ที่ไม่ได้ส่งมาหาย

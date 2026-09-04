@@ -10,6 +10,7 @@ const signalEngine = require('./signalEngine');
 const indicators = require('./indicators'); // FIX-2026-08-01: needed by signalEngine.checkSafeTrade (ema)
 const volatilityScanner = require('./volatilityScanner');
 const dps = require('./dynamicPositionSizing'); // FIX-2026-08-08: Feature #1 — Dynamic Position Sizing
+const dlc = require('./dlc');                   // FIX-2026-09-04: Dynamic Layer Control (position-aware layer gate)
 const cbAutoUnlock = require('./cbAutoUnlock'); // FIX-2026-08-08: Feature #3 — Auto Unlock Cooldown
 const cbVersion = require('./cbVersion'); // FIX-2026-08-08: Feature #2 — CB Version routing (v2 vs v3)
 const cbv5MasterToggle = require('./cbv5MasterToggle'); // FIX-2026-08-12 (audit Q9): master CBv5 toggle (AppConfig.cbv5MasterEnabled)
@@ -3506,18 +3507,76 @@ class Trader {
     //   การล็อกที่บรรทัดเดิมทำให้บอท single-position ตลอด ทั้งที่ออกแบบให้รัน maxTrades ไม้พร้อมกัน
     //   ตอนนี้ใช้แค่ Trade.countDocuments เช็ค slot ตามที่ตั้งใจไว้
 
-    // เช็คจำนวนไม้ (นับ trades ที่ยังไม่จบ — placed/filled/holding/selling)
-    const activeTrades = await Trade.countDocuments({
-      botId: this.bot._id,
-      state: { $in: ['placed', 'filled', 'holding', 'selling'] },
-    });
-    if (activeTrades >= this.bot.maxTrades) {
-      logger.info({
-        botId: this.bot._id.toString(),
-        activeTrades, maxTrades: this.bot.maxTrades,
-      }, 'trader: max trades reached');
-      await Signal.updateOne({ _id: signalDoc._id }, { outcome: 'skipped', note: 'maxTrades reached' });
-      return;
+    // FIX-2026-09-04: Dynamic Layer Control gate (replaces rigid maxTrades when dlcEnabled=true)
+    //   - dlcEnabled + masterDlcEnabled → smart gate (per-position loss threshold)
+    //   - dlcEnabled off (or master off)  → legacy maxTrades count-and-compare
+    //   - position PnL computed on-the-fly from currentPrice vs buyPrice
+    //     (Trade.pnlPercent is null until SELL fills — see src/core/dlc.js)
+    if (this.bot.dlcEnabled) {
+      const _masterToggles = await masterConfig.getMasterToggles();
+      if (_masterToggles.masterDlcEnabled === true) {
+        const _dlcCfg = await masterConfig.getDlcConfig();
+        // Batch-fetch latest 1m close per unique symbol — avoid N+1 on per-position
+        const _openTradesRaw = await Trade.find({
+          botId: this.bot._id,
+          state: { $in: ['placed', 'filled', 'holding', 'selling'] },
+        }).select({ symbol: 1, buyPrice: 1, buyFilledAt: 1 }).lean();
+        const _uniqueSyms = [...new Set(_openTradesRaw.map((t) => t.symbol).filter(Boolean))];
+        const _priceBySym = {};
+        await Promise.all(_uniqueSyms.map(async (sym) => {
+          try {
+            const k = await binanceRest.getKlines({ symbol: sym, interval: '1m', limit: 1 });
+            const close = Array.isArray(k) && k.length > 0 ? Number(k[k.length - 1][4]) : null;
+            if (Number.isFinite(close)) _priceBySym[sym] = close;
+          } catch (_e) { /* leave undefined → priceLookup returns null → DLC blocks */ }
+        }));
+        const _positions = _openTradesRaw.map((t) => ({
+          buyPrice: t.buyPrice,
+          buyFilledAt: t.buyFilledAt,
+          symbol: t.symbol,
+          currentPrice: _priceBySym[t.symbol] ?? null,
+        }));
+        const _dlcDecision = dlc.evaluate({ cfg: _dlcCfg, positions: _positions });
+        if (!_dlcDecision.allow) {
+          logger.info({
+            botId: this.bot._id.toString(),
+            reason: _dlcDecision.reason,
+            blockingIdx: _dlcDecision.blockingIdx,
+            threshold: _dlcDecision.threshold,
+            openCount: _dlcDecision.openCount,
+          }, 'trader: DLC gate blocked');
+          await Signal.updateOne({ _id: signalDoc._id }, {
+            outcome: 'skipped', note: `DLC:${_dlcDecision.reason}`,
+          });
+          return;
+        }
+        // DLC allow → skip legacy maxTrades gate (DLC owns layer gating)
+      } else {
+        // masterDlcEnabled=false → fallback to legacy gate
+        const activeTrades = _openTradesRaw.length;
+        if (activeTrades >= this.bot.maxTrades) {
+          logger.info({
+            botId: this.bot._id.toString(),
+            activeTrades, maxTrades: this.bot.maxTrades,
+          }, 'trader: max trades reached (DLC master off)');
+          await Signal.updateOne({ _id: signalDoc._id }, { outcome: 'skipped', note: 'maxTrades reached' });
+          return;
+        }
+      }
+    } else {
+      // เช็คจำนวนไม้ (นับ trades ที่ยังไม่จบ — placed/filled/holding/selling) — legacy path
+      const activeTrades = await Trade.countDocuments({
+        botId: this.bot._id,
+        state: { $in: ['placed', 'filled', 'holding', 'selling'] },
+      });
+      if (activeTrades >= this.bot.maxTrades) {
+        logger.info({
+          botId: this.bot._id.toString(),
+          activeTrades, maxTrades: this.bot.maxTrades,
+        }, 'trader: max trades reached');
+        await Signal.updateOne({ _id: signalDoc._id }, { outcome: 'skipped', note: 'maxTrades reached' });
+        return;
+      }
     }
 
     // FIX-2026-08-30 / Phase 4 — Auto-Timing (heatmap-driven entry gate)

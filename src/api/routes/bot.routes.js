@@ -1132,6 +1132,16 @@ router.post('/', requireAuth, requireBotActionPassword, async (req, res) => {
       });
     }
 
+    // FIX-2026-09-04: Dynamic Layer Control mutex with DCA stack / Martingale
+    //   - DLC = position-aware layer gate (replaces maxTrades)
+    //   - DCA stack = its own layer logic (BEP-driven)
+    //   - 2 ระบบจัดการ layers พร้อมกัน → conflict; user ต้องเลือกอย่างใดอย่างหนึ่ง
+    if (data.dlcEnabled === true && (data.dcaEnabled === true || data.martingaleEnabled === true)) {
+      return res.status(400).json({
+        error: 'dlcEnabled is mutually exclusive with dcaEnabled/martingaleEnabled (Dynamic Layer Control manages its own layers; DCA stack also manages layers). Disable one of them.',
+      });
+    }
+
     // FIX-2026-08-09: build payload จาก helper เดียว (DRY — share with autoAddBot)
     //   - data = req.body (explicit user input)
     //   - botDefaults = AppConfig.botDefaults (Settings section 1️⃣)
@@ -1187,6 +1197,8 @@ router.put('/:id', requireAuth, async (req, res) => {
     //   is owned by a separate function. Changing maxTrades doesn't affect DPS state.)
     const _prevCapital = bot.capitalPerTrade;
     const allowed = ['name', 'capitalPerTrade', 'maxTrades', 'tpPercent', 'retryTimeMin', 'retryMax', 'timeframe', 'stopLossOnUpperKC', 'autoUpdateTp', 'kcMult', 'minSpreadTicks', 's1OnlyDown', 'xs1Enabled', 'cbEnabled', 'cbv2Enabled', 'cbv2LockHours', 'cbv3Enabled', 'cbv3LockHours', 'safeTradeEnabled', 'safeTradeTrendlineEnabled', 'autoPauseEnabled', 'autoPauseMinKcPct', 'autoPauseMin24hVolUsdt', 'suggestTpWindow', 'autoArmStopLossOnUKC', 'autoArmLossPct', 'autoArmAgeHours', 'slUkcTriggerOnProfit', 'tpTrendMultiplier', 'tpTrendEnabled', 'dcaEnabled', 'dcaMaxLayers', 'martingaleEnabled', 'martingaleMultiplier', 'martingaleMaxLayerNotional', 'safeTradeNoTradeEnabled', 'dynamicSizeEnabled', 'cbAutoUnlockEnabled', 'cbAutoUnlockThresholdPct',
+      // FIX-2026-09-04: Dynamic Layer Control (DLC) — per-bot PUT whitelist
+      'dlcEnabled', 'dlcBaseLossPct',
       // FIX-2026-08-29: per-bot opt-out for the auto-pause threshold auto-adjust scheduler
       //   (autoPauseAdjustEnabled on Bot, default true). Was missing from BOTH this
       //   PATCH whitelist AND the bulk-update allowed[] — silently dropped from bot-edit save.
@@ -1368,6 +1380,50 @@ router.put('/:id', requireAuth, async (req, res) => {
       return res.status(400).json({
         error: 'dynamicSizeEnabled is mutually exclusive with dcaEnabled/martingaleEnabled (Dynamic Position Sizing adjusts size per-trade; DCA stack manages its own layers). Disable one of them.',
       });
+    }
+
+    // FIX-2026-09-04: Dynamic Layer Control mutex with DCA stack / Martingale (effective-state merge)
+    //   - DLC = position-aware layer gate (replaces maxTrades)
+    //   - DCA stack = its own layer logic (BEP-driven)
+    //   - 2 ระบบจัดการ layers พร้อมกัน → conflict; user ต้องเลือกอย่างใดอย่างหนึ่ง
+    const effectiveDlc = data.dlcEnabled !== undefined
+      ? (data.dlcEnabled === true || data.dlcEnabled === 'true')
+      : bot.dlcEnabled === true;
+    const effectiveDcaForDlc = effectiveDca; // already computed above (effective-state merge)
+    const effectiveMartingaleForDlc = effectiveMartingale;
+    if (effectiveDlc && (effectiveDcaForDlc || effectiveMartingaleForDlc)) {
+      return res.status(400).json({
+        error: 'dlcEnabled is mutually exclusive with dcaEnabled/martingaleEnabled (Dynamic Layer Control manages its own layers; DCA stack also manages layers). Disable one of them.',
+      });
+    }
+
+    // FIX-2026-09-04: snapshot/restore maxTrades on DLC toggle transitions
+    //   - DLC OFF → ON: snapshot bot.maxTrades → dlcPrevMaxTrades, set maxTrades=1
+    //   - DLC ON  → OFF: restore dlcPrevMaxTrades → maxTrades, clear snapshot
+    //   - DLC ON  → ON: no-op (don't touch snapshot or maxTrades)
+    //   - DLC OFF → OFF: no-op
+    if (data.dlcEnabled !== undefined) {
+      const wantsDlc = data.dlcEnabled === true || data.dlcEnabled === 'true';
+      if (wantsDlc && bot.dlcEnabled !== true) {
+        // OFF → ON
+        const _prevMaxTrades = bot.maxTrades;
+        Object.assign(bot, { dlcPrevMaxTrades: _prevMaxTrades, maxTrades: 1 });
+        logger.info({
+          botId: bot._id.toString(),
+          dlcPrevMaxTrades: _prevMaxTrades,
+        }, 'bot.routes: DLC enabled → maxTrades snapshot + reset to 1');
+      } else if (!wantsDlc && bot.dlcEnabled === true) {
+        // ON → OFF
+        const _restore = bot.dlcPrevMaxTrades;
+        if (Number.isFinite(_restore)) {
+          bot.maxTrades = _restore;
+          logger.info({
+            botId: bot._id.toString(),
+            restoredMaxTrades: _restore,
+          }, 'bot.routes: DLC disabled → maxTrades restored from snapshot');
+        }
+        bot.dlcPrevMaxTrades = null;
+      }
     }
 
     // FIX-2026-08-08 (rev2): reset DPS state เมื่อ user แก้ capitalPerTrade เอง (แก้บั๊ก A4)
@@ -2219,6 +2275,8 @@ router.post('/bulk-update', requireAuth, async (req, res) => {
       'martingaleEnabled', 'martingaleMultiplier', 'martingaleMaxLayerNotional',
       // FIX-2026-08-08: Feature #1+3 — DPS + Auto Unlock Cooldown (Master Config support)
       'dynamicSizeEnabled', 'cbAutoUnlockEnabled', 'cbAutoUnlockThresholdPct',
+      // FIX-2026-09-04: Dynamic Layer Control (DLC) — Master Config bulk-update support
+      'dlcEnabled', 'dlcBaseLossPct',
       // FIX-2026-08-10: CBv5 (Support Zone + Deepest Low + Volume Filter) — bulk-update support
       //   CBv5 is independent of cbVersion enum — runs parallel with CBv2/CBv3.
       'cbv5Enabled', 'cbv5LockHours',

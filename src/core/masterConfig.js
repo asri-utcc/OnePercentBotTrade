@@ -14,6 +14,7 @@
 
 const AppConfig = require('../db/models/AppConfig');
 const dps = require('./dynamicPositionSizing');
+const dlc = require('./dlc');
 const logger = require('../utils/logger');
 
 const CACHE_MS = 30 * 1000;
@@ -22,12 +23,20 @@ const _cache = {
   masterDynamicSizeEnabled: true,
   masterCbAutoUnlockEnabled: false,
   masterAutoDeleteBotEnabled: false,
+  // FIX-2026-09-04: DLC master kill-switch (default false — opt-in rollout)
+  masterDlcEnabled: false,
 };
 
 // FIX-2026-08-08 (rev2): DPS tunables cache — แยก slot แต่ใช้ TTL เดียวกัน
 const _dpsCache = {
   at: 0,
   cfg: dps.normalizeConfig(null), // = DEFAULTS
+};
+
+// FIX-2026-09-04: DLC tunables cache — same TTL as DPS, own slot
+const _dlcCache = {
+  at: 0,
+  cfg: dlc.normalizeConfig(null), // = DEFAULTS
 };
 
 /**
@@ -55,6 +64,14 @@ function _mapDpsConfig(cfg) {
   });
 }
 
+// FIX-2026-09-04: map AppConfig doc → DLC engine config
+function _mapDlcConfig(cfg) {
+  if (!cfg) return dlc.normalizeConfig(null);
+  return dlc.normalizeConfig({
+    baseLossPct: cfg.dlcBaseLossPct,
+  });
+}
+
 async function getMasterToggles() {
   const now = Date.now();
   if ((now - _cache.at) < CACHE_MS) return _cache;
@@ -64,9 +81,14 @@ async function getMasterToggles() {
       _cache.masterDynamicSizeEnabled = cfg.masterDynamicSizeEnabled !== false; // default true
       _cache.masterCbAutoUnlockEnabled = cfg.masterCbAutoUnlockEnabled === true;  // default false
       _cache.masterAutoDeleteBotEnabled = cfg.autoDeleteBotEnabled === true;      // default false
+      // FIX-2026-09-04: DLC master gate
+      _cache.masterDlcEnabled = cfg.masterDlcEnabled === true; // default false (opt-in)
       // อ่านรอบเดียว → เติม DPS cache ไปเลย (ประหยัด query)
       _dpsCache.cfg = _mapDpsConfig(cfg);
       _dpsCache.at = now;
+      // FIX-2026-09-04: same trick for DLC cache
+      _dlcCache.cfg = _mapDlcConfig(cfg);
+      _dlcCache.at = now;
     }
     _cache.at = now;
   } catch (err) {
@@ -92,13 +114,32 @@ async function getDpsConfig() {
   return _dpsCache.cfg;
 }
 
+/**
+ * FIX-2026-09-04: getDlcConfig — DLC tunables (cache 30s, mirrors getDpsConfig)
+ *   - fail-safe: อ่าน DB ไม่ได้ → คืนค่า cache เดิม/DEFAULTS
+ */
+async function getDlcConfig() {
+  const now = Date.now();
+  if ((now - _dlcCache.at) < CACHE_MS) return _dlcCache.cfg;
+  try {
+    const cfg = await AppConfig.findOne({ key: 'singleton' }).lean();
+    _dlcCache.cfg = _mapDlcConfig(cfg);
+    _dlcCache.at = now;
+  } catch (err) {
+    logger.warn({ err: err.message }, 'masterConfig: DLC config read failed, using cached/default');
+  }
+  return _dlcCache.cfg;
+}
+
 function invalidateCache() {
   _cache.at = 0;
   _dpsCache.at = 0;
+  _dlcCache.at = 0;
 }
 
 module.exports = {
   getMasterToggles,
   getDpsConfig,
+  getDlcConfig,
   invalidateCache,
 };

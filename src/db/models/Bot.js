@@ -261,6 +261,28 @@ const botSchema = new mongoose.Schema(
     },
 
     // ═══════════════════════════════════════════════════════════════════════
+    // FIX-2026-09-04: Dynamic Layer Control (DLC) — position-aware layer gate
+    //   - Replaces maxTrades gate with smart gate: each new layer requires
+    //     existing positions to be deep enough in loss
+    //   - threshold[i] = dlcBaseLossPct * (k - i), k=open positions, i=0=oldest
+    //     example (base=-10):
+    //       k=1, i=0 → threshold=-10  (1 open position must be <-10% to add pos#2)
+    //       k=2, i=0 → threshold=-20, i=1 → threshold=-10
+    //       k=3, i=0 → threshold=-30, i=1 → -20, i=2 → -10
+    //   - mutex: dlcEnabled requires dcaEnabled=false AND martingaleEnabled=false
+    //     (enforced in bot.routes.js + UI disable in bot-edit.js)
+    //   - snapshot/restore maxTrades on toggle (dlcPrevMaxTrades):
+    //       DLC OFF→ON: snapshot maxTrades to dlcPrevMaxTrades, set maxTrades=1
+    //       DLC ON→OFF: restore dlcPrevMaxTrades, clear snapshot
+    //   - master gate: AppConfig.masterDlcEnabled (default false → opt-in rollout)
+    //   - PnL for open positions computed on-the-fly from currentPrice vs buyPrice
+    //     (Trade.pnlPercent is null until SELL fills — see src/core/dlc.js)
+    // ═══════════════════════════════════════════════════════════════════════
+    dlcEnabled:       { type: Boolean, default: false },
+    dlcBaseLossPct:   { type: Number,  default: -10, min: -95, max: -1 },
+    dlcPrevMaxTrades: { type: Number,  default: null },                // snapshot of user's maxTrades before DLC takeover
+
+    // ═══════════════════════════════════════════════════════════════════════
     // FIX-2026-09-02: Round-down Capital (opt-in per-bot — ลด notional ให้พอดี
     //   กับยอด USDT ที่ใช้ได้ เมื่อเงินไม่พอ)
     //   - เดิม: ถ้า available USDT < capitalPerTrade + fee buffer → skip signal

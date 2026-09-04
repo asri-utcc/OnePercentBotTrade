@@ -163,6 +163,10 @@ const appConfigSchema = new mongoose.Schema(
     // ═══════════════════════════════════════════════════════════════════════
     masterDynamicSizeEnabled: { type: Boolean, default: true },
     masterCbAutoUnlockEnabled: { type: Boolean, default: false },
+    // FIX-2026-09-04: DLC master kill-switch (default false — opt-in rollout)
+    //   - when false, all bots silently fall back to legacy maxTrades gate
+    //   - when true, per-bot dlcEnabled is respected (each bot still opts in individually)
+    masterDlcEnabled: { type: Boolean, default: false },
 
     // ═══════════════════════════════════════════════════════════════════════
     // FIX-2026-08-08 (rev2): DPS tunables — ย้ายจาก hardcode ใน dynamicPositionSizing.js
@@ -192,6 +196,14 @@ const appConfigSchema = new mongoose.Schema(
     dpsRespectBotCapital: { type: Boolean, default: true },  // anchored clamp — band ครอบ capitalPerTrade เสมอ
     dpsResetHistoryOnFire: { type: Boolean, default: true }, // กฎยิงแล้วเคลียร์ streak
     dpsDryRun: { type: Boolean, default: false },            // คำนวณ + แจ้งเตือน แต่ไม่เขียนจริง
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // FIX-2026-09-04: Dynamic Layer Control (DLC) master tunables
+    //   - default fleet-wide loss-threshold; per-bot override via Bot.dlcBaseLossPct
+    //   - validation/clamp อยู่ที่ admin.routes.js (PUT /api/admin/app-config)
+    //   - engine อ่านผ่าน masterConfig.getDlcConfig() (cache 30s)
+    // ═══════════════════════════════════════════════════════════════════════
+    dlcBaseLossPct: { type: Number, default: -10 }, // % loss threshold per layer step (negative)
 
     // ═══════════════════════════════════════════════════════════════════════
     // FIX-2026-08-08: Feature #5 — Auto Delete Bot (global setting)
