@@ -3,12 +3,13 @@
 /**
  * FIX-2026-08-09: DPS loss-path coverage — single source of truth for evaluating
  * Dynamic Position Sizing after ANY SELL fill (not just trader.handleSellFilled).
+ * FIX-2026-09-03: layer-removal — DPS now only auto-tunes size (layers owned by separate function)
  *
  * Background (memory: onepercentbot-dps-loss-path-bypass-2026-08-09):
  *   - ก่อนหน้านี้ DPS eval block อยู่ใน trader.handleSellFilled() เท่านั้น
  *   - ทุก force-close path (cbv3_panic, cbv2_panic, sl_ukc_f1_armed, manual_api_market,
  *     market_fallback, manual_api_synthetic) ผ่าน forceClose.js หรือ _emergencyMarketSell
- *   - ผลคือ Rule 3 (แพ้ติดกัน N ไม้ → size -2 USDT, layers -2) ไม่เคยถูก eval ใน production
+ *   - ผลคือ Rule 3 (แพ้ติดกัน N ไม้ → size -2 USDT) ไม่เคยถูก eval ใน production
  *   - Bot ที่ชนะหลายไม้ติด → size ใหญ่ขึ้นเรื่อยๆ โดยไม่มี auto-rebalance ตอนแพ้
  *
  * Pattern: helper accepts (bot, pnl, pnlPct, source) → look up master config + DPS config
@@ -24,8 +25,8 @@
  *
  * @param {Object} opts
  * @param {Object} opts.bot - Bot doc or lean (must have _id, name, symbol, timeframe,
- *   dynamicSizeEnabled, dcaEnabled, martingaleEnabled, capitalPerTrade, maxTrades,
- *   dynamicSizeCurrent, dynamicLayersCurrent, dynamicSizeLastResults, dynamicSizeCooldownUntil)
+ *   dynamicSizeEnabled, dcaEnabled, martingaleEnabled, capitalPerTrade,
+ *   dynamicSizeCurrent, dynamicSizeLastResults, dynamicSizeCooldownUntil)
  * @param {number} opts.pnl - Realized PnL (USDT, net of fees) — used for isWin detection
  * @param {number} opts.pnlPct - PnL percent (e.g. -1.23 = -1.23%) — passed to DPS
  * @param {string} [opts.source='unknown'] - Tag for logs (e.g. 'trader:handleSellFilled', 'forceClose:market')
@@ -81,7 +82,7 @@ async function evaluateDpsAfterClose({ bot, pnl, pnlPct, source = 'unknown' }) {
       isWin: Number(pnl) > 0,
     }, dpsCfg);
 
-    // ── 4. Persist state (history เสมอ, size/layers เฉพาะ changed) ─────────
+    // ── 4. Persist state (history เสมอ, size เฉพาะ changed) ─────────
     if (Array.isArray(evalResult.newHistory) || evalResult.changed) {
       await dps.persistState(Bot, botId, evalResult);
     }
@@ -97,9 +98,10 @@ async function evaluateDpsAfterClose({ bot, pnl, pnlPct, source = 'unknown' }) {
         dryRun: !!evalResult.dryRun,
         pnlPct: Number(pnlPct).toFixed(4),
         isWin: Number(pnl) > 0,
-      }, 'dpsAfterClose: size/layers updated');
+      }, 'dpsAfterClose: size updated');
 
       // FIX-2026-08-09: include `source` in telegram payload so user sees which path fired
+      // FIX-2026-09-03: layer fields removed from telegram payload
       const botName = botSnap.name || botSnap.symbol || botId.toString();
       telegramNotifier.sendNow('dpsResize', {
         botName,
@@ -107,18 +109,14 @@ async function evaluateDpsAfterClose({ bot, pnl, pnlPct, source = 'unknown' }) {
         timeframe: botSnap.timeframe,
         reason: evalResult.reason,
         beforeSize: evalResult.before.size,
-        beforeLayers: evalResult.before.layers,
         afterSize: evalResult.after.size,
-        afterLayers: evalResult.after.layers,
         pnlPct,
         isWin: Number(pnl) > 0,
         dryRun: !!evalResult.dryRun,
         cooldownMinutes: Math.round((dpsCfg.cooldownMs || 0) / 60000),
         minSize: evalResult.bounds && evalResult.bounds.minSize,
         maxSize: evalResult.bounds && evalResult.bounds.maxSize,
-        minLayers: evalResult.bounds && evalResult.bounds.minLayers,
-        maxLayers: evalResult.bounds && evalResult.bounds.maxLayers,
-        source, // new field — telegram formatter may ignore unknown fields
+        source, // telegram formatter may ignore unknown fields
       }).catch((err) => logger.warn({ err: err.message, botId: botId.toString(), source }, 'dpsAfterClose: telegram sendNow failed'));
     } else if (evalResult.skipped) {
       logger.debug({

@@ -81,10 +81,10 @@ const APP_CONFIG_FIELDS = [
   // CB
   'cbVersion', 'cbv5MasterEnabled', 'masterDynamicSizeEnabled', 'masterCbAutoUnlockEnabled',
   // DPS
-  'dpsMinSize', 'dpsMaxSize', 'dpsMinLayers', 'dpsMaxLayers', 'dpsCooldownMinutes',
-  'dpsWinStreakCount', 'dpsWinStreakDeltaSize', 'dpsWinStreakDeltaLayers',
-  'dpsBigWinCount', 'dpsBigWinPct', 'dpsBigWinDeltaSize', 'dpsBigWinDeltaLayers',
-  'dpsLossStreakCount', 'dpsLossDeltaSize', 'dpsLossDeltaLayers',
+  'dpsMinSize', 'dpsMaxSize', 'dpsCooldownMinutes',
+  'dpsWinStreakCount', 'dpsWinStreakDeltaSize',
+  'dpsBigWinCount', 'dpsBigWinPct', 'dpsBigWinDeltaSize',
+  'dpsLossStreakCount', 'dpsLossDeltaSize',
   'dpsRespectBotCapital', 'dpsResetHistoryOnFire', 'dpsDryRun',
   // Rate limit
   'binanceRateLimitPerMin',

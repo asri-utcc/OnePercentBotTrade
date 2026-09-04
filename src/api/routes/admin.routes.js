@@ -49,30 +49,26 @@ router.get('/app-config', requireAuth, async (req, res) => {
 
 // ─── PUT /api/admin/app-config ─────────────────────────────────
 // FIX-2026-08-08 (rev2): master toggles — DPS tunables + CB Auto-Unlock + Auto Delete Bot
-//   - whitelist fields (กัน user inject field �ื่น)
+//   - whitelist fields (กัน user inject field อื่น)
 //   - per-field clamp map
-//   - cross-field validation: minSize<=maxSize, minLayers<=maxLayers (merge DB ก่อนเช็ค)
+//   - cross-field validation: minSize<=maxSize (merge DB ก่อนเช็ค)
 //   - invalidate caches so next read picks up new value within 30s
 // FIX-2026-08-24: removed requireSettingsPassword per user request — in-session admin
 //   action. requireSettingsPassword was already a no-op (falls back to requireAuth).
+// FIX-2026-09-03: layer-removal — DPS_CLAMP drops 5 layer entries; cross-field drops minLayers/maxLayers check.
 //
 // FIX-2026-08-08 (rev2): DPS field clamps (ต้องตรงกับ DEFAULTS ใน dynamicPositionSizing.js)
 const DPS_CLAMP = {
   dpsMinSize:        { min: 5,    max: 10000, int: false },
   dpsMaxSize:        { min: 5,    max: 10000, int: false },
-  dpsMinLayers:      { min: 1,    max: 50,    int: true  },
-  dpsMaxLayers:      { min: 1,    max: 50,    int: true  },
   dpsCooldownMinutes:{ min: 0,    max: 1440,  int: true  },
   dpsWinStreakCount: { min: 1,    max: 20,    int: true  },
   dpsWinStreakDeltaSize:    { min: -1000, max: 1000, int: false },
-  dpsWinStreakDeltaLayers:  { min: -50,   max: 50,   int: true  },
   dpsBigWinCount:    { min: 1,    max: 20,    int: true  },
   dpsBigWinPct:      { min: 0.1,  max: 100,   int: false },
   dpsBigWinDeltaSize:       { min: -1000, max: 1000, int: false },
-  dpsBigWinDeltaLayers:     { min: -50,   max: 50,   int: true  },
   dpsLossStreakCount:{ min: 1,    max: 20,    int: true  },
   dpsLossDeltaSize:  { min: -1000, max: 1000, int: false },
-  dpsLossDeltaLayers:{ min: -50,   max: 50,   int: true  },
 };
 
 function _clampDpsField(name, value) {
@@ -96,13 +92,12 @@ router.put('/app-config', requireAuth, async (req, res) => {
       // FIX-2026-08-31: System-level Auto-Timing master (AppConfig.autoTimingEnabled)
       //   Master switch for the heatmap-driven entry gate; per-bot opt-in lives on Bot.autoTimingEnabled.
       autoTimingEnabled: 'boolean',
-      // FIX-2026-08-08 (rev2): DPS tunables (15 numbers)
+      // FIX-2026-08-08 (rev2): DPS tunables (10 numbers — layer fields removed FIX-2026-09-03)
       dpsMinSize: 'number', dpsMaxSize: 'number',
-      dpsMinLayers: 'number', dpsMaxLayers: 'number',
       dpsCooldownMinutes: 'number',
-      dpsWinStreakCount: 'number', dpsWinStreakDeltaSize: 'number', dpsWinStreakDeltaLayers: 'number',
-      dpsBigWinCount: 'number', dpsBigWinPct: 'number', dpsBigWinDeltaSize: 'number', dpsBigWinDeltaLayers: 'number',
-      dpsLossStreakCount: 'number', dpsLossDeltaSize: 'number', dpsLossDeltaLayers: 'number',
+      dpsWinStreakCount: 'number', dpsWinStreakDeltaSize: 'number',
+      dpsBigWinCount: 'number', dpsBigWinPct: 'number', dpsBigWinDeltaSize: 'number',
+      dpsLossStreakCount: 'number', dpsLossDeltaSize: 'number',
       // FIX-2026-08-08 (rev2): DPS safety (3 booleans)
       dpsRespectBotCapital: 'boolean',
       dpsResetHistoryOnFire: 'boolean',
@@ -147,23 +142,17 @@ router.put('/app-config', requireAuth, async (req, res) => {
 
     // FIX-2026-08-08 (rev2): cross-field DPS validation (merge DB เดิม + set ใหม่ก่อนเช็ค)
     //   - ต้องทำหลัง clamp เพื่อให้ค่าที่ส่งมาเกินช่วงก็โดนบีบก่อน
-    const wantsMinSize   = set.dpsMinSize   != null;
-    const wantsMaxSize   = set.dpsMaxSize   != null;
-    const wantsMinLayers = set.dpsMinLayers != null;
-    const wantsMaxLayers = set.dpsMaxLayers != null;
-    if (wantsMinSize || wantsMaxSize || wantsMinLayers || wantsMaxLayers) {
+    //   - FIX-2026-09-03: layer-removal — drops minLayers/maxLayers check (DPS only auto-tunes size)
+    const wantsMinSize = set.dpsMinSize != null;
+    const wantsMaxSize = set.dpsMaxSize != null;
+    if (wantsMinSize || wantsMaxSize) {
       const current = await AppConfig.findOne({ key: 'singleton' }).lean();
       const merged = {
-        dpsMinSize:   wantsMinSize   ? set.dpsMinSize   : (current ? current.dpsMinSize   : 6),
-        dpsMaxSize:   wantsMaxSize   ? set.dpsMaxSize   : (current ? current.dpsMaxSize   : 15),
-        dpsMinLayers: wantsMinLayers ? set.dpsMinLayers : (current ? current.dpsMinLayers : 1),
-        dpsMaxLayers: wantsMaxLayers ? set.dpsMaxLayers : (current ? current.dpsMaxLayers : 5),
+        dpsMinSize: wantsMinSize ? set.dpsMinSize : (current ? current.dpsMinSize : 6),
+        dpsMaxSize: wantsMaxSize ? set.dpsMaxSize : (current ? current.dpsMaxSize : 15),
       };
       if (merged.dpsMinSize > merged.dpsMaxSize) {
         return res.status(400).json({ error: `ขนาดไม้: ขั้นต่ำ (${merged.dpsMinSize}) ต้องไม่เกิน ขั้นสูง (${merged.dpsMaxSize})` });
-      }
-      if (merged.dpsMinLayers > merged.dpsMaxLayers) {
-        return res.status(400).json({ error: `จำนวนไม้: ขั้นต่ำ (${merged.dpsMinLayers}) ต้องไม่เกิน ขั้นสูง (${merged.dpsMaxLayers})` });
       }
     }
 

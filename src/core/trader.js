@@ -8386,8 +8386,8 @@ class Trader {
       // FIX-2026-08-08: Feature #1 — Dynamic Position Sizing evaluation
       //   - evaluate after every closed position (BUY→SELL)
       //   - skip if disabled / DCA mode / martingale / cooldown / master-off
-      //   - apply dynamicSizeCurrent + dynamicLayersCurrent to bot
-      //   - persisted via dps.persistEval (separate updateOne — non-blocking)
+      //   - apply dynamicSizeCurrent to bot (layers are owned by separate function)
+      //   - persisted via dps.persistState (separate updateOne — non-blocking)
       // FIX-2026-08-08: master switch — read AppConfig.masterDynamicSizeEnabled (30s cache)
       //   - if master off → stamp _masterDynamicSizeEnabled=false on snapshot → dps.evaluate() returns 'master-off'
       // FIX-2026-08-08 (rev2): ย้าย getMasterToggles() เข้ามาใน try — DPS ต้องไม่มีทางกระทบ SELL flow
@@ -8395,6 +8395,8 @@ class Trader {
       //   - single source of truth across handleSellFilled / _emergencyMarketSell / forceClose / botManager
       //   - helper handles deps reload, master toggle, persistState, log + telegram
       //   - caller syncs in-memory snapshot from evalResult so next BUY uses fresh size
+      // FIX-2026-09-03: layer-removal — DPS now only auto-tunes size (layers owned by separate function).
+      //   dynamicLayersCurrent line dropped from this sync block.
       try {
         const dpsAfterClose = require('./dpsAfterClose');
         const evalResult = await dpsAfterClose.evaluateDpsAfterClose({
@@ -8411,7 +8413,6 @@ class Trader {
           }
           if (evalResult.changed) {
             this.bot.dynamicSizeCurrent = evalResult.after.size;
-            this.bot.dynamicLayersCurrent = evalResult.after.layers;
             this.bot.dynamicSizeCooldownUntil = evalResult.cooldownUntil;
           }
           if (evalResult.skipped) {

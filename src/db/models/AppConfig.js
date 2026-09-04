@@ -170,26 +170,24 @@ const appConfigSchema = new mongoose.Schema(
     //   - default = ค่าเดิมทุกตัว → DB เดิมที่ยังไม่มี field เหล่านี้ ทำงานเหมือนเดิมเป๊ะ
     //   - validation/clamp อยู่ที่ admin.routes.js (PUT /api/admin/app-config)
     //   - engine อ่านผ่าน masterConfig.getDpsConfig() (cache 30s)
+    // FIX-2026-09-03: layer-removal — DPS now only auto-tunes size.
+    //   - 5 layer fields removed: dpsMinLayers, dpsMaxLayers, dpsWinStreakDeltaLayers,
+    //     dpsBigWinDeltaLayers, dpsLossDeltaLayers (migrate-dps-layers-2026-09-03.js $unseats them)
     // ═══════════════════════════════════════════════════════════════════════
-    // ── ขอบเขต (ขนาดไม้ + จำนวนไม้) ──
+    // ── ขอบเขต (ขนาดไม้) ──
     dpsMinSize: { type: Number, default: 6 },     // USDT ต่อไม้ ขั้นต่ำ
     dpsMaxSize: { type: Number, default: 15 },    // USDT ต่อไม้ ขั้นสูง
-    dpsMinLayers: { type: Number, default: 1 },   // จำนวนไม้ ขั้นต่ำ
-    dpsMaxLayers: { type: Number, default: 5 },   // จำนวนไม้ ขั้นสูง
     dpsCooldownMinutes: { type: Number, default: 5 }, // cooldown ระหว่าง resize (นาที)
     // ── Rule 1: ชนะติดกัน N ไม้ ──
     dpsWinStreakCount: { type: Number, default: 3 },
     dpsWinStreakDeltaSize: { type: Number, default: 1 },
-    dpsWinStreakDeltaLayers: { type: Number, default: 1 },
     // ── Rule 2: N ไม้ล่าสุดกำไร > X% ทุกไม้ ──
     dpsBigWinCount: { type: Number, default: 2 },
     dpsBigWinPct: { type: Number, default: 2.0 },
     dpsBigWinDeltaSize: { type: Number, default: 2 },
-    dpsBigWinDeltaLayers: { type: Number, default: 0 },
     // ── Rule 3: แพ้ติดกัน N ไม้ ──
     dpsLossStreakCount: { type: Number, default: 1 },
     dpsLossDeltaSize: { type: Number, default: -2 },
-    dpsLossDeltaLayers: { type: Number, default: -2 },
     // ── safety ──
     dpsRespectBotCapital: { type: Boolean, default: true },  // anchored clamp — band ครอบ capitalPerTrade เสมอ
     dpsResetHistoryOnFire: { type: Boolean, default: true }, // กฎยิงแล้วเคลียร์ streak

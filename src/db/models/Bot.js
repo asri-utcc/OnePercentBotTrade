@@ -233,21 +233,22 @@ const botSchema = new mongoose.Schema(
     tpOnFloor: { type: Boolean, default: false },
 
     // ═══════════════════════════════════════════════════════════════════════
-    // FIX-2026-08-08: Feature #1 — Dynamic Position Sizing (auto-tune size + layers)
+    // FIX-2026-08-08: Feature #1 — Dynamic Position Sizing (auto-tune size)
     //   - enabled: master toggle (default true — matches user's request)
     //   - mutually exclusive กับ DCA / Martingale (validator ใน routes)
     //   - logic (ทุกครั้งที่ SELL fill 1 closed position):
-    //       * last 3 closed positions all win → size +1 USDT, layers +1
+    //       * last 3 closed positions all win → size +1 USDT
     //       * last 2 closed positions >2% profit each → size +2 USDT
-    //       * last closed position loss → size -2 (≥6), layers -2 (≥1)
-    //   - bounds: size 6..15 USDT, layers 1..5
-    //   - dynamicSizeCurrent / dynamicLayersCurrent = effective value (snapshot, NOT source of truth)
+    //       * last closed position loss → size -2 (≥6)
+    //   - bounds: size 6..15 USDT
+    //   - dynamicSizeCurrent = effective value (snapshot, NOT source of truth)
     //     — source of truth = evaluate() ใน trader.handleSellFilled hook
     //   - dynamicSizeCooldownUntil: กัน rapid resize (default 5 min) — ป้องกัน whipsaw
     // ═══════════════════════════════════════════════════════════════════════
+    // FIX-2026-09-03: layer-removal — DPS now only auto-tunes size.
+    //   layers (maxTrades) ถูกควบคุมโดยฟังก์ชันแยก — ไม่อยู่ใน DPS contract อีกต่อไป
     dynamicSizeEnabled: { type: Boolean, default: true },
     dynamicSizeCurrent: { type: Number, default: null },        // null = use capitalPerTrade
-    dynamicLayersCurrent: { type: Number, default: null },      // null = use maxTrades
     dynamicSizeLastEvaluatedAt: { type: Date, default: null },
     dynamicSizeCooldownUntil: { type: Date, default: null },   // 5 min cooldown after each eval
     dynamicSizeLastResults: {                                    // last 3 closed positions (most recent first)

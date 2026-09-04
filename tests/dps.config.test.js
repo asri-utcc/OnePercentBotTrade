@@ -2,6 +2,7 @@
 
 /**
  * FIX-2026-08-08 (rev2): Pure-unit regression tests for Dynamic Position Sizing
+ * FIX-2026-09-03: Layer-removal — tests now size-only (no layers assertions, no layer config keys)
  *
  *   ไม่ต้องการ MongoDB — ทดสอบแค่ engine logic ใน src/core/dynamicPositionSizing.js
  *   ครอบคลุม 6 บั๊กที่เจอ:
@@ -14,12 +15,12 @@
  *
  *   + ครอบคลุมฟีเจอร์ใหม่ rev2:
  *     - normalizeConfig fallback (null/undefined/NaN → DEFAULTS)
- *     - bad-config guard (min > max) + history ยังถูกบันทึก
+ *     - bad-config guard (minSize > maxSize) + history ยังถูกบันทึก
  *     - dryRun (changed=false แต่คำนวณครบ + history บันทึก)
  *     - cooldown path returns newHistory (A2 fix)
  *     - resolveBounds anchored clamp (A3 fix)
  *     - custom config: 5-win streak / 2-loss streak / bigWinPct 3%
- *     - resetStateUpdate clears all 5 fields
+ *     - resetStateUpdate clears all 4 fields (layers dropped FIX-2026-09-03)
  */
 
 const dps = require('../src/core/dynamicPositionSizing');
@@ -34,10 +35,8 @@ jest.mock('../src/services/licenseService', () => ({
 // helpers ──────────────────────────────────────────────────────────────────
 const baseBot = (overrides = {}) => ({
   capitalPerTrade: 9,
-  maxTrades: 5,
   dynamicSizeEnabled: true,
   dynamicSizeCurrent: null,
-  dynamicLayersCurrent: null,
   dynamicSizeLastResults: [],
   dynamicSizeCooldownUntil: null,
   ...overrides,
@@ -50,13 +49,13 @@ const loss = (pnlPct = -1.0) => ({ isWin: false, pnlPct });
 // DEFAULTS — ค่าต้องตรงกับที่ AppConfig default ใช้
 // ─────────────────────────────────────────────────────────────────────────
 describe('DPS · DEFAULTS (FIX-2026-08-08 rev2)', () => {
-  test('ค่า DEFAULTS ตรงกับพฤติกรรมเดิม (size 6..15, layers 1..5, 3 wins → +1/+1, 2 wins >2% → +2/+0, 1 loss → -2/-2)', () => {
+  test('ค่า DEFAULTS ตรงกับพฤติกรรมเดิม (size 6..15, 3 wins → +1, 2 wins >2% → +2, 1 loss → -2)', () => {
     expect(dps.DEFAULTS).toEqual({
-      minSize: 6, maxSize: 15, minLayers: 1, maxLayers: 5,
+      minSize: 6, maxSize: 15,
       cooldownMs: 5 * 60 * 1000,
-      winStreakCount: 3, winStreakDeltaSize: 1, winStreakDeltaLayers: 1,
-      bigWinCount: 2, bigWinPct: 2.0, bigWinDeltaSize: 2, bigWinDeltaLayers: 0,
-      lossStreakCount: 1, lossDeltaSize: -2, lossDeltaLayers: -2,
+      winStreakCount: 3, winStreakDeltaSize: 1,
+      bigWinCount: 2, bigWinPct: 2.0, bigWinDeltaSize: 2,
+      lossStreakCount: 1, lossDeltaSize: -2,
       respectBotCapital: true, resetHistoryOnFire: true, dryRun: false,
     });
   });
@@ -94,10 +93,9 @@ describe('DPS · DEFAULTS (FIX-2026-08-08 rev2)', () => {
 // resetStateUpdate — A4 regression guard
 // ─────────────────────────────────────────────────────────────────────────
 describe('DPS · resetStateUpdate (A4 fix)', () => {
-  test('เคลียร์ทุก field ที่เกี่ยวกับ DPS (5 fields)', () => {
+  test('เคลียร์ทุก field ที่เกี่ยวกับ DPS (4 fields — layers dropped FIX-2026-09-03)', () => {
     expect(dps.resetStateUpdate()).toEqual({
       dynamicSizeCurrent: null,
-      dynamicLayersCurrent: null,
       dynamicSizeLastResults: [],
       dynamicSizeCooldownUntil: null,
       dynamicSizeLastEvaluatedAt: null,
@@ -126,8 +124,6 @@ describe('DPS · A1 regression: history grows on every trade', () => {
     expect(r.changed).toBe(true);
     expect(r.reason).toBe('3-wins');
     expect(r.after.size).toBe(9 + 1);  // capitalPerTrade + winStreakDeltaSize
-    // layers: base 5 + delta 1 = 6 → clamped by maxLayers=5 → final 5 (sizeChanged still true because size moved)
-    expect(r.after.layers).toBe(5);
     expect(r.newHistory).toEqual([]);  // resetHistoryOnFire cleared it
   });
 
@@ -140,7 +136,6 @@ describe('DPS · A1 regression: history grows on every trade', () => {
     expect(r.changed).toBe(true);
     expect(r.reason).toBe('2-wins-2pct');
     expect(r.after.size).toBe(9 + 2);  // bigWinDeltaSize
-    expect(r.after.layers).toBe(5 + 0); // bigWinDeltaLayers=0
   });
 
   test('resetHistoryOnFire=false → streak ต่อยอด (Rule 1 ยิงได้หลายครั้งติด)', () => {
@@ -279,12 +274,6 @@ describe('DPS · bad-config guard', () => {
     expect(r.newHistory).toHaveLength(1);  // history ถูกบันทึก
   });
 
-  test('minLayers > maxLayers → skipped:bad-config', () => {
-    const cfg = dps.normalizeConfig({ minLayers: 5, maxLayers: 1, respectBotCapital: false });
-    const r = dps.evaluate(baseBot(), win(1.5), cfg);
-    expect(r.skipped).toBe('bad-config');
-  });
-
   test('respectBotCapital=true + bot ไม่มี capitalPerTrade → guard fires (ป้องกัน clamp เพี้ยน)', () => {
     const cfg = dps.normalizeConfig({ minSize: 20, maxSize: 10, respectBotCapital: true });
     const r = dps.evaluate({ dynamicSizeEnabled: true }, win(1.5), cfg);
@@ -314,7 +303,7 @@ describe('DPS · dryRun mode', () => {
 // ─────────────────────────────────────────────────────────────────────────
 describe('DPS · custom config from settings page', () => {
   test('ชนะติด 5 (ไม่แตะ 2%) → Rule 1 ยิงที่ streak=5', () => {
-    const cfg = dps.normalizeConfig({ winStreakCount: 5, winStreakDeltaSize: 2, winStreakDeltaLayers: 1 });
+    const cfg = dps.normalizeConfig({ winStreakCount: 5, winStreakDeltaSize: 2 });
     const bot = baseBot();
     let r;
     for (let i = 0; i < 5; i++) {
@@ -323,12 +312,10 @@ describe('DPS · custom config from settings page', () => {
     }
     expect(r.reason).toBe('5-wins');
     expect(r.after.size).toBe(9 + 2);  // 11
-    // layers: base 5 + delta 1 = 6 → clamp ที่ maxLayers=5 → 5 (sizeChanged still true เพราะ size ขยับ)
-    expect(r.after.layers).toBe(5);
   });
 
   test('แพ้ติด 2 → Rule 3 ยิงหลังแพ้ครบ 2', () => {
-    const cfg = dps.normalizeConfig({ lossStreakCount: 2, lossDeltaSize: -3, lossDeltaLayers: -1 });
+    const cfg = dps.normalizeConfig({ lossStreakCount: 2, lossDeltaSize: -3 });
     const bot = baseBot();
     let r = dps.evaluate(bot, loss(-1), cfg);
     expect(r.changed).toBe(false); // streak ยังไม่ครบ
@@ -336,7 +323,6 @@ describe('DPS · custom config from settings page', () => {
     r = dps.evaluate(bot, loss(-1), cfg);
     expect(r.reason).toBe('2-losses');
     expect(r.after.size).toBe(9 - 3);
-    expect(r.after.layers).toBe(5 - 1);
   });
 
   test('bigWinPct 3% → ไม้ที่กำไร 2.5% ไม่เข้า Rule 2', () => {
@@ -362,10 +348,10 @@ describe('DPS · custom config from settings page', () => {
 // ─────────────────────────────────────────────────────────────────────────
 describe('DPS · getEffective', () => {
   test('dynamicSizeCurrent=null → คืน capitalPerTrade', () => {
-    expect(dps.getEffective(baseBot())).toEqual({ size: 9, layers: 5 });
+    expect(dps.getEffective(baseBot())).toEqual({ size: 9 });
   });
   test('dynamicSizeCurrent=12 → คืน 12 (DPS ปรับแล้ว)', () => {
-    expect(dps.getEffective(baseBot({ dynamicSizeCurrent: 12 }))).toEqual({ size: 12, layers: 5 });
+    expect(dps.getEffective(baseBot({ dynamicSizeCurrent: 12 }))).toEqual({ size: 12 });
   });
 });
 
@@ -391,20 +377,16 @@ describe('DPS · computeDeltasFromHistory', () => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────
-// clampSizeAndLayers — pure helper
+// clampSize — pure helper (FIX-2026-09-03: renamed from clampSizeAndLayers)
 // ─────────────────────────────────────────────────────────────────────────
-describe('DPS · clampSizeAndLayers', () => {
+describe('DPS · clampSize', () => {
   test('size เกิน max → บีบลง', () => {
-    expect(dps.clampSizeAndLayers(20, 3, { minSize: 6, maxSize: 15, minLayers: 1, maxLayers: 5 }))
-      .toEqual({ newSize: 15, newLayers: 3 });
+    expect(dps.clampSize(20, { minSize: 6, maxSize: 15 }))
+      .toEqual({ newSize: 15 });
   });
   test('size ต่ำกว่า min → ดันขึ้น', () => {
-    expect(dps.clampSizeAndLayers(2, 3, { minSize: 6, maxSize: 15, minLayers: 1, maxLayers: 5 }))
-      .toEqual({ newSize: 6, newLayers: 3 });
-  });
-  test('layers เกิน → บีบลง', () => {
-    expect(dps.clampSizeAndLayers(10, 99, { minSize: 6, maxSize: 15, minLayers: 1, maxLayers: 5 }))
-      .toEqual({ newSize: 10, newLayers: 5 });
+    expect(dps.clampSize(2, { minSize: 6, maxSize: 15 }))
+      .toEqual({ newSize: 6 });
   });
 });
 

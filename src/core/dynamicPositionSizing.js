@@ -1,12 +1,17 @@
 'use strict';
 
 /**
- * FIX-2026-08-08: Feature #1 — Dynamic Position Sizing (auto-tune size + layers)
+ * FIX-2026-09-03: Layer-removal refactor — DPS now only auto-tunes **size** (`buyNotionalUSDT`)
+ *   - `maxTrades` / `dynamicLayersCurrent` removed from DPS contract
+ *   - layers are now owned by a separate layer-control function (planned)
+ *   - engine return shape now `{ size }` only (no `layers`)
+ *
+ * FIX-2026-08-08: Feature #1 — Dynamic Position Sizing (auto-tune size)
  *   - rule (per closed position = 1 BUY → 1 SELL), ค่าทั้งหมดปรับได้จากหน้า /settings.html:
- *       * ชนะติดกัน N ไม้            → size +X USDT, layers +Y   (default 3 → +1 / +1)
- *       * N ไม้ล่าสุดกำไร > P% ทุกไม้ → size +X USDT, layers +Y   (default 2 ไม้ >2% → +2 / +0)
- *       * แพ้ติดกัน N ไม้             → size -X USDT, layers -Y   (default 1 → -2 / -2)
- *   - bounds default: size 6..15 USDT, layers 1..5 (ปรับได้)
+ *       * ชนะติดกัน N ไม้            → size +X USDT                       (default 3 → +1)
+ *       * N ไม้ล่าสุดกำไร > P% ทุกไม้ → size +X USDT                       (default 2 ไม้ >2% → +2)
+ *       * แพ้ติดกัน N ไม้             → size -X USDT                       (default 1 → -2)
+ *   - bounds default: size 6..15 USDT (ปรับได้)
  *   - default toggle per bot: `dynamicSizeEnabled` (default true)
  *   - **mutually exclusive** กับ DCA / Martingale (validated in routes)
  *   - evaluate after handleSellFilled (in-place — single source of truth)
@@ -22,7 +27,7 @@
  *       → แก้: append history ก่อน แล้วค่อยเช็ค cooldown (คืน newHistory ทุก path หลัง append)
  *   A3) clamp 6..15 บีบทับ capitalPerTrade ของ user (บอท 20 USDT ถูกหั่นเหลือ 15)
  *       → แก้: anchored clamp — cfg.respectBotCapital (default true) ขยาย band ให้ครอบ
- *         capitalPerTrade/maxTrades ของบอทเสมอ
+ *         capitalPerTrade ของบอทเสมอ
  *   A6) กฎยิงซ้ำจาก streak เดิม (ชนะ 3 แล้วชนะไม้ที่ 4 → history ยัง [W,W,W] → +1 อีก)
  *       → แก้: cfg.resetHistoryOnFire (default true) เคลียร์ history เมื่อกฎยิง
  */
@@ -31,13 +36,16 @@
 const licenseService = require('../services/licenseService');
 
 // ─────────────────────────────────────────────────────────────────────────────
-// FIX-2026-08-08: design notes
+// FIX-2026-09-03: design notes (post layer-removal)
 //   - effective size = dynamicSizeCurrent if set else capitalPerTrade
-//   - effective layers = dynamicLayersCurrent if set else maxTrades
+//   - layers / maxTrades ถูกควบคุมโดยฟังก์ชันแยก (ไม่อยู่ใน DPS contract นี้อีกต่อไป)
 //   - persisted `dynamicSizeLastResults` = closed positions ล่าสุด (most recent first),
 //     cap = max(winStreakCount, bigWinCount, lossStreakCount)
 //   - **rule order matters**: เช็ค win-streak ก่อน (priority สูงสุด) → big-win → loss
 //     เมื่อหลายเงื่อนไขเข้าพร้อมกัน apply delta เดียวต่อ 1 eval
+//   - **FIX-2026-09-03 behavior change**: `sizeChanged = newSize !== baseSize` (no `|| newLayers !== baseLayers`)
+//     → ที่ band-edge เมื่อ size ถูก clamp คงที่ layers-only moves ไม่นับเป็น changed อีกต่อไป
+//       (ไม่มีผลต่อการเทรดจริง — `dynamicLayersCurrent` เป็น dead output ตั้งแต่ต้น)
 // ─────────────────────────────────────────────────────────────────────────────
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -46,22 +54,17 @@ const licenseService = require('../services/licenseService');
 const DEFAULTS = {
   minSize: 6,               // USDT
   maxSize: 15,              // USDT
-  minLayers: 1,
-  maxLayers: 5,
   cooldownMs: 5 * 60 * 1000, // 5 min between resizes
   // Rule 1 — ชนะติดกัน N ไม้
   winStreakCount: 3,
   winStreakDeltaSize: 1,
-  winStreakDeltaLayers: 1,
   // Rule 2 — N ไม้ล่าสุดกำไร > bigWinPct% ทุกไม้
   bigWinCount: 2,
   bigWinPct: 2.0,
   bigWinDeltaSize: 2,
-  bigWinDeltaLayers: 0,
   // Rule 3 — แพ้ติดกัน N ไม้
   lossStreakCount: 1,
   lossDeltaSize: -2,
-  lossDeltaLayers: -2,
   // safety
   respectBotCapital: true,   // anchored clamp — band ต้องครอบ capitalPerTrade เสมอ
   resetHistoryOnFire: true,  // กฎยิงแล้วเคลียร์ streak (ต้องสร้าง streak ใหม่ถึงจะยิงอีก)
@@ -71,8 +74,6 @@ const DEFAULTS = {
 // Legacy exports (คงไว้เพื่อ backward-compat กับ test/caller เดิม)
 const MIN_SIZE = DEFAULTS.minSize;
 const MAX_SIZE = DEFAULTS.maxSize;
-const MIN_LAYERS = DEFAULTS.minLayers;
-const MAX_LAYERS = DEFAULTS.maxLayers;
 const COOLDOWN_MS = DEFAULTS.cooldownMs;
 const MAX_HISTORY = 3;
 const PROFIT_THRESHOLD_PCT = DEFAULTS.bigWinPct;
@@ -97,15 +98,15 @@ function normalizeConfig(cfg) {
 }
 
 /**
- * Compute size delta + layers delta based on recent closed positions.
+ * Compute size delta based on recent closed positions.
  * @param {Array} lastResults - most recent first
  * @param {Object} cfg - normalized config (optional → DEFAULTS)
- * Returns { deltaSize, deltaLayers, reason }
+ * Returns { deltaSize, reason }
  */
 function computeDeltasFromHistory(lastResults, cfg) {
   const c = cfg && cfg.maxHistory ? cfg : normalizeConfig(cfg);
   if (!Array.isArray(lastResults) || lastResults.length === 0) {
-    return { deltaSize: 0, deltaLayers: 0, reason: 'no-history', newSize: null, newLayers: null };
+    return { deltaSize: 0, reason: 'no-history' };
   }
 
   // Rule 1: ชนะติดกัน N ไม้ (N ไม้ล่าสุดต้องชนะทั้งหมด)
@@ -115,10 +116,7 @@ function computeDeltasFromHistory(lastResults, cfg) {
     if (allWin) {
       return {
         deltaSize: c.winStreakDeltaSize,
-        deltaLayers: c.winStreakDeltaLayers,
         reason: `${c.winStreakCount}-wins`,
-        newSize: null,
-        newLayers: null,
       };
     }
   }
@@ -132,10 +130,7 @@ function computeDeltasFromHistory(lastResults, cfg) {
     if (bothBigProfit) {
       return {
         deltaSize: c.bigWinDeltaSize,
-        deltaLayers: c.bigWinDeltaLayers,
         reason: `${c.bigWinCount}-wins-${c.bigWinPct}pct`,
-        newSize: null,
-        newLayers: null,
       };
     }
   }
@@ -147,21 +142,18 @@ function computeDeltasFromHistory(lastResults, cfg) {
     if (allLoss) {
       return {
         deltaSize: c.lossDeltaSize,
-        deltaLayers: c.lossDeltaLayers,
         reason: c.lossStreakCount > 1 ? `${c.lossStreakCount}-losses` : 'loss',
-        newSize: null,
-        newLayers: null,
       };
     }
   }
 
   // Mild win (ชนะแต่ไม่เข้ากฎไหน): no change
-  return { deltaSize: 0, deltaLayers: 0, reason: 'no-rule', newSize: null, newLayers: null };
+  return { deltaSize: 0, reason: 'no-rule' };
 }
 
 /**
  * FIX-2026-08-08 (rev2): resolveBounds — anchored clamp (แก้บั๊ก A3)
- *   - respectBotCapital=true (default): ขยาย band ให้ครอบ capitalPerTrade / maxTrades ของบอทเสมอ
+ *   - respectBotCapital=true (default): ขยาย band ให้ครอบ capitalPerTrade ของบอทเสมอ
  *     → DPS ขยับรอบๆ ค่าที่ user ตั้ง แต่ไม่มีวันกระโดดออกนอกกรอบที่ user ตั้งใจ
  *   - respectBotCapital=false: ใช้ band ตรงๆ ตามที่ตั้งในหน้า settings
  */
@@ -169,8 +161,6 @@ function resolveBounds(bot, cfg) {
   const c = cfg && cfg.maxHistory ? cfg : normalizeConfig(cfg);
   let minSize = c.minSize;
   let maxSize = c.maxSize;
-  let minLayers = c.minLayers;
-  let maxLayers = c.maxLayers;
 
   if (c.respectBotCapital && bot) {
     const cap = Number(bot.capitalPerTrade);
@@ -178,25 +168,19 @@ function resolveBounds(bot, cfg) {
       minSize = Math.min(minSize, cap);
       maxSize = Math.max(maxSize, cap);
     }
-    const mt = Number(bot.maxTrades);
-    if (Number.isFinite(mt) && mt > 0) {
-      minLayers = Math.min(minLayers, mt);
-      maxLayers = Math.max(maxLayers, mt);
-    }
   }
-  return { minSize, maxSize, minLayers, maxLayers };
+  return { minSize, maxSize };
 }
 
 /**
- * Apply clamping to size and layers.
- * @param {Object} bounds - { minSize, maxSize, minLayers, maxLayers } (optional → DEFAULTS)
- * Returns { newSize, newLayers }
+ * Apply clamping to size.
+ * @param {Object} bounds - { minSize, maxSize } (optional → DEFAULTS)
+ * Returns { newSize }
  */
-function clampSizeAndLayers(size, layers, bounds) {
+function clampSize(size, bounds) {
   const b = bounds && Number.isFinite(bounds.minSize) ? bounds : DEFAULTS;
   const cSize = Math.max(b.minSize, Math.min(b.maxSize, size));
-  const cLayers = Math.max(b.minLayers, Math.min(b.maxLayers, layers));
-  return { newSize: cSize, newLayers: cLayers };
+  return { newSize: cSize };
 }
 
 /**
@@ -212,8 +196,8 @@ function clampSizeAndLayers(size, layers, bounds) {
  *   - **does NOT persist** — caller persists ด้วย persistState()
  *
  * @param {Object} bot - Bot doc/lean — ต้องมี dynamicSizeEnabled, dynamicSizeCurrent,
- *   dynamicLayersCurrent, dynamicSizeLastResults, dynamicSizeCooldownUntil, capitalPerTrade,
- *   maxTrades, dcaEnabled, martingaleEnabled
+ *   dynamicSizeLastResults, dynamicSizeCooldownUntil, capitalPerTrade,
+ *   dcaEnabled, martingaleEnabled
  * @param {Object} tradeResult - { closedAt: Date, pnlPct: Number, isWin: Boolean }
  * @param {Object} [cfg] - DPS config จาก masterConfig.getDpsConfig() (optional → DEFAULTS)
  * @returns {Object} { changed, before, after, reason, appliedAt, cooldownUntil, newHistory, skipped, dryRun, bounds }
@@ -259,7 +243,7 @@ function evaluate(bot, tradeResult, cfg) {
   //   - ตรวจหลัง append history เพื่อให้สถิติไม่หาย (ถ้า user แก้ config ในอนาคต จะได้นับต่อ)
   //   - คืน newHistory ให้ caller persist ด้วย (เหมือน cooldown path)
   const bounds = resolveBounds(bot, c);
-  if (bounds.minSize > bounds.maxSize || bounds.minLayers > bounds.maxLayers) {
+  if (bounds.minSize > bounds.maxSize) {
     return { changed: false, skipped: 'bad-config', reason: 'bad-config', newHistory };
   }
 
@@ -272,15 +256,16 @@ function evaluate(bot, tradeResult, cfg) {
 
   // ── ข้อ 4: compute rule → clamp ───────────────────────────────────────────
   const baseSize = Number.isFinite(bot.dynamicSizeCurrent) ? bot.dynamicSizeCurrent : (bot.capitalPerTrade || 0);
-  const baseLayers = Number.isFinite(bot.dynamicLayersCurrent) ? bot.dynamicLayersCurrent : (bot.maxTrades || 0);
 
   const deltas = computeDeltasFromHistory(newHistory, c);
   const targetSize = baseSize + deltas.deltaSize;
-  const targetLayers = baseLayers + deltas.deltaLayers;
-  const { newSize, newLayers } = clampSizeAndLayers(targetSize, targetLayers, bounds);
+  const { newSize } = clampSize(targetSize, bounds);
 
   const ruleFired = deltas.reason !== 'no-rule' && deltas.reason !== 'no-history';
-  const sizeChanged = newSize !== baseSize || newLayers !== baseLayers;
+  // FIX-2026-09-03: layers no longer affect sizeChanged (DPS layers removed — owned by separate function).
+  // Behavior change at minSize floor: layers-only moves no longer count as changed → no resize telegram,
+  // no cooldown stamp, no history-clear. For size not at floor, behavior is identical.
+  const sizeChanged = newSize !== baseSize;
 
   // ── ข้อ 5: กฎยิงแล้วเคลียร์ streak (แก้ A6) ────────────────────────────────
   //   เคลียร์เฉพาะเมื่อกฎยิงและมีการเปลี่ยนจริง — ถ้าชนเพดานแล้ว (clamp) ไม่เคลียร์
@@ -292,8 +277,8 @@ function evaluate(bot, tradeResult, cfg) {
     changed: c.dryRun ? false : sizeChanged,
     wouldChange: sizeChanged,
     dryRun: !!c.dryRun,
-    before: { size: baseSize, layers: baseLayers },
-    after: { size: newSize, layers: newLayers },
+    before: { size: baseSize },
+    after: { size: newSize },
     reason: deltas.reason,
     newHistory: finalHistory,
     appliedAt: new Date(),
@@ -304,15 +289,15 @@ function evaluate(bot, tradeResult, cfg) {
 }
 
 /**
- * FIX-2026-08-08: getEffectiveSizeOrLayers — resolve effective size/layers
+ * FIX-2026-08-08: getEffective — resolve effective size
  *   - returns dynamicSizeCurrent if set, else capitalPerTrade
  *   - used by trader.placeBuy() to compute buy quantity
+ *   - FIX-2026-09-03: returns `{ size }` only (layers removed from DPS)
  */
 function getEffective(bot) {
-  if (!bot) return { size: 0, layers: 0 };
+  if (!bot) return { size: 0 };
   return {
     size: Number.isFinite(bot.dynamicSizeCurrent) ? bot.dynamicSizeCurrent : (bot.capitalPerTrade || 0),
-    layers: Number.isFinite(bot.dynamicLayersCurrent) ? bot.dynamicLayersCurrent : (bot.maxTrades || 0),
   };
 }
 
@@ -320,7 +305,7 @@ function getEffective(bot) {
  * FIX-2026-08-08 (rev2): persistState — persist eval result (แทน persistEval เดิม)
  *   - เขียน dynamicSizeLastResults + dynamicSizeLastEvaluatedAt **เสมอ** (เมื่อมี newHistory)
  *     ← หัวใจของการแก้บั๊ก A1: history ต้องสะสมได้แม้ไม้นั้นไม่ทำให้ size เปลี่ยน
- *   - เขียน dynamicSizeCurrent/dynamicLayersCurrent/dynamicSizeCooldownUntil **เฉพาะเมื่อ changed**
+ *   - เขียน dynamicSizeCurrent/dynamicSizeCooldownUntil **เฉพาะเมื่อ changed**
  *   - updateOne ตัวเดียว → +1 write ต่อ 1 position ปิด (ไม่มีนัยยะต่อ load)
  *   - returns true ถ้ามีการเขียน size จริง (caller ใช้ตัดสินใจ log/telegram)
  */
@@ -333,7 +318,6 @@ async function persistState(Bot, botId, evalResult) {
   }
   if (evalResult.changed) {
     update.dynamicSizeCurrent = evalResult.after.size;
-    update.dynamicLayersCurrent = evalResult.after.layers;
     update.dynamicSizeCooldownUntil = evalResult.cooldownUntil;
   }
   if (Object.keys(update).length === 0) return false;
@@ -352,12 +336,12 @@ async function persistEval(Bot, botId, evalResult) {
 
 /**
  * FIX-2026-08-08 (rev2): resetState — เคลียร์ DPS state ของบอท
- *   ใช้เมื่อ user แก้ capitalPerTrade/maxTrades เอง หรือกดปุ่ม reset
+ *   ใช้เมื่อ user แก้ capitalPerTrade เอง หรือกดปุ่ม reset
+ *   FIX-2026-09-03: dynamicLayersCurrent dropped (4 fields instead of 5)
  */
 function resetStateUpdate() {
   return {
     dynamicSizeCurrent: null,
-    dynamicLayersCurrent: null,
     dynamicSizeLastResults: [],
     dynamicSizeCooldownUntil: null,
     dynamicSizeLastEvaluatedAt: null,
@@ -371,14 +355,12 @@ module.exports = {
   // constants (exported for tests / backward-compat)
   MIN_SIZE,
   MAX_SIZE,
-  MIN_LAYERS,
-  MAX_LAYERS,
   COOLDOWN_MS,
   MAX_HISTORY,
   PROFIT_THRESHOLD_PCT,
   // pure helpers
   computeDeltasFromHistory,
-  clampSizeAndLayers,
+  clampSize,
   resolveBounds,
   resetStateUpdate,
   // main API

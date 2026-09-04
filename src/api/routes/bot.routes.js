@@ -307,10 +307,9 @@ router.get('/', requireAuth, async (req, res) => {
         })(),
         // FIX-2026-08-08: Feature #1 — Dynamic Position Sizing fields (effective values for UI)
         //   - dynamicSizeEffective: ค่าที่ใช้จริง (fallback = capitalPerTrade)
-        //   - dynamicLayersEffective: ค่าที่ใช้จริง (fallback = maxTrades)
         //   - dynamicSizeInCooldown: อยู่ในช่วง cooldown (กัน rapid resize)
+        //   - FIX-2026-09-03: dynamicLayersEffective removed (DPS only auto-tunes size; layers owned by separate function)
         dynamicSizeEffective: Number.isFinite(b.dynamicSizeCurrent) ? b.dynamicSizeCurrent : (b.capitalPerTrade || 0),
-        dynamicLayersEffective: Number.isFinite(b.dynamicLayersCurrent) ? b.dynamicLayersCurrent : (b.maxTrades || 0),
         dynamicSizeInCooldown: b.dynamicSizeCooldownUntil && new Date(b.dynamicSizeCooldownUntil).getTime() > Date.now(),
         // FIX-2026-08-08: Feature #2 — CB Cooldown state (sub-categories for filter)
         //   - cbCooldown: { active, reason, version, until, msLeft } — used by bots.html filter
@@ -1121,9 +1120,11 @@ router.post('/', requireAuth, requireBotActionPassword, async (req, res) => {
     }
 
     // FIX-2026-08-08: Feature #1 — Dynamic Position Sizing mutally exclusive with DCA stack mode
-    //   - DPS adjusts size/layers per-trade based on win/loss history
-    //   - DCA stack mode manages its own size/layers per layer (BEP-driven)
+    //   - DPS adjusts size per-trade based on win/loss history
+    //   - DCA stack mode manages its own size per layer (BEP-driven)
     //   - ทั้ง 2 ระบบปรับ size พร้อมกัน → conflict; user ต้องเลือกอย่างใดอย่างหนึ่ง
+    //   - FIX-2026-09-03: layer-removal — DPS no longer touches layers, but DCA/Martingale mutex still stands
+    //     (DCA controls layers; DPS controls size; both would race on per-BUY sizing)
     const dpsEnabled = data.dynamicSizeEnabled !== false; // default true (lenient)
     if (dpsEnabled && (data.dcaEnabled === true || data.martingaleEnabled === true)) {
       return res.status(400).json({
@@ -1181,9 +1182,10 @@ router.put('/:id', requireAuth, async (req, res) => {
     if (!bot) return res.status(404).json({ error: 'Bot not found' });
 
     const data = req.body || {};
-    // FIX-2026-08-08 (rev2): จำค่าเดิมไว้ตรวจว่า user แก้ capital/maxTrades เองหรือไม่ (แก้บั๊ก A4)
+    // FIX-2026-08-08 (rev2): จำค่าเดิมไว้ตรวจว่า user แก้ capital เองหรือไม่ (แก้บั๊ก A4)
+    // FIX-2026-09-03: layer-removal — _prevMaxTrades dropped (DPS no longer touches layers; maxTrades
+    //   is owned by a separate function. Changing maxTrades doesn't affect DPS state.)
     const _prevCapital = bot.capitalPerTrade;
-    const _prevMaxTrades = bot.maxTrades;
     const allowed = ['name', 'capitalPerTrade', 'maxTrades', 'tpPercent', 'retryTimeMin', 'retryMax', 'timeframe', 'stopLossOnUpperKC', 'autoUpdateTp', 'kcMult', 'minSpreadTicks', 's1OnlyDown', 'xs1Enabled', 'cbEnabled', 'cbv2Enabled', 'cbv2LockHours', 'cbv3Enabled', 'cbv3LockHours', 'safeTradeEnabled', 'safeTradeTrendlineEnabled', 'autoPauseEnabled', 'autoPauseMinKcPct', 'autoPauseMin24hVolUsdt', 'suggestTpWindow', 'autoArmStopLossOnUKC', 'autoArmLossPct', 'autoArmAgeHours', 'slUkcTriggerOnProfit', 'tpTrendMultiplier', 'tpTrendEnabled', 'dcaEnabled', 'dcaMaxLayers', 'martingaleEnabled', 'martingaleMultiplier', 'martingaleMaxLayerNotional', 'safeTradeNoTradeEnabled', 'dynamicSizeEnabled', 'cbAutoUnlockEnabled', 'cbAutoUnlockThresholdPct',
       // FIX-2026-08-29: per-bot opt-out for the auto-pause threshold auto-adjust scheduler
       //   (autoPauseAdjustEnabled on Bot, default true). Was missing from BOTH this
@@ -1357,6 +1359,8 @@ router.put('/:id', requireAuth, async (req, res) => {
     // FIX-2026-08-08: Feature #1 — Dynamic Position Sizing mutually exclusive with DCA (post-merge check)
     //   - effectiveDps = data.dynamicSizeEnabled ?? existing dynamicSizeEnabled
     //   - reject ถ้าจะเปิด DPS แต่ DCA/Martingale เปิดอยู่ (ทั้งกรณี enable ใหม่ + กรณี DCA ถูกปิดแต่ DPS ถูก enable)
+    //   - FIX-2026-09-03: layer-removal — DPS only controls size, but DCA stack still owns layers
+    //     (mutex remains because both would race on per-BUY sizing logic)
     const effectiveDps = data.dynamicSizeEnabled !== undefined
       ? (data.dynamicSizeEnabled === true || data.dynamicSizeEnabled === 'true')
       : bot.dynamicSizeEnabled !== false; // default true (matching schema default)
@@ -1366,16 +1370,16 @@ router.put('/:id', requireAuth, async (req, res) => {
       });
     }
 
-    // FIX-2026-08-08 (rev2): reset DPS state เมื่อ user แก้ capitalPerTrade/maxTrades เอง (แก้บั๊ก A4)
+    // FIX-2026-08-08 (rev2): reset DPS state เมื่อ user แก้ capitalPerTrade เอง (แก้บั๊ก A4)
     //   เดิม: dynamicSizeCurrent override buyNotionalUSDT ถาวร → แก้ capital ในหน้า bot-edit ไม่มีผลเลย
     //   ใหม่: ค่าที่ user ตั้งมีผลทันที แล้ว DPS เริ่มนับ streak ใหม่จากฐานใหม่
-    if (bot.capitalPerTrade !== _prevCapital || bot.maxTrades !== _prevMaxTrades) {
+    //   FIX-2026-09-03: layer-removal — `maxTrades` no longer triggers DPS reset (DPS no longer touches layers)
+    if (bot.capitalPerTrade !== _prevCapital) {
       Object.assign(bot, dps.resetStateUpdate());
       logger.info({
         botId: bot._id.toString(),
         capital: `${_prevCapital} → ${bot.capitalPerTrade}`,
-        maxTrades: `${_prevMaxTrades} → ${bot.maxTrades}`,
-      }, 'bot.routes: capital/maxTrades changed by user → DPS state reset');
+      }, 'bot.routes: capital changed by user → DPS state reset');
     }
 
     // validate symbol (ไม่ให้แก้ symbol ใน v1 - ถ้าต้องการ ลบแล้วสร้างใหม่)
@@ -1699,7 +1703,8 @@ router.post('/:id/dps-reset', requireAuth, async (req, res) => {
   try {
     const bot = await Bot.findById(req.params.id);
     if (!bot) return res.status(404).json({ error: 'Bot not found' });
-    const before = { size: bot.dynamicSizeCurrent, layers: bot.dynamicLayersCurrent };
+    // FIX-2026-09-03: layer-removal — only size tracked (DPS no longer owns layers)
+    const before = { size: bot.dynamicSizeCurrent };
     Object.assign(bot, dps.resetStateUpdate());
     await bot.save();
 

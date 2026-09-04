@@ -35,11 +35,11 @@ jest.mock('../src/db/models/Bot', () => {
 jest.mock('../src/core/masterConfig', () => ({
   getMasterToggles: jest.fn().mockResolvedValue({ masterDynamicSizeEnabled: true }),
   getDpsConfig: jest.fn().mockResolvedValue({
-    minSize: 6, maxSize: 15, minLayers: 1, maxLayers: 5,
+    minSize: 6, maxSize: 15,
     cooldownMs: 5 * 60 * 1000,
-    winStreakCount: 3, winStreakDeltaSize: 1, winStreakDeltaLayers: 1,
-    bigWinCount: 2, bigWinPct: 2.0, bigWinDeltaSize: 2, bigWinDeltaLayers: 0,
-    lossStreakCount: 1, lossDeltaSize: -2, lossDeltaLayers: -2,
+    winStreakCount: 3, winStreakDeltaSize: 1,
+    bigWinCount: 2, bigWinPct: 2.0, bigWinDeltaSize: 2,
+    lossStreakCount: 1, lossDeltaSize: -2,
     respectBotCapital: true, resetHistoryOnFire: true, dryRun: false,
   }),
 }));
@@ -69,7 +69,6 @@ const baseBot = (overrides = {}) => ({
   dcaEnabled: false,
   martingaleEnabled: false,
   dynamicSizeCurrent: null,
-  dynamicLayersCurrent: null,
   dynamicSizeLastResults: [],
   dynamicSizeCooldownUntil: null,
   _masterDynamicSizeEnabled: true,
@@ -84,11 +83,11 @@ describe('dpsAfterClose.evaluateDpsAfterClose', () => {
     Bot.__updateOne.mockResolvedValue({ acknowledged: true, modifiedCount: 1 });
     masterConfig.getMasterToggles.mockResolvedValue({ masterDynamicSizeEnabled: true });
     masterConfig.getDpsConfig.mockResolvedValue({
-      minSize: 6, maxSize: 15, minLayers: 1, maxLayers: 5,
+      minSize: 6, maxSize: 15,
       cooldownMs: 5 * 60 * 1000,
-      winStreakCount: 3, winStreakDeltaSize: 1, winStreakDeltaLayers: 1,
-      bigWinCount: 2, bigWinPct: 2.0, bigWinDeltaSize: 2, bigWinDeltaLayers: 0,
-      lossStreakCount: 1, lossDeltaSize: -2, lossDeltaLayers: -2,
+      winStreakCount: 3, winStreakDeltaSize: 1,
+      bigWinCount: 2, bigWinPct: 2.0, bigWinDeltaSize: 2,
+      lossStreakCount: 1, lossDeltaSize: -2,
       respectBotCapital: true, resetHistoryOnFire: true, dryRun: false,
     });
     telegramNotifier.sendNow.mockResolvedValue(true);
@@ -116,7 +115,6 @@ describe('dpsAfterClose.evaluateDpsAfterClose', () => {
     expect(result.reason).toBe('loss');
     expect(result.before.size).toBe(9);
     expect(result.after.size).toBe(7);  // 9 + (-2) = 7
-    expect(result.after.layers).toBe(3); // 5 + (-2) = 3
     // resetHistoryOnFire=true → history cleared after rule fires (next loss starts fresh streak)
     expect(result.newHistory).toHaveLength(0);
 
@@ -126,7 +124,6 @@ describe('dpsAfterClose.evaluateDpsAfterClose', () => {
     // lastResults is the cleared array (size 0) — but cooldownUntil + size ARE updated
     expect(update.dynamicSizeLastResults).toHaveLength(0);
     expect(update.dynamicSizeCurrent).toBe(7);
-    expect(update.dynamicLayersCurrent).toBe(3);
     expect(update.dynamicSizeCooldownUntil).toBeDefined();
   });
 
@@ -323,7 +320,6 @@ describe('dpsAfterClose.evaluateDpsAfterClose', () => {
     const futureCooldown = new Date(Date.now() + 5 * 60 * 1000);
     const botWithCooldown = baseBot({
       dynamicSizeCurrent: 11,
-      dynamicLayersCurrent: 4,
       dynamicSizeCooldownUntil: futureCooldown,
     });
     mockBotFound(botWithCooldown);

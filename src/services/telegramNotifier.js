@@ -589,19 +589,20 @@ function renderMessage(eventKey, p, cfg) {
       //   - independent of cbVersion enum (works alongside CBv2 or CBv3)
       case 'cbv5PanicClose':
         return `💎 CBv5 panic-sell (Support Zone broken) — ปิดทุก position + cooldown BUY\nBot: ${p.botName}\nSymbol: ${p.symbol} (${p.timeframe || '?'})\nLowerKC break + ทลาย deepest pivot low (${p.deepestLow != null ? p.deepestLow.toFixed(6) : '?'}) + ${p.isBearish ? 'bearish' : 'wick'} + ${p.isHighVolume ? 'volume spike' : 'normal vol'} → โครงสร้าง support พัง\nClosed: ${p.closedCount} ไม้\nCooldown: ${p.lockHours || '?'} ชั่วโมง (until ${p.lockedUntil || '?'})\nLowerKC: ${p.lastLower != null ? p.lastLower.toFixed(6) : '?'}\n\n⏸ บอทยัง enable + Auto-pause/resume ยังทำงานปกติ — แค่กั้น S1 BUY ระหว่าง cooldown\n📌 Manual clear cooldown: POST /api/bots/<id>/unlock-cbv2`;
-      // FIX-2026-08-08: Feature #1 — Dynamic Position Sizing resize (size/layers changed)
+      // FIX-2026-08-08: Feature #1 — Dynamic Position Sizing resize (size changed)
       //   - reason: '3-wins' | '2-wins-2pct' | 'loss' (ตัวเลขเปลี่ยนตาม config)
-      //   - before/after show current USDT size + layer count
+      //   - before/after show current USDT size
       // FIX-2026-08-08 (rev2): ค่า clamp/cooldown มาจาก payload (ตั้งได้ที่ /settings.html section 🔟)
       //   + dry-run mode: คำนวณ + แจ้งเตือน แต่ไม่ได้ปรับจริง
+      // FIX-2026-09-03: layer-removal — DPS now only auto-tunes size (layers owned by separate function).
+      //   beforeLayers / afterLayers / minLayers / maxLayers segments removed from telegram payload.
       case 'dpsResize': {
         const cdMin = Number.isFinite(Number(p.cooldownMinutes)) ? Number(p.cooldownMinutes) : 5;
         const bMinS = p.minSize ?? 6, bMaxS = p.maxSize ?? 15;
-        const bMinL = p.minLayers ?? 1, bMaxL = p.maxLayers ?? 5;
         const head = p.dryRun
           ? '🧪 DPS (DRY-RUN — คำนวณเฉยๆ ไม่ได้ปรับจริง)'
           : '📊 DPS resize (Dynamic Position Sizing)';
-        return `${head}\nBot: ${p.botName}\nSymbol: ${p.symbol} (${p.timeframe || '?'})\nReason: ${p.reason || '?'}\nBefore: $${p.beforeSize ?? '?'} × ${p.beforeLayers ?? '?'} layers\nAfter: $${p.afterSize ?? '?'} × ${p.afterLayers ?? '?'} layers\nLast trade: pnl ${p.pnlPct != null ? Number(p.pnlPct).toFixed(2) + '%' : '?'} (${p.isWin ? 'WIN' : 'LOSS'})\nCooldown: ${cdMin} นาที (กัน whipsaw)\n\n💡 clamp: $${bMinS}..$${bMaxS} · ${bMinL}..${bMaxL} layers — ปรับได้ที่ Settings 🔟`;
+        return `${head}\nBot: ${p.botName}\nSymbol: ${p.symbol} (${p.timeframe || '?'})\nReason: ${p.reason || '?'}\nBefore: $${p.beforeSize ?? '?'}\nAfter: $${p.afterSize ?? '?'}\nLast trade: pnl ${p.pnlPct != null ? Number(p.pnlPct).toFixed(2) + '%' : '?'} (${p.isWin ? 'WIN' : 'LOSS'})\nCooldown: ${cdMin} นาที (กัน whipsaw)\n\n💡 clamp: $${bMinS}..$${bMaxS} — ปรับได้ที่ Settings 🔟`;
       }
 
       // FIX-2026-08-08: Feature #3 — Auto unlock cooldown (CB unlocked after 3+ profitable signals)

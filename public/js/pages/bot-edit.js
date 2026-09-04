@@ -206,8 +206,8 @@ function render() {
                   <span class="form-check-label">📊 <strong>Dynamic Position Sizing (DPS)</strong></span>
                 </label>
                 <small class="text-muted d-block mt-1">
-                  ปรับทุนและจำนวนไม้ตามประวัติเทรด · ข้ามเมื่อใช้ DCA/Martingale
-                  <br />Current: <code>$${bot.dynamicSizeEffective != null ? bot.dynamicSizeEffective : (bot.dynamicSizeCurrent != null ? bot.dynamicSizeCurrent : bot.capitalPerTrade)} × ${bot.dynamicLayersEffective != null ? bot.dynamicLayersEffective : (bot.dynamicLayersCurrent != null ? bot.dynamicLayersCurrent : bot.maxTrades)} layers</code>
+                  ปรับทุนตามประวัติเทรด (จำนวนไม้ควบคุมโดยฟังก์ชันแยก) · ข้ามเมื่อใช้ DCA/Martingale
+                  <br />Current: <code>$${bot.dynamicSizeEffective != null ? bot.dynamicSizeEffective : (bot.dynamicSizeCurrent != null ? bot.dynamicSizeCurrent : bot.capitalPerTrade)}</code>
                 </small>
               </div>
               <div class="bot-settings-option">

@@ -1201,47 +1201,36 @@ function renderCbVersionSection() {
 }
 
 // ─── 🛒 Section: DPS (Dynamic Position Sizing) ───────────────────
+// FIX-2026-09-03: layer-removal — DPS now only auto-tunes size (layers owned by separate function).
+//   5 layer inputs removed from renderDpsSection (Min layers, Max layers, Δ layers in Rules 1/2/3).
 function renderDpsSection() {
   const dcfg = (adminCfg && adminCfg.config) || {};
   const dps = {
     dpsMinSize:   Number.isFinite(Number(dcfg.dpsMinSize))   ? Number(dcfg.dpsMinSize)   : 6,
     dpsMaxSize:   Number.isFinite(Number(dcfg.dpsMaxSize))   ? Number(dcfg.dpsMaxSize)   : 15,
-    dpsMinLayers: Number.isFinite(Number(dcfg.dpsMinLayers)) ? Number(dcfg.dpsMinLayers) : 1,
-    dpsMaxLayers: Number.isFinite(Number(dcfg.dpsMaxLayers)) ? Number(dcfg.dpsMaxLayers) : 5,
     dpsCooldownMinutes: Number.isFinite(Number(dcfg.dpsCooldownMinutes)) ? Number(dcfg.dpsCooldownMinutes) : 5,
     dpsWinStreakCount:    Number.isFinite(Number(dcfg.dpsWinStreakCount))    ? Number(dcfg.dpsWinStreakCount)    : 3,
     dpsWinStreakDeltaSize:    Number.isFinite(Number(dcfg.dpsWinStreakDeltaSize))    ? Number(dcfg.dpsWinStreakDeltaSize)    : 1,
-    dpsWinStreakDeltaLayers:  Number.isFinite(Number(dcfg.dpsWinStreakDeltaLayers))  ? Number(dcfg.dpsWinStreakDeltaLayers)  : 1,
     dpsBigWinCount:    Number.isFinite(Number(dcfg.dpsBigWinCount))    ? Number(dcfg.dpsBigWinCount)    : 2,
     dpsBigWinPct:      Number.isFinite(Number(dcfg.dpsBigWinPct))      ? Number(dcfg.dpsBigWinPct)      : 2.0,
     dpsBigWinDeltaSize:    Number.isFinite(Number(dcfg.dpsBigWinDeltaSize))    ? Number(dcfg.dpsBigWinDeltaSize)    : 2,
-    dpsBigWinDeltaLayers:  Number.isFinite(Number(dcfg.dpsBigWinDeltaLayers))  ? Number(dcfg.dpsBigWinDeltaLayers)  : 0,
     dpsLossStreakCount: Number.isFinite(Number(dcfg.dpsLossStreakCount)) ? Number(dcfg.dpsLossStreakCount) : 1,
     dpsLossDeltaSize:   Number.isFinite(Number(dcfg.dpsLossDeltaSize))   ? Number(dcfg.dpsLossDeltaSize)   : -2,
-    dpsLossDeltaLayers: Number.isFinite(Number(dcfg.dpsLossDeltaLayers)) ? Number(dcfg.dpsLossDeltaLayers) : -2,
     dpsRespectBotCapital:  dcfg.dpsRespectBotCapital  !== false,
     dpsResetHistoryOnFire: dcfg.dpsResetHistoryOnFire !== false,
     dpsDryRun:             dcfg.dpsDryRun === true,
   };
-  return section('sec-dps', '📊', 'Dynamic Position Sizing (DPS) — auto-tune size + layers', false, `
+  return section('sec-dps', '📊', 'Dynamic Position Sizing (DPS) — auto-tune size', false, `
     <div class="row g-3">
-      <div class="col-md-3">
+      <div class="col-md-4">
         <label class="form-label">📐 Min size (USDT)</label>
         <input type="number" class="form-control dps-input" id="dps-min-size" value="${dps.dpsMinSize}" step="0.01" min="5" max="10000" data-dps="dpsMinSize" />
       </div>
-      <div class="col-md-3">
+      <div class="col-md-4">
         <label class="form-label">📐 Max size (USDT)</label>
         <input type="number" class="form-control dps-input" id="dps-max-size" value="${dps.dpsMaxSize}" step="0.01" min="5" max="10000" data-dps="dpsMaxSize" />
       </div>
-      <div class="col-md-3">
-        <label class="form-label">🪜 Min layers</label>
-        <input type="number" class="form-control dps-input" id="dps-min-layers" value="${dps.dpsMinLayers}" step="1" min="1" max="50" data-dps="dpsMinLayers" />
-      </div>
-      <div class="col-md-3">
-        <label class="form-label">🪜 Max layers</label>
-        <input type="number" class="form-control dps-input" id="dps-max-layers" value="${dps.dpsMaxLayers}" step="1" min="1" max="50" data-dps="dpsMaxLayers" />
-      </div>
-      <div class="col-md-3">
+      <div class="col-md-4">
         <label class="form-label">⏱ Cooldown (นาที)</label>
         <input type="number" class="form-control dps-input" id="dps-cooldown" value="${dps.dpsCooldownMinutes}" step="1" min="0" max="1440" data-dps="dpsCooldownMinutes" />
       </div>
@@ -1253,17 +1242,13 @@ function renderDpsSection() {
       <div class="col-md-12">
         <strong class="text-muted-3">กฎ 1 · ชนะติดกัน N ไม้</strong>
       </div>
-      <div class="col-md-4">
+      <div class="col-md-6">
         <label class="form-label">จำนวนไม้ชนะติด</label>
         <input type="number" class="form-control dps-input" id="dps-r1-count" value="${dps.dpsWinStreakCount}" step="1" min="1" max="20" data-dps="dpsWinStreakCount" />
       </div>
-      <div class="col-md-4">
+      <div class="col-md-6">
         <label class="form-label">Δ size</label>
         <input type="number" class="form-control dps-input" id="dps-r1-dsize" value="${dps.dpsWinStreakDeltaSize}" step="0.1" min="-1000" max="1000" data-dps="dpsWinStreakDeltaSize" />
-      </div>
-      <div class="col-md-4">
-        <label class="form-label">Δ layers</label>
-        <input type="number" class="form-control dps-input" id="dps-r1-dlayers" value="${dps.dpsWinStreakDeltaLayers}" step="1" min="-50" max="50" data-dps="dpsWinStreakDeltaLayers" />
       </div>
     </div>
 
@@ -1271,21 +1256,17 @@ function renderDpsSection() {
       <div class="col-md-12">
         <strong class="text-muted-3">กฎ 2 · N ไม้ล่าสุดกำไร ≥ X% ทุกไม้</strong>
       </div>
-      <div class="col-md-3">
+      <div class="col-md-4">
         <label class="form-label">จำนวนไม้ย้อนหลัง</label>
         <input type="number" class="form-control dps-input" id="dps-r2-count" value="${dps.dpsBigWinCount}" step="1" min="1" max="20" data-dps="dpsBigWinCount" />
       </div>
-      <div class="col-md-3">
+      <div class="col-md-4">
         <label class="form-label">% กำไรขั้นต่ำต่อไม้</label>
         <input type="number" class="form-control dps-input" id="dps-r2-pct" value="${dps.dpsBigWinPct}" step="0.1" min="0.1" max="100" data-dps="dpsBigWinPct" />
       </div>
-      <div class="col-md-3">
+      <div class="col-md-4">
         <label class="form-label">Δ size</label>
         <input type="number" class="form-control dps-input" id="dps-r2-dsize" value="${dps.dpsBigWinDeltaSize}" step="0.1" min="-1000" max="1000" data-dps="dpsBigWinDeltaSize" />
-      </div>
-      <div class="col-md-3">
-        <label class="form-label">Δ layers</label>
-        <input type="number" class="form-control dps-input" id="dps-r2-dlayers" value="${dps.dpsBigWinDeltaLayers}" step="1" min="-50" max="50" data-dps="dpsBigWinDeltaLayers" />
       </div>
     </div>
 
@@ -1293,17 +1274,13 @@ function renderDpsSection() {
       <div class="col-md-12">
         <strong class="text-muted-3">กฎ 3 · แพ้ติดกัน N ไม้</strong>
       </div>
-      <div class="col-md-4">
+      <div class="col-md-6">
         <label class="form-label">จำนวนไม้แพ้ติด</label>
         <input type="number" class="form-control dps-input" id="dps-r3-count" value="${dps.dpsLossStreakCount}" step="1" min="1" max="20" data-dps="dpsLossStreakCount" />
       </div>
-      <div class="col-md-4">
+      <div class="col-md-6">
         <label class="form-label">Δ size</label>
         <input type="number" class="form-control dps-input" id="dps-r3-dsize" value="${dps.dpsLossDeltaSize}" step="0.1" min="-1000" max="1000" data-dps="dpsLossDeltaSize" />
-      </div>
-      <div class="col-md-4">
-        <label class="form-label">Δ layers</label>
-        <input type="number" class="form-control dps-input" id="dps-r3-dlayers" value="${dps.dpsLossDeltaLayers}" step="1" min="-50" max="50" data-dps="dpsLossDeltaLayers" />
       </div>
     </div>
 
@@ -2626,41 +2603,34 @@ async function saveDpsConfig() {
 
   const minSize   = num('dps-min-size');
   const maxSize   = num('dps-max-size');
-  const minLayers = int('dps-min-layers');
-  const maxLayers = int('dps-max-layers');
   const cooldown  = int('dps-cooldown');
 
   if (!Number.isFinite(minSize) || minSize < 5 || minSize > 10000) { setStatus('dps-status', '❌ Min size ต้องอยู่ระหว่าง 5..10000', true); return; }
   if (!Number.isFinite(maxSize) || maxSize < 5 || maxSize > 10000) { setStatus('dps-status', '❌ Max size ต้องอยู่ระหว่าง 5..10000', true); return; }
   if (minSize > maxSize) { setStatus('dps-status', '❌ Min size ต้องไม่เกิน Max size', true); return; }
-  if (!Number.isFinite(minLayers) || minLayers < 1 || minLayers > 50) { setStatus('dps-status', '❌ Min layers ต้องอยู่ระหว่าง 1..50', true); return; }
-  if (!Number.isFinite(maxLayers) || maxLayers < 1 || maxLayers > 50) { setStatus('dps-status', '❌ Max layers ต้องอยู่ระหว่าง 1..50', true); return; }
-  if (minLayers > maxLayers) { setStatus('dps-status', '❌ Min layers ต้องไม่เกิน Max layers', true); return; }
+  // FIX-2026-09-03: layer-removal — minLayers/maxLayers validations dropped (DPS only auto-tunes size)
   if (!Number.isFinite(cooldown) || cooldown < 0 || cooldown > 1440) { setStatus('dps-status', '❌ Cooldown ต้องอยู่ระหว่าง 0..1440', true); return; }
 
   const r1Count    = int('dps-r1-count');
   const r1DSize    = num('dps-r1-dsize');
-  const r1DLayers  = int('dps-r1-dlayers');
   const r2Count    = int('dps-r2-count');
   const r2Pct      = num('dps-r2-pct');
   const r2DSize    = num('dps-r2-dsize');
-  const r2DLayers  = int('dps-r2-dlayers');
   const r3Count    = int('dps-r3-count');
   const r3DSize    = num('dps-r3-dsize');
-  const r3DLayers  = int('dps-r3-dlayers');
   if (![r1Count, r2Count, r3Count].every((v) => Number.isFinite(v) && v >= 1 && v <= 20)) { setStatus('dps-status', '❌ จำนวนไม้ (count) ต้องอยู่ระหว่าง 1..20', true); return; }
   if (!Number.isFinite(r2Pct) || r2Pct < 0.1 || r2Pct > 100) { setStatus('dps-status', '❌ % กำไรขั้นต่ำต่อไม้ ต้องอยู่ระหว่าง 0.1..100', true); return; }
-  for (const [name, v] of [['r1DSize', r1DSize], ['r1DLayers', r1DLayers], ['r2DSize', r2DSize], ['r2DLayers', r2DLayers], ['r3DSize', r3DSize], ['r3DLayers', r3DLayers]]) {
+  // FIX-2026-09-03: layer-removal — r*DLayers validations dropped (only size deltas remain)
+  for (const [name, v] of [['r1DSize', r1DSize], ['r2DSize', r2DSize], ['r3DSize', r3DSize]]) {
     if (!Number.isFinite(v)) { setStatus('dps-status', `❌ ${name} ต้องเป็นตัวเลข`, true); return; }
   }
 
   const payload = {
     dpsMinSize: minSize, dpsMaxSize: maxSize,
-    dpsMinLayers: minLayers, dpsMaxLayers: maxLayers,
     dpsCooldownMinutes: cooldown,
-    dpsWinStreakCount: r1Count, dpsWinStreakDeltaSize: r1DSize, dpsWinStreakDeltaLayers: r1DLayers,
-    dpsBigWinCount: r2Count, dpsBigWinPct: r2Pct, dpsBigWinDeltaSize: r2DSize, dpsBigWinDeltaLayers: r2DLayers,
-    dpsLossStreakCount: r3Count, dpsLossDeltaSize: r3DSize, dpsLossDeltaLayers: r3DLayers,
+    dpsWinStreakCount: r1Count, dpsWinStreakDeltaSize: r1DSize,
+    dpsBigWinCount: r2Count, dpsBigWinPct: r2Pct, dpsBigWinDeltaSize: r2DSize,
+    dpsLossStreakCount: r3Count, dpsLossDeltaSize: r3DSize,
     dpsRespectBotCapital: !!el('dps-respect').checked,
     dpsResetHistoryOnFire: !!el('dps-reset').checked,
     dpsDryRun: !!el('dps-dryrun').checked,
