@@ -43,6 +43,8 @@
     { id: 'mc-tpTrendMultiplier', key: 'tpTrendMultiplier', section: 'tp', order: 50, type: 'number', step: '1', min: '1', max: '10', label: '✖️ ตัวคูณ TP ตามแนวโน้ม' },
     { id: 'mc-autoPauseMinKcPct', key: 'autoPauseMinKcPct', section: 'automation', order: 30, type: 'number', step: '0.1', min: '0.1', max: '50', label: '⏸️ Min-%KC threshold (%)' },
     { id: 'mc-autoPauseMin24hVolUsdt', key: 'autoPauseMin24hVolUsdt', section: 'automation', order: 31, type: 'number', step: '1000', min: '0', label: '💵 Auto-pause Min 24h Vol (USDT)' },
+    // FIX-2026-09-05: DLC per-bot base-loss default — sits NEXT to DPS tunables (was: invisible to user in ตั้งค่าระบบ)
+    { id: 'mc-dlcBaseLossPct', key: 'dlcBaseLossPct', section: 'automation', order: 32, type: 'number', step: '0.5', min: '-95', max: '-1', label: '🪜 DLC Base Loss % (ติดลบ · ยิ่งติดลบมาก = ยิ่งต้องขาดทุนลึกก่ยเปิด layer ถัดไป)' },
     // FIX-2026-08-30 / Phase 4: per-bot Auto-Timing opt-in (3-state string → null/true/false at backend)
     { id: 'mc-autoTimingEnabled', key: 'autoTimingEnabled', section: 'automation', order: 40, type: 'select', options: ['inherit','true','false'], label: '⏱️ Auto-Timing (heatmap entry gate) · inherit=master' },
     { id: 'mc-autoArmLossPct', key: 'autoArmLossPct', section: 'risk', order: 30, type: 'number', step: '0.5', min: '1', max: '99', label: '🛡️ ขาดทุนขั้นต่ำสำหรับ Auto-arm (%)' },
@@ -81,6 +83,10 @@
     { id: 'mc-autoUpdateTp', key: 'autoUpdateTp', section: 'tp', order: 30, label: '⏰ อัปเดต TP% ทุกต้นชั่วโมง' },
     { id: 'mc-tpTrendEnabled', key: 'tpTrendEnabled', section: 'tp', order: 40, label: '📈 ขยาย TP ตามแนวโน้ม (Trend ×N)' },
     { id: 'mc-dynamicSizeEnabled', key: 'dynamicSizeEnabled', section: 'automation', order: 10, label: '📊 Dynamic Position Sizing (DPS)' },
+    // FIX-2026-09-05: DLC per-bot default toggle — sits NEXT to DPS master toggle
+    //   - user reported "หา DLC ใน Master Config ไม่เจอ" (was only in ตั้งค่าระบบ section)
+    //   - masterDlcEnabled (kill-switch) stays inline in bot-edit accordion
+    { id: 'mc-dlcEnabled', key: 'dlcEnabled', section: 'automation', order: 11, label: '🪜 Dynamic Layer Control (DLC) · per-bot default (masterDlcEnabled kill-switch stays inline in bot-edit)' },
     { id: 'mc-autoPauseEnabled', key: 'autoPauseEnabled', section: 'automation', order: 20, label: '⏸️ หยุดบอทเมื่อ Min-%KC หรือ 24h Vol ต่ำ' },
     // FIX-2026-08-29: per-bot opt-in for auto-pause threshold auto-adjust (default ON)
     { id: 'mc-autoPauseAdjustEnabled', key: 'autoPauseAdjustEnabled', section: 'automation', order: 25, label: '🔧 ให้ Auto-adjust threshold ของบอทนี้' },

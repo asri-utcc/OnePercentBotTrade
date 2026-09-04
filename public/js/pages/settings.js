@@ -462,6 +462,15 @@ function renderBotDefaultsSection() {
           <span class="form-check-label">📚 DCA + BEP stack mode</span>
         </label>
       </div>
+      <!-- FIX-2026-09-05: DLC per-bot default toggle — sits NEXT to DPS in Bot Defaults
+           (was: missing → user reported "หาใน setting bot default ไม่มีให้แก้ไขเปิดปิดเหมือนกัน") -->
+      <div class="col-md-4">
+        <label class="form-check form-switch">
+          <input type="checkbox" class="form-check-input" id="bd-dlc-enabled" ${d.dlcEnabled ? 'checked' : ''} />
+          <span class="form-check-label">🪜 Dynamic Layer Control (DLC)</span>
+        </label>
+        <small class="text-muted-3 d-block">Mutex กับ DCA: ติ๊กอันใดอันหนึ่ง — เปิด DLC ต้องปิด DCA+Martingale</small>
+      </div>
     </div>
 
     <!-- CBv5 Advanced sub-section -->
@@ -558,6 +567,12 @@ function renderBotDefaultsSection() {
       <div class="col-md-3">
         <label class="form-label">DCA Max Layers</label>
         <input type="number" class="form-control" id="bd-dca-max-layers" value="${d.dcaMaxLayers}" step="1" min="1" max="100" />
+      </div>
+      <!-- FIX-2026-09-05: DLC base-loss field (per-bot default) — sits with DCA Max Layers -->
+      <div class="col-md-3">
+        <label class="form-label">🪜 DLC Base Loss % (ติดลบ)</label>
+        <input type="number" class="form-control" id="bd-dlc-base-loss-pct" value="${d.dlcBaseLossPct ?? -10}" step="0.5" min="-95" max="-1" />
+        <small class="text-muted-3 d-block">ยิ่งติดลบมาก = layer ถัดไปต้องรอขาดทุนลึกกว่านี้</small>
       </div>
     </div>
 
@@ -2719,6 +2734,9 @@ const BD_RECOMMENDED = {
   // FIX-2026-09-02: Round-down Capital (opt-in per-bot — default OFF, min 5.5 USDT)
   roundDownCapitalEnabled: false,
   roundDownCapitalMin: 5.5,
+  // FIX-2026-09-05: DLC per-bot default (opt-in, like DPS recommended=true) — but DLC is mutually exclusive with DCA, so default OFF keeps DCA available
+  dlcEnabled: false,
+  dlcBaseLossPct: -10,
 };
 
 async function saveBotDefaults() {
@@ -2746,6 +2764,10 @@ async function saveBotDefaults() {
     suggestTpWindow: int('bd-suggest-tp-window'),
     dcaEnabled: isChecked('bd-dca-enabled'),
     dcaMaxLayers: int('bd-dca-max-layers'),
+    // FIX-2026-09-05: DLC per-bot defaults — dlcEnabled toggle + dlcBaseLossPct field (mirror DPS pattern in admin whitelist)
+    //   - dlcEnabled=true requires dcaEnabled=false (mutex handled by admin.routes.js bulk mutex check)
+    dlcEnabled: isChecked('bd-dlc-enabled'),
+    dlcBaseLossPct: num('bd-dlc-base-loss-pct'),
     s1OnlyDown: isChecked('bd-s1-only-down'),
     xs1Enabled: isChecked('bd-xs1-enabled'),
     cbEnabled: isChecked('bd-cb-enabled'),
@@ -2814,6 +2836,10 @@ async function saveBotDefaults() {
   if (!Number.isFinite(payload.tpTrendMultiplier) || payload.tpTrendMultiplier < 1 || payload.tpTrendMultiplier > 10) errors.push('TP trend mult 1..10');
   // FIX-2026-09-02: Round-down min notional threshold (USDT, 1..10000)
   if (!Number.isFinite(payload.roundDownCapitalMin) || payload.roundDownCapitalMin < 1 || payload.roundDownCapitalMin > 10000) errors.push('Round-down min 1..10000');
+  // FIX-2026-09-05: DLC base-loss range -95..-1 (mirror Bot schema + botDefaults.js clamp)
+  if (!Number.isFinite(payload.dlcBaseLossPct) || payload.dlcBaseLossPct < -95 || payload.dlcBaseLossPct > -1) errors.push('DLC base loss -95..-1');
+  // FIX-2026-09-05: DLC↔DCA mutex (mirror bot.routes.js mutex)
+  if (payload.dlcEnabled && payload.dcaEnabled) errors.push('dlcEnabled ห้ามเปิดพร้อม dcaEnabled (mutex)');
   if (errors.length > 0) {
     setStatus('bd-status', '❌ ' + errors.join(' · '), true);
     return;

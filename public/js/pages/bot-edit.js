@@ -40,6 +40,30 @@ async function loadBot() {
   }
 }
 
+// FIX-2026-09-04: Dynamic Layer Control (DLC) — UI dependency on DCA/Martingale
+//   - TRUE top-level function (was nested inside render() — closure overhead per render + confusing scope)
+//   - called from end of render() so listener rebind happens after every render cycle
+//   - mutates DOM in place: toggles f-dlc-enabled.disabled + checked based on current f-dca-enabled/f-martingale-enabled state
+function refreshDlcUi() {
+  const cb = document.getElementById('f-dlc-enabled');
+  const baseLoss = document.getElementById('f-dlc-base-loss-pct');
+  const warn = document.getElementById('dlc-warning');
+  if (!cb) return;
+  const dcaOn = document.getElementById('f-dca-enabled')?.checked;
+  const martOn = document.getElementById('f-martingale-enabled')?.checked;
+  const blocked = dcaOn || martOn;
+  if (blocked) {
+    cb.disabled = true;
+    cb.checked = false;
+    if (baseLoss) baseLoss.disabled = true;
+    if (warn) warn.style.display = '';
+  } else {
+    cb.disabled = false;
+    if (baseLoss) baseLoss.disabled = false;
+    if (warn) warn.style.display = 'none';
+  }
+}
+
 function render() {
   const container = document.getElementById('bot-edit-content');
   const hasActiveCbCooldown = [bot.cbv2LockedUntil, bot.cbv3LockedUntil]
@@ -1103,27 +1127,9 @@ function render() {
   refreshDcaUi();
 
   // FIX-2026-09-04: Dynamic Layer Control (DLC) — UI dependency on DCA/Martingale
-  //   - moved OUT of top-level (was firing once on script load → stale after re-render)
-  //   - now invoked from end of render() so listeners rebind every render cycle
-function refreshDlcUi() {
-  const cb = document.getElementById('f-dlc-enabled');
-  const baseLoss = document.getElementById('f-dlc-base-loss-pct');
-  const warn = document.getElementById('dlc-warning');
-  if (!cb) return;
-  const dcaOn = document.getElementById('f-dca-enabled')?.checked;
-  const martOn = document.getElementById('f-martingale-enabled')?.checked;
-  const blocked = dcaOn || martOn;
-  if (blocked) {
-    cb.disabled = true;
-    cb.checked = false;
-    if (baseLoss) baseLoss.disabled = true;
-    if (warn) warn.style.display = '';
-  } else {
-    cb.disabled = false;
-    if (baseLoss) baseLoss.disabled = false;
-    if (warn) warn.style.display = 'none';
-  }
-}
+  //   - TRUE top-level function (declared below init/loadBot; called from end of render())
+  //   - called from end of render() so listeners rebind every render cycle
+
 
   // FIX-2026-08-03: Backtest stats toggle
   const _statsBtn = document.getElementById('dca-show-stats-btn');
