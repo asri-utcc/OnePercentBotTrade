@@ -2,15 +2,23 @@
 
 /**
  * FIX-2026-08-27 Phase 3b-1: tierTemplates tests
+ * FIX-2026-09-04: REWORKED — tier templates are EMPTY (no default contribution).
+ *
+ * **User directive (2026-09-04):**
+ *   "ลบ tier template ออกให้หมด ให้หมด user จะได้รับค่าเริ่มต้นจากบอทเหมือนๆกันทุกคน
+ *    และแต่ละคนจะปรับแต่งการตั้งค่าเองโดยไม่มีการเข้ามาแทรกแซงจากแอกมิน
+ *    นอกจากการจำกัดบางฟังชั่นที่ขึ้นอยู่กับข้อจำกัดการใช้งานของแต่ละ tier"
+ *
+ * Tier now restricts ONLY features (licenseService.isFeatureEnabled) + maxBots/maxCapital.
+ * NO default-value contribution. All bots get same fallback → botDefaults → overrides.
  *
  * Verifies:
- *   - TIER_PRESETS is frozen (cannot be mutated at runtime)
- *   - All 3 tiers (basic/pro/enterprise) are present
- *   - getTierPreset() returns preset for known tier, empty for unknown/null
- *   - listTiers() returns sorted list
- *   - mergeTierWithDefaults merges with tier winning over botDefaults
- *   - buildBotCreatePayload honors tier → botDefaults → fallback
- *   - tier=null preserves old behavior (no preset contribution)
+ *   - TIER_PRESETS is frozen + all 3 tiers present
+ *   - All 3 tier presets are EMPTY (no keys)
+ *   - getTierPreset() returns empty preset for known tier
+ *   - mergeTierWithDefaults returns botDefaults unchanged (tier contributes nothing)
+ *   - buildBotCreatePayload ignores tier — same result for tier=null/basic/pro/enterprise
+ *   - User override > botDefaults > fallback (unchanged from previous behavior)
  */
 
 const {
@@ -21,7 +29,7 @@ const {
 } = require('../src/services/tierTemplates');
 const { buildBotCreatePayload } = require('../src/services/botDefaults');
 
-describe('tierTemplates — TIER_PRESETS structure (FIX-2026-08-27)', () => {
+describe('tierTemplates — TIER_PRESETS structure (FIX-2026-09-04: empty presets)', () => {
   test('all 3 tiers present', () => {
     expect(Object.keys(TIER_PRESETS).sort()).toEqual(['basic', 'enterprise', 'pro']);
   });
@@ -33,80 +41,42 @@ describe('tierTemplates — TIER_PRESETS structure (FIX-2026-08-27)', () => {
     expect(Object.isFrozen(TIER_PRESETS.enterprise)).toBe(true);
   });
 
-  test('every preset has the same set of keys (consistency check)', () => {
-    const basicKeys = Object.keys(TIER_PRESETS.basic).sort();
-    const proKeys = Object.keys(TIER_PRESETS.pro).sort();
-    const entKeys = Object.keys(TIER_PRESETS.enterprise).sort();
-    expect(proKeys).toEqual(basicKeys);
-    expect(entKeys).toEqual(basicKeys);
+  test('all tier presets are EMPTY (FIX-2026-09-04 user directive)', () => {
+    // User: "ลบ tier template ออกให้หมด ให้หมด user จะได้รับค่าเริ่มต้นจากบอทเหมือนๆกันทุกคน"
+    expect(Object.keys(TIER_PRESETS.basic)).toEqual([]);
+    expect(Object.keys(TIER_PRESETS.pro)).toEqual([]);
+    expect(Object.keys(TIER_PRESETS.enterprise)).toEqual([]);
   });
 
-  test('basic has most conservative capitalPerTrade', () => {
-    expect(TIER_PRESETS.basic.capitalPerTrade).toBeLessThan(TIER_PRESETS.pro.capitalPerTrade);
-    expect(TIER_PRESETS.pro.capitalPerTrade).toBeLessThan(TIER_PRESETS.enterprise.capitalPerTrade);
-  });
-
-  test('basic has most conservative maxTrades', () => {
-    expect(TIER_PRESETS.basic.maxTrades).toBeLessThan(TIER_PRESETS.pro.maxTrades);
-    expect(TIER_PRESETS.pro.maxTrades).toBeLessThan(TIER_PRESETS.enterprise.maxTrades);
-  });
-
-  test('basic has lowest tpPercent', () => {
-    expect(TIER_PRESETS.basic.tpPercent).toBeLessThan(TIER_PRESETS.pro.tpPercent);
-    expect(TIER_PRESETS.pro.tpPercent).toBeLessThan(TIER_PRESETS.enterprise.tpPercent);
-  });
-
-  test('NO *Enabled safety/feature toggles in any tier preset (FIX-2026-09-04)', () => {
-    // User directive: "ให้ผู้ใช้เป็นผู้ตั้ง ไม่ผูกกับ preset tier ใดๆ"
-    // Tier presets must not silently enable ANY safety/feature toggle.
-    const forbidden = [
-      'cbv5Enabled', 'cbv3Enabled', 'cbAutoUnlockEnabled',
-      'dynamicSizeEnabled', 'autoArmStopLossOnUKC', 'autoUpdateTp',
-      'dcaEnabled', 'martingaleEnabled',
+  test('NO safety/feature/size defaults in any tier preset (FIX-2026-09-04)', () => {
+    // Comprehensive: nothing admin-set should leak into bot defaults via tier.
+    // Tier only restricts features (licenseService) — not bot values.
+    const forbiddenAny = [
+      // safety toggles
+      'cbv5Enabled', 'cbv3Enabled', 'cbv2Enabled', 'cbAutoUnlockEnabled',
       'safeTradeTrendlineEnabled', 'safeTradeNoTradeEnabled',
+      'dcaEnabled', 'martingaleEnabled',
+      // automation toggles
+      'dynamicSizeEnabled', 'autoArmStopLossOnUKC', 'autoUpdateTp',
       'stopLossOnUpperKC', 'xs1Enabled', 'tpTrendEnabled',
+      // size/limit defaults (was tier-progressive before, now removed)
+      'capitalPerTrade', 'maxTrades', 'tpPercent', 'retryMax', 'retryTimeMin',
+      // numeric hints (was kept briefly in round 3, now removed too)
+      'cbv5LockHours', 'cbv3LockHours', 'cbAutoUnlockThresholdPct',
     ];
     ['basic', 'pro', 'enterprise'].forEach(t => {
-      forbidden.forEach(f => {
+      forbiddenAny.forEach(f => {
         expect(TIER_PRESETS[t][f]).toBeUndefined();
       });
     });
   });
-
-  test('lock-hour + threshold hints remain (numeric only)', () => {
-    expect(TIER_PRESETS.basic.cbv5LockHours).toBe(8);
-    expect(TIER_PRESETS.basic.cbv3LockHours).toBe(8);
-    expect(TIER_PRESETS.basic.cbAutoUnlockThresholdPct).toBe(1.0);
-    expect(TIER_PRESETS.pro.cbv5LockHours).toBe(4);
-    expect(TIER_PRESETS.pro.cbv3LockHours).toBe(8);
-    expect(TIER_PRESETS.enterprise.cbv5LockHours).toBe(2);
-    expect(TIER_PRESETS.enterprise.cbv3LockHours).toBe(4);
-    expect(TIER_PRESETS.enterprise.cbAutoUnlockThresholdPct).toBe(0.8);
-  });
-
-  test('size/limit defaults still tier-progressive', () => {
-    expect(TIER_PRESETS.basic.capitalPerTrade).toBeLessThan(TIER_PRESETS.pro.capitalPerTrade);
-    expect(TIER_PRESETS.pro.capitalPerTrade).toBeLessThan(TIER_PRESETS.enterprise.capitalPerTrade);
-    expect(TIER_PRESETS.basic.maxTrades).toBeLessThan(TIER_PRESETS.pro.maxTrades);
-    expect(TIER_PRESETS.pro.maxTrades).toBeLessThan(TIER_PRESETS.enterprise.maxTrades);
-    expect(TIER_PRESETS.basic.tpPercent).toBeLessThan(TIER_PRESETS.pro.tpPercent);
-    expect(TIER_PRESETS.pro.tpPercent).toBeLessThan(TIER_PRESETS.enterprise.tpPercent);
-  });
 });
 
 describe('tierTemplates — getTierPreset()', () => {
-  test('returns basic preset for "basic"', () => {
-    const p = getTierPreset('basic');
-    expect(p.capitalPerTrade).toBe(TIER_PRESETS.basic.capitalPerTrade);
-    expect(p).toBe(TIER_PRESETS.basic); // same reference
-  });
-
-  test('returns pro preset for "pro"', () => {
-    expect(getTierPreset('pro')).toBe(TIER_PRESETS.pro);
-  });
-
-  test('returns enterprise preset for "enterprise"', () => {
-    expect(getTierPreset('enterprise')).toBe(TIER_PRESETS.enterprise);
+  test('returns empty frozen object for basic/pro/enterprise', () => {
+    expect(getTierPreset('basic')).toEqual({});
+    expect(getTierPreset('pro')).toEqual({});
+    expect(getTierPreset('enterprise')).toEqual({});
   });
 
   test('returns empty object for unknown tier', () => {
@@ -124,88 +94,93 @@ describe('tierTemplates — getTierPreset()', () => {
 });
 
 describe('tierTemplates — listTiers()', () => {
-  test('returns array of tier names', () => {
+  test('returns array of 3 tier names', () => {
     const tiers = listTiers();
-    expect(Array.isArray(tiers)).toBe(true);
-    expect(tiers).toContain('basic');
-    expect(tiers).toContain('pro');
-    expect(tiers).toContain('enterprise');
+    expect(tiers).toEqual(['basic', 'pro', 'enterprise']);
   });
 });
 
-describe('tierTemplates — mergeTierWithDefaults()', () => {
-  test('tier wins over botDefaults', () => {
-    const merged = mergeTierWithDefaults({ capitalPerTrade: 7 }, 'basic');
-    expect(merged.capitalPerTrade).toBe(5); // basic preset wins
-  });
-
-  test('botDefaults used when tier does not set the field', () => {
-    const merged = mergeTierWithDefaults({ kcMult: 2.5 }, 'basic');
-    expect(merged.kcMult).toBe(2.5); // botDefaults value
-    expect(merged.capitalPerTrade).toBe(5); // tier preset
-  });
-
-  test('null tier → botDefaults passes through unchanged', () => {
+describe('tierTemplates — mergeTierWithDefaults() (FIX-2026-09-04: tier is no-op)', () => {
+  test('tier=null → botDefaults passes through unchanged', () => {
     const merged = mergeTierWithDefaults({ kcMult: 2.5, capitalPerTrade: 9 }, null);
     expect(merged).toEqual({ kcMult: 2.5, capitalPerTrade: 9 });
   });
 
-  test('empty botDefaults → only tier values present', () => {
-    const merged = mergeTierWithDefaults({}, 'pro');
-    expect(merged.capitalPerTrade).toBe(TIER_PRESETS.pro.capitalPerTrade);
-    expect(merged.maxTrades).toBe(TIER_PRESETS.pro.maxTrades);
+  test('tier=basic → botDefaults passes through unchanged (FIX-2026-09-04)', () => {
+    const merged = mergeTierWithDefaults({ capitalPerTrade: 7 }, 'basic');
+    expect(merged.capitalPerTrade).toBe(7); // tier contributes nothing
+  });
+
+  test('tier=pro → botDefaults passes through unchanged (FIX-2026-09-04)', () => {
+    const merged = mergeTierWithDefaults({ kcMult: 2.5 }, 'pro');
+    expect(merged.kcMult).toBe(2.5);
+    expect(merged.capitalPerTrade).toBeUndefined(); // not injected
+  });
+
+  test('tier=enterprise → botDefaults passes through unchanged (FIX-2026-09-04)', () => {
+    const merged = mergeTierWithDefaults({ capitalPerTrade: 25, maxTrades: 20 }, 'enterprise');
+    expect(merged).toEqual({ capitalPerTrade: 25, maxTrades: 20 });
+  });
+
+  test('empty botDefaults + any tier → still empty', () => {
+    expect(mergeTierWithDefaults({}, 'basic')).toEqual({});
+    expect(mergeTierWithDefaults({}, 'pro')).toEqual({});
+    expect(mergeTierWithDefaults({}, 'enterprise')).toEqual({});
   });
 
   test('does not mutate inputs', () => {
     const bd = { capitalPerTrade: 7 };
-    const merged = mergeTierWithDefaults(bd, 'basic');
-    expect(bd.capitalPerTrade).toBe(7); // original unchanged
-    expect(merged.capitalPerTrade).toBe(5);
+    const merged = mergeTierWithDefaults(bd, 'enterprise');
+    expect(bd.capitalPerTrade).toBe(7);
+    expect(merged).toEqual({ capitalPerTrade: 7 });
+  });
+
+  test('tier=unknown → botDefaults passes through (no error)', () => {
+    const merged = mergeTierWithDefaults({ capitalPerTrade: 12 }, 'platinum');
+    expect(merged).toEqual({ capitalPerTrade: 12 });
   });
 });
 
-describe('buildBotCreatePayload — tier integration (FIX-2026-08-27)', () => {
-  test('tier=basic → small capitalPerTrade', () => {
-    const p = buildBotCreatePayload({ tier: 'basic', fallbacks: { capitalPerTrade: 99 } });
-    expect(p.capitalPerTrade).toBe(5);
+describe('buildBotCreatePayload — tier is a no-op (FIX-2026-09-04)', () => {
+  // CRITICAL: all tiers must produce IDENTICAL results when only tier differs.
+  // This is the regression guard against silent admin interference.
+
+  test('tier=null/basic/pro/enterprise → IDENTICAL capitalPerTrade (fallback)', () => {
+    const fb = { capitalPerTrade: 99 };
+    const a = buildBotCreatePayload({ tier: null, fallbacks: fb });
+    const b = buildBotCreatePayload({ tier: 'basic', fallbacks: fb });
+    const c = buildBotCreatePayload({ tier: 'pro', fallbacks: fb });
+    const d = buildBotCreatePayload({ tier: 'enterprise', fallbacks: fb });
+    expect(a.capitalPerTrade).toBe(99);
+    expect(b.capitalPerTrade).toBe(99);
+    expect(c.capitalPerTrade).toBe(99);
+    expect(d.capitalPerTrade).toBe(99);
   });
 
-  test('tier=pro → medium capitalPerTrade', () => {
-    const p = buildBotCreatePayload({ tier: 'pro', fallbacks: { capitalPerTrade: 99 } });
-    expect(p.capitalPerTrade).toBe(10);
+  test('tier=null/basic/pro/enterprise → IDENTICAL maxTrades (fallback)', () => {
+    const fb = { maxTrades: 7 };
+    ['basic', 'pro', 'enterprise', null].forEach(t => {
+      const p = buildBotCreatePayload({ tier: t, fallbacks: fb });
+      expect(p.maxTrades).toBe(7);
+    });
   });
 
-  test('tier=enterprise → large capitalPerTrade', () => {
-    const p = buildBotCreatePayload({ tier: 'enterprise', fallbacks: { capitalPerTrade: 99 } });
-    expect(p.capitalPerTrade).toBe(25);
+  test('tier does not affect kcMult', () => {
+    const botDefaults = { kcMult: 2.7 };
+    const fb = { kcMult: 1.5 };
+    ['basic', 'pro', 'enterprise'].forEach(t => {
+      const p = buildBotCreatePayload({ tier: t, botDefaults, fallbacks: fb });
+      expect(p.kcMult).toBe(2.7); // botDefaults wins, tier contributes nothing
+    });
   });
 
-  test('tier overrides botDefaults for the same field', () => {
+  test('user override still wins (unchanged precedence)', () => {
     const p = buildBotCreatePayload({
-      tier: 'pro',
-      botDefaults: { capitalPerTrade: 50 }, // user override in Settings
+      overrides: { capitalPerTrade: 100 },
+      tier: 'enterprise', // would have given 25 in old design
       fallbacks: { capitalPerTrade: 99 },
     });
-    // tier=pro preset (10) wins over botDefaults (50)
-    expect(p.capitalPerTrade).toBe(10);
-  });
-
-  test('botDefaults used when tier does not set the field', () => {
-    const p = buildBotCreatePayload({
-      tier: 'basic',
-      botDefaults: { kcMult: 2.7 }, // not in basic preset
-      fallbacks: { kcMult: 1.5 },
-    });
-    expect(p.kcMult).toBe(2.7);
-  });
-
-  test('user override wins over tier', () => {
-    const p = buildBotCreatePayload({
-      overrides: { capitalPerTrade: 100 }, // user explicit
-      tier: 'enterprise',                  // would give 25
-      fallbacks: { capitalPerTrade: 99 },
-    });
-    expect(p.capitalPerTrade).toBe(100);
+    expect(p.capitalPerTrade).toBe(100); // user override wins
   });
 
   test('tier=null preserves old behavior (no tier contribution)', () => {
@@ -225,38 +200,35 @@ describe('buildBotCreatePayload — tier integration (FIX-2026-08-27)', () => {
   });
 
   test('NO safety/feature *Enabled is true across all tiers (FIX-2026-09-04)', () => {
-    // Regression guard for fleet-wide silent divergence: 28 (New Beta) bots had
-    //   cbEnabled=false but cbv3Enabled=true → LISTA got hit today.
-    // User directive: "ให้ผู้ใช้เป็นผู้ตั้ง ไม่ผูกกับ preset tier ใดๆ"
-    // Circuit-breaker family only — verified by also testing buildBotCreatePayload:
-    // - tier preset no longer contributes any *Enabled
-    // - botDefaults uses strict + fallback=false for cbv3Enabled/cbv2Enabled/cbv5Enabled/cbAutoUnlockEnabled
+    // Regression guard: 28 (New Beta) bots had cbEnabled=false but cbv3Enabled=true.
+    const safetyFlags = [
+      'cbv5Enabled', 'cbv3Enabled', 'cbv2Enabled', 'cbAutoUnlockEnabled',
+    ];
     ['basic', 'pro', 'enterprise'].forEach(t => {
       const p = buildBotCreatePayload({ tier: t, fallbacks: {} });
-      expect(p.cbv5Enabled).toBe(false);
-      expect(p.cbv3Enabled).toBe(false);
-      expect(p.cbv2Enabled).toBe(false);
-      expect(p.cbAutoUnlockEnabled).toBe(false);
+      safetyFlags.forEach(f => {
+        expect(p[f]).toBe(false);
+      });
     });
   });
 
-  test('basic tier keeps capitalPerTrade=5 even when botDefaults.capitalPerTrade differs', () => {
-    // regression: explicit tier takes priority
-    const p = buildBotCreatePayload({
-      tier: 'basic',
-      botDefaults: { capitalPerTrade: 50 },
-      fallbacks: { capitalPerTrade: 9 },
+  test('cbv*LockHours are NOT tier-influenced (FIX-2026-09-04)', () => {
+    // Previously cbv5LockHours was tier-progressive (8/4/2). Now all from botDefaults (user Settings)
+    // or hardcoded fallback inside pickScalar — tier contributes nothing.
+    const botDefaults = { cbv5LockHours: 6, cbv3LockHours: 7 };
+    ['basic', 'pro', 'enterprise'].forEach(t => {
+      const p = buildBotCreatePayload({ tier: t, botDefaults, fallbacks: {} });
+      expect(p.cbv5LockHours).toBe(6);
+      expect(p.cbv3LockHours).toBe(7);
     });
-    expect(p.capitalPerTrade).toBe(5);
   });
 
-  test('lock-hour hints flow from tier to botDefaults merge', () => {
-    // Verify numeric hints still propagate (cbv5LockHours is NOT an *Enabled flag)
-    const basic = buildBotCreatePayload({ tier: 'basic', fallbacks: {} });
-    const pro = buildBotCreatePayload({ tier: 'pro', fallbacks: {} });
-    const ent = buildBotCreatePayload({ tier: 'enterprise', fallbacks: {} });
-    expect(basic.cbv5LockHours).toBe(8);
-    expect(pro.cbv5LockHours).toBe(4);
-    expect(ent.cbv5LockHours).toBe(2);
+  test('all tiers with no overrides/botDefaults/fallbacks → identical default bot', () => {
+    // This is the headline test: every bot starts the same way regardless of tier.
+    const a = buildBotCreatePayload({ tier: 'basic', fallbacks: {} });
+    const b = buildBotCreatePayload({ tier: 'pro', fallbacks: {} });
+    const c = buildBotCreatePayload({ tier: 'enterprise', fallbacks: {} });
+    expect(b).toEqual(a);
+    expect(c).toEqual(a);
   });
 });

@@ -789,40 +789,28 @@ function setupEventHandlers() {
   }
 
   // FIX-2026-08-27 Phase 3b-1: Tier preset application (mirrors src/services/tierTemplates.js)
-  //   - Frontend mirror so user sees instant feedback before submit
-  //   - Server-side buildBotCreatePayload already applies tier on POST (single source of truth)
-  // FIX-2026-09-04: REWORKED — tier preset only sets SIZE/LIMIT defaults. NO *Enabled flags.
-  //   User directive: "ให้ผู้ใช้เป็นผู้ตั้ง ไม่ผูกกับ preset tier ใดๆ"
-  //   Mirror of src/services/tierTemplates.js. Safety/feature toggles must be set by user.
+  // FIX-2026-09-04 REWORKED: tier templates REMOVED — all bots get same fallback defaults.
+  //   User directive: "ลบ tier template ออกให้หมด ให้หมด user จะได้รับค่าเริ่มต้นจากบอทเหมือนๆกันทุกคน
+  //    และแต่ละคนจะปรับแต่งการตั้งค่าเองโดยไม่มีการเข้ามาแทรกแซงจากแอกมิน
+  //    นอกจากการจำกัดบางฟังชั่นที่ขึ้นอยู่กับข้อจำกัดการใช้งานของแต่ละ tier"
+  //   Tier now only restricts FEATURES (licenseService.isFeatureEnabled) + maxBots/maxCapital.
+  //   TIER_PRESETS_FRONTEND kept empty for API stability (future re-introduction).
   const TIER_PRESETS_FRONTEND = {
-    basic: {
-      capitalPerTrade: 5, maxTrades: 3, tpPercent: 0.281, retryMax: 1, retryTimeMin: 0.5,
-      cbv5LockHours: 8, cbv3LockHours: 8, cbAutoUnlockThresholdPct: 1.0,
-    },
-    pro: {
-      capitalPerTrade: 10, maxTrades: 10, tpPercent: 0.5, retryMax: 3, retryTimeMin: 0.2,
-      cbv5LockHours: 4, cbv3LockHours: 8, cbAutoUnlockThresholdPct: 1.0,
-    },
-    enterprise: {
-      capitalPerTrade: 25, maxTrades: 20, tpPercent: 1.0, retryMax: 8, retryTimeMin: 0.1,
-      cbv5LockHours: 2, cbv3LockHours: 4, cbAutoUnlockThresholdPct: 0.8,
-    },
+    basic: {},
+    pro: {},
+    enterprise: {},
   };
   function applyTierPresetToNewBot(tier) {
+    // FIX-2026-09-04: No-op. Tier presets are empty. All bots get same defaults.
+    // Function kept for API stability — callers can still call it without side effects.
     const preset = (tier && TIER_PRESETS_FRONTEND[tier]) || null;
     if (!preset) {
-      console.warn('No tier preset for:', tier);
+      // Unknown tier → silently no-op (don't warn — empty presets are now normal)
       return;
     }
+    // Apply whatever the preset contains (currently always empty)
     const set = (id, val) => { const el = document.getElementById(id); if (el != null && val != null) el.value = val; };
-    // FIX-2026-09-04: Only size/limit fields from preset. NO *Enabled flags set.
-    set('nb-capital', preset.capitalPerTrade);
-    set('nb-maxtrades', preset.maxTrades);
-    set('nb-tp', preset.tpPercent);
-    set('nb-retry', preset.retryTimeMin);
-    set('nb-retry-max', preset.retryMax);
-    set('nb-cbv5-lock-hours', preset.cbv5LockHours);
-    set('nb-cbv3-lock-hours', preset.cbv3LockHours);
+    Object.entries(preset).forEach(([id, val]) => set('nb-' + id, val));
   }
 
   // FIX-2026-08-14: Import/Export file-based for New Bot modal
