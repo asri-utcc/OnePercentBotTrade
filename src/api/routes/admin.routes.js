@@ -519,9 +519,10 @@ const BOT_DEFAULTS_SCHEMA = {
   s1OnlyDown: false,
   xs1Enabled: true,
   cbEnabled: true,
-  cbv2Enabled: true,
+  // FIX-2026-09-04: align with round-4 directive — CB family default OFF (was true, caused invisible divergence)
+  cbv2Enabled: false,
   cbv2LockHours: 8,
-  cbv3Enabled: true,
+  cbv3Enabled: false,
   cbv3LockHours: 8,
   // FIX-2026-09-03: CBv5 opt-in across all tiers (was true) — see src/services/tierTemplates.js
   cbv5Enabled: false,

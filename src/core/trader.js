@@ -3801,10 +3801,15 @@ class Trader {
     //   cbv5MasterToggle is the operator-level master switch (admin dashboard); forceCBv5
     //   is the per-cell Auto-Timing override. We treat forceCBv5 as one more enabling
     //   condition in the AND chain — it cannot turn CBv5 ON if the master toggle is OFF.
+    // FIX-2026-09-04: Branch B (forceCBv5) now also checks `cbv5MasterToggle.isMasterCbv5Enabled()`
+    //   to match the comment guarantee. Previously Branch B bypassed the master toggle — if admin
+    //   had set cbv5MasterEnabled=false globally but forceCBv5=true was set in any Auto-Timing
+    //   cell, CBv5 would still evaluate. 0 forceCBv5 cells active today, so impact is pre-existing
+    //   but now fixed for safety.
     const cbv5AutoTimingForce = this._autoTimingDecision?.forceCBv5 === true;
     const cbv5PreGate = await cbCooldownGate.evaluateCbCooldown(this, this.bot, 'v5', Date.now());
     if ((this.bot.cbv5Enabled !== false && !this._isDcaMode() && !cbv5PreGate.active && !this._hasActiveCbCooldownExceptV5() && await cbv5MasterToggle.isMasterCbv5Enabled() && licenseService.isFeatureEnabled('cbv5'))
-        || (cbv5AutoTimingForce && !this._isDcaMode() && !cbv5PreGate.active && licenseService.isFeatureEnabled('cbv5'))) {
+        || (cbv5AutoTimingForce && !this._isDcaMode() && !cbv5PreGate.active && await cbv5MasterToggle.isMasterCbv5Enabled() && licenseService.isFeatureEnabled('cbv5'))) {
       try {
         const evalResult = await cbPatternEvaluator.fetchAndEvaluateCBv5({
           bot: this.bot,

@@ -124,7 +124,9 @@ const botSchema = new mongoose.Schema(
     //   - lock overrides Auto-pause-resume: ถ้า cbv2LockedUntil > now → auto-resume blocked (user ต้อง manual ปลดล็อค หรือรอให้ lock หมดเวลา)
     //   - lock expiry → auto-resume path ทำงานปกติ (เฉพาะ Min-%KC >= threshold) เหมือน Auto-pause
     //   - manual unlock via POST /api/bots/:id/unlock-cbv2 (BOT_ACTION_PASSWORD required)
-    cbv2Enabled: { type: Boolean, default: true },
+    // FIX-2026-09-04: align with buildBotCreatePayload strict semantics (was default: true, caused
+    //   invisible divergence with cbEnabled=false — 2 bAdd bots hit CBv2)
+    cbv2Enabled: { type: Boolean, default: false },
     cbv2LockHours: { type: Number, default: 8, min: 0.5, max: 168 },
     cbv2LockedUntil: { type: Date, default: null },
     cbv2LockReason: { type: String, default: null }, // 'cbv2_panic' | null
@@ -312,7 +314,9 @@ const botSchema = new mongoose.Schema(
     //     schema before — Mongoose strict mode silently dropped them on save,
     //     breaking per-bot opt-out UI. Added to mirror cbv2* fields.
     // ═══════════════════════════════════════════════════════════════════════
-    cbv3Enabled: { type: Boolean, default: true },
+    // FIX-2026-09-04: align with buildBotCreatePayload strict semantics (was default: true, caused
+    //   invisible divergence with cbEnabled=false — LISTA hit by CBv3 today)
+    cbv3Enabled: { type: Boolean, default: false },
     cbv3LockHours: { type: Number, default: 8, min: 0.5, max: 168 },
     cbv3LockedUntil: { type: Date, default: null },
     cbv3LockReason: { type: String, default: null }, // 'cbv3_panic' | null
