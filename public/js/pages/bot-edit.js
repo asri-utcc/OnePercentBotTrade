@@ -3,6 +3,9 @@
 const urlParams = new URLSearchParams(location.search);
 const botId = urlParams.get('id');
 let bot = null;
+// FIX-2026-09-04: Master config snapshot (read in render() to show inline DLC kill-switch)
+//   populated by loadBot() from GET /api/admin/app-config (masterDlcEnabled + master toggles)
+let masterCfg = null;
 // FIX-2026-08-02: Tab state — always defaults to classic on page load (no localStorage persistence)
 let activeTab = 'classic'; // 'classic' | 'dca'
 
@@ -29,6 +32,8 @@ async function loadBot() {
     ]);
     bot = resp.bot;
     bot.cbVersion = cfgResp?.config?.cbVersion || 'v3';
+    // FIX-2026-09-04: snapshot Master config for inline DLC kill-switch (masterCfg read in render())
+    masterCfg = cfgResp?.config || {};
     render();
   } catch (err) {
     document.getElementById('bot-edit-content').innerHTML = `<div class="alert alert-danger">${err.message}</div>`;
@@ -233,6 +238,23 @@ function render() {
                   k=ไม้ค้างอยู่, threshold[เก่าสุด→ใหม่สุด] = base × (k, k-1, ..., 1) × (-1)
                   <br />เช่น base=-10, k=2 → pos#1 ต้อง &lt; -20%, pos#2 ต้อง &lt; -10%
                 </small>
+                <!-- FIX-2026-09-04: Master kill-switch inline (user: "อย่าใส่ใน ตั้งค่าระบบ ใช้งานยาก").
+                     Toggling master OFF makes per-bot DLC non-functional but does not lose per-bot state. -->
+                <details class="mt-2" id="dlc-master-toggle">
+                  <summary class="text-muted" style="cursor:pointer; font-size:0.85rem;">
+                    ⚙️ <strong>${(typeof masterCfg === 'object' && masterCfg.masterDlcEnabled === true) ? '🟢 DLC Master: ON' : '🔒 DLC Master: OFF'}</strong>
+                    <small class="d-block">kill-switch ทั้งระบบ (off → per-bot DLC ทำไม่ได้ แม้ติ๊ก ON ในบอทนี้)</small>
+                  </summary>
+                  <div class="mt-2 d-flex align-items-center gap-2 flex-wrap">
+                    <label class="form-check form-switch mb-0">
+                      <input type="checkbox" class="form-check-input" id="f-dlc-master-enabled" ${(typeof masterCfg === 'object' && masterCfg.masterDlcEnabled === true) ? 'checked' : ''} />
+                      <span class="form-check-label">${(typeof masterCfg === 'object' && masterCfg.masterDlcEnabled === true) ? '🟢 เปิด DLC ทั้งระบบ' : '🔒 ปิด DLC ทั้งระบบ'}</span>
+                    </label>
+                    <button type="button" id="btn-dlc-master-save" class="btn btn-sm btn-outline-warning" title="บันทึกค่า masterDlcEnabled → AppConfig">💾 บันทึก Master</button>
+                    <small class="text-muted-3">อัปเดตทันที (≤30s cache TTL)</small>
+                  </div>
+                  <div id="dlc-master-status" class="small mt-1"></div>
+                </details>
               </div>
               <div class="bot-settings-option">
                 <label class="form-check form-switch mb-0">
@@ -1081,36 +1103,27 @@ function render() {
   refreshDcaUi();
 
   // FIX-2026-09-04: Dynamic Layer Control (DLC) — UI dependency on DCA/Martingale
-  //   - DLC ON + DCA/Martingale ON = conflict (enforced server-side too)
-  //   - when DCA or Martingale flips ON → DLC checkbox disabled + unchecked + warning shown
-  //   - when both flip OFF → DLC checkbox re-enabled
-  function refreshDlcUi() {
-    const cb = document.getElementById('f-dlc-enabled');
-    const baseLoss = document.getElementById('f-dlc-base-loss-pct');
-    const warn = document.getElementById('dlc-warning');
-    if (!cb) return;
-    const dcaOn = document.getElementById('f-dca-enabled')?.checked;
-    const martOn = document.getElementById('f-martingale-enabled')?.checked;
-    const blocked = dcaOn || martOn;
-    if (blocked) {
-      cb.disabled = true;
-      cb.checked = false;
-      if (baseLoss) baseLoss.disabled = true;
-      if (warn) warn.style.display = '';
-    } else {
-      // re-enable only when bot is currently NOT in DLC mode (otherwise leave checked state alone)
-      cb.disabled = false;
-      if (baseLoss) baseLoss.disabled = false;
-      if (warn) warn.style.display = 'none';
-    }
+  //   - moved OUT of top-level (was firing once on script load → stale after re-render)
+  //   - now invoked from end of render() so listeners rebind every render cycle
+function refreshDlcUi() {
+  const cb = document.getElementById('f-dlc-enabled');
+  const baseLoss = document.getElementById('f-dlc-base-loss-pct');
+  const warn = document.getElementById('dlc-warning');
+  if (!cb) return;
+  const dcaOn = document.getElementById('f-dca-enabled')?.checked;
+  const martOn = document.getElementById('f-martingale-enabled')?.checked;
+  const blocked = dcaOn || martOn;
+  if (blocked) {
+    cb.disabled = true;
+    cb.checked = false;
+    if (baseLoss) baseLoss.disabled = true;
+    if (warn) warn.style.display = '';
+  } else {
+    cb.disabled = false;
+    if (baseLoss) baseLoss.disabled = false;
+    if (warn) warn.style.display = 'none';
   }
-  // Wire: re-evaluate DLC UI whenever DCA or Martingale toggles
-  const _dcaForDlc = document.getElementById('f-dca-enabled');
-  if (_dcaForDlc) _dcaForDlc.addEventListener('change', refreshDlcUi);
-  const _martForDlc = document.getElementById('f-martingale-enabled');
-  if (_martForDlc) _martForDlc.addEventListener('change', refreshDlcUi);
-  // Initial render
-  refreshDlcUi();
+}
 
   // FIX-2026-08-03: Backtest stats toggle
   const _statsBtn = document.getElementById('dca-show-stats-btn');
@@ -1140,6 +1153,50 @@ function render() {
       const show = adv.style.display === 'none';
       adv.style.display = show ? '' : 'none';
       advToggle.textContent = show ? '⚙️ ซ่อนขั้นสูง' : '⚙️ ขั้นสูง (KC + Pivot + Volume)';
+    });
+  }
+
+  // FIX-2026-09-04: Rebind DLC mutex listeners and master kill-switch — re-attach on every render
+  //   (was at top-level, fired once → stale after re-render post-save).
+  //   1. Re-evaluate DLC UI state based on current DCA/Martingale values
+  refreshDlcUi();
+  //   2. Re-wire DCA change → refreshDlcUi (so flipping DCA disables DLC visually)
+  const _dcaForDlc = document.getElementById('f-dca-enabled');
+  if (_dcaForDlc && !_dcaForDlc._dlcBound) {
+    _dcaForDlc._dlcBound = true;
+    _dcaForDlc.addEventListener('change', refreshDlcUi);
+  }
+  //   3. Re-wire Martingale change → refreshDlcUi (mirror DCA)
+  const _martForDlc = document.getElementById('f-martingale-enabled');
+  if (_martForDlc && !_martForDlc._dlcBound) {
+    _martForDlc._dlcBound = true;
+    _martForDlc.addEventListener('change', refreshDlcUi);
+  }
+  //   4. Inline DLC master kill-switch save button (replaces Master Config placement)
+  const _dlcMasterSave = document.getElementById('btn-dlc-master-save');
+  if (_dlcMasterSave && !_dlcMasterSave._bound) {
+    _dlcMasterSave._bound = true;
+    _dlcMasterSave.addEventListener('click', async () => {
+      const status = document.getElementById('dlc-master-status');
+      const cb = document.getElementById('f-dlc-master-enabled');
+      if (!cb) return;
+      const wantsMaster = cb.checked;
+      status.textContent = '⏳ กำลังบันทึก masterDlcEnabled...';
+      status.style.color = 'var(--text-3)';
+      try {
+        await API.put('/api/admin/app-config', { masterDlcEnabled: wantsMaster });
+        status.textContent = '✅ บันทึกแล้ว (cache TTL 30s)';
+        status.style.color = '#4ade80';
+        // Refresh masterCfg so future renders reflect new state
+        try {
+          const cfgResp = await API.get('/api/admin/app-config');
+          masterCfg = cfgResp?.config || {};
+        } catch (_) { /* ignore — cache will refresh naturally */ }
+        setTimeout(() => { status.textContent = ''; }, 3000);
+      } catch (err) {
+        status.textContent = '❌ ' + (err.response?.data?.error || err.body?.error || err.message);
+        status.style.color = '#ff6b6b';
+      }
     });
   }
 
@@ -1203,6 +1260,18 @@ function updateTotal() {
 async function save(e) {
   e.preventDefault();
   document.getElementById('f-error').textContent = '';
+  // FIX-2026-09-04: pre-flight DLC mutex — fail fast with explicit modal if user tries to save
+  //   dlcEnabled=true while DCA or Martingale is currently ON (matches server-side bot.routes.js mutex)
+  //   was: silently silently got 400 and toggle "bounced back to OFF" (user reported)
+  const _wantsDlc = document.getElementById('f-dlc-enabled')?.checked;
+  const _dcaOnPreflight = document.getElementById('f-dca-enabled')?.checked;
+  const _martOnPreflight = document.getElementById('f-martingale-enabled')?.checked;
+  if (_wantsDlc && (_dcaOnPreflight || _martOnPreflight)) {
+    const msg = 'dlcEnabled ห้ามเปิดพร้อม DCA/Martingale (DLC ใช้ layer logic แยก — ใช้ร่วมกันไม่ได้) — ปิด DCA/Martingale ก่อน';
+    await AdminModalAlert.show({ title: '⚠️ DLC Mutex', message: msg, level: 'warn' });
+    document.getElementById('f-error').textContent = msg;
+    return;
+  }
   const data = {
     name: document.getElementById('f-name').value,
     timeframe: document.getElementById('f-timeframe').value,
@@ -1282,7 +1351,10 @@ async function save(e) {
     await AdminModalAlert.show({ title: '✅ บันทึกแล้ว', message: 'บันทึกการตั้งค่าบอทเรียบร้อย', level: 'success' });
     await loadBot();
   } catch (err) {
-    document.getElementById('f-error').textContent = err.message;
+    // FIX-2026-09-04: surface server error in modal so user sees WHY (was: silent — toggle looked like it "bounced back")
+    const errMsg = err.response?.data?.error || err.body?.error || err.message;
+    document.getElementById('f-error').textContent = errMsg;
+    await AdminModalAlert.show({ title: '⚠️ บันทึกไม่สำเร็จ', message: errMsg, level: 'error' });
   }
 }
 

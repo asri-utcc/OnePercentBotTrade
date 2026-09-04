@@ -380,20 +380,7 @@
                   </label>
                 </div>
               </div>
-              <div class="col-md-4">
-                <div class="bot-settings-option h-100">
-                  <label class="form-check form-switch d-flex align-items-start gap-2 mb-0" style="cursor:pointer;">
-                    <input type="checkbox" class="form-check-input" id="mc-master-dlc" ${cfg.masterDlcEnabled === true ? 'checked' : ''} />
-                    <span>🪜 <strong>DLC Master</strong><small class="text-muted-3 d-block">เปิด Dynamic Layer Control ทั้งระบบ · per-bot ต้อง <code>dlcEnabled=true</code> ด้วยถึงจะมีผล</small></span>
-                  </label>
-                </div>
-              </div>
-              <div class="col-md-4">
-                <div class="bot-settings-field h-100">
-                  <label class="form-label" for="mc-master-dlc-base-loss">📉 DLC Default Base Loss % (ติดลบ)</label>
-                  <input type="number" class="form-control form-control-sm" id="mc-master-dlc-base-loss" value="${cfg.dlcBaseLossPct ?? -10}" min="-95" max="-1" step="0.5" />
-                </div>
-              </div>
+              <!-- FIX-2026-09-04: DLC master + base loss moved OUT of Master Config into inline bot-edit DLC accordion (user: "อย่าใส่ใน ตั้งค่าระบบ ใช้งานยาก") -->
             </div>
             <div class="bot-settings-actions mt-3">
               <button type="button" class="btn btn-sm btn-outline-warning" id="mc-save-master">💾 บันทึกค่าระบบ</button>
@@ -521,11 +508,9 @@
       // FIX-2026-08-31: System-level Auto-Timing master (AppConfig.autoTimingEnabled)
       //   Distinct from mc-autoTimingEnabled (per-bot tristate) below.
       autoTimingEnabled: document.getElementById('mc-master-auto-timing').checked,
-      // FIX-2026-09-04: DLC master kill-switch + default baseLossPct
-      //   - masterDlcEnabled=false (default): per-bot dlcEnabled ทำไม่ได้แม้ติ๊ก ON (engine skip)
-      //   - dlcBaseLossPct: master default for new bots
-      masterDlcEnabled: document.getElementById('mc-master-dlc').checked,
-      dlcBaseLossPct: parseFloat(document.getElementById('mc-master-dlc-base-loss').value) || -10,
+      // FIX-2026-09-04: DLC master toggles removed from Master Config (moved inline to bot-edit DLC accordion).
+      //   masterDlcEnabled + dlcBaseLossPct are still accepted via PUT /api/admin/app-config
+      //   for DB-direct updates; UI exposes them next to per-bot DLC toggle.
     };
     status.textContent = '⏳ กำลังบันทึก…';
     status.style.color = 'var(--text-3)';
