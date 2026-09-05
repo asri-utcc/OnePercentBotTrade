@@ -3494,6 +3494,13 @@ class Trader {
         bgState: signal.bgState,
         bgPrev: signal.bgPrev,
         outcome: 'detected',
+        // FIX-2026-09-05: initial note so 'detected' rows are self-describing.
+        //   - ก่อนหน้านี้ note='' เสมอจนกว่า gate chain จะ update outcome
+        //   - ทำให้ UI แสดง "🎯 detected" อย่างเดียว ไม่มีบริบท
+        //   - เปลี่ยนเป็น "awaiting_gate_evaluation" เพื่อให้ tooltip + DB filter บอกได้ว่า
+        //     signal ยังอยู่ใน transient state (gate chain กำลังรัน)
+        //   - ถ้า candle เก่าเกิน threshold แล้วยัง note นี้อยู่ = stale (UI จะ mark '⚠️ stuck')
+        note: 'awaiting_gate_evaluation',
       });
     } catch (err) {
       logger.error({ err: err.message }, 'trader: failed to save signal');

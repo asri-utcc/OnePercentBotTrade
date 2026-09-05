@@ -1788,6 +1788,23 @@ function formatSignalAction(s) {
 
   // ─── Derive outcome (with smarter non-DB fallback) ───
   let outcome = s.outcome || null;
+  // FIX-2026-09-05: stale-detected upgrade.
+  //   - 'detected' เป็น transient state (save ตอนเจอ S1 ก่อน gate chain ทำงาน)
+  //   - ปกติจะถูก update เป็น skipped/filled/failed ภายในไม่กี่วินาที
+  //   - ถ้า candle close เกิน threshold แล้วยังเป็น detected = "stale"
+  //     แสดงว่า trader crash ก่อน update หรือ gate exception
+  //   - threshold = max(5min, 2× timeframe) เพื่อรองรับ 1h/4h TF ที่ต้องใช้เวลานาน
+  let isStaleDetected = false;
+  if (outcome === 'detected' && s.openTime) {
+    const openMs = Number(s.openTime) || 0;
+    const tfMs = timeframeToMs(s.timeframe);
+    const closeMs = openMs + tfMs;
+    const staleMs = Math.max(5 * 60_000, 2 * tfMs);
+    if (Date.now() > closeMs + staleMs) {
+      isStaleDetected = true;
+      outcome = 'stale_detected';
+    }
+  }
   if (!outcome) {
     // No DB row → classify by in-memory status + candle age
     if (s.status === 'blocked') {
@@ -1815,6 +1832,9 @@ function formatSignalAction(s) {
   }
 
   // 1) outcome → base (cls, label)
+  // FIX-2026-09-05: detected label now reflects transient state (was '🎯 detected' — ทำให้ user
+  //   เข้าใจผิดว่าเป็น final outcome). stale_detected ใหม่สำหรับ rows ที่ note='awaiting_gate_evaluation'
+  //   นานเกิน threshold = trader crash / gate exception
   const OUTCOME_BASE = {
     filled:            { cls: 'is-filled',            label: '✅ filled' },
     order_placed:      { cls: 'is-order_placed',      label: '📤 order_placed' },
@@ -1822,7 +1842,8 @@ function formatSignalAction(s) {
     skipped_predicted: { cls: 'is-skipped_predicted', label: '⏭ predicted skip' },
     expired:           { cls: 'is-expired',           label: '⌛ expired' },
     failed:            { cls: 'is-failed',            label: '❌ failed' },
-    detected:          { cls: 'is-detected',          label: '🎯 detected' },
+    detected:          { cls: 'is-detected',          label: '⏳ กำลังประมวลผล' },
+    stale_detected:    { cls: 'is-stale-detected',    label: '⚠️ stuck — gate ไม่อัปเดต' },
     pending:           { cls: 'is-pending',           label: '⏳ pending' },
     no_audit:          { cls: 'is-no-audit',          label: '❓ ไม่มีบันทึก' },
   };
@@ -1863,12 +1884,22 @@ function formatSignalAction(s) {
   const titleParts = [`outcome: ${outcome}`];
   if (note) titleParts.push(note);
   if (tradeId) titleParts.push(`trade: ${tradeId}`);
-  if (outcome === 'no_audit') {
+  if (outcome === 'stale_detected') {
+    // FIX-2026-09-05: explain why a detected-row is flagged stuck so users understand
+    //   โดยไม่ต้องเปิด pm2 logs
+    titleParts.push('— candle close เกิน max(5min, 2×TF) แล้ว แต่ outcome ยังไม่เปลี่ยน');
+    titleParts.push('— สาเหตุที่พบบ่อย: trader crash / gate exception / DLC await throw');
+    titleParts.push('— ดู pm2 logs ช่วงเวลานั้น + restart trader ถ้าจำเป็น');
+  } else if (outcome === 'no_audit') {
     titleParts.push('— scan เจอ S1 แต่ trader ไม่เคย process แท่งนี้ (historical scanner)');
   } else if (outcome === 'pending') {
     titleParts.push('— trader กำลัง process อยู่ รอสักครู่');
   } else if (outcome === 'skipped_predicted') {
     titleParts.push('— in-memory block (DB row pending / ไม่เคยเขียน)');
+  } else if (outcome === 'detected' && note === 'awaiting_gate_evaluation') {
+    // FIX-2026-09-05: fresh detected = transient state รอ gate chain
+    titleParts.push('— transient state: กำลัง evaluate DLC / AutoTiming / ST#1-3 / CBv5');
+    titleParts.push('— จะถูก update เป็น skipped/filled/failed ภายในไม่กี่วินาที');
   }
   const title = titleParts.join('\n');
 

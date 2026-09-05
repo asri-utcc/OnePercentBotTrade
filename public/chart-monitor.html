@@ -380,6 +380,12 @@
     /* detected / pending → violet (no decision yet) */
     .cm-ls-action.is-detected,
     .cm-ls-action.is-pending        { background: rgba(167,139,250,0.16); color: #c4b5fd; border: 1px solid rgba(167,139,250,0.40); }
+    /* FIX-2026-09-05: stale_detected — outcome='detected' นานเกิน threshold (max 5min, 2×TF)
+       = trader crash / gate exception. ใช้สี amber/orange เพื่อให้ user สังเกตเห็นแตกต่าง
+       จาก violet transient (is-detected) และ bear (is-failed) — บอกว่า "needs attention"
+       แต่ไม่ใช่ "hard error" */
+    .cm-ls-action.is-stale-detected { background: rgba(245,184,0,0.22); color: #fcd34d; border: 1px solid rgba(245,184,0,0.60); animation: cm-stale-pulse 1.6s ease-in-out infinite; }
+    @keyframes cm-stale-pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.65; } }
     /* no_audit (2026-08-20 rev2) — scan เจอ แต่ trader ไม่เคย process → muted question mark */
     .cm-ls-action.is-no-audit       { background: rgba(148,163,184,0.10); color: #cbd5e1; border: 1px dashed rgba(148,163,184,0.40); font-style: italic; }
     /* trade link on filled rows */
@@ -899,6 +905,6 @@
       }
     });
   </script>
-  <script src="/js/pages/chart-monitor.js?v=2026-09-04-dlc-everywhere"></script>
+  <script src="/js/pages/chart-monitor.js?v=2026-09-05-detected-ux"></script>
 </body>
 </html>
