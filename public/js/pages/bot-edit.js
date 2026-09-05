@@ -352,6 +352,38 @@ function render() {
                 <small class="text-muted d-block mt-2">เมื่อครบทั้ง loss% และอายุ ระบบจะ arm safety flag ให้ position นั้น</small>
               </div>
               <div class="bot-settings-option is-full">
+                <label class="form-check form-switch mb-0">
+                  <input type="checkbox" class="form-check-input" id="f-auv2-enabled" ${bot.auv2Enabled ? 'checked' : ''} />
+                  <span class="form-check-label">🌊 <strong>AUv2 — F1 v2 (shallow-loss exit)</strong></span>
+                </label>
+                <div class="bot-settings-dependent bot-settings-grid">
+                  <div>
+                    <label class="form-label" for="f-auv2-min-age-hours">อายุ Position ขั้นต่ำ (ชม.)</label>
+                    <input type="number" class="form-control" id="f-auv2-min-age-hours" value="${bot.auv2MinAgeHours ?? 24}" step="0.5" min="0.5" max="999" />
+                  </div>
+                  <div>
+                    <label class="form-label" for="f-auv2-loss-mode">Loss Metric</label>
+                    <select class="form-select" id="f-auv2-loss-mode">
+                      <option value="pct" ${(bot.auv2LossMode ?? 'pct') === 'pct' ? 'selected' : ''}>% pct (loss%)</option>
+                      <option value="thb" ${bot.auv2LossMode === 'thb' ? 'selected' : ''}>฿ thb (lossTHB)</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label class="form-label" for="f-auv2-max-loss-pct">ขาดทุนตื้นสุด (%)</label>
+                    <input type="number" class="form-control" id="f-auv2-max-loss-pct" value="${bot.auv2MaxLossPct ?? 5}" step="0.1" min="0.1" max="50" />
+                  </div>
+                  <div>
+                    <label class="form-label" for="f-auv2-max-loss-thb">ขาดทุนตื้นสุด (THB)</label>
+                    <input type="number" class="form-control" id="f-auv2-max-loss-thb" value="${bot.auv2MaxLossThb ?? 200}" step="1" min="1" max="100000" />
+                  </div>
+                  <div>
+                    <label class="form-label" for="f-auv2-max-wait-days">Hard Cap (วัน, 0=no cap)</label>
+                    <input type="number" class="form-control" id="f-auv2-max-wait-days" value="${bot.auv2MaxWaitDays ?? 7}" step="1" min="0" max="90" />
+                  </div>
+                </div>
+                <small class="text-muted d-block mt-2">เหมือน F1 แต่ trigger เมื่อ <strong>loss ตื้นพอ</strong> (% หรือ THB) → <strong>MARKET SELL ทันที</strong> (ไม่ต้องรอ upperKC breakout) · Hard Cap บังคับขายเมื่อเกินกำหนด</small>
+              </div>
+              <div class="bot-settings-option is-full">
                 <label class="form-check form-switch">
                   <input type="checkbox" class="form-check-input" id="f-sl-ukc-trigger-on-profit" ${bot.slUkcTriggerOnProfit ? 'checked' : ''} />
                   <span class="form-check-label">💰 <strong>ให้ SL-UKC ปิด Position ที่กำไรด้วย</strong></span>
@@ -1332,6 +1364,13 @@ async function save(e) {
     autoArmStopLossOnUKC: document.getElementById('f-auto-arm-stop-loss-ukc').checked, // FIX-2026-07-31 (F1): per-bot auto-arm SL-on-UKC toggle (default true)
     autoArmLossPct: parseFloat(document.getElementById('f-auto-arm-loss-pct').value) || 10, // FIX-2026-08-03 / EXT-2026-08-20: per-bot F1 loss threshold (1..99, default 10)
     autoArmAgeHours: parseFloat(document.getElementById('f-auto-arm-age-hours').value) || 4, // FIX-2026-08-03 / EXT-2026-08-20: per-bot F1 age threshold (0.5..999, default 4)
+    // FIX-2026-09-06: AUv2 — F1 v2 (shallow-loss exit)
+    auv2Enabled: document.getElementById('f-auv2-enabled').checked,
+    auv2MinAgeHours: parseFloat(document.getElementById('f-auv2-min-age-hours').value) || 24,
+    auv2LossMode: document.getElementById('f-auv2-loss-mode').value === 'thb' ? 'thb' : 'pct',
+    auv2MaxLossPct: parseFloat(document.getElementById('f-auv2-max-loss-pct').value) || 5,
+    auv2MaxLossThb: parseFloat(document.getElementById('f-auv2-max-loss-thb').value) || 200,
+    auv2MaxWaitDays: Math.max(0, Math.min(90, parseInt(document.getElementById('f-auv2-max-wait-days').value, 10) || 7)),
     slUkcTriggerOnProfit: document.getElementById('f-sl-ukc-trigger-on-profit').checked, // FIX-2026-08-03: SL-UKC trigger on profit (default false)
     tpTrendEnabled: document.getElementById('f-tp-trend-enabled').checked, // FIX-2026-08-01: per-bot TP trend ×N master toggle (default true)
     tpTrendMultiplier: parseFloat(document.getElementById('f-tp-trend-multiplier').value), // FIX-2026-07-31 (F2): per-bot TP ×N multiplier (1..10, default 2)

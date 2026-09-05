@@ -213,6 +213,29 @@ const botSchema = new mongoose.Schema(
     //   - false (default): SL-UKC only fires when buyPrice > close (loss only) — original behavior
     //   - true: SL-UKC fires whenever candle.close > upperKC (profit OR loss) — strict upper-band exit
     slUkcTriggerOnProfit: { type: Boolean, default: false },
+    // FIX-2026-09-06: AUv2 — Auto-Underwater v2 (F1 auto-arm v2)
+    //   - same age+loss gate as F1 auto-arm แต่ trigger ด้วย "loss ตื้นพอ" แทน SL-UKC
+    //   - ต่างจาก F1: F1 arm SL-UKC flag แล้วรอ close > upperKC; AUv2 MARKET SELL ทันที
+    //   - default OFF — opt-in ชัดเจน (mirror cbv5Enabled pattern)
+    auv2Enabled: { type: Boolean, default: false },
+    // FIX-2026-09-06: AUv2 age threshold (hours) — position ต้องถืออย่างน้อยเท่านี้ก่อนตรวจ loss
+    //   - default 24h — กัน trigger ทันทีหลังซื้อ
+    auv2MinAgeHours: { type: Number, default: 24, min: 0.5, max: 999 },
+    // FIX-2026-09-06: AUv2 loss metric mode
+    //   - 'pct' (default): trigger เมื่อ loss% shallower than auv2MaxLossPct
+    //   - 'thb': trigger เมื่อ lossTHB shallower than auv2MaxLossThb (ใช้ fxService.convertUsdtToThb)
+    auv2LossMode: { type: String, enum: ['pct', 'thb'], default: 'pct' },
+    // FIX-2026-09-06: AUv2 max loss% threshold (only when mode='pct')
+    //   - signed semantics: trigger เมื่อ lossPct > -auv2MaxLossPct (e.g., -4.9% triggers, -10% waits)
+    //   - default 5% (range 0.1..50)
+    auv2MaxLossPct: { type: Number, default: 5, min: 0.1, max: 50 },
+    // FIX-2026-09-06: AUv2 max loss THB threshold (only when mode='thb')
+    //   - signed semantics: trigger เมื่อ lossTHB > -auv2MaxLossThb
+    //   - default 200 THB (range 1..100000)
+    auv2MaxLossThb: { type: Number, default: 200, min: 1, max: 100000 },
+    // FIX-2026-09-06: AUv2 hard cap (days) — force sell เมื่อ position ถือเกิน cap ไม่ว่า loss เท่าไหร่
+    //   - 0 = no cap (default 7 — ป้องกัน "ถือข้ามเดือน")
+    auv2MaxWaitDays: { type: Number, default: 7, min: 0, max: 90 },
     // FIX-2026-07-31: TP trend multiplier — เมื่อ upper-TF close > EMA20 → tpPercent *= tpTrendMultiplier
     //   - default 2 (0.2% → 0.4%)
     //   - range 1..10 (1 = no multiplier, 10 = aggressive)

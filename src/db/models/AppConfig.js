@@ -167,6 +167,10 @@ const appConfigSchema = new mongoose.Schema(
     //   - when false, all bots silently fall back to legacy maxTrades gate
     //   - when true, per-bot dlcEnabled is respected (each bot still opts in individually)
     masterDlcEnabled: { type: Boolean, default: false },
+    // FIX-2026-09-06: AUv2 master kill-switch (default false — opt-in rollout)
+    //   - when false, all bots silently skip AUv2 scheduler regardless of per-bot flag
+    //   - when true, per-bot auv2Enabled is respected (each bot still opts in individually)
+    masterAuv2Enabled: { type: Boolean, default: false },
 
     // ═══════════════════════════════════════════════════════════════════════
     // FIX-2026-08-08 (rev2): DPS tunables — ย้ายจาก hardcode ใน dynamicPositionSizing.js
@@ -409,6 +413,17 @@ const appConfigSchema = new mongoose.Schema(
     autoTimingLastRunAt:         { type: Date,    default: null },
     autoTimingLastStats:         { type: Object,  default: null },
     autoTimingLastError:         { type: String,  default: null },
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // FIX-2026-09-06: AUv2 — Auto-Underwater v2 scheduler telemetry
+    //   - singleton scheduler (autoUnderwaterV2.js) writes last-run + last-stats
+    //   - lastError for incident investigation (best-effort; non-fatal)
+    //   - intervalMs configurable from Master Config (default 180s — mirror positionWatchdog)
+    // ═══════════════════════════════════════════════════════════════════════
+    auv2IntervalMs:      { type: Number, default: 180000, min: 60000, max: 900000 },
+    auv2LastRunAt:       { type: Date,   default: null },
+    auv2LastStats:       { type: Object, default: null },
+    auv2LastError:       { type: String, default: null },
 
     // ═══════════════════════════════════════════════════════════════════════
     // Phase 4-2026-08-29: Chat System — Operator display name

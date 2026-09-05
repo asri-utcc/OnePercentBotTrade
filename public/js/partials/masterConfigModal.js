@@ -49,6 +49,13 @@
     { id: 'mc-autoTimingEnabled', key: 'autoTimingEnabled', section: 'automation', order: 40, type: 'select', options: ['inherit','true','false'], label: '⏱️ Auto-Timing (heatmap entry gate) · inherit=master' },
     { id: 'mc-autoArmLossPct', key: 'autoArmLossPct', section: 'risk', order: 30, type: 'number', step: '0.5', min: '1', max: '99', label: '🛡️ ขาดทุนขั้นต่ำสำหรับ Auto-arm (%)' },
     { id: 'mc-autoArmAgeHours', key: 'autoArmAgeHours', section: 'risk', order: 40, type: 'number', step: '0.5', min: '0.5', max: '999', label: '⏰ อายุ Position ขั้นต่ำสำหรับ Auto-arm (ชม.)' },
+    // FIX-2026-09-06: AUv2 — Auto-Underwater v2 (F1 auto-arm variant) — Master Config bulk-update
+    { id: 'mc-auv2Enabled',        key: 'auv2Enabled',     section: 'risk', order: 50, type: 'bool',   label: '🌊 AUv2 — F1 v2 (shallow-loss exit after age)' },
+    { id: 'mc-auv2MinAgeHours',    key: 'auv2MinAgeHours', section: 'risk', order: 51, type: 'number', step: '0.5', min: '0.5', max: '999', label: '⏰ AUv2 อายุ Position ขั้นต่ำ (ชม.) · default 24' },
+    { id: 'mc-auv2LossMode',       key: 'auv2LossMode',    section: 'risk', order: 52, type: 'select', options: ['pct','thb'], label: '📐 AUv2 Loss Metric Mode · pct / thb' },
+    { id: 'mc-auv2MaxLossPct',     key: 'auv2MaxLossPct',  section: 'risk', order: 53, type: 'number', step: '0.1', min: '0.1', max: '50', label: '🛡️ AUv2 ขาดทุนตื้นสุด (%) · default 5' },
+    { id: 'mc-auv2MaxLossThb',     key: 'auv2MaxLossThb',  section: 'risk', order: 54, type: 'number', step: '1', min: '1', max: '100000', label: '💴 AUv2 ขาดทุนตื้นสุด (THB) · default 200' },
+    { id: 'mc-auv2MaxWaitDays',    key: 'auv2MaxWaitDays', section: 'risk', order: 55, type: 'number', step: '1', min: '0', max: '90', label: '⏳ AUv2 Hard Cap (วัน) · default 7, 0=no cap' },
     { id: 'mc-cbv2LockHours', key: 'cbv2LockHours', section: 'risk', order: 80, type: 'number', step: '0.5', min: '0.5', max: '168', label: '⏱ ระยะเวลา CBv2 Cooldown (ชม.)' },
     { id: 'mc-cbv3LockHours', key: 'cbv3LockHours', section: 'risk', order: 80, type: 'number', step: '0.5', min: '0.5', max: '168', label: '⏱ ระยะเวลา CBv3 Cooldown (ชม.)' },
     { id: 'mc-cbv5LockHours', key: 'cbv5LockHours', section: 'risk', order: 81, type: 'number', step: '0.5', min: '0.5', max: '168', label: '⏱ ระยะเวลา CBv5 Cooldown (ชม.) · default 4' },

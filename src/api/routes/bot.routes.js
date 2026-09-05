@@ -1197,6 +1197,8 @@ router.put('/:id', requireAuth, async (req, res) => {
     //   is owned by a separate function. Changing maxTrades doesn't affect DPS state.)
     const _prevCapital = bot.capitalPerTrade;
     const allowed = ['name', 'capitalPerTrade', 'maxTrades', 'tpPercent', 'retryTimeMin', 'retryMax', 'timeframe', 'stopLossOnUpperKC', 'autoUpdateTp', 'kcMult', 'minSpreadTicks', 's1OnlyDown', 'xs1Enabled', 'cbEnabled', 'cbv2Enabled', 'cbv2LockHours', 'cbv3Enabled', 'cbv3LockHours', 'safeTradeEnabled', 'safeTradeTrendlineEnabled', 'autoPauseEnabled', 'autoPauseMinKcPct', 'autoPauseMin24hVolUsdt', 'suggestTpWindow', 'autoArmStopLossOnUKC', 'autoArmLossPct', 'autoArmAgeHours', 'slUkcTriggerOnProfit', 'tpTrendMultiplier', 'tpTrendEnabled', 'dcaEnabled', 'dcaMaxLayers', 'martingaleEnabled', 'martingaleMultiplier', 'martingaleMaxLayerNotional', 'safeTradeNoTradeEnabled', 'dynamicSizeEnabled', 'cbAutoUnlockEnabled', 'cbAutoUnlockThresholdPct',
+      // FIX-2026-09-06: AUv2 — Auto-Underwater v2 (F1 auto-arm variant) — per-bot PUT whitelist
+      'auv2Enabled', 'auv2MinAgeHours', 'auv2LossMode', 'auv2MaxLossPct', 'auv2MaxLossThb', 'auv2MaxWaitDays',
       // FIX-2026-09-04: Dynamic Layer Control (DLC) — per-bot PUT whitelist
       'dlcEnabled', 'dlcBaseLossPct',
       // FIX-2026-08-29: per-bot opt-out for the auto-pause threshold auto-adjust scheduler
@@ -1243,6 +1245,24 @@ router.put('/:id', requireAuth, async (req, res) => {
         } else if (k === 'slUkcTriggerOnProfit') {
           // FIX-2026-08-03: SL-UKC trigger on profitable positions (default false)
           bot[k] = data[k] === true || data[k] === 'true';
+        } else if (k === 'auv2Enabled') {
+          // FIX-2026-09-06: AUv2 master toggle (per-bot opt-in, default false)
+          bot[k] = data[k] === true || data[k] === 'true';
+        } else if (k === 'auv2MinAgeHours') {
+          // FIX-2026-09-06: AUv2 age threshold hours (0.5..999, default 24)
+          bot[k] = Math.min(999, Math.max(0.5, parseFloat(data[k])));
+        } else if (k === 'auv2LossMode') {
+          // FIX-2026-09-06: AUv2 loss metric mode ('pct' | 'thb')
+          bot[k] = (data[k] === 'thb') ? 'thb' : 'pct';
+        } else if (k === 'auv2MaxLossPct') {
+          // FIX-2026-09-06: AUv2 max loss% threshold (0.1..50, default 5)
+          bot[k] = Math.min(50, Math.max(0.1, parseFloat(data[k])));
+        } else if (k === 'auv2MaxLossThb') {
+          // FIX-2026-09-06: AUv2 max loss THB threshold (1..100000, default 200)
+          bot[k] = Math.min(100000, Math.max(1, parseFloat(data[k])));
+        } else if (k === 'auv2MaxWaitDays') {
+          // FIX-2026-09-06: AUv2 hard cap days (0..90, default 7) — 0 = no cap
+          bot[k] = Math.min(90, Math.max(0, Math.floor(parseFloat(data[k]))));
         } else if (k === 'safeTradeNoTradeEnabled') {
           // FIX-2026-08-05: Pine no-trade engulfing/SS filter (default false — opt-in)
           bot[k] = data[k] === true || data[k] === 'true';

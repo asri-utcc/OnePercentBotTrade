@@ -9,6 +9,7 @@ const dashboardWs = require('./realtime/dashboardWs');
 const botManager = require('./core/botManager');
 const healthMonitor = require('./services/healthMonitor');
 const positionWatchdog = require('./services/positionWatchdog');
+const autoUnderwaterV2 = require('./services/autoUnderwaterV2'); // FIX-2026-09-06: AUv2 — F1 auto-arm v2 (shallow-loss exit gate)
 const autoBnbBuyer = require('./services/autoBnbBuyer'); // FIX-2026-08-05: auto-buy BNB service
 const autoAddBot = require('./services/autoAddBot'); // FIX-2026-08-07: auto-add new bot service
 const delistMonitor = require('./services/binanceDelistMonitor'); // FIX-2026-08-06: binance delist detection
@@ -215,6 +216,13 @@ async function main() {
   positionWatchdog.start();
   await sleep(SUBSYSTEM_STAGGER_MS);
 
+  // FIX-2026-09-06: AUv2 — Auto-Underwater v2 (F1 auto-arm variant)
+  //   Singleton scheduler: ตรวจ position ที่อายุ ≥ auv2MinAgeHours + loss shallower than trigger → MARKET SELL
+  //   Master toggle: AppConfig.masterAuv2Enabled (default false). เริ่มเสมอเมื่อ server boot
+  //   (engine ตรวจ master/license ภายใน tick — start/stop overhead negligible)
+  autoUnderwaterV2.start();
+  await sleep(SUBSYSTEM_STAGGER_MS);
+
   // FIX-2026-08-05: Auto-Buy BNB — periodic scan + MARKET BUY BNB/USDT when value < threshold
   //   user-configurable via /api/bnb-auto-buy/config (default OFF — must opt-in)
   autoBnbBuyer.start();
@@ -338,6 +346,7 @@ async function main() {
     try { walletSnapshot.stop(); } catch (e) { /* ignore */ }
     try { autoReserve.stop(); } catch (e) { /* ignore */ }
     try { autoTiming.stop(); } catch (e) { /* ignore */ }
+    try { autoUnderwaterV2.stop(); } catch (e) { /* ignore */ }
     try { adminMonitor.stop(); } catch (e) { /* ignore */ }
     try { await botManager.flushActiveTimeOnShutdown(); } catch (e) { /* ignore */ }
     try { await botManager.stop(); } catch (e) { /* ignore */ }

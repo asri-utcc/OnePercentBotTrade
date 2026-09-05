@@ -234,6 +234,21 @@ function buildBotCreatePayload({ overrides = {}, botDefaults = {}, fallbacks = {
     autoArmAgeHours: pickScalar(o, b, 'autoArmAgeHours', 4, { clamp: [0.5, 999] }),
     slUkcTriggerOnProfit: pickBool(o, b, 'slUkcTriggerOnProfit', false, { strict: true }),
 
+    // ── FIX-2026-09-06: AUv2 — Auto-Underwater v2 (F1 auto-arm variant) ──
+    //   - same age+loss gate แต่ trigger ด้วย "loss ตื้นพอ" → MARKET SELL ทันที
+    //   - default OFF (opt-in; mirror cbv5Enabled pattern)
+    auv2Enabled: pickBool(o, b, 'auv2Enabled', false, { strict: true }),
+    auv2MinAgeHours: pickScalar(o, b, 'auv2MinAgeHours', 24, { clamp: [0.5, 999] }),
+    auv2LossMode: (function () {
+      const v = (o && o.auv2LossMode != null) ? o.auv2LossMode
+              : (b && b.auv2LossMode != null) ? b.auv2LossMode
+              : 'pct';
+      return ['pct', 'thb'].includes(v) ? v : 'pct';
+    })(),
+    auv2MaxLossPct: pickScalar(o, b, 'auv2MaxLossPct', 5, { clamp: [0.1, 50] }),
+    auv2MaxLossThb: pickScalar(o, b, 'auv2MaxLossThb', 200, { clamp: [1, 100000] }),
+    auv2MaxWaitDays: pickScalar(o, b, 'auv2MaxWaitDays', 7, { clamp: [0, 90] }),
+
     // ── TP trend ×N (F2) ──
     tpTrendEnabled: pickBool(o, b, 'tpTrendEnabled', true),
     tpTrendMultiplier: pickScalar(o, b, 'tpTrendMultiplier', 2, { clamp: [1, 10] }),

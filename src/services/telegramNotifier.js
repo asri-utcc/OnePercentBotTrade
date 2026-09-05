@@ -412,6 +412,8 @@ function renderMessage(eventKey, p, cfg) {
             // FIX-2026-08-09: แยก SL-UKC F1-armed vs manual
             sl_ukc_f1_armed:                 '🛑 Stop-loss upper-KC (auto-armed by F1)',
             sl_ukc_manual:                   '🛑 Stop-loss upper-KC (manually armed)',
+            // FIX-2026-09-06: AUv2 — F1 auto-arm v2 (shallow-loss exit gate)
+            auv2_shallow_loss:               '🌊 AUv2 — F1 v2 (shallow-loss exit after age)',
             // FIX-2026-08-09: แยก 4 sources ของ manual close
             manual_api_force_close_trade:    '🔧 Force-close (UI 1 trade)',
             manual_api_force_close_bot:      '🔧 Force-close bot (UI)',

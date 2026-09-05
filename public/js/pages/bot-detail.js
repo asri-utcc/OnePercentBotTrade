@@ -708,6 +708,9 @@ function renderCfgGrid(id) {
     { k: 'Retry max',       v: `${b.retryMax ?? 1} ครั้ง` },
     { k: 'KC Mult', v: `${b.kcMult ?? 1.5} (${(b.kcMult ?? 1.5) < 1.5 ? 'KC แคบ — sensitive' : (b.kcMult ?? 1.5) > 1.5 ? 'KC กว้าง — conservative' : 'ค่าเดิม'})` },
     { k: 'Stop Loss (upper-KC)', v: b.stopLossOnUpperKC ? '🛑 เปิด — ปิด position ขาดทุนเมื่อราคาทะลุ upper-KC' : '⏸ ปิดอยู่' },
+    { k: 'AUv2 (F1 v2)', v: b.auv2Enabled
+        ? `🌊 เปิด — ขายเมื่ออายุ ≥ ${b.auv2MinAgeHours ?? 24}ชม. + loss ตื้นกว่า ${b.auv2LossMode === 'thb' ? `${b.auv2MaxLossThb ?? 200} THB` : `${b.auv2MaxLossPct ?? 5}%`} (hard cap ${b.auv2MaxWaitDays ?? 7} วัน)`
+        : '⏸ ปิดอยู่' },
     { k: 'Auto-update TP%', v: b.autoUpdateTp
         ? `⏰ เปิด — recompute ทุกต้นชั่วโมง${b.updateTpAt ? ` (ล่าสุด: ${fmtDateTime(b.updateTpAt)})` : ''}`
         : '⏸ ปิดอยู่' },

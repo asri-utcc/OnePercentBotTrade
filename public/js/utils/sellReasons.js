@@ -23,6 +23,8 @@
     cbv5_panic:              { label: 'CBv5',   emoji: '💎', category: 'bear',    tooltip: 'CBv5 Support Zone panic-close (lowerKC break + deepest pivot low + bearish + volume spike) + HYBRID cooldown S1 BUY for cbv5LockHours hours (bot stays enabled)' },
     // FIX-2026-08-09: แยก SL-UKC auto-armed (F1) vs manual — เดิมรวมเป็น stop_loss_upper_kc
     sl_ukc_f1_armed:         { label: 'SL-F1',  emoji: '🛑', category: 'bear',    tooltip: 'SL on upper-KC — auto-armed by F1 (loss>10% + age>4h), then close > upperKC' },
+    // FIX-2026-09-06: AUv2 — F1 auto-arm variant (shallow-loss exit after age)
+    auv2_shallow_loss:       { label: 'AUv2',   emoji: '🌊', category: 'bear',    tooltip: 'AUv2 — F1 v2 (shallow-loss exit): age ≥ minAgeHours + loss shallower than threshold (pct/thb), MARKET SELL immediately (no upperKC confirmation)' },
     sl_ukc_manual:           { label: 'SL-M',   emoji: '🛑', category: 'bear',    tooltip: 'SL on upper-KC — manually armed (bot.stopLossOnUpperKC=true), then close > upperKC' },
     stop_loss_upper_kc:      { label: 'SL',     emoji: '�', category: 'bear',    tooltip: 'Stop-loss on upper-KC (legacy — trades เก่าก่อน schema update)' },
     market_fallback:         { label: 'MKT',    emoji: '⚠️', category: 'warn',    tooltip: 'MARKET fallback (LIMIT rejected / MIN_NOTIONAL breach / validation fail)' },

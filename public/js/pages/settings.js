@@ -434,6 +434,13 @@ function renderBotDefaultsSection() {
       </div>
       <div class="col-md-4">
         <label class="form-check form-switch">
+          <input type="checkbox" class="form-check-input" id="bd-auv2-enabled" ${d.auv2Enabled ? 'checked' : ''} />
+          <span class="form-check-label">🌊 AUv2 — F1 v2 (shallow-loss exit)</span>
+        </label>
+        <small class="text-muted-3 d-block mt-1">Default OFF — opt-in per-bot</small>
+      </div>
+      <div class="col-md-4">
+        <label class="form-check form-switch">
           <input type="checkbox" class="form-check-input" id="bd-sl-ukc-trigger-on-profit" ${d.slUkcTriggerOnProfit ? 'checked' : ''} />
           <span class="form-check-label">💰 SL-UKC trigger on profit</span>
         </label>
@@ -559,6 +566,29 @@ function renderBotDefaultsSection() {
       <div class="col-md-3">
         <label class="form-label">Auto-arm age (ชม.)</label>
         <input type="number" class="form-control" id="bd-auto-arm-age-hours" value="${d.autoArmAgeHours}" step="0.5" min="0.5" max="999" />
+      </div>
+      <div class="col-md-3">
+        <label class="form-label">🌊 AUv2 min age (ชม.)</label>
+        <input type="number" class="form-control" id="bd-auv2-min-age-hours" value="${d.auv2MinAgeHours ?? 24}" step="0.5" min="0.5" max="999" />
+      </div>
+      <div class="col-md-3">
+        <label class="form-label">AUv2 loss mode</label>
+        <select class="form-select" id="bd-auv2-loss-mode">
+          <option value="pct" ${(d.auv2LossMode ?? 'pct') === 'pct' ? 'selected' : ''}>pct (% shallow loss)</option>
+          <option value="thb" ${d.auv2LossMode === 'thb' ? 'selected' : ''}>thb (THB shallow loss)</option>
+        </select>
+      </div>
+      <div class="col-md-3">
+        <label class="form-label">AUv2 max loss (%)</label>
+        <input type="number" class="form-control" id="bd-auv2-max-loss-pct" value="${d.auv2MaxLossPct ?? 5}" step="0.1" min="0.1" max="50" />
+      </div>
+      <div class="col-md-3">
+        <label class="form-label">AUv2 max loss (THB)</label>
+        <input type="number" class="form-control" id="bd-auv2-max-loss-thb" value="${d.auv2MaxLossThb ?? 200}" step="1" min="1" max="100000" />
+      </div>
+      <div class="col-md-3">
+        <label class="form-label">AUv2 hard cap (วัน)</label>
+        <input type="number" class="form-control" id="bd-auv2-max-wait-days" value="${d.auv2MaxWaitDays ?? 7}" step="1" min="0" max="90" />
       </div>
       <div class="col-md-3">
         <label class="form-label">TP trend multiplier ×N</label>
@@ -2726,6 +2756,13 @@ const BD_RECOMMENDED = {
   autoArmStopLossOnUKC: true,
   autoArmLossPct: 6.3,
   autoArmAgeHours: 4,
+  // FIX-2026-09-06: AUv2 — F1 v2 (shallow-loss exit) — default OFF (opt-in)
+  auv2Enabled: false,
+  auv2MinAgeHours: 24,
+  auv2LossMode: 'pct',
+  auv2MaxLossPct: 5,
+  auv2MaxLossThb: 200,
+  auv2MaxWaitDays: 7,
   slUkcTriggerOnProfit: false,
   tpTrendEnabled: true,
   tpTrendMultiplier: 2,
@@ -2803,6 +2840,13 @@ async function saveBotDefaults() {
     autoArmStopLossOnUKC: isChecked('bd-auto-arm-stop-loss-ukc'),
     autoArmLossPct: num('bd-auto-arm-loss-pct'),
     autoArmAgeHours: num('bd-auto-arm-age-hours'),
+    // FIX-2026-09-06: AUv2 — F1 v2 (shallow-loss exit)
+    auv2Enabled: isChecked('bd-auv2-enabled'),
+    auv2MinAgeHours: num('bd-auv2-min-age-hours'),
+    auv2LossMode: str('bd-auv2-loss-mode') || 'pct',
+    auv2MaxLossPct: num('bd-auv2-max-loss-pct'),
+    auv2MaxLossThb: num('bd-auv2-max-loss-thb'),
+    auv2MaxWaitDays: int('bd-auv2-max-wait-days'),
     slUkcTriggerOnProfit: isChecked('bd-sl-ukc-trigger-on-profit'),
     tpTrendEnabled: isChecked('bd-tp-trend-enabled'),
     tpTrendMultiplier: num('bd-tp-trend-multiplier'),
@@ -2833,6 +2877,12 @@ async function saveBotDefaults() {
   if (!Number.isFinite(payload.cbv5DebounceCandles) || payload.cbv5DebounceCandles < 1 || payload.cbv5DebounceCandles > 20) errors.push('CBv5 debounce 1..20');
   if (!Number.isFinite(payload.autoArmLossPct) || payload.autoArmLossPct < 1 || payload.autoArmLossPct > 99) errors.push('Auto-arm loss 1..99');
   if (!Number.isFinite(payload.autoArmAgeHours) || payload.autoArmAgeHours < 0.5 || payload.autoArmAgeHours > 999) errors.push('Auto-arm age 0.5..999');
+  // FIX-2026-09-06: AUv2 validation
+  if (!Number.isFinite(payload.auv2MinAgeHours) || payload.auv2MinAgeHours < 0.5 || payload.auv2MinAgeHours > 999) errors.push('AUv2 min age 0.5..999');
+  if (!Number.isFinite(payload.auv2MaxLossPct) || payload.auv2MaxLossPct < 0.1 || payload.auv2MaxLossPct > 50) errors.push('AUv2 max loss% 0.1..50');
+  if (!Number.isFinite(payload.auv2MaxLossThb) || payload.auv2MaxLossThb < 1 || payload.auv2MaxLossThb > 100000) errors.push('AUv2 max loss THB 1..100000');
+  if (!Number.isFinite(payload.auv2MaxWaitDays) || payload.auv2MaxWaitDays < 0 || payload.auv2MaxWaitDays > 90) errors.push('AUv2 hard cap 0..90');
+  if (payload.auv2LossMode !== 'pct' && payload.auv2LossMode !== 'thb') errors.push('AUv2 loss mode pct|thb');
   if (!Number.isFinite(payload.tpTrendMultiplier) || payload.tpTrendMultiplier < 1 || payload.tpTrendMultiplier > 10) errors.push('TP trend mult 1..10');
   // FIX-2026-09-02: Round-down min notional threshold (USDT, 1..10000)
   if (!Number.isFinite(payload.roundDownCapitalMin) || payload.roundDownCapitalMin < 1 || payload.roundDownCapitalMin > 10000) errors.push('Round-down min 1..10000');
