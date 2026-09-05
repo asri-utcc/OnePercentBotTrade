@@ -92,6 +92,15 @@ router.put('/app-config', requireAuth, async (req, res) => {
       // FIX-2026-08-31: System-level Auto-Timing master (AppConfig.autoTimingEnabled)
       //   Master switch for the heatmap-driven entry gate; per-bot opt-in lives on Bot.autoTimingEnabled.
       autoTimingEnabled: 'boolean',
+      // FIX-2026-09-05: System-level DLC master kill-switch + base-loss default
+      //   (AppConfig.masterDlcEnabled, AppConfig.dlcBaseLossPct) — was missing from
+      //   whitelist, so PUT /api/admin/app-config silently dropped these fields (200 OK
+      //   + unknownKeys warning), bots with dlcEnabled=true got snapshot maxTrades=1
+      //   but master=false → trader fell back to legacy "maxTrades reached" path.
+      //   Mirror pattern of autoTimingEnabled above (which has the same fix-history
+      //   per [[onepercentbot-master-config-autoTiming-fix-2026-08-31]]).
+      masterDlcEnabled: 'boolean',
+      dlcBaseLossPct: 'number',
       // FIX-2026-08-08 (rev2): DPS tunables (10 numbers — layer fields removed FIX-2026-09-03)
       dpsMinSize: 'number', dpsMaxSize: 'number',
       dpsCooldownMinutes: 'number',
@@ -138,6 +147,10 @@ router.put('/app-config', requireAuth, async (req, res) => {
     }
     if (set.autoDeleteBotWarningDays != null) {
       set.autoDeleteBotWarningDays = Math.max(1, Math.min(30, set.autoDeleteBotWarningDays));
+    }
+    // FIX-2026-09-05: DLC base-loss clamp (mirror Bot schema range -95..-1)
+    if (set.dlcBaseLossPct != null) {
+      set.dlcBaseLossPct = Math.max(-95, Math.min(-1, set.dlcBaseLossPct));
     }
 
     // FIX-2026-08-08 (rev2): cross-field DPS validation (merge DB เดิม + set ใหม่ก่อนเช็ค)
