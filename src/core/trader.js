@@ -3519,16 +3519,30 @@ class Trader {
     //   - dlcEnabled off (or master off)  → legacy maxTrades count-and-compare
     //   - position PnL computed on-the-fly from currentPrice vs buyPrice
     //     (Trade.pnlPercent is null until SELL fills — see src/core/dlc.js)
-    if (this.bot.dlcEnabled) {
-      const _masterToggles = await masterConfig.getMasterToggles();
-      if (_masterToggles.masterDlcEnabled === true) {
-        const _dlcCfg = await masterConfig.getDlcConfig();
-        // Batch-fetch latest 1m close per unique symbol — avoid N+1 on per-position
-        const _openTradesRaw = await Trade.find({
+    //
+    // FIX BUG-2026-09-05a: hoist `_openTradesRaw` declaration ABOVE the inner if/else.
+    //   Before fix: `const _openTradesRaw = await Trade.find(...)` lived INSIDE the
+    //   `if (_masterToggles.masterDlcEnabled === true)` branch only. The `else` branch
+    //   (masterDlcEnabled=false fallback) referenced `_openTradesRaw.length` at L3563
+    //   → ReferenceError every time a dlc=true bot fired S1 while masterDlc was off.
+    //   The WS handler at L415 has .catch() so the process didn't crash, BUT the
+    //   signal doc (already saved with outcome='detected') never got updated → stuck
+    //   at 'detected' forever with no UI indication. pm2 logs confirm this was firing
+    //   for every S1 signal since the DLC feature merged. The hoisted declaration
+    //   serves both branches (single Mongo query, no behavioural change).
+    let _openTradesRaw = []; // default empty so legacy branch never sees undefined
+    let _autoTimingDecision = null; // FIX BUG-2026-09-05b: safe default for crash handler
+    try {
+      if (this.bot.dlcEnabled) {
+        const _masterToggles = await masterConfig.getMasterToggles();
+        _openTradesRaw = await Trade.find({
           botId: this.bot._id,
           state: { $in: ['placed', 'filled', 'holding', 'selling'] },
         }).select({ symbol: 1, buyPrice: 1, buyFilledAt: 1 }).lean();
-        const _uniqueSyms = [...new Set(_openTradesRaw.map((t) => t.symbol).filter(Boolean))];
+        if (_masterToggles.masterDlcEnabled === true) {
+          const _dlcCfg = await masterConfig.getDlcConfig();
+          // Batch-fetch latest 1m close per unique symbol — avoid N+1 on per-position
+          const _uniqueSyms = [...new Set(_openTradesRaw.map((t) => t.symbol).filter(Boolean))];
         const _priceBySym = {};
         await Promise.all(_uniqueSyms.map(async (sym) => {
           try {
@@ -3584,6 +3598,33 @@ class Trader {
         await Signal.updateOne({ _id: signalDoc._id }, { outcome: 'skipped', note: 'maxTrades reached' });
         return;
       }
+    }
+    } catch (gateErr) {
+      // FIX BUG-2026-09-05b: defensive catch around the DLC + maxTrades gate chain.
+      //   Before this wrapper, any exception thrown by masterConfig.getMasterToggles(),
+      //   Trade.find(), binanceRest.getKlines(), or dlc.evaluate() would silently
+      //   bubble up to the WS .catch() at L415 with NO signal outcome update — leaving
+      //   the signal stuck at 'detected' forever. The earlier root cause (the
+      //   _openTradesRaw ReferenceError) is fixed by hoisting above, but this guard
+      //   prevents the same class of bug from recurring if a future gate throws.
+      //   - mark signal as 'failed' with a short reason so UI never shows stuck state
+      //   - log full stack for diagnosis
+      //   - return silently — WS .catch() still prevents process exit
+      logger.error({
+        err: gateErr.message,
+        stack: gateErr.stack,
+        botId: this.bot._id?.toString(),
+        symbol: this.bot.symbol,
+      }, 'trader: gate chain threw — marking signal failed (was: stuck-detected BUG)');
+      try {
+        await Signal.updateOne(
+          { _id: signalDoc._id, outcome: 'detected' }, // only flip if still pending
+          { outcome: 'failed', note: `gate_exception:${String(gateErr.message || gateErr).slice(0, 180)}` }
+        );
+      } catch (_updateErr) {
+        logger.error({ err: _updateErr.message }, 'trader: failed to mark signal as failed');
+      }
+      return;
     }
 
     // FIX-2026-08-30 / Phase 4 — Auto-Timing (heatmap-driven entry gate)
