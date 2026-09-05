@@ -2384,6 +2384,88 @@ router.post('/bulk-update', requireAuth, async (req, res) => {
 
     const result = await Bot.updateMany({ _id: { $in: botIds } }, { $set: update });
 
+    // FIX-2026-09-05: DLC per-bot snapshot/restore for bulk-update (mirror PUT /api/bots/:id)
+    //   - if dlcEnabled is in the bulk settings, each affected bot needs:
+    //     OFF->ON : snapshot bot.maxTrades -> bot.dlcPrevMaxTrades, set bot.maxTrades=1
+    //     ON->OFF : restore bot.dlcPrevMaxTrades -> bot.maxTrades, clear snapshot
+    //   - previously bulk-update on dlcEnabled wrote dlcEnabled:true but did NOT snapshot,
+    //     so masterDlcEnabled=true caused trader to enter DLC path with bot's old maxTrades
+    //     and there was no way to restore on toggle-off
+    if ('dlcEnabled' in update) {
+      try {
+        const wantsDlc = update.dlcEnabled === true || update.dlcEnabled === 'true';
+        const affected = await Bot.find({ _id: { $in: botIds } })
+          .select({ _id: 1, dlcEnabled: 1, maxTrades: 1, dlcPrevMaxTrades: 1 })
+          .lean();
+        const bulkOps = [];
+        for (const bot of affected) {
+          const wasDlc = bot.dlcEnabled === true;
+          if (wantsDlc && !wasDlc) {
+            bulkOps.push({
+              updateOne: {
+                filter: { _id: bot._id },
+                update: { $set: { dlcPrevMaxTrades: bot.maxTrades, maxTrades: 1 } },
+              },
+            });
+          } else if (!wantsDlc && wasDlc) {
+            const restore = bot.dlcPrevMaxTrades != null ? bot.dlcPrevMaxTrades : bot.maxTrades;
+            bulkOps.push({
+              updateOne: {
+                filter: { _id: bot._id },
+                update: { $set: { maxTrades: restore, dlcPrevMaxTrades: null } },
+              },
+            });
+          }
+        }
+        if (bulkOps.length > 0) {
+          await Bot.bulkWrite(bulkOps, { ordered: false });
+          logger.info({ botId: null, wantsDlc, count: bulkOps.length }, 'bulk-update: DLC snapshot/restore applied');
+        }
+      } catch (dlcErr) {
+        logger.warn({ err: dlcErr.message }, 'bulk-update: DLC snapshot/restore failed (continuing)');
+      }
+    }
+
+    // FIX-2026-09-05: sync in-memory trader.bot for non-TF-change fields
+    //   - running traders keep this.bot as cached snapshot at spawn time
+    //   - bulk-update writes go to DB but trader memory is stale until restart
+    //   - for DLC this is CRITICAL: trader checks this.bot.dlcEnabled at L3515 BEFORE
+    //     checking master toggle, so stale dlcEnabled=false makes engine skip DLC path
+    //   - same applies to other live behavior toggles (dynamicSizeEnabled, autoTiming)
+    //   - skip if a restart already happened (TF change above) - restart re-reads from DB
+    if (!('timeframe' in update)) {
+      let syncedInMem = 0;
+      const traders = botManager.traders;
+      if (traders && typeof traders.values === 'function') {
+        for (const botId of botIds) {
+          const idStr = String(botId);
+          const trader = traders.get(idStr) || traders.get(botId);
+          if (!trader || !trader.bot) continue;
+          try {
+            const fresh = await Bot.findById(botId).select({
+              dlcEnabled: 1, dlcBaseLossPct: 1, dlcPrevMaxTrades: 1, maxTrades: 1,
+              dynamicSizeEnabled: 1, autoTimingEnabled: 1, autoTimingOverrideCell: 1,
+            }).lean();
+            if (fresh) {
+              if (fresh.dlcEnabled !== undefined) trader.bot.dlcEnabled = fresh.dlcEnabled === true;
+              if (fresh.dlcBaseLossPct != null) trader.bot.dlcBaseLossPct = fresh.dlcBaseLossPct;
+              if (fresh.dlcPrevMaxTrades !== undefined) trader.bot.dlcPrevMaxTrades = fresh.dlcPrevMaxTrades;
+              if (fresh.maxTrades != null) trader.bot.maxTrades = fresh.maxTrades;
+              if (fresh.dynamicSizeEnabled !== undefined) trader.bot.dynamicSizeEnabled = fresh.dynamicSizeEnabled === true;
+              if (fresh.autoTimingEnabled !== undefined) trader.bot.autoTimingEnabled = fresh.autoTimingEnabled;
+              if (fresh.autoTimingOverrideCell !== undefined) trader.bot.autoTimingOverrideCell = fresh.autoTimingOverrideCell;
+              syncedInMem++;
+            }
+          } catch (e) {
+            logger.warn({ botId: idStr, err: e.message }, 'bulk-update: in-memory trader sync failed (continuing)');
+          }
+        }
+      }
+      if (syncedInMem > 0) {
+        logger.info({ botId: null, syncedInMem }, 'bulk-update: in-memory trader.bot synced');
+      }
+    }
+
     // FIX-2026-08-02: restart trader สำหรับบอทที่ TF เปลี่ยนจริง + ยัง enabled
     //   - trader caches interval ใน kline subscription + indicator cache ตอน spawn
     //     → ถ้าไม่ restart, bot:updated จะ refresh this.bot.timeframe แต่ logic ยังใช้ TF เก่า
