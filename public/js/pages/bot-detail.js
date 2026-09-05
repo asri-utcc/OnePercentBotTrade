@@ -784,6 +784,35 @@ function renderTrades() {
 }
 
 /* ── Signals ──────────────────────────────────────────── */
+// FIX-2026-09-05: enrich outcome text for UI clarity (mirrors chart-monitor.js).
+//   - DB 'detected' rows are TRANSIENT (save ตอนเจอ S1 ก่อน gate chain)
+//   - ถ้าเก่าเกิน threshold = stuck → แสดง '⚠️ stuck — gate ไม่อัปเดต'
+//   - threshold = max(5min, 2× timeframe)
+function _enrichSignalOutcome(s) {
+  if (!s) return s;
+  if (s.outcome !== 'detected') return s;
+  const tf = s.timeframe || '3m';
+  const m = String(tf).match(/^(\d+)([mhd])$/);
+  let tfMs = 60_000;
+  if (m) {
+    const n = parseInt(m[1], 10);
+    tfMs = n * (m[2] === 'm' ? 60_000 : m[2] === 'h' ? 3_600_000 : 86_400_000);
+  }
+  const staleMs = Math.max(5 * 60_000, 2 * tfMs);
+  const created = s.createdAt ? new Date(s.createdAt).getTime() : 0;
+  if (created && Date.now() - created > staleMs) {
+    // shallow clone to avoid mutating source
+    return Object.assign({}, s, {
+      _enrichedOutcome: 'stale_detected',
+      _enrichedLabel: '⚠️ stuck — gate ไม่อัปเดต',
+    });
+  }
+  return Object.assign({}, s, {
+    _enrichedOutcome: 'detected',
+    _enrichedLabel: '⏳ กำลังประมวลผล',
+  });
+}
+
 function renderSignals() {
   const tbody = document.getElementById('signals-tbody');
   const mob = document.getElementById('signals-mob');
@@ -797,11 +826,17 @@ function renderSignals() {
     return;
   }
 
-  tbody.innerHTML = detail.signals.map((s) => {
-    const oc = OUTCOME_CLASS[s.outcome] || '';
+  tbody.innerHTML = detail.signals.map((rawS) => {
+    const s = _enrichSignalOutcome(rawS);
+    const oc = OUTCOME_CLASS[s._enrichedOutcome] || OUTCOME_CLASS[s.outcome] || '';
+    const label = s._enrichedLabel || s.outcome;
     const dir = (s.bgPrev === 2 && (s.bgState === 1 || s.bgState === 3))
       ? (s.bgState === 1 ? 'bull' : 'bear')
       : 'neutral';
+    // FIX-2026-09-05: tooltip อธิบายเมื่อ outcome เป็น stale_detected
+    const staleTitle = s._enrichedOutcome === 'stale_detected'
+      ? 'outcome: detected (stale)\n— candle close เกิน max(5min, 2×TF) แล้ว แต่ outcome ยังไม่เปลี่ยน\n— trader crash / gate exception ระหว่าง pm2 reload'
+      : '';
     return `
       <tr>
         <td><span class="ts">${fmtDateTime(s.createdAt)}</span></td>
@@ -810,13 +845,15 @@ function renderSignals() {
         <td style="font-size:0.78rem;">${s.bgPrev} → ${s.bgState}</td>
         <td class="num">${s.upperKC != null ? PriceFormat.format(s.upperKC, s.symbol) : '-'}</td>
         <td class="num">${s.lowerKC != null ? PriceFormat.format(s.lowerKC, s.symbol) : '-'}</td>
-        <td><span class="status-pill is-${oc}">${s.outcome}</span></td>
+        <td><span class="status-pill is-${oc}"${staleTitle ? ` title="${escapeHtml(staleTitle)}"` : ''}>${escapeHtml(label)}</span></td>
         <td style="font-size:0.75rem;color:var(--text-3);">${escapeHtml(s.note || '')}</td>
       </tr>`;
   }).join('');
 
-  mob.innerHTML = detail.signals.map((s) => {
-    const oc = OUTCOME_CLASS[s.outcome] || '';
+  mob.innerHTML = detail.signals.map((rawS) => {
+    const s = _enrichSignalOutcome(rawS);
+    const oc = OUTCOME_CLASS[s._enrichedOutcome] || OUTCOME_CLASS[s.outcome] || '';
+    const label = s._enrichedLabel || s.outcome;
     const dir = (s.bgPrev === 2 && (s.bgState === 1 || s.bgState === 3))
       ? (s.bgState === 1 ? 'bull' : 'bear')
       : 'neutral';
@@ -829,7 +866,7 @@ function renderSignals() {
         <div class="row"><span class="k">Close</span><span class="v">${s.closePrice != null ? PriceFormat.format(s.closePrice, s.symbol) : '-'}</span></div>
         <div class="row"><span class="k">BG</span><span class="v">${s.bgPrev} → ${s.bgState}</span></div>
         <div class="row"><span class="k">KC range</span><span class="v">${s.lowerKC != null ? PriceFormat.format(s.lowerKC, s.symbol) : '-'} → ${s.upperKC != null ? PriceFormat.format(s.upperKC, s.symbol) : '-'}</span></div>
-        <div class="row"><span class="k">Outcome</span><span class="v"><span class="status-pill is-${oc}">${s.outcome}</span></span></div>
+        <div class="row"><span class="k">Outcome</span><span class="v"><span class="status-pill is-${oc}">${escapeHtml(label)}</span></span></div>
         ${s.note ? `<div class="row"><span class="k">Note</span><span class="v" style="font-size:0.72rem;color:var(--text-3);">${escapeHtml(s.note)}</span></div>` : ''}
       </div>`;
   }).join('');
@@ -842,8 +879,10 @@ function renderRecentSignals() {
     container.innerHTML = '<div class="text-muted-3 text-center py-4">ยังไม่มี signals</div>';
     return;
   }
-  container.innerHTML = recent.map((s) => {
-    const oc = OUTCOME_CLASS[s.outcome] || '';
+  container.innerHTML = recent.map((rawS) => {
+    const s = _enrichSignalOutcome(rawS);
+    const oc = OUTCOME_CLASS[s._enrichedOutcome] || OUTCOME_CLASS[s.outcome] || '';
+    const label = s._enrichedLabel || s.outcome;
     const dir = (s.bgPrev === 2 && (s.bgState === 1 || s.bgState === 3))
       ? (s.bgState === 1 ? 'bull' : 'bear')
       : 'neutral';
@@ -853,7 +892,7 @@ function renderRecentSignals() {
         <span class="ts">${fmtDateTime(s.createdAt)}</span>
         <span class="price">${s.closePrice != null ? PriceFormat.format(s.closePrice, s.symbol) : '-'}</span>
         <span class="bg">bg ${s.bgPrev}→${s.bgState}</span>
-        <span class="outcome"><span class="status-pill is-${oc}">${s.outcome}</span></span>
+        <span class="outcome"><span class="status-pill is-${oc}">${escapeHtml(label)}</span></span>
         ${s.note ? `<span class="note">${escapeHtml(s.note)}</span>` : ''}
       </div>`;
   }).join('');
