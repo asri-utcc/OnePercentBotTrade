@@ -59,6 +59,15 @@ const AUTO_PAUSE_BUY_IN_FLIGHT_STATES = [
   'partial_sell_wait',
   'stopping',
 ];
+// FIX-2026-09-05 (FFUSDT orphan): orphan-BUY-on-disabled-bot auto-recovery knobs
+//   - RECOVERABLE reasons = เฉพาะที่ "ระบบ" pause เอง; บอทที่ user ปิดเอง (autoPauseReason=null)
+//     หรือ 'binance_delist' จะไม่ถูกแตะ (delist มี force-close scheduler ของตัวเอง)
+//   - MAX attempts = circuit breaker กัน spawn/stop trader วนไม่รู้จบถ้าวาง SELL ไม่สำเร็จจริงๆ
+//     (เช่น balance ไม่พอ / symbol โดน delist) — ครบแล้วเหลือ alert อย่างเดียว
+const ORPHAN_RECOVERABLE_PAUSE_REASONS = ['low_vol', 'low_24h_vol'];
+const MAX_ORPHAN_RECOVERY_ATTEMPTS = 5;
+const ORPHAN_ALERT_LATCH_MS = 60 * 60 * 1000; // re-alert อย่างมาก 1 ครั้ง/ชม. ต่อ trade
+
 // FIX-2026-08-06: delist scheduler — interval + forceCloseDays/blockBuyDays
 const DELIST_SCHEDULE_INTERVAL_MS = 5 * 60 * 1000; // ทุก 5 นาที ตรวจ delist schedule
 let delistSchedulerTimer = null;
@@ -553,31 +562,122 @@ class BotManager {
                   trader.currentTrade = trade;
                   await trader.handleBuyFilled(trade, order, sig);
                 } else {
-                  // ไม่มี trader (บอท disabled) → mark filled + ปล่อยให้ user/manual reconcile
-                  logger.warn({
-                    tradeId: trade._id.toString(),
-                    botId: trade.botId.toString(),
-                  }, 'reconcile: BUY filled but no live trader — DB updated to filled, manual SELL needed');
-                  await Trade.updateOne(
-                    { _id: trade._id },
-                    {
-                      state: 'filled',
-                      buyStatus: order.status,
-                      buyFilledAt: new Date(order.updateTime || Date.now()),
-                      buyPrice: parseFloat(order.price) || parseFloat(order.cummulativeQuoteQty) / parseFloat(order.executedQty),
-                      buyQty: parseFloat(order.executedQty),
-                      buyQuoteQty: parseFloat(order.cummulativeQuoteQty),
+                  // FIX-2026-09-05 (FFUSDT orphan, ค้าง 7h46m): เดิม branch นี้แค่ mark filled
+                  //   แล้ว log "manual SELL needed" วนทุก 5 นาทีไปเรื่อยๆ โดยไม่ทำอะไรเลย
+                  //   → position ลอยไม่มี SELL บน order book = ขายที่ TP ไม่ได้แม้ราคาจะถึง
+                  //   ตอนนี้: mark filled → พยายาม auto-recover → alert (latch ที่เปิดได้จริง)
+                  const buyPriceCalc = parseFloat(order.price) || parseFloat(order.cummulativeQuoteQty) / parseFloat(order.executedQty);
+                  const buyQtyCalc = parseFloat(order.executedQty);
+                  const buyFilledAtCalc = new Date(order.updateTime || Date.now());
+
+                  // เขียนเฉพาะตอน state ยังไม่ใช่ 'filled' — เดิมเขียนทับค่าเดิมทุกรอบ reconcile
+                  //   ทำให้ `updatedAt` ถูก refresh ทุก 5 นาที → latch alert ที่วัดจาก updatedAt
+                  //   ไม่มีวันเปิด (staleMs ค้างที่ ~280s ตลอด) + DB churn เปล่าๆ
+                  if (trade.state !== 'filled') {
+                    logger.warn({
+                      tradeId: trade._id.toString(),
+                      botId: trade.botId.toString(),
+                    }, 'reconcile: BUY filled but no live trader — DB updated to filled');
+                    await Trade.updateOne(
+                      { _id: trade._id },
+                      {
+                        state: 'filled',
+                        buyStatus: order.status,
+                        buyFilledAt: buyFilledAtCalc,
+                        buyPrice: buyPriceCalc,
+                        buyQty: buyQtyCalc,
+                        buyQuoteQty: parseFloat(order.cummulativeQuoteQty),
+                      }
+                    );
+                    trade.state = 'filled';
+                  }
+
+                  // ── AUTO-RECOVERY ────────────────────────────────────────────
+                  // policy (user directive 2026-09-05): กู้เฉพาะบอทที่ "ระบบ" ปิดเอง
+                  //   - autoPauseReason ∈ {low_vol, low_24h_vol} = auto-pause → กู้ได้
+                  //   - user ปิดเอง (null) / 'binance_delist' / soft-deleted → ไม่แตะ, alert อย่างเดียว
+                  //     (delist มี delist scheduler force-close ของตัวเองอยู่แล้ว)
+                  //
+                  // วิธีกู้: spawn trader ชั่วคราวโดย "ไม่แตะ bot.enabled" แล้วเรียก handleBuyFilled
+                  //   เพื่อวาง LIMIT_MAKER SELL @ TP จากนั้น stopTrader ทันที
+                  //   - ทำไมไม่ flip enabled=true จริง: trader.onCandleClosed bail ที่บรรทัดแรก
+                  //     ถ้า !this.bot.enabled (trader.js:3224) → trader ชั่วคราวนี้ "เปิด BUY ใหม่ไม่ได้เลย"
+                  //     แม้ startup kline replay จะยิง candle เข้ามา — เป็น guarantee ระดับโครงสร้าง
+                  //     ไม่ใช่แค่ timing luck.  ถ้า flip enabled จริงจะเสี่ยงเปิด position ใหม่บนเหรียญ
+                  //     low-vol ที่ user ตั้งใจให้หยุด + ยิง telegram "bot enabled" หลอน
+                  //   - SELL อยู่บน order book ของ Binance แล้ว → fill เองได้แม้บอทปิดสนิท
+                  //     และ positionWatchdog ดูแล state='selling' โดยไม่สน bot.enabled
+                  const recoveryCount = trade.orphanBuyRecoveryCount || 0;
+                  const canRecover = bot.enabled === false
+                    && !bot.deletedAt
+                    && ORPHAN_RECOVERABLE_PAUSE_REASONS.includes(bot.autoPauseReason)
+                    && recoveryCount < MAX_ORPHAN_RECOVERY_ATTEMPTS
+                    && !this.traders.has(bot._id.toString());
+                  let recovered = false;
+                  let recoveryError = null;
+
+                  if (canRecover) {
+                    try {
+                      await Trade.updateOne(
+                        { _id: trade._id },
+                        { $set: { orphanBuyRecoveryAt: new Date() }, $inc: { orphanBuyRecoveryCount: 1 } }
+                      );
+                      // ส่ง bot doc ตามจริง (enabled:false) → trader วาง SELL ได้ แต่ BUY ไม่ได้
+                      await this._withSpawnLock(bot._id, () => this.spawnTrader({ ...bot, enabled: false }));
+                      const revived = this.traders.get(bot._id.toString());
+                      if (!revived) throw new Error('spawnTrader did not register a trader');
+                      revived.currentTrade = trade;
+                      await revived.handleBuyFilled(trade, order, sig);
+                      const after = await Trade.findById(trade._id, 'state sellOrderId').lean();
+                      recovered = !!(after && (after.sellOrderId || ['selling', 'sold'].includes(after.state)));
+                      if (!recovered) {
+                        throw new Error(`SELL not on book after handleBuyFilled (state=${after ? after.state : 'missing'})`);
+                      }
+                      logger.warn({
+                        tradeId: trade._id.toString(),
+                        botId: trade.botId.toString(),
+                        botName: bot.name,
+                        symbol: trade.symbol,
+                        buyOrderId: trade.buyOrderId,
+                        buyQty: buyQtyCalc,
+                        sellOrderId: after.sellOrderId,
+                        attempt: recoveryCount + 1,
+                      }, 'reconcile: ✅ orphan BUY auto-recovered — SELL placed, bot stays auto-paused');
+                    } catch (recErr) {
+                      recoveryError = recErr.message;
+                      logger.error({
+                        tradeId: trade._id.toString(),
+                        botId: trade.botId.toString(),
+                        symbol: trade.symbol,
+                        attempt: recoveryCount + 1,
+                        maxAttempts: MAX_ORPHAN_RECOVERY_ATTEMPTS,
+                        err: recErr.message,
+                      }, 'reconcile: orphan BUY auto-recovery FAILED — will retry next cycle');
+                    } finally {
+                      // เก็บกวาด trader ชั่วคราวเสมอ (ทั้งสำเร็จและล้มเหลว) — บอทต้องกลับไปสถานะ paused
+                      await this.stopTrader(bot._id).catch((stopErr) => {
+                        logger.warn({
+                          botId: trade.botId.toString(),
+                          err: stopErr.message,
+                        }, 'reconcile: stopTrader after orphan recovery failed (non-fatal)');
+                      });
                     }
-                  );
+                  }
+
                   // FIX-2026-08-14: ส่ง Telegram alert เพื่อให้ user รู้ทันที — ก่อนหน้านี้ silent
                   //   log เฉยๆ ทำให้ orphan ค้างเป็นเดือน (เช่น EPIC 2026-08-14 ค้าง 4 ชม.)
-                  //   - latch: ส่ง telegram เฉพาะเมื่อ `trade.updatedAt` เก่ากว่า 1 ชั่วโมง
-                  //     (คือ "ยังไม่ได้ alert ใน reconcile cycle นี้") — กัน spam ทุก 5 นาที
-                  //   - reconcile cycle ถัดไปจะ re-update trade.updatedAt → latch ใหม่อีก 1 ชม.
-                  const updatedAtMs = trade.updatedAt ? new Date(trade.updatedAt).getTime() : 0;
-                  const staleMs = Date.now() - updatedAtMs;
-                  const shouldAlert = staleMs > 60 * 60 * 1000; // > 1 hour since last update
+                  // FIX-2026-09-05: latch เดิมวัดจาก `trade.updatedAt` แต่โค้ดบล็อกเดียวกันเขียน
+                  //   Trade.updateOne ทุกรอบ → updatedAt refresh ตลอด → staleMs ไม่เคยเกิน 1 ชม.
+                  //   → alert ไม่เคยยิงเลย (FFUSDT: telegramAlerted:false 98 ครั้งติดใน 7h46m).
+                  //   ใหม่: ใช้ field เฉพาะ `orphanBuyAlertedAt` ที่เขียนตอน alert เท่านั้น
+                  //   - ยิงทันทีครั้งแรกที่เจอ (ไม่ต้องรอ 1 ชม.) แล้ว re-alert ทุก 1 ชม. ถ้ายังไม่หาย
+                  //   - ถ้า auto-recover สำเร็จ → ไม่ต้อง alert (ไม่มี action ให้ user ทำ)
+                  const alertedAtMs = trade.orphanBuyAlertedAt ? new Date(trade.orphanBuyAlertedAt).getTime() : 0;
+                  const sinceAlertMs = Date.now() - alertedAtMs;
+                  const shouldAlert = !recovered && (!alertedAtMs || sinceAlertMs > ORPHAN_ALERT_LATCH_MS);
                   if (shouldAlert) {
+                    await Trade.updateOne({ _id: trade._id }, { $set: { orphanBuyAlertedAt: new Date() } })
+                      .catch(() => { /* non-fatal — alert ยังส่งได้ */ });
                     try {
                       const telegramNotifier = require('../services/telegramNotifier');
                       telegramNotifier.sendNow && telegramNotifier.sendNow('orphanBuyFilled', {
@@ -585,31 +685,36 @@ class BotManager {
                         symbol: trade.symbol,
                         tradeId: trade._id.toString(),
                         buyOrderId: trade.buyOrderId,
-                        buyPrice: parseFloat(order.price) || parseFloat(order.cummulativeQuoteQty) / parseFloat(order.executedQty),
-                        buyQty: parseFloat(order.executedQty),
-                        buyFilledAt: new Date(order.updateTime || Date.now()).toISOString(),
+                        buyPrice: buyPriceCalc,
+                        buyQty: buyQtyCalc,
+                        buyFilledAt: buyFilledAtCalc.toISOString(),
                         botEnabled: bot.enabled,
                         botStatus: bot.status,
                         autoPauseReason: bot.autoPauseReason || '',
+                        recoveryError: recoveryError || '',
                         ts: Date.now(),
                       });
                     } catch (tgErr) {
                       logger.warn({ err: tgErr.message }, 'reconcile: telegram alert (orphanBuyFilled) failed (non-fatal)');
                     }
                   }
-                  logger.error({
-                    tradeId: trade._id.toString(),
-                    botId: trade.botId.toString(),
-                    botName: bot.name,
-                    symbol: trade.symbol,
-                    buyOrderId: trade.buyOrderId,
-                    buyQty: parseFloat(order.executedQty),
-                    buyFilledAt: new Date(order.updateTime || Date.now()).toISOString(),
-                    botEnabled: bot.enabled,
-                    autoPauseReason: bot.autoPauseReason || '',
-                    telegramAlerted: shouldAlert,
-                    staleMsSinceLastUpdate: staleMs,
-                  }, 'reconcile: 🚨 ORPHAN BUY filled on DISABLED bot — user must re-enable bot OR run force-close manually');
+                  if (!recovered) {
+                    logger.error({
+                      tradeId: trade._id.toString(),
+                      botId: trade.botId.toString(),
+                      botName: bot.name,
+                      symbol: trade.symbol,
+                      buyOrderId: trade.buyOrderId,
+                      buyQty: buyQtyCalc,
+                      buyFilledAt: buyFilledAtCalc.toISOString(),
+                      botEnabled: bot.enabled,
+                      autoPauseReason: bot.autoPauseReason || '',
+                      telegramAlerted: shouldAlert,
+                      autoRecoveryAttempted: canRecover,
+                      autoRecoveryAttempts: canRecover ? recoveryCount + 1 : recoveryCount,
+                      recoveryError: recoveryError || null,
+                    }, 'reconcile: 🚨 ORPHAN BUY filled on DISABLED bot — no SELL on book');
+                  }
                 }
               }
             } else if (order.status === 'PARTIALLY_FILLED') {
@@ -1224,6 +1329,27 @@ async function findBotIdsWithBuyInFlight() {
   return out;
 }
 
+// FIX-2026-09-05 (FFUSDT orphan): fresh per-bot BUY-in-flight check — ปิด TOCTOU race
+//   ที่ findBotIdsWithBuyInFlight() snapshot ทิ้งไว้.
+//   Incident: sweep เริ่ม 02:16:34 → snapshot (FF ยังไม่มี trade) → loop วน getKlines ทีละบอท
+//   (~100s สำหรับ fleet ปัจจุบัน) → 02:18:01 FF วาง BUY → 02:18:09 loop มาถึง FF แล้ว pause
+//   จาก snapshot ที่เก่า 87 วินาที → trader.stop() ฆ่า fill handler → 02:18:13 BUY fill → orphan.
+//   snapshot จึงเป็นได้แค่ pre-filter; การตัดสินใจ pause ต้อง re-query สดเสมอ.
+//   ต้นทุน: 1 indexed query ({botId, state}) เฉพาะบอทที่กำลังจะถูก pause จริง — ไม่ใช่ทุกบอท.
+//   fail-CLOSED: ถ้า query error → return true (ไม่ pause) เพราะ orphan แพงกว่าการ pause ช้าไป 1 tick.
+async function hasBuyInFlightFresh(botId) {
+  try {
+    const t = await Trade.findOne(
+      { botId, state: { $in: AUTO_PAUSE_BUY_IN_FLIGHT_STATES } },
+      { _id: 1 }
+    ).lean();
+    return !!t;
+  } catch (err) {
+    logger.warn({ botId: String(botId), err: err.message }, 'botManager: hasBuyInFlightFresh failed — treating as in-flight (fail-closed)');
+    return true;
+  }
+}
+
 // FIX-2026-08-01: Auto-pause scanner — ทุก 5 นาที ตรวจ Min-%KC(30 bars) ของทุกบอทที่ autoPauseEnabled !== false
 //   - ถ้า minKcPct < threshold และบอท enabled → PAUSE (set enabled=false + telegram + stop trader)
 //   - ถ้า minKcPct >= threshold และบอท auto-paused ก่อนหน้า (autoPauseReason === 'low_vol') → RESUME
@@ -1247,7 +1373,7 @@ async function checkAutoPauseBots() {
   if (!bots || bots.length === 0) return;
 
   // FIX-2026-08-24 (P1 audit): stats accumulator (P1-7 hysteresis counter)
-  let stats = { skippedHysteresis: 0, skippedBuyInFlight: 0, paused: 0, resumed: 0, errors: 0 };
+  let stats = { skippedHysteresis: 0, skippedBuyInFlight: 0, skippedBuyInFlightRace: 0, paused: 0, resumed: 0, errors: 0 };
 
   const telegramNotifier = require('../services/telegramNotifier');
   const now = new Date();
@@ -1358,16 +1484,22 @@ async function checkAutoPauseBots() {
         //   orphan the position (trader.stop() removes the in-memory SELL-placement
         //   handler).  Next tick (10min) will re-evaluate when BUY has progressed
         //   to 'selling' (safe to pause) or the BUY has fully closed.
-        if (buyInFlightBots.has(String(b._id))) {
+        // FIX-2026-09-05 (FFUSDT orphan): snapshot อย่างเดียวไม่พอ — loop นี้ใช้เวลา ~100s
+        //   (getKlines ต่อบอท) ทำให้ BUY ที่วางระหว่าง sweep หลุด guard.  re-query สดก่อน pause
+        //   ทุกครั้ง (ราคาถูก เพราะ branch นี้เข้าเฉพาะบอทที่ threshold trigger จริง).
+        if (buyInFlightBots.has(String(b._id)) || await hasBuyInFlightFresh(b._id)) {
+          const viaSnapshot = buyInFlightBots.has(String(b._id));
           update.autoPauseLastCheckedAt = now;
           update.autoPauseSkipReason = 'buy_in_flight';
           await Bot.updateOne({ _id: b._id }, { $set: update });
           stats.skippedBuyInFlight = (stats.skippedBuyInFlight || 0) + 1;
+          if (!viaSnapshot) stats.skippedBuyInFlightRace = (stats.skippedBuyInFlightRace || 0) + 1;
           logger.info({
             botId: String(b._id),
             pauseReason,
             minKcPct,
             quoteVolume24h,
+            detectedBy: viaSnapshot ? 'snapshot' : 'fresh_recheck',
           }, 'botManager: auto-pause skipped — BUY in flight');
           continue;
         }
@@ -1674,6 +1806,12 @@ module.exports.invalidateTrendlineCache = invalidateTrendlineCache;
 // FIX-2026-08-22: Export for testability (see tests/autoPauseBuyInFlight.test.js)
 module.exports.findBotIdsWithBuyInFlight = findBotIdsWithBuyInFlight;
 module.exports.AUTO_PAUSE_BUY_IN_FLIGHT_STATES = AUTO_PAUSE_BUY_IN_FLIGHT_STATES;
+// FIX-2026-09-05 (FFUSDT orphan): Export for testability (see tests/autoPauseBuyInFlightRace.test.js
+//   and tests/orphanBuyAutoRecovery.test.js)
+module.exports.hasBuyInFlightFresh = hasBuyInFlightFresh;
+module.exports.ORPHAN_RECOVERABLE_PAUSE_REASONS = ORPHAN_RECOVERABLE_PAUSE_REASONS;
+module.exports.MAX_ORPHAN_RECOVERY_ATTEMPTS = MAX_ORPHAN_RECOVERY_ATTEMPTS;
+module.exports.ORPHAN_ALERT_LATCH_MS = ORPHAN_ALERT_LATCH_MS;
 // FIX-2026-08-22 (zombie): Export for testability (see tests/autoPauseDeletedAtGuard.test.js)
 module.exports.checkAutoPauseBots = checkAutoPauseBots;
 

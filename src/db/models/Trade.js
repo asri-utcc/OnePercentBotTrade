@@ -106,6 +106,15 @@ const tradeSchema = new mongoose.Schema(
     orphanDetected: { type: Boolean, default: false },          // true = DB กับ Binance ขัดกัน (audit flag)
     orphanReason: { type: String, default: null },              // reason สำหรับ orphan (e.g. 'SELL PARTIALLY_FILLED')
 
+    // FIX-2026-09-05 (FFUSDT orphan, 7h46m): dedicated latch fields สำหรับ orphan-BUY-on-disabled-bot
+    //   - เดิม latch ใช้ `trade.updatedAt` แต่ reconcile เขียน Trade.updateOne ทุก 5 นาที
+    //     → updatedAt ถูก refresh ตลอด → staleMs ค้างที่ ~280s → latch (> 1 ชม.) ไม่มีวันเปิด
+    //     → telegram alert ไม่เคยยิงเลย (log ยืนยัน: telegramAlerted:false 98 ครั้งติด)
+    //   - ใหม่: ใช้ field แยกที่เขียนเฉพาะตอน alert/recover จริง → latch ทำงานตามสเปค
+    orphanBuyAlertedAt: { type: Date, default: null },          // ครั้งล่าสุดที่ส่ง telegram orphanBuyFilled
+    orphanBuyRecoveryAt: { type: Date, default: null },         // ครั้งล่าสุดที่พยายาม auto-recover (re-enable + SELL)
+    orphanBuyRecoveryCount: { type: Number, default: 0 },       // จำนวนครั้งที่พยายาม auto-recover (audit / circuit-breaker)
+
     // FIX-2026-07-31: auto-arm SL-on-UKC flag (per-trade)
     //   - set true เมื่อ position loss > autoArmLossPct AND age > autoArmAgeHours AND bot.autoArmStopLossOnUKC=true
     //   - _checkStopLossOnUpperKC filter: state='selling' AND useStopLossOnUKC===true

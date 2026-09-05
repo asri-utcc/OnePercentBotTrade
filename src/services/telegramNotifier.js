@@ -465,7 +465,10 @@ function renderMessage(eventKey, p, cfg) {
         const filledAgo = p.buyFilledAt ? Math.round((Date.now() - new Date(p.buyFilledAt).getTime()) / 60000) : null;
         const agoTxt = filledAgo != null ? ` (เมื่อ ${filledAgo} นาทีที่แล้ว)` : '';
         const reasonLine = p.autoPauseReason ? `\nAuto-pause reason: ${p.autoPauseReason}` : '';
-        return `🚨 ORPHAN BUY filled on DISABLED bot${agoTxt}\nBot: ${p.botName} (enabled=${p.botEnabled}, status=${p.botStatus})\nSymbol: ${p.symbol}\nBuy order: ${p.buyOrderId}\nQty: ${p.buyQty != null ? p.buyQty : '?'} @ ${p.buyPrice != null ? p.buyPrice : '?'} USDT${reasonLine}\n\n⚠️ ไม่มี SELL order บน Binance — ต้อง re-enable bot หรือ force-close ด้วยตัวเอง`;
+        // FIX-2026-09-05: auto-recovery พยายามวาง SELL ให้แล้วแต่ล้มเหลว → บอกสาเหตุตรงๆ
+        //   (alert นี้ยิงเฉพาะตอน "กู้ไม่สำเร็จ" — ถ้ากู้ได้ reconcile จะไม่ส่งเลย)
+        const recLine = p.recoveryError ? `\nAuto-recovery failed: ${p.recoveryError}` : '';
+        return `🚨 ORPHAN BUY filled on DISABLED bot${agoTxt}\nBot: ${p.botName} (enabled=${p.botEnabled}, status=${p.botStatus})\nSymbol: ${p.symbol}\nBuy order: ${p.buyOrderId}\nQty: ${p.buyQty != null ? p.buyQty : '?'} @ ${p.buyPrice != null ? p.buyPrice : '?'} USDT${reasonLine}${recLine}\n\n⚠️ ไม่มี SELL order บน Binance — ต้อง re-enable bot หรือ force-close ด้วยตัวเอง`;
       }
       case 'botDeleted':
         return `🗑 Bot deleted\nBot: ${p.name || p.botId || '(unknown)'}`;
