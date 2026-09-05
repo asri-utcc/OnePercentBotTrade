@@ -337,7 +337,7 @@
       }
       shareCardLoading = true;
       const s = document.createElement('script');
-      s.src = '/js/partials/shareCard.js?v=2026-09-02-h2';
+      s.src = '/js/partials/shareCard.js?v=2026-09-05-month';
       s.async = true;
       s.onload = () => resolve(window.ShareCard);
       s.onerror = () => reject(new Error('shareCard.js load failed'));
@@ -351,9 +351,11 @@
     const base = lastData ? { ...lastData } : { ts: Date.now() };
     // Always include today's snapshot, even if other fetches fail (graceful degradation)
 
-    const [positionsRes, walletRes] = await Promise.allSettled([
+    // 2026-09-05: เพิ่ม /api/pnl/calendar (default = current BKK month/year) → monthly PnL
+    const [positionsRes, walletRes, monthPnlRes] = await Promise.allSettled([
       API.get('/api/bots/positions?noPrediction=1').catch(() => null),
       API.get('/api/wallet/balances').catch(() => null),
+      API.get('/api/pnl/calendar').catch(() => null),
     ]);
 
     // ── Positions ───────────────────────────────────────────────────
@@ -418,6 +420,38 @@
       if (base.totalUnrealizedUsdt != null && base.totalUnrealizedThb == null) {
         base.totalUnrealizedThb = base.totalUnrealizedUsdt * base.fxRate;
       }
+    }
+
+    // ── Monthly PnL (เดือนนี้ — from /api/pnl/calendar) ─────────────────
+    // 2026-09-05: เพิ่ม PnL เดือนนี้ — ใช้ totals (pnl, grossProfit, grossLoss, trades, wins, losses, winRate)
+    if (monthPnlRes.status === 'fulfilled' && monthPnlRes.value && monthPnlRes.value.totals) {
+      const t = monthPnlRes.value.totals;
+      const fx = Number(base.fxRate) || 0;
+      base.monthPnlUsdt      = Number(t.pnl) || 0;
+      base.monthPnlThb       = Number(t.pnl) * fx;
+      base.monthGrossProfitUsdt = Number(t.grossProfit) || 0;
+      base.monthGrossProfitThb  = Number(t.grossProfit) * fx;
+      base.monthGrossLossUsdt   = Number(t.grossLoss) || 0;
+      base.monthGrossLossThb    = Number(t.grossLoss) * fx;
+      base.monthTrades = Number(t.trades) || 0;
+      base.monthWins   = Number(t.wins) || 0;
+      base.monthLosses = Number(t.losses) || 0;
+      base.monthWinRate = Number(t.winRate) || 0;
+      // month label เช่น "ก.ย. 2026"
+      const months = ['ม.ค.', 'ก.พ.', 'มี.ค.', 'เม.ย.', 'พ.ค.', 'มิ.ย.',
+                      'ก.ค.', 'ส.ค.', 'ก.ย.', 'ต.ค.', 'พ.ย.', 'ธ.ค.'];
+      const mi = Number(monthPnlRes.value.month) - 1;
+      const yi = Number(monthPnlRes.value.year);
+      if (mi >= 0 && mi < 12 && yi > 0) {
+        base.monthLabel = `${months[mi]} ${yi + 543}`; // BKK year (พ.ศ.)
+      }
+    } else {
+      // graceful fallback — ส่งเป็น 0/null เพื่อไม่ให้ shareCard crash
+      base.monthPnlUsdt = 0; base.monthPnlThb = 0;
+      base.monthGrossProfitUsdt = 0; base.monthGrossProfitThb = 0;
+      base.monthGrossLossUsdt = 0; base.monthGrossLossThb = 0;
+      base.monthTrades = 0; base.monthWins = 0; base.monthLosses = 0;
+      base.monthWinRate = 0; base.monthLabel = '';
     }
 
     return base;

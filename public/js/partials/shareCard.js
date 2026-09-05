@@ -46,7 +46,8 @@
 
 (function () {
   const W = 800;
-  const H = 1000;
+  // 2026-09-05: H 1000 → 1100 เพื่อรองรับ MONTH TRADING section ใหม่
+  const H = 1100;
 
   // ─── Zone themes ──────────────────────────────────────────────────────
   const ZONE_THEMES = {
@@ -377,6 +378,14 @@
     const usableUsdt = Number(d.usableUsdt) || 0;
     const usableThb = Number(d.usableThb) || (usableUsdt * fxRate);
 
+    // 2026-09-05: month PnL (เดือนนี้ — from /api/pnl/calendar totals)
+    const monthPnlUsdt = Number(d.monthPnlUsdt) || 0;
+    const monthPnlThb = Number(d.monthPnlThb) || (monthPnlUsdt * fxRate);
+    const monthTrades = Number(d.monthTrades) || 0;
+    const monthWins = Number(d.monthWins) || 0;
+    const monthLosses = Number(d.monthLosses) || 0;
+    const monthWinRate = Number(d.monthWinRate) || 0;
+
     const isProfit = todayPnlUsdt >= 0;
     const pnlColor = isProfit ? t.positive : t.negative;
 
@@ -537,8 +546,39 @@
     </g>
   </g>
 
+  <!-- MONTH TRADING section — 2026-09-05: เพิ่ม PnL เดือนนี้ -->
+  <g transform="translate(60, 950)">
+    <text x="0" y="0" font-size="13" font-weight="700" fill="${t.accent}" letter-spacing="2">📅 MONTH TRADING ${escapeXml(d.monthLabel || '')}</text>
+    <line x1="200" y1="-5" x2="${W - 120}" y2="-5" stroke="${t.cardBorder}" stroke-width="1"/>
+
+    <g transform="translate(0, 20)">
+      <!-- Month PnL (THB big) -->
+      <g transform="translate(0, 0)">
+        <text x="80" y="32" text-anchor="middle" font-size="28" font-weight="800" fill="${monthPnlUsdt >= 0 ? t.positive : t.negative}">${fmtThb(monthPnlThb, { dp: 0 })}</text>
+        <text x="80" y="52" text-anchor="middle" font-size="11" fill="${t.textMuted}" letter-spacing="1">MONTH PnL</text>
+        <text x="80" y="68" text-anchor="middle" font-size="10" fill="${t.textMuted}" opacity="0.75">${fmtUsdtSigned(monthPnlUsdt, { dp: 2 })}</text>
+      </g>
+      <!-- Month Trades -->
+      <g transform="translate(170, 0)">
+        <text x="80" y="32" text-anchor="middle" font-size="32" font-weight="800" fill="${t.text}">${monthTrades}</text>
+        <text x="80" y="52" text-anchor="middle" font-size="11" fill="${t.textMuted}" letter-spacing="1">TRADES</text>
+      </g>
+      <!-- Month Win rate -->
+      <g transform="translate(340, 0)">
+        <text x="80" y="32" text-anchor="middle" font-size="32" font-weight="800" fill="${monthTrades > 0 ? t.positive : t.textMuted}">${monthTrades > 0 ? fmtPct(monthWinRate) : '—'}</text>
+        <text x="80" y="52" text-anchor="middle" font-size="11" fill="${t.textMuted}" letter-spacing="1">WIN RATE</text>
+      </g>
+      <!-- Month W/L -->
+      <g transform="translate(510, 0)">
+        <text x="80" y="20" text-anchor="middle" font-size="22" font-weight="800" fill="${t.positive}">${monthWins}W</text>
+        <text x="80" y="44" text-anchor="middle" font-size="22" font-weight="800" fill="${monthLosses > 0 ? t.negative : t.textMuted}">${monthLosses}L</text>
+        <text x="80" y="62" text-anchor="middle" font-size="11" fill="${t.textMuted}" letter-spacing="1">เดือนนี้</text>
+      </g>
+    </g>
+  </g>
+
   <!-- Footer -->
-  <g transform="translate(${W / 2}, 970)">
+  <g transform="translate(${W / 2}, 1075)">
     <text x="0" y="0" text-anchor="middle" font-size="13" font-weight="700" fill="${t.text}">#OnePercentBotTrade</text>
     ${zone === 'achieved' ? `<text x="0" y="20" text-anchor="middle" font-size="11" fill="${t.textMuted}">✨ ทุกวันคือโอกาส — วันนี้คุณทำได้! ✨</text>` : ''}
     <text x="0" y="${zone === 'achieved' ? 40 : 22}" text-anchor="middle" font-size="10" fill="${t.textMuted}" opacity="0.85">${escapeXml(generatedAtStr(d.generatedAt || d.ts || Date.now()))}</text>
@@ -741,11 +781,26 @@
     const usableUsdt = Number(d.usableUsdt) || 0;
 
     const safeHtml = (s) => escapeXml(String(s));
+    // 2026-09-05: เพิ่ม month PnL fields
+    const monthPnlUsdt = Number(d.monthPnlUsdt) || 0;
+    const monthPnlThb = Number(d.monthPnlThb) || (monthPnlUsdt * fxRate);
+    const monthTrades = Number(d.monthTrades) || 0;
+    const monthWins = Number(d.monthWins) || 0;
+    const monthLosses = Number(d.monthLosses) || 0;
+    const monthWinRate = Number(d.monthWinRate) || 0;
+    const monthLabel = d.monthLabel || '';
+
     const lines = [];
     lines.push(`${meta.emoji} <b>${safeHtml(meta.headline)}</b>`);
     lines.push(`<b>PnL: ${sign}${fmtUsdt(pnlUsdt, { dp: 2 }).replace(' USDT', '')} USDT (${fmtThb(pnlThb, { dp: 0 })})</b>`);
     lines.push('');
-    lines.push(`📊 Trades: <b>${trades}</b> (${wins}W / ${losses}L) · Win rate: <b>${trades > 0 ? fmtPct(winRate) : '—'}</b>`);
+    lines.push(`📊 Today: <b>${trades}</b> trades (${wins}W / ${losses}L) · Win rate: <b>${trades > 0 ? fmtPct(winRate) : '—'}</b>`);
+    // 2026-09-05: เพิ่ม "เดือนนี้" summary
+    if (monthTrades > 0 || monthPnlUsdt !== 0) {
+      const monthSign = monthPnlUsdt >= 0 ? '+' : '−';
+      lines.push(`📅 เดือนนี้${monthLabel ? ' (' + safeHtml(monthLabel) + ')' : ''}: <b>${monthSign}${Math.abs(monthPnlUsdt).toFixed(2)} USDT (${fmtThb(monthPnlThb, { dp: 0 })})</b>`);
+      lines.push(`   · <b>${monthTrades}</b> trades (${monthWins}W / ${monthLosses}L) · Win rate: <b>${fmtPct(monthWinRate)}</b>`);
+    }
     lines.push(`💼 Holding: <b>${holdingCount}</b> positions · Loss: <b>${fmtUsdt(totalUnrealizedUsdt, { dp: 2 })}</b>`);
     if (worst && worst.symbol && worst.unrealizedUsdt < 0) {
       lines.push(`😱 Worst: <b>${safeHtml(worst.symbol)}</b> ${fmtUsdt(worst.unrealizedUsdt, { dp: 2 })}`);
