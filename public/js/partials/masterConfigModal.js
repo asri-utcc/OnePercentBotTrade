@@ -957,8 +957,13 @@
       }
       return;
     }
-    const name = promptForName('ตั้งชื่อ Template ใหม่ (max 50 chars):');
-    if (name == null) return;
+    const nameRaw = promptForName('ตั้งชื่อ Template ใหม่ (max 50 chars):');
+    if (nameRaw == null) return;
+    const name = (typeof nameRaw === 'string' ? nameRaw : '').replace(/\s+/g, ' ').trim();
+    if (!name) {
+      setTemplateStatus('❌ ชื่อ template ห้ามว่าง — กรุณาตั้งชื่อก่อน Save', 'danger');
+      return;
+    }
     setTemplateStatus('⏳ กำลัง save…');
     try {
       const resp = await API.post('/api/admin/master-config-templates', { name, settings });
