@@ -958,6 +958,9 @@
       return;
     }
     const nameRaw = promptForName('ตั้งชื่อ Template ใหม่ (max 50 chars):');
+    // DEBUG-2026-09-06: surface what we got from the modal so we can tell
+    // empty-string vs null vs whitespace apart in DevTools console.
+    console.log('[DEBUG onTemplateSave] nameRaw=', JSON.stringify(nameRaw), 'typeof=', typeof nameRaw);
     if (nameRaw == null) return;
     const name = (typeof nameRaw === 'string' ? nameRaw : '').replace(/\s+/g, ' ').trim();
     if (!name) {
