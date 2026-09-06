@@ -1028,8 +1028,10 @@
     if (!id) { setTemplateStatus('⚠️ เลือก template ก่อน', 'warn'); return; }
     const existing = cachedTemplates.find((t) => t.id === id);
     if (!existing) { setTemplateStatus('⚠️ template หายไปจากรายการ', 'warn'); return; }
-    const name = promptForName('เปลี่ยนชื่อ Template:', existing.name);
-    if (name == null || name === existing.name) return;
+    const nameRaw = promptForName('เปลี่ยนชื่อ Template:', existing.name);
+    if (nameRaw == null) return;
+    const name = (typeof nameRaw === 'string' ? nameRaw : '').replace(/\s+/g, ' ').trim();
+    if (!name || name === existing.name) { setTemplateStatus('⚠️ ชื่อใหม่ว่างหรือเหมือนเดิม', 'warn'); return; }
     setTemplateStatus('⏳ กำลัง rename…');
     try {
       const resp = await API.put(`/api/admin/master-config-templates/${encodeURIComponent(id)}`, { name });
@@ -1046,8 +1048,10 @@
     if (!id) { setTemplateStatus('️ เลือก template ก่อน', 'warn'); return; }
     const existing = cachedTemplates.find((t) => t.id === id);
     if (!existing) { setTemplateStatus('⚠️ template หายไปจากรายการ', 'warn'); return; }
-    const name = promptForName(`Duplicate "${existing.name}" — ตั้งชื่อใหม่:`, existing.name + ' (copy)');
-    if (name == null) return;
+    const nameRaw = promptForName(`Duplicate "${existing.name}" — ตั้งชื่อใหม่:`, existing.name + ' (copy)');
+    if (nameRaw == null) return;
+    const name = (typeof nameRaw === 'string' ? nameRaw : '').replace(/\s+/g, ' ').trim();
+    if (!name) { setTemplateStatus('❌ ชื่อ template ห้ามว่าง', 'danger'); return; }
     setTemplateStatus('⏳ กำลัง duplicate…');
     try {
       const full = await API.get(`/api/admin/master-config-templates/${encodeURIComponent(id)}`);
