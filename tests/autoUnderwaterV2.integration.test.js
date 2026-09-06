@@ -172,6 +172,31 @@ describe('AutoUnderwaterV2.runOnce integration', () => {
     expect(mockForceClose.forceCloseTrade).not.toHaveBeenCalled();
   });
 
+  test('DCA stack trade (isDcaStack=true) → skippedDca=1 even if shallow loss', async () => {
+    mockBinanceRest.getKlines.mockResolvedValue([
+      [0, 0, 0, 0, 95.1, 0, 0, 0, 0, 0, 0, 0], // -4.9% (would trigger)
+    ]);
+    mockTrade.find.mockReturnValue({
+      lean: async () => [{
+        _id: 't1', botId: 'b1', state: 'holding',
+        buyFilledAt: new Date(Date.now() - 2 * 86400000).toISOString(),
+        buyPrice: 100, totalQty: 10, isDcaStack: true, stackBep: 80,
+      }],
+    });
+    mockBot.find.mockReturnValue({
+      lean: async () => [{
+        _id: 'b1', symbol: 'BTCUSDT', timeframe: '3m', enabled: true,
+        auv2Enabled: true, auv2MinAgeHours: 24, auv2LossMode: 'pct',
+        auv2MaxLossPct: 5, auv2MaxLossThb: 200, auv2MaxWaitDays: 0,
+      }],
+    });
+    const stats = await auv2.runOnce();
+    expect(stats.skippedDca).toBe(1);
+    expect(stats.triggered).toBe(0);
+    expect(stats.closed).toBe(0);
+    expect(mockForceClose.forceCloseTrade).not.toHaveBeenCalled();
+  });
+
   test('trigger path: bot eligible + loss shallow → forceCloseTrade called', async () => {
     // lastClose=95.1 → lossPct=4.9% (< default 5% threshold) → trigger
     mockBinanceRest.getKlines.mockResolvedValue([

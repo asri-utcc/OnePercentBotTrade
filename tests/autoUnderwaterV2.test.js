@@ -4,7 +4,7 @@
  * FIX-2026-09-06: Unit tests for AUv2 — Auto-Underwater v2
  *
  * Covers (pure helper AutoUnderwaterV2._evaluate):
- *   - master_off / license_off / bot_optout
+ *   - master_off / license_off / bot_optout / dca_skip
  *   - not_open (state not in OPEN_STATES)
  *   - too_young (age < auv2MinAgeHours)
  *   - no_close (lastClose invalid)
@@ -14,7 +14,7 @@
  *   - not_shallow — thb mode
  *   - TRIGGER — thb mode (lossTHB > -auv2MaxLossThb)
  *   - TRIGGER — hard cap reached (auv2MaxWaitDays=7, age=10d, loss still deep)
- *   - DCA stack uses stackBep not buyPrice
+ *   - DCA stack is skipped entirely (Q4 — DCA มี BEP logic ของตัวเอง)
  *   - THB mode graceful degradation when fxRate invalid → fallback to pct
  */
 
@@ -122,6 +122,27 @@ describe('AutoUnderwaterV2._evaluate', () => {
     expect(skip).toBe('bot_optout');
   });
 
+  test('returns "dca_skip" when trade.isDcaStack === true (even if shallow loss)', () => {
+    const skip = eval_({
+      trade: trade({ isDcaStack: true, stackBep: 80 }),
+      ctx: ctx({ lastClose: 95.1 }), // would normally trigger
+    });
+    expect(skip).toBe('dca_skip');
+  });
+
+  test('returns "dca_skip" for DCA stack regardless of age/loss', () => {
+    const skip = eval_({
+      bot: bot({ auv2MinAgeHours: 1, auv2MaxLossPct: 50 }),
+      trade: trade({
+        isDcaStack: true,
+        stackBep: 80,
+        buyFilledAt: new Date(NOW - 30 * DAY).toISOString(), // 30 days old
+      }),
+      ctx: ctx({ lastClose: 79.9 }), // would trigger
+    });
+    expect(skip).toBe('dca_skip');
+  });
+
   test('returns "not_open" when state not in OPEN_STATES', () => {
     const skip = eval_({ trade: trade({ state: 'sold' }) });
     expect(skip).toBe('not_open');
@@ -191,37 +212,6 @@ describe('AutoUnderwaterV2._evaluate', () => {
       ctx: ctx({ lastClose: 50 }),
     });
     expect(skip).toBe('not_shallow');
-  });
-
-  test('DCA stack uses stackBep not buyPrice', () => {
-    // stackBep=80 (average), buyPrice=100 — DCA bought more layers at 60
-    // lastClose=78 → loss vs stackBep = (80-78)/80 = 2.5% (shallow, trigger)
-    // loss vs buyPrice = (100-78)/100 = 22% (deep, not_shallow)
-    const skip = eval_({
-      bot: bot({ auv2MaxLossPct: 5 }),
-      trade: trade({ isDcaStack: true, stackBep: 80, buyPrice: 100 }),
-      ctx: ctx({ lastClose: 78 }),
-    });
-    expect(skip).toBeNull(); // stackBep wins → shallow
-  });
-
-  test('DCA stack with stackBep=null falls back to buyPrice', () => {
-    // lastClose=95.1 → lossPct=4.9% → trigger via buyPrice
-    const skip = eval_({
-      bot: bot({ auv2MaxLossPct: 5 }),
-      trade: trade({ isDcaStack: true, stackBep: null, buyPrice: 100 }),
-      ctx: ctx({ lastClose: 95.1 }),
-    });
-    expect(skip).toBeNull();
-  });
-
-  test('DCA stack with stackBep=0 falls back to buyPrice', () => {
-    const skip = eval_({
-      bot: bot({ auv2MaxLossPct: 5 }),
-      trade: trade({ isDcaStack: true, stackBep: 0, buyPrice: 100 }),
-      ctx: ctx({ lastClose: 95.1 }),
-    });
-    expect(skip).toBeNull();
   });
 
   test('Missing buyFilledAt → not_open', () => {

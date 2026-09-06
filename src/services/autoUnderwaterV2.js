@@ -19,7 +19,8 @@
  *   - License-gated: licenseService.isFeatureEnabled('auv2')
  *   - Master toggle: AppConfig.masterAuv2Enabled (default false — opt-in)
  *   - Per-bot toggle: bot.auv2Enabled (default false — opt-in)
- *   - Hard cap: bot.auv2MaxWaitDays — force sell เมื่อ position ถือเกิน cap ไม่ว่า loss
+ *   - DCA skip: trade.isDcaStack === true → AUv2 ไม่ trigger (DCA มี BEP logic ของตัวเอง)
+ *   - Hard cap: bot.auv2MaxWaitDays — OPTIONAL force sell (default 0 = disabled, ให้ TP/CB/AUv1/manual จัดการเอง)
  *   - Loss metric: bot.auv2LossMode ('pct' | 'thb') เลือก 1 อย่าง
  *       * 'pct': lossPct > -bot.auv2MaxLossPct (shallower than threshold)
  *       * 'thb': lossTHB > -bot.auv2MaxLossThb (ผ่าน fxService.convertUsdtToThb)
@@ -30,6 +31,7 @@
  *   - 'master_off'    : AppConfig.masterAuv2Enabled === false
  *   - 'license_off'   : licenseService missing/false
  *   - 'bot_optout'    : bot.auv2Enabled === false
+ *   - 'dca_skip'      : trade.isDcaStack === true (AUv2 ไม่ใช้กับ DCA — DCA มี logic ของตัวเอง)
  *   - 'not_open'      : trade.state not in OPEN_STATES
  *   - 'too_young'     : age < bot.auv2MinAgeHours
  *   - 'not_shallow'   : loss ยังไม่ตื้นพอ + ไม่เกิน hard cap
@@ -85,6 +87,8 @@ class AutoUnderwaterV2 {
     if (!ctx.masterOn) return 'master_off';
     if (!ctx.licenseOn) return 'license_off';
     if (bot.auv2Enabled !== true) return 'bot_optout';
+    // FIX-2026-09-06: AUv2 skip DCA stacks (ไม่ต้องใช้กับ DCA — DCA มี BEP/TP logic ของตัวเอง)
+    if (trade.isDcaStack === true) return 'dca_skip';
     if (!OPEN_STATES.includes(trade.state)) return 'not_open';
 
     if (!trade.buyFilledAt) return 'not_open'; // BUY ยังไม่ fill → ไม่มีจุดเริ่มนับ
@@ -199,6 +203,7 @@ class AutoUnderwaterV2 {
     const stats = {
       scanned: 0, triggered: 0, closed: 0, errors: 0,
       skippedMasterOff: 0, skippedLicenseOff: 0, skippedBotOptOut: 0,
+      skippedDca: 0,
       skippedNotOpen: 0, skippedTooYoung: 0, skippedNotShallow: 0,
       skippedNoClose: 0, skippedNoRefPrice: 0,
     };
@@ -304,6 +309,7 @@ class AutoUnderwaterV2 {
           if (skip === 'master_off') stats.skippedMasterOff++;
           else if (skip === 'license_off') stats.skippedLicenseOff++;
           else if (skip === 'bot_optout') stats.skippedBotOptOut++;
+          else if (skip === 'dca_skip') stats.skippedDca++;
           else if (skip === 'not_open') stats.skippedNotOpen++;
           else if (skip === 'too_young') stats.skippedTooYoung++;
           else if (skip === 'not_shallow') stats.skippedNotShallow++;

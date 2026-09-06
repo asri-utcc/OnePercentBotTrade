@@ -235,7 +235,7 @@ const botSchema = new mongoose.Schema(
     auv2MaxLossThb: { type: Number, default: 200, min: 1, max: 100000 },
     // FIX-2026-09-06: AUv2 hard cap (days) — force sell เมื่อ position ถือเกิน cap ไม่ว่า loss เท่าไหร่
     //   - 0 = no cap (default 7 — ป้องกัน "ถือข้ามเดือน")
-    auv2MaxWaitDays: { type: Number, default: 7, min: 0, max: 90 },
+    auv2MaxWaitDays: { type: Number, default: 0, min: 0, max: 90 },
     // FIX-2026-07-31: TP trend multiplier — เมื่อ upper-TF close > EMA20 → tpPercent *= tpTrendMultiplier
     //   - default 2 (0.2% → 0.4%)
     //   - range 1..10 (1 = no multiplier, 10 = aggressive)

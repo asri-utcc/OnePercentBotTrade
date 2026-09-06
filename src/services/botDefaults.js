@@ -247,7 +247,7 @@ function buildBotCreatePayload({ overrides = {}, botDefaults = {}, fallbacks = {
     })(),
     auv2MaxLossPct: pickScalar(o, b, 'auv2MaxLossPct', 5, { clamp: [0.1, 50] }),
     auv2MaxLossThb: pickScalar(o, b, 'auv2MaxLossThb', 200, { clamp: [1, 100000] }),
-    auv2MaxWaitDays: pickScalar(o, b, 'auv2MaxWaitDays', 7, { clamp: [0, 90] }),
+    auv2MaxWaitDays: pickScalar(o, b, 'auv2MaxWaitDays', 0, { clamp: [0, 90] }),
 
     // ── TP trend ×N (F2) ──
     tpTrendEnabled: pickBool(o, b, 'tpTrendEnabled', true),
