@@ -963,7 +963,7 @@
       }
       return;
     }
-    const nameRaw = promptForName('ตั้งชื่อ Template ใหม่ (max 50 chars):');
+    const nameRaw = await promptForName('ตั้งชื่อ Template ใหม่ (max 50 chars):');
     // DEBUG-2026-09-06: log what we got to trace user repro of nameRaw= {}.
     console.log('[DEBUG onTemplateSave] nameRaw=', JSON.stringify(nameRaw), 'typeof=', typeof nameRaw);
     if (nameRaw == null) return;
@@ -1039,7 +1039,7 @@
     if (!id) { setTemplateStatus('⚠️ เลือก template ก่อน', 'warn'); return; }
     const existing = cachedTemplates.find((t) => t.id === id);
     if (!existing) { setTemplateStatus('⚠️ template หายไปจากรายการ', 'warn'); return; }
-    const nameRaw = promptForName('เปลี่ยนชื่อ Template:', existing.name);
+    const nameRaw = await promptForName('เปลี่ยนชื่อ Template:', existing.name);
     if (nameRaw == null) return;
     const name = String(nameRaw).replace(/\s+/g, ' ').trim();
     if (!name || name === '[object Object]' || name === existing.name) { setTemplateStatus('⚠️ ชื่อใหม่ว่างหรือเหมือนเดิม', 'warn'); return; }
@@ -1059,7 +1059,7 @@
     if (!id) { setTemplateStatus('️ เลือก template ก่อน', 'warn'); return; }
     const existing = cachedTemplates.find((t) => t.id === id);
     if (!existing) { setTemplateStatus('⚠️ template หายไปจากรายการ', 'warn'); return; }
-    const nameRaw = promptForName(`Duplicate "${existing.name}" — ตั้งชื่อใหม่:`, existing.name + ' (copy)');
+    const nameRaw = await promptForName(`Duplicate "${existing.name}" — ตั้งชื่อใหม่:`, existing.name + ' (copy)');
     if (nameRaw == null) return;
     const name = String(nameRaw).replace(/\s+/g, ' ').trim();
     if (!name || name === '[object Object]') { setTemplateStatus('❌ ชื่อ template ห้ามว่าง', 'danger'); return; }
