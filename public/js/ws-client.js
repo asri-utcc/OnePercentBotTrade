@@ -363,9 +363,27 @@ AdminModalAlert.prompt = function ({ title = 'Input', message = '', level = 'inf
     };
     const onKey = (e) => {
       if (e.key === 'Escape') { e.preventDefault(); cleanup(null); }
-      else if (e.key === 'Enter' && document.activeElement === inputEl) { e.preventDefault(); cleanup(inputEl.value); }
+      else if (e.key === 'Enter' && document.activeElement === inputEl) {
+        // FIX-2026-09-06: block Enter submit when input is empty/whitespace-only
+        // (defense-in-depth — OK button is also disabled, but Enter bypasses click).
+        if (!inputEl.value.trim()) return;
+        e.preventDefault();
+        cleanup(inputEl.value);
+      }
     };
-    okBtn.addEventListener('click', () => cleanup(inputEl.value));
+    // FIX-2026-09-06: disable OK button when input is empty/whitespace-only.
+    // Prevents accidental empty POSTs (e.g. user thinks they typed but IME
+    // hasn't committed, or placeholder was mistaken for typed text) and gives
+    // a clear visual cue. Covers new-template + rename + duplicate + password.
+    const syncOkState = () => {
+      const empty = !inputEl.value.trim();
+      okBtn.disabled = empty;
+      okBtn.style.opacity = empty ? '0.45' : '1';
+      okBtn.style.cursor = empty ? 'not-allowed' : 'pointer';
+    };
+    inputEl.addEventListener('input', syncOkState);
+    syncOkState();
+    okBtn.addEventListener('click', () => { if (!okBtn.disabled) cleanup(inputEl.value); });
     if (cancelBtn) cancelBtn.addEventListener('click', () => cleanup(null));
     backdrop.addEventListener('click', (e) => { if (e.target === backdrop) cleanup(null); });
     document.addEventListener('keydown', onKey);
