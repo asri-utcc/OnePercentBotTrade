@@ -143,6 +143,37 @@ describe('FIX-2026-08-29 master config whitelist regression', () => {
       expect(ADMIN_ROUTES_SRC).toMatch(/auv2MaxLossThb\s*:\s*['"]number['"]/);
       expect(ADMIN_ROUTES_SRC).toMatch(/auv2MaxWaitDays\s*:\s*['"]number['"]/);
     });
+
+    // FIX-2026-09-06: PUT /api/admin/bot-defaults — 'Set to New Bot' path also needs
+    //   BOOLEAN_FIELDS, NUMBER_FIELDS, STRING_FIELDS entries for AUv2. Was missing
+    //   → Master Config → Set to New Bot → 400 'No valid fields to update'.
+    test('PUT /bot-defaults BOOLEAN_FIELDS contains auv2Enabled', () => {
+      // Find BOOLEAN_FIELDS array inside the bot-defaults handler (the third
+      // const declared as such, the first two are Master Config set BOOLEAN).
+      // Use a narrow slice: from "router.put('/bot-defaults'" to next
+      // "const STRING_FIELDS" or end of handler.
+      const start = ADMIN_ROUTES_SRC.indexOf("router.put('/bot-defaults'");
+      expect(start).toBeGreaterThan(0);
+      const end = ADMIN_ROUTES_SRC.indexOf("const STRING_FIELDS", start);
+      const slice = ADMIN_ROUTES_SRC.slice(start, end);
+      expect(slice).toMatch(/['"]auv2Enabled['"]/);
+    });
+
+    test('PUT /bot-defaults NUMBER_FIELDS contains auv2MinAgeHours/MaxLossPct/Thb/MaxWaitDays', () => {
+      const start = ADMIN_ROUTES_SRC.indexOf("router.put('/bot-defaults'");
+      const end = ADMIN_ROUTES_SRC.indexOf("const STRING_FIELDS", start);
+      const slice = ADMIN_ROUTES_SRC.slice(start, end);
+      for (const k of ['auv2MinAgeHours', 'auv2MaxLossPct', 'auv2MaxLossThb', 'auv2MaxWaitDays']) {
+        expect(slice).toMatch(new RegExp(`['"]${k}['"]`));
+      }
+    });
+
+    test('PUT /bot-defaults STRING_FIELDS contains auv2LossMode', () => {
+      const start = ADMIN_ROUTES_SRC.indexOf("router.put('/bot-defaults'");
+      const end = ADMIN_ROUTES_SRC.indexOf("res.status(400)", start); // end of handler
+      const slice = ADMIN_ROUTES_SRC.slice(start, end);
+      expect(slice).toMatch(/['"]auv2LossMode['"]/);
+    });
   });
 
   describe('Schema sanity', () => {
