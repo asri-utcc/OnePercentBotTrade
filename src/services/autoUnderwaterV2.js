@@ -220,9 +220,9 @@ class AutoUnderwaterV2 {
   }
 
   async _checkUnderwaterPositions(stats) {
-    // 0. Check master toggle
-    const cfg = await AppConfig.findOne({ key: 'singleton' }, 'masterAuv2Enabled').lean();
-    if (!cfg || cfg.masterAuv2Enabled !== true) {
+    // 0. Check master toggle (AppConfig.auv2Enabled — no "master" prefix, matches cbEnabled pattern)
+    const cfg = await AppConfig.findOne({ key: 'singleton' }, 'auv2Enabled').lean();
+    if (!cfg || cfg.auv2Enabled !== true) {
       stats.skippedMasterOff++;
       return;
     }

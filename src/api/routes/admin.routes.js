@@ -111,6 +111,15 @@ router.put('/app-config', requireAuth, async (req, res) => {
       dpsRespectBotCapital: 'boolean',
       dpsResetHistoryOnFire: 'boolean',
       dpsDryRun: 'boolean',
+      // FIX-2026-09-06: AUv2 — Auto-Underwater v2 (F1 auto-arm variant)
+      //   - master toggle (AppConfig.auv2Enabled, no "master" prefix — mirror cbEnabled pattern)
+      //   - master defaults for per-bot fields (mirror autoArmLossPct pattern)
+      auv2Enabled: 'boolean',
+      auv2MinAgeHours: 'number',
+      auv2LossMode: 'string',
+      auv2MaxLossPct: 'number',
+      auv2MaxLossThb: 'number',
+      auv2MaxWaitDays: 'number',
     };
     const set = {};
     // FIX-2026-09-01 audit H15: track unknown keys so admin sees a warning
@@ -151,6 +160,23 @@ router.put('/app-config', requireAuth, async (req, res) => {
     // FIX-2026-09-05: DLC base-loss clamp (mirror Bot schema range -95..-1)
     if (set.dlcBaseLossPct != null) {
       set.dlcBaseLossPct = Math.max(-95, Math.min(-1, set.dlcBaseLossPct));
+    }
+    // FIX-2026-09-06: AUv2 numeric clamps (mirror Bot schema ranges)
+    if (set.auv2MinAgeHours != null) {
+      set.auv2MinAgeHours = Math.max(0.5, Math.min(999, set.auv2MinAgeHours));
+    }
+    if (set.auv2MaxLossPct != null) {
+      set.auv2MaxLossPct = Math.max(0.1, Math.min(50, set.auv2MaxLossPct));
+    }
+    if (set.auv2MaxLossThb != null) {
+      set.auv2MaxLossThb = Math.max(1, Math.min(100000, set.auv2MaxLossThb));
+    }
+    if (set.auv2MaxWaitDays != null) {
+      set.auv2MaxWaitDays = Math.max(0, Math.min(90, set.auv2MaxWaitDays));
+    }
+    // FIX-2026-09-06: AUv2 loss-mode enum (mirror Bot schema enum ['pct','thb'])
+    if (set.auv2LossMode != null && !['pct', 'thb'].includes(set.auv2LossMode)) {
+      delete set.auv2LossMode;
     }
 
     // FIX-2026-08-08 (rev2): cross-field DPS validation (merge DB เดิม + set ใหม่ก่อนเช็ค)

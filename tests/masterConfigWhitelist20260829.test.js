@@ -103,6 +103,17 @@ describe('FIX-2026-08-29 master config whitelist regression', () => {
       }
       for (const k of nums) expect(bools.has(k)).toBe(false);
     });
+
+    // FIX-2026-09-06: AUv2 — master config whitelist (PUT /api/admin/app-config)
+    //   service reads AppConfig.auv2Enabled (NOT masterAuv2Enabled — match cbEnabled pattern)
+    test('admin whitelist contains AUv2 master toggle + 5 per-bot defaults', () => {
+      expect(ADMIN_ROUTES_SRC).toMatch(/auv2Enabled\s*:\s*['"]boolean['"]/);
+      expect(ADMIN_ROUTES_SRC).toMatch(/auv2MinAgeHours\s*:\s*['"]number['"]/);
+      expect(ADMIN_ROUTES_SRC).toMatch(/auv2LossMode\s*:\s*['"]string['"]/);
+      expect(ADMIN_ROUTES_SRC).toMatch(/auv2MaxLossPct\s*:\s*['"]number['"]/);
+      expect(ADMIN_ROUTES_SRC).toMatch(/auv2MaxLossThb\s*:\s*['"]number['"]/);
+      expect(ADMIN_ROUTES_SRC).toMatch(/auv2MaxWaitDays\s*:\s*['"]number['"]/);
+    });
   });
 
   describe('Schema sanity', () => {
@@ -112,6 +123,13 @@ describe('FIX-2026-08-29 master config whitelist regression', () => {
 
     test('AppConfig schema declares autoPauseAdjustEnabled (master switch, default false)', () => {
       expect(APP_CONFIG_SRC).toMatch(/autoPauseAdjustEnabled\s*:\s*\{\s*type\s*:\s*Boolean,\s*default\s*:\s*false/);
+    });
+
+    // FIX-2026-09-06: AUv2 master schema field — key is "auv2Enabled" (NOT masterAuv2Enabled)
+    //   to match the codebase pattern (cbEnabled, autoArmStopLossOnUKC, dlcEnabled, etc.)
+    test('AppConfig schema declares auv2Enabled (no "master" prefix)', () => {
+      expect(APP_CONFIG_SRC).toMatch(/auv2Enabled\s*:\s*\{\s*type\s*:\s*Boolean,\s*default\s*:\s*false/);
+      expect(APP_CONFIG_SRC).not.toMatch(/masterAuv2Enabled/);
     });
   });
 });

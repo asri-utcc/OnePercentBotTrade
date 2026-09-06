@@ -50,7 +50,6 @@
     { id: 'mc-autoArmLossPct', key: 'autoArmLossPct', section: 'risk', order: 30, type: 'number', step: '0.5', min: '1', max: '99', label: '🛡️ ขาดทุนขั้นต่ำสำหรับ Auto-arm (%)' },
     { id: 'mc-autoArmAgeHours', key: 'autoArmAgeHours', section: 'risk', order: 40, type: 'number', step: '0.5', min: '0.5', max: '999', label: '⏰ อายุ Position ขั้นต่ำสำหรับ Auto-arm (ชม.)' },
     // FIX-2026-09-06: AUv2 — Auto-Underwater v2 (F1 auto-arm variant) — Master Config bulk-update
-    { id: 'mc-auv2Enabled',        key: 'auv2Enabled',     section: 'risk', order: 50, type: 'bool',   label: '🌊 AUv2 — F1 v2 (shallow-loss exit after age)' },
     { id: 'mc-auv2MinAgeHours',    key: 'auv2MinAgeHours', section: 'risk', order: 51, type: 'number', step: '0.5', min: '0.5', max: '999', label: '⏰ AUv2 อายุ Position ขั้นต่ำ (ชม.) · default 24' },
     { id: 'mc-auv2LossMode',       key: 'auv2LossMode',    section: 'risk', order: 52, type: 'select', options: ['pct','thb'], label: '📐 AUv2 Loss Metric Mode · pct / thb' },
     { id: 'mc-auv2MaxLossPct',     key: 'auv2MaxLossPct',  section: 'risk', order: 53, type: 'number', step: '0.1', min: '0.1', max: '50', label: '🛡️ AUv2 ขาดทุนตื้นสุด (%) · default 5' },
@@ -99,6 +98,9 @@
     { id: 'mc-autoPauseAdjustEnabled', key: 'autoPauseAdjustEnabled', section: 'automation', order: 25, label: '🔧 ให้ Auto-adjust threshold ของบอทนี้' },
     { id: 'mc-stopLossOnUpperKC', key: 'stopLossOnUpperKC', section: 'risk', order: 10, label: '🛑 Stop Loss เมื่อแท่งปิดเหนือ Upper-KC' },
     { id: 'mc-autoArmStopLossOnUKC', key: 'autoArmStopLossOnUKC', section: 'risk', order: 20, label: '🛡️ เปิดใช้ SL-UKC อัตโนมัติเมื่อขาดทุนนาน' },
+    // FIX-2026-09-06: AUv2 — F1 v2 (Auto-Underwater v2 shallow-loss exit gate)
+    //   Per-bot opt-in (bot.auv2Enabled) — master toggle = kill-switch AppConfig.auv2Enabled
+    { id: 'mc-auv2Enabled', key: 'auv2Enabled', section: 'risk', order: 21, label: '🌊 AUv2 — F1 v2 (shallow-loss exit after age)' },
     { id: 'mc-slUkcTriggerOnProfit', key: 'slUkcTriggerOnProfit', section: 'risk', order: 50, label: '💰 ให้ SL-UKC ปิด Position ที่กำไรด้วย' },
     { id: 'mc-cbEnabled', key: 'cbEnabled', section: 'risk', order: 60, label: '🚨 Circuit Breaker (CB)' },
     { id: 'mc-cbv2Enabled', key: 'cbv2Enabled', section: 'risk', order: 70, label: '💎 CBv2 — Panic-sell + Cooldown' },

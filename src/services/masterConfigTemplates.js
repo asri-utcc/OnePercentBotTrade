@@ -39,6 +39,9 @@ const ALLOWED_TEMPLATE_FIELDS = [
   'dynamicSizeEnabled', 'cbAutoUnlockEnabled', 'cbAutoUnlockThresholdPct',
   'cbv3Enabled', 'cbv3LockHours',
   'cbv5Enabled', 'cbv5LockHours',
+  // FIX-2026-09-06: AUv2 — Auto-Underwater v2 (F1 auto-arm variant)
+  'auv2Enabled', 'auv2MinAgeHours', 'auv2LossMode',
+  'auv2MaxLossPct', 'auv2MaxLossThb', 'auv2MaxWaitDays',
   'cbv5KcLen', 'cbv5KcMult',
   'cbv5PivotLookback', 'cbv5PivotLeftLen', 'cbv5PivotRightLen',
   'cbv5StrictBreak', 'cbv5UseVolume',

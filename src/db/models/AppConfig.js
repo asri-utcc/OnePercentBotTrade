@@ -170,7 +170,9 @@ const appConfigSchema = new mongoose.Schema(
     // FIX-2026-09-06: AUv2 master kill-switch (default false — opt-in rollout)
     //   - when false, all bots silently skip AUv2 scheduler regardless of per-bot flag
     //   - when true, per-bot auv2Enabled is respected (each bot still opts in individually)
-    masterAuv2Enabled: { type: Boolean, default: false },
+    //   - Note: key is "auv2Enabled" (no "master" prefix) to match codebase pattern (cbEnabled,
+    //     autoArmStopLossOnUKC, dlcEnabled, etc.) — see [[onepercentbot-master-config-autoTiming-fix]]
+    auv2Enabled: { type: Boolean, default: false },
 
     // ═══════════════════════════════════════════════════════════════════════
     // FIX-2026-08-08 (rev2): DPS tunables — ย้ายจาก hardcode ใน dynamicPositionSizing.js

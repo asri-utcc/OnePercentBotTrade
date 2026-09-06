@@ -62,6 +62,9 @@ const BOOLEAN_FIELDS = new Set([
   'tpTrendEnabled', 'autoUpdateTp', 'stopLossOnUpperKC',
   // FIX-2026-09-02: Round-down Capital (opt-in per-bot)
   'roundDownCapitalEnabled',
+  // FIX-2026-09-06: AUv2 — Auto-Underwater v2 per-bot opt-in (mirror autoArmStopLossOnUKC pattern)
+  'auv2Enabled', 'auv2MinAgeHours', 'auv2LossMode',
+  'auv2MaxLossPct', 'auv2MaxLossThb', 'auv2MaxWaitDays',
 ]);
 
 const STRING_FIELDS = new Set([

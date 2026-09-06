@@ -88,7 +88,7 @@ function resetMocks() {
   mockBinanceRest.getKlines.mockReset();
 
   // Defaults
-  mockAppConfig.findOne.mockReturnValue({ lean: async () => ({ key: 'singleton', masterAuv2Enabled: true }) });
+  mockAppConfig.findOne.mockReturnValue({ lean: async () => ({ key: 'singleton', auv2Enabled: true }) });
   mockBot.find.mockReturnValue({ lean: async () => [] });
   mockTrade.find.mockReturnValue({ lean: async () => [] });
   mockTrade.findById.mockReturnValue({ lean: async () => null });
@@ -109,7 +109,7 @@ beforeEach(() => {
 
 describe('AutoUnderwaterV2.runOnce integration', () => {
   test('master toggle OFF → exits early with skippedMasterOff=1', async () => {
-    mockAppConfig.findOne.mockReturnValue({ lean: async () => ({ key: 'singleton', masterAuv2Enabled: false }) });
+    mockAppConfig.findOne.mockReturnValue({ lean: async () => ({ key: 'singleton', auv2Enabled: false }) });
     const stats = await auv2.runOnce();
     expect(stats.skippedMasterOff).toBe(1);
     expect(mockTrade.find).not.toHaveBeenCalled();
