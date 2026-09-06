@@ -279,11 +279,17 @@ class AutoUnderwaterV2 {
     for (const [botIdStr, trades] of byBot) {
       const bot = botMap.get(botIdStr);
       if (!bot) {
-        for (const t of trades) stats.skippedNotOpen++; // bot missing → can't evaluate
+        for (const t of trades) {
+          stats.scanned++;
+          stats.skippedNotOpen++; // bot missing → can't evaluate
+        }
         continue;
       }
       if (bot.auv2Enabled !== true) {
-        stats.skippedBotOptOut += trades.length;
+        for (const t of trades) {
+          stats.scanned++;
+          stats.skippedBotOptOut++;
+        }
         continue;
       }
 
