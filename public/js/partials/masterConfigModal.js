@@ -1067,7 +1067,7 @@
     }))) return;
     setTemplateStatus('⏳ กำลังลบ…');
     try {
-      await API.delete(`/api/admin/master-config-templates/${encodeURIComponent(id)}`);
+      await API.del(`/api/admin/master-config-templates/${encodeURIComponent(id)}`);
       setTemplateStatus(`✅ ลบ "${existing.name}" แล้ว`, 'success');
       await refreshTemplateDropdown();
       setSelectedTemplateId('');
