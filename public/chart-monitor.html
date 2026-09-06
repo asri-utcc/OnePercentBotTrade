@@ -663,6 +663,76 @@
       font-size: 0.7rem;
     }
     #cmExpandSignalRow .cm-status { font-size: 0.7rem; padding: 0.15rem 0.5rem; border-radius: 999px; font-weight: 600; }
+
+    /* ─── 2026-09-06: Mini-chart grid card — collapsible (mirror cm-positions-card) ───
+       Header row clickable to collapse/expand the whole grid. State persisted in localStorage.
+       Default EXPANDED — mini-charts are the main content of this page. */
+    .cm-grid-card {
+      background: var(--surface-1, #0f172a);
+      border: 1px solid rgba(255,255,255,0.06);
+      border-radius: 11px;
+      padding: 0.6rem 0.85rem 0.85rem;
+      margin-bottom: 1rem;
+    }
+    .cm-grid-header {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      flex-wrap: wrap;
+      margin-bottom: 0.55rem;
+      cursor: pointer;
+      user-select: none;
+    }
+    .cm-grid-title {
+      font-weight: 600;
+      font-size: 0.95rem;
+      color: var(--text-1, #f1f5f9);
+      display: inline-flex;
+      align-items: center;
+      gap: 0.35rem;
+    }
+    .cm-grid-count {
+      font-size: 0.7rem;
+      font-weight: 700;
+      background: rgba(167,139,250,0.18);
+      color: #c4b5fd;
+      padding: 0.05rem 0.5rem;
+      border-radius: 999px;
+      border: 1px solid rgba(167,139,250,0.35);
+    }
+    .cm-grid-meta {
+      font-size: 0.7rem;
+      color: var(--text-muted, #94a3b8);
+      margin-left: auto;
+      display: inline-flex;
+      align-items: center;
+      gap: 0.4rem;
+    }
+    .cm-grid-toggle {
+      background: rgba(255,255,255,0.05);
+      border: 1px solid rgba(255,255,255,0.1);
+      color: var(--text-2, #cbd5e1);
+      width: 26px; height: 26px; border-radius: 6px;
+      cursor: pointer; font-size: 0.85rem; line-height: 1;
+      display: inline-flex; align-items: center; justify-content: center;
+      padding: 0; transition: transform 0.18s ease, background 0.15s ease;
+    }
+    .cm-grid-toggle:hover {
+      background: rgba(245,184,0,0.18); color: var(--gold-1, #f5b800);
+    }
+    .cm-grid-card.is-collapsed .cm-grid-toggle {
+      transform: rotate(-90deg);
+    }
+    .cm-grid-card.is-collapsed #cm-grid,
+    .cm-grid-card.is-collapsed #cm-empty {
+      display: none !important;
+    }
+    .cm-grid-card.is-collapsed .cm-grid-header {
+      margin-bottom: 0;
+    }
+    .cm-grid-card.is-collapsed .cm-grid-header:hover {
+      background: rgba(245,184,0,0.06);
+    }
   </style>
 </head>
 <body>
@@ -781,7 +851,7 @@
             <option value="stopped">Stopped เท่านั้น</option>
           </select>
           <select id="cm-sort" class="form-select form-select-sm">
-            <option value="default">เรียงตามทุน/ไม้ (แนะนำ)</option>
+            <option value="default">เรียงตามไม้ที่ถือ → บอทรัน (แนะนำ)</option>
             <option value="name">เรียงตามชื่อ</option>
             <option value="symbol">เรียงตาม Symbol</option>
             <option value="pnl">เรียงตาม Today PnL</option>
@@ -792,14 +862,23 @@
       </div>
     </div>
 
-    <!-- Grid of mini-charts -->
-    <div id="cm-grid" class="cm-grid"></div>
+    <!-- Grid of mini-charts — 2026-09-06: wrapped in collapsible card (mirror cm-positions-card UX) -->
+    <div class="cm-grid-card" id="cm-grid-card">
+      <div class="cm-grid-header" id="cm-grid-header" title="คลิกเพื่อยุบ/ขยาย">
+        <span class="cm-grid-title">📈 Mini Charts <span class="cm-grid-count" id="cm-grid-count">0</span></span>
+        <span class="cm-grid-meta">
+          <span id="cm-grid-sub">—</span>
+          <button type="button" class="cm-grid-toggle" id="cm-grid-toggle" title="ยุบ/ขยาย" aria-label="ยุบ/ขยาย">▾</button>
+        </span>
+      </div>
+      <div id="cm-grid" class="cm-grid"></div>
 
-    <!-- Empty state -->
-    <div id="cm-empty" class="cm-empty" hidden>
-      <span class="glyph">📭</span>
-      <div>ยังไม่มีบอทที่ตรงกับเงื่อนไข</div>
-      <div class="small mt-1">ลองเปลี่ยน filter ด้านบน หรือไปที่ <a href="/bots.html" style="color:var(--gold-1);">หน้า Bots</a> เพื่อเปิดบอท</div>
+      <!-- Empty state -->
+      <div id="cm-empty" class="cm-empty" hidden>
+        <span class="glyph">📭</span>
+        <div>ยังไม่มีบอทที่ตรงกับเงื่อนไข</div>
+        <div class="small mt-1">ลองเปลี่ยน filter ด้านบน หรือไปที่ <a href="/bots.html" style="color:var(--gold-1);">หน้า Bots</a> เพื่อเปิดบอท</div>
+      </div>
     </div>
 
     <!-- Latest Signals panel (top 20 across all running bots) — moved to bottom per request -->
@@ -905,6 +984,6 @@
       }
     });
   </script>
-  <script src="/js/pages/chart-monitor.js?v=2026-09-05-detected-ux"></script>
+  <script src="/js/pages/chart-monitor.js?v=2026-09-06-grid-collapse-sort"></script>
 </body>
 </html>

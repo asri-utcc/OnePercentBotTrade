@@ -130,6 +130,9 @@ async function init() {
   // Positions card collapse/expand (2026-08-06) — default collapsed, state persisted in localStorage
   initCmPositionsCollapse();
 
+  // Mini-chart grid collapse/expand (2026-09-06) — default EXPANDED (charts are the main content)
+  initCmGridCollapse();
+
   // Today PnL tile click → open today's pnl modal (2026-08-06)
   const pnlTile = document.getElementById('cm-stat-pnl-tile');
   if (pnlTile) pnlTile.addEventListener('click', () => openTodayPnlModal().catch((e) => console.warn('chart-monitor pnl modal:', e.message)));
@@ -965,6 +968,33 @@ function initCmPositionsCollapse() {
 }
 
 /* ════════════════════════════════════════════════════════════════════
+ * Mini-chart grid card — collapse/expand (2026-09-06)
+ *   - mirror cm-positions-card UX (clickable header + ▾ toggle button)
+ *   - default state: EXPANDED (mini-charts are the main content of this page)
+ *   - state persisted in localStorage so user choice sticks across reloads
+ * ════════════════════════════════════════════════════════════════════ */
+const CM_GRID_COLLAPSE_KEY = 'cm.grid.collapsed.v1';
+function initCmGridCollapse() {
+  const card = document.getElementById('cm-grid-card');
+  const header = document.getElementById('cm-grid-header');
+  if (!card || !header) return;
+  let collapsed = false;
+  try {
+    const stored = localStorage.getItem(CM_GRID_COLLAPSE_KEY);
+    if (stored === '0' || stored === '1') collapsed = stored === '1';
+  } catch (_) { /* localStorage unavailable */ }
+  const apply = () => {
+    card.classList.toggle('is-collapsed', collapsed);
+  };
+  apply();
+  header.addEventListener('click', () => {
+    collapsed = !collapsed;
+    apply();
+    try { localStorage.setItem(CM_GRID_COLLAPSE_KEY, collapsed ? '1' : '0'); } catch (_) {}
+  });
+}
+
+/* ════════════════════════════════════════════════════════════════════
  * Today PnL modal (2026-08-06)
  *   - click on Today PnL tile → open modal showing today's trades
  *   - SAME UX/content as clicking a day cell in pnl.html (openDayModal)
@@ -1160,6 +1190,9 @@ function renderGrid() {
     sorted.length === _cmBots.length
       ? `${_cmBots.length} บอท`
       : `${sorted.length} / ${_cmBots.length} บอท`;
+  // 2026-09-06: also update the count badge in the new collapsible mini-chart header
+  const gridCountEl = document.getElementById('cm-grid-count');
+  if (gridCountEl) gridCountEl.textContent = sorted.length;
 
   if (sorted.length === 0) {
     grid.innerHTML = '';
@@ -1298,8 +1331,15 @@ function sortCmBots(arr, sortKey) {
   if (sortKey === 'pnl')     copy.sort((a, b) => (b.todayPnl || 0) - (a.todayPnl || 0));
   if (sortKey === 'tf')      copy.sort((a, b) => (a.timeframe || '').localeCompare(b.timeframe || ''));
   if (sortKey === 'default') {
-    // Mirror bots.html: enabled first, then totalCapital desc, then createdAt desc
+    // 2026-09-06: per user request — sort by held positions desc, then running before stopped
+    //   Priority:
+    //     1) activePositionsCount desc (จำนวนไม้ที่ถือ มาก→น้อย)
+    //     2) enabled desc (running → stopped)
+    //   Tie-breaker: totalCapital desc, then createdAt desc (matches old behavior)
     copy.sort((a, b) => {
+      const pa = (a.activePositionsCount || 0);
+      const pb = (b.activePositionsCount || 0);
+      if (pb !== pa) return pb - pa;
       if (!!b.enabled !== !!a.enabled) return (b.enabled ? 1 : 0) - (a.enabled ? 1 : 0);
       const ta = (a.capitalPerTrade || 0) * (a.maxTrades || 0);
       const tb = (b.capitalPerTrade || 0) * (b.maxTrades || 0);
