@@ -325,7 +325,7 @@ class AutoUnderwaterV2 {
 
         // ─── TRIGGER: force-close this position ───
         // Re-fetch fresh state to avoid double-sell (forceCloseTrade also has atomic claim)
-        const fresh = await Trade.findById(t._id, 'state botId symbol buyPrice buyQty totalQty isDcaStack stackBep').lean();
+        const fresh = await Trade.findById(t._id, 'state botId symbol buyPrice buyQty totalQty isDcaStack stackBep buyFilledAt').lean();
         if (!fresh || !OPEN_STATES.includes(fresh.state)) {
           logger.debug({ tradeId: String(t._id), dbState: fresh ? fresh.state : 'deleted' }, 'auv2: trade no longer open — skip');
           continue;
