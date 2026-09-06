@@ -361,14 +361,25 @@ AdminModalAlert.prompt = function ({ title = 'Input', message = '', level = 'inf
       backdrop.remove();
       resolve(v);
     };
+    // FIX-2026-09-06 (defensive): always read inputEl.value AT the time of
+      // submit, not from a captured reference. User repro showed
+      // nameRaw= {} typeof=object on this environment even though the OK
+      // button correctly disabled when input was empty — strongly suggests
+      // a browser/extension was rewriting inputEl.value to a non-string.
+      // Reading live + coercing to string guarantees we always get usable text.
+      const readValue = () => {
+        try {
+          const raw = inputEl ? inputEl.value : '';
+          return typeof raw === 'string' ? raw : String(raw == null ? '' : raw);
+        } catch (_) { return ''; }
+      };
     const onKey = (e) => {
       if (e.key === 'Escape') { e.preventDefault(); cleanup(null); }
       else if (e.key === 'Enter' && document.activeElement === inputEl) {
-        // FIX-2026-09-06: block Enter submit when input is empty/whitespace-only
-        // (defense-in-depth — OK button is also disabled, but Enter bypasses click).
-        if (!inputEl.value.trim()) return;
+        const v = readValue();
+        if (!v.trim()) return;
         e.preventDefault();
-        cleanup(inputEl.value);
+        cleanup(v);
       }
     };
     // FIX-2026-09-06: disable OK button when input is empty/whitespace-only.
@@ -376,14 +387,17 @@ AdminModalAlert.prompt = function ({ title = 'Input', message = '', level = 'inf
     // hasn't committed, or placeholder was mistaken for typed text) and gives
     // a clear visual cue. Covers new-template + rename + duplicate + password.
     const syncOkState = () => {
-      const empty = !inputEl.value.trim();
+      const empty = !readValue().trim();
       okBtn.disabled = empty;
       okBtn.style.opacity = empty ? '0.45' : '1';
       okBtn.style.cursor = empty ? 'not-allowed' : 'pointer';
     };
     inputEl.addEventListener('input', syncOkState);
     syncOkState();
-    okBtn.addEventListener('click', () => { if (!okBtn.disabled) cleanup(inputEl.value); });
+    okBtn.addEventListener('click', () => {
+      if (okBtn.disabled) return;
+      cleanup(readValue());
+    });
     if (cancelBtn) cancelBtn.addEventListener('click', () => cleanup(null));
     backdrop.addEventListener('click', (e) => { if (e.target === backdrop) cleanup(null); });
     document.addEventListener('keydown', onKey);

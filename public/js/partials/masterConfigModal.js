@@ -916,7 +916,13 @@
       placeholder: 'ตั้งชื่อ',
       level: 'info', okLabel: 'ตกลง',
     });
-    return v;
+    // BUGFIX-2026-09-06: user reported promptForName() returned `{}` (empty
+    // object, typeof=object) on this environment. coerce to string defensively
+    // so the caller's typeof check + trim still work correctly. Strip surrounding
+    // quotes if a JSON-stringified value leaks through (stringify-on-mismatch).
+    if (typeof v === 'string') return v;
+    if (v == null) return v;
+    return String(v);
   }
 
   function getSelectedTemplateId() {
@@ -958,12 +964,14 @@
       return;
     }
     const nameRaw = promptForName('ตั้งชื่อ Template ใหม่ (max 50 chars):');
-    // DEBUG-2026-09-06: surface what we got from the modal so we can tell
-    // empty-string vs null vs whitespace apart in DevTools console.
+    // DEBUG-2026-09-06: log what we got to trace user repro of nameRaw= {}.
     console.log('[DEBUG onTemplateSave] nameRaw=', JSON.stringify(nameRaw), 'typeof=', typeof nameRaw);
     if (nameRaw == null) return;
-    const name = (typeof nameRaw === 'string' ? nameRaw : '').replace(/\s+/g, ' ').trim();
-    if (!name) {
+    // Defensive coerce: promptForName should always return string|null, but
+    // this env was observed returning {} (typeof=object). Coerce to string
+    // so the trim() + empty check below behaves correctly.
+    const name = String(nameRaw).replace(/\s+/g, ' ').trim();
+    if (!name || name === '[object Object]') {
       setTemplateStatus('❌ ชื่อ template ห้ามว่าง — กรุณาตั้งชื่อก่อน Save', 'danger');
       return;
     }
@@ -1033,8 +1041,8 @@
     if (!existing) { setTemplateStatus('⚠️ template หายไปจากรายการ', 'warn'); return; }
     const nameRaw = promptForName('เปลี่ยนชื่อ Template:', existing.name);
     if (nameRaw == null) return;
-    const name = (typeof nameRaw === 'string' ? nameRaw : '').replace(/\s+/g, ' ').trim();
-    if (!name || name === existing.name) { setTemplateStatus('⚠️ ชื่อใหม่ว่างหรือเหมือนเดิม', 'warn'); return; }
+    const name = String(nameRaw).replace(/\s+/g, ' ').trim();
+    if (!name || name === '[object Object]' || name === existing.name) { setTemplateStatus('⚠️ ชื่อใหม่ว่างหรือเหมือนเดิม', 'warn'); return; }
     setTemplateStatus('⏳ กำลัง rename…');
     try {
       const resp = await API.put(`/api/admin/master-config-templates/${encodeURIComponent(id)}`, { name });
@@ -1053,8 +1061,8 @@
     if (!existing) { setTemplateStatus('⚠️ template หายไปจากรายการ', 'warn'); return; }
     const nameRaw = promptForName(`Duplicate "${existing.name}" — ตั้งชื่อใหม่:`, existing.name + ' (copy)');
     if (nameRaw == null) return;
-    const name = (typeof nameRaw === 'string' ? nameRaw : '').replace(/\s+/g, ' ').trim();
-    if (!name) { setTemplateStatus('❌ ชื่อ template ห้ามว่าง', 'danger'); return; }
+    const name = String(nameRaw).replace(/\s+/g, ' ').trim();
+    if (!name || name === '[object Object]') { setTemplateStatus('❌ ชื่อ template ห้ามว่าง', 'danger'); return; }
     setTemplateStatus('⏳ กำลัง duplicate…');
     try {
       const full = await API.get(`/api/admin/master-config-templates/${encodeURIComponent(id)}`);
