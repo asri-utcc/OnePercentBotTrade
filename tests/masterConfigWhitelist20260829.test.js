@@ -81,6 +81,35 @@ describe('FIX-2026-08-29 master config whitelist regression', () => {
       }
       expect(dupes).toEqual([]);
     });
+
+    // FIX-2026-09-06: bulk-update `allowed[]` MUST contain AUv2 fields too.
+    //   extractArrayKeys() returns only the first 'allowed' (PATCH), so we
+    //   locate the second 'const allowed = [', slice from there, and re-parse.
+    //   Root cause: Master Config → save AUv2 toggle → bulk-update returned 400
+    //   'no valid fields in settings' because the bulk whitelist was missing
+    //   all 6 auv2 fields.
+    test('bulk-update allowed[] contains all 6 AUv2 fields', () => {
+      const firstStart = BOT_ROUTES_SRC.indexOf('const allowed = [');
+      const secondStart = BOT_ROUTES_SRC.indexOf('const allowed = [', firstStart + 1);
+      expect(secondStart).toBeGreaterThan(0);
+      let depth = 0, endIdx = -1, i = BOT_ROUTES_SRC.indexOf('[', secondStart);
+      for (; i < BOT_ROUTES_SRC.length; i += 1) {
+        if (BOT_ROUTES_SRC[i] === '[') depth += 1;
+        else if (BOT_ROUTES_SRC[i] === ']') {
+          depth -= 1;
+          if (depth === 0) { endIdx = i + 1; break; }
+        }
+      }
+      const block = BOT_ROUTES_SRC.slice(secondStart, endIdx);
+      const keys = [...block.matchAll(/['"]([a-zA-Z][a-zA-Z0-9_]*)['"]/g)].map((x) => x[1]);
+      expect(keys.length).toBeGreaterThan(50);
+      for (const k of [
+        'auv2Enabled', 'auv2MinAgeHours', 'auv2LossMode',
+        'auv2MaxLossPct', 'auv2MaxLossThb', 'auv2MaxWaitDays',
+      ]) {
+        expect(keys).toContain(k);
+      }
+    });
   });
 
   describe('admin.routes.js whitelists', () => {

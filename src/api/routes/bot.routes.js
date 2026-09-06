@@ -2309,6 +2309,11 @@ router.post('/bulk-update', requireAuth, async (req, res) => {
       // FIX-2026-09-02: Round-down Capital (opt-in per-bot) — when balance
       //   is insufficient, round notional down to fit available USDT.
       'roundDownCapitalEnabled', 'roundDownCapitalMin',
+      // FIX-2026-09-06: AUv2 — Auto-Underwater v2 (F1 auto-arm variant)
+      //   bulk-update support (mirror PATCH whitelist at line 1201; same fields).
+      //   Was missing — bulk-updating AUv2 toggles returned 400 'no valid fields in settings'.
+      'auv2Enabled', 'auv2MinAgeHours', 'auv2LossMode',
+      'auv2MaxLossPct', 'auv2MaxLossThb', 'auv2MaxWaitDays',
     ];
     const update = {};
     for (const k of allowed) {
@@ -2367,6 +2372,13 @@ router.post('/bulk-update', requireAuth, async (req, res) => {
     // FIX-2026-09-02: Round-down Capital field clamps (mirror PATCH route)
     if ('roundDownCapitalEnabled' in update) update.roundDownCapitalEnabled = update.roundDownCapitalEnabled === true || update.roundDownCapitalEnabled === 'true';
     if (Number.isFinite(update.roundDownCapitalMin)) update.roundDownCapitalMin = Math.max(1, Math.min(10000, update.roundDownCapitalMin));
+    // FIX-2026-09-06: AUv2 — Auto-Underwater v2 (mirror PATCH route clamps at line 1248-1265)
+    if ('auv2Enabled' in update) update.auv2Enabled = update.auv2Enabled === true || update.auv2Enabled === 'true';
+    if (Number.isFinite(update.auv2MinAgeHours)) update.auv2MinAgeHours = Math.max(0.5, Math.min(999, update.auv2MinAgeHours));
+    if ('auv2LossMode' in update) update.auv2LossMode = update.auv2LossMode === 'thb' ? 'thb' : 'pct';
+    if (Number.isFinite(update.auv2MaxLossPct)) update.auv2MaxLossPct = Math.max(0.1, Math.min(50, update.auv2MaxLossPct));
+    if (Number.isFinite(update.auv2MaxLossThb)) update.auv2MaxLossThb = Math.max(1, Math.min(100000, update.auv2MaxLossThb));
+    if (Number.isFinite(update.auv2MaxWaitDays)) update.auv2MaxWaitDays = Math.max(0, Math.min(90, Math.floor(update.auv2MaxWaitDays)));
 
     // FIX-2026-08-03: bulk-update Martingale-requires-DCA validation
     //   - bulk mode applies same settings to many bots — must check that after merge,
