@@ -5,7 +5,8 @@
  *
  * Covers:
  *   - Master toggle OFF → tick exits early, stats.skippedMasterOff=1
- *   - License OFF → tick exits early, stats.skippedLicenseOff=1
+ *   - License gate REMOVED 2026-09-06 (AUv2 mirrors F1 — safety feature, not premium)
+ *     → license OFF/missing has NO effect on tick
  *   - Master ON + no open trades → tick exits cleanly
  *   - Master ON + open trade but bot opt-out → skippedBotOptOut incremented
  *   - Master ON + open trade eligible → forceCloseTrade invoked + sellReason overridden
@@ -122,12 +123,16 @@ describe('AutoUnderwaterV2.runOnce integration', () => {
     expect(mockTrade.find).not.toHaveBeenCalled();
   });
 
-  test('license OFF → exits early with skippedLicenseOff=1', async () => {
+  // FIX-2026-09-06: License gate was removed (mirrors F1 — safety, not premium).
+  //   Verify that license OFF does NOT block the tick — only master + per-bot do.
+  test('license OFF (RETIRED) → does NOT block tick — only master + per-bot gate', async () => {
     const licenseService = require('../src/services/licenseService');
     licenseService.isFeatureEnabled.mockReturnValue(false);
+    // Master is ON (default in resetMocks) + no open trades → tick runs cleanly
     const stats = await auv2.runOnce();
-    expect(stats.skippedLicenseOff).toBe(1);
-    expect(mockTrade.find).not.toHaveBeenCalled();
+    expect(stats.skippedLicenseOff).toBe(0); // no longer incremented
+    expect(stats.errors).toBe(0);
+    // Master ON → proceeded past master check (would still hit "no trades" branch)
   });
 
   test('no open trades → exits cleanly with no errors', async () => {

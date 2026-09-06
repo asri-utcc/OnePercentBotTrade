@@ -16,8 +16,8 @@
  * Design:
  *   - Singleton scheduler with in-flight guard (mirror positionWatchdog pattern)
  *   - Default 180s tick (AppConfig.auv2IntervalMs — mirror positionWatchdog)
- *   - License-gated: licenseService.isFeatureEnabled('auv2')
- *   - Master toggle: AppConfig.masterAuv2Enabled (default false — opt-in)
+ *   - NO license gate (mirrors F1 — safety feature, not premium)
+ *   - Master toggle: AppConfig.auv2Enabled (no "master" prefix, matches cbEnabled pattern; default false — opt-in)
  *   - Per-bot toggle: bot.auv2Enabled (default false — opt-in)
  *   - DCA skip: trade.isDcaStack === true → AUv2 ไม่ trigger (DCA มี BEP logic ของตัวเอง)
  *   - Hard cap: bot.auv2MaxWaitDays — OPTIONAL force sell (default 0 = disabled, ให้ TP/CB/AUv1/manual จัดการเอง)
@@ -28,8 +28,8 @@
  *   - Position scope: state ∈ {placed, filled, holding, selling} (mirror F1 widened)
  *
  * Skip reasons (return pure helper — testable without mocks):
- *   - 'master_off'    : AppConfig.masterAuv2Enabled === false
- *   - 'license_off'   : licenseService missing/false
+ *   - 'master_off'    : AppConfig.auv2Enabled === false
+ *   - 'license_off'   : RETIRED 2026-09-06 (license gate removed — AUv2 is safety, not premium)
  *   - 'bot_optout'    : bot.auv2Enabled === false
  *   - 'dca_skip'      : trade.isDcaStack === true (AUv2 ไม่ใช้กับ DCA — DCA มี logic ของตัวเอง)
  *   - 'not_open'      : trade.state not in OPEN_STATES
@@ -55,6 +55,14 @@ const logger = require('../utils/logger');
 
 let licenseService = null;
 try { licenseService = require('./licenseService'); } catch (_) { /* ignore — feature stays off */ }
+
+// FIX-2026-09-06: AUv2 mirrors F1 auto-arm (trader.js:_autoArmStopLossOnUKC) —
+//   safety feature, NOT premium. F1 has NO license gate; AUv2 should follow.
+//   The original license gate (licenseService.isFeatureEnabled('auv2'))
+//   silently broke because `_getFeatures()` in licenseService.js does NOT
+//   include `auv2` in its allowlist → features['auv2'] === undefined → false
+//   for EVERY license (including enterprise). Removal makes AUv2 work like F1:
+//   only master toggle (AppConfig.auv2Enabled) + per-bot opt-in gate it.
 
 const DEFAULT_INTERVAL_MS = 180000;
 const KLINE_FETCH_LIMIT = 2; // last close only
@@ -227,12 +235,8 @@ class AutoUnderwaterV2 {
       return;
     }
 
-    // 1. License gate (defensive — licenseService might be missing in dev)
-    const licenseOn = licenseService && (typeof licenseService.isFeatureEnabled !== 'function' || licenseService.isFeatureEnabled('auv2'));
-    if (!licenseOn) {
-      stats.skippedLicenseOff++;
-      return;
-    }
+    // 1. License gate — REMOVED 2026-09-06 (AUv2 mirrors F1, which has no license gate)
+    //    Kept as no-op for backward compat with tests + telemetry bucket.
 
     // 2. Fetch all open-state trades
     const candidates = await Trade.find({ state: { $in: OPEN_STATES } }).lean();
