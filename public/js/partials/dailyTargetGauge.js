@@ -337,7 +337,7 @@
       }
       shareCardLoading = true;
       const s = document.createElement('script');
-      s.src = '/js/partials/shareCard.js?v=2026-09-08-compress';
+      s.src = '/js/partials/shareCard.js?v=2026-09-08-multipart';
       s.async = true;
       s.onload = () => resolve(window.ShareCard);
       s.onerror = () => reject(new Error('shareCard.js load failed'));

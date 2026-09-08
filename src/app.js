@@ -78,8 +78,8 @@ function createApp() {
     next();
   });
 
-  app.use(express.json({ limit: '5mb' })); // FIX-2026-09-08: 1mb→5mb — shareCard Telegram send posts base64 PNG ~3 MB (800×1100 @ 0.95 quality). Internal cap on /api/share-card/send-telegram still enforces 4 MB hard limit.
-  app.use(express.urlencoded({ extended: true, limit: '5mb' }));
+  app.use(express.json({ limit: '1mb' })); // FIX-2026-09-08: rolled back from 5mb — shareCard send-telegram now uses multer (multipart) so it bypasses express.json entirely. Keep default 1mb to minimize attack surface for other endpoints.
+  app.use(express.urlencoded({ extended: true, limit: '1mb' }));
 
   // 2026-08-09: Cookie parser (ต้องมาก่อน session — ใช้ใน /api/auth/login-telegram/* เพื่ออ่าน tg_login_token)
   app.use(cookieParser());

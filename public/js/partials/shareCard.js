@@ -828,31 +828,26 @@
     try {
       btn.disabled = true;
       btn.innerHTML = '⏳ กำลังแปลงเป็น PNG...';
-      // 2026-09-08: compress (scale 0.75 → 600×825, quality 0.85) เพื่อหลบ
-      //   HTTP 413 Request Entity Too Large จาก express.json limit 1 MB
-      //   Telegram ก็ compress ฝั่ง server + แสดงสูงสุด ~1280px width อยู่แล้ว
-      const pngBlob = await svgStringToPngBlob(svgString, { scale: 0.75, quality: 0.85 });
+      // 2026-09-08 (v6): multipart upload — ส่ง PNG เต็มคุณภาพ 800×1100 @ 0.95
+      //   (compress ฝั่ง server ของ Telegram อยู่แล้ว + multipart = no base64 overhead)
+      //   ก่อนหน้านี้ (v5) ต้อง compress เพราะ POST base64 JSON → ติด express.json 1 MB
+      //   ตอนนี้ multer.memoryStorage() รับ binary ตรงๆ ไม่ผ่าน express.json แล้ว
+      const pngBlob = await svgStringToPngBlob(svgString, { scale: 1, quality: 0.95 });
       if (!pngBlob) throw new Error('PNG conversion failed');
       btn.innerHTML = '⏳ กำลังส่งไป Telegram...';
-      // base64 encode for POST
-      const arrayBuf = await pngBlob.arrayBuffer();
-      const bytes = new Uint8Array(arrayBuf);
-      let bin = '';
-      // chunk to avoid call stack overflow on large buffers
-      const CHUNK = 0x8000;
-      for (let i = 0; i < bytes.length; i += CHUNK) {
-        bin += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK));
-      }
-      const pngBase64 = btoa(bin);
+
+      // Multipart upload — ไม่ตั้ง Content-Type, browser จะใส่ boundary ให้อัตโนมัติ
+      const fd = new FormData();
+      fd.append('photo', pngBlob, 'onepercent-pnl.png');
+      fd.append('caption', caption);
       const res = await fetch('/api/share-card/send-telegram', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ pngBase64, caption }),
+        body: fd,
         credentials: 'same-origin',
       });
       const json = await res.json().catch(() => ({}));
       if (res.ok && json.ok) {
-        btn.innerHTML = '✅ ส่งแล้ว!';
+        btn.innerHTML = `✅ ส่งแล้ว (${(pngBlob.size / 1024).toFixed(0)} KB)`;
         setTimeout(() => {
           btn.disabled = false;
           btn.innerHTML = original;
