@@ -249,9 +249,9 @@ describe('roundDownCapital — computeAdjustedNotional (the actual retry math)',
 // ─── botDefaults.buildBotCreatePayload integration ─────────────────────────
 
 describe('roundDownCapital — botDefaults.buildBotCreatePayload defaults', () => {
-  test('no override, no botDefaults, no tier → roundDownCapitalEnabled=false (opt-in)', () => {
+  test('no override, no botDefaults, no tier → roundDownCapitalEnabled=true (FIX-2026-09-09 recommend ON)', () => {
     const p = botDefaults.buildBotCreatePayload();
-    expect(p.roundDownCapitalEnabled).toBe(false);
+    expect(p.roundDownCapitalEnabled).toBe(true);
   });
 
   test('default roundDownCapitalMin = 5.5', () => {
@@ -308,9 +308,11 @@ describe('roundDownCapital — botDefaults.buildBotCreatePayload defaults', () =
     expect(p.roundDownCapitalMin).toBe(12);
   });
 
-  test('tier preset basic/pro/enterprise does NOT enable round-down (not a tier feature)', () => {
-    expect(botDefaults.buildBotCreatePayload({ tier: 'basic' }).roundDownCapitalEnabled).toBe(false);
-    expect(botDefaults.buildBotCreatePayload({ tier: 'pro' }).roundDownCapitalEnabled).toBe(false);
-    expect(botDefaults.buildBotCreatePayload({ tier: 'enterprise' }).roundDownCapitalEnabled).toBe(false);
+  test('tier preset basic/pro/enterprise is a no-op for round-down (FIX-2026-09-04 tier empty)', () => {
+    // FIX-2026-09-09: RECOMMENDED_DEFAULTS.roundDownCapitalEnabled=true (recommend ON)
+    // Tier presets are frozen-empty (FIX-2026-09-04) → tier is a no-op → default stays true
+    expect(botDefaults.buildBotCreatePayload({ tier: 'basic' }).roundDownCapitalEnabled).toBe(true);
+    expect(botDefaults.buildBotCreatePayload({ tier: 'pro' }).roundDownCapitalEnabled).toBe(true);
+    expect(botDefaults.buildBotCreatePayload({ tier: 'enterprise' }).roundDownCapitalEnabled).toBe(true);
   });
 });

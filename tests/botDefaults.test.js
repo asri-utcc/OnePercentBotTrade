@@ -113,15 +113,15 @@ describe('botDefaults — pickScalar (numeric + clamp)', () => {
 });
 
 describe('botDefaults — buildBotCreatePayload (full integration)', () => {
-  // 1. No overrides, no botDefaults → falls back to hardcoded defaults
+  // 1. No overrides, no botDefaults → falls back to RECOMMENDED_DEFAULTS
   test('pure fallback when nothing set', () => {
     const p = buildBotCreatePayload();
-    expect(p.symbol).toBe('');
-    expect(p.timeframe).toBe('5m');
-    expect(p.capitalPerTrade).toBe(9);
+    expect(p.symbol).toBe('BNBUSDT'); // RECOMMENDED_DEFAULTS.defaultSymbol
+    expect(p.timeframe).toBe('3m'); // RECOMMENDED_DEFAULTS.defaultTimeframe
+    expect(p.capitalPerTrade).toBe(8); // RECOMMENDED_DEFAULTS.capitalPerTrade
     expect(p.maxTrades).toBe(1);
-    expect(p.kcMult).toBe(1.5); // hardcoded fallback
-    expect(p.xs1Enabled).toBe(true); // lenient default ON
+    expect(p.kcMult).toBe(1.2); // RECOMMENDED_DEFAULTS.kcMult
+    expect(p.xs1Enabled).toBe(false); // RECOMMENDED_DEFAULTS.xs1Enabled (was lenient true pre-2026-09-09)
     expect(p.dcaEnabled).toBe(false); // strict default OFF
     expect(p.tpTrendEnabled).toBe(true);
     expect(p.tpTrendMultiplier).toBe(2);
@@ -320,9 +320,9 @@ describe('botDefaults — CBv5 default OFF (FIX-2026-09-02)', () => {
 //   - Used in trader.placeBuy() to reduce notional when balance is insufficient
 //   - Strict boolean semantics (must be === true to enable — same as cbv5Enabled)
 describe('botDefaults — Round-down Capital (FIX-2026-09-02)', () => {
-  test('no override, no botDefaults, no tier → roundDownCapitalEnabled=false (opt-in)', () => {
+  test('no override, no botDefaults, no tier → roundDownCapitalEnabled=true (FIX-2026-09-09 recommend ON)', () => {
     const p = buildBotCreatePayload();
-    expect(p.roundDownCapitalEnabled).toBe(false);
+    expect(p.roundDownCapitalEnabled).toBe(true);
   });
   test('default roundDownCapitalMin = 5.5', () => {
     const p = buildBotCreatePayload();

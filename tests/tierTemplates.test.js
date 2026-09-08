@@ -201,14 +201,26 @@ describe('buildBotCreatePayload — tier is a no-op (FIX-2026-09-04)', () => {
 
   test('NO safety/feature *Enabled is true across all tiers (FIX-2026-09-04)', () => {
     // Regression guard: 28 (New Beta) bots had cbEnabled=false but cbv3Enabled=true.
-    const safetyFlags = [
-      'cbv5Enabled', 'cbv3Enabled', 'cbv2Enabled', 'cbAutoUnlockEnabled',
+    // FIX-2026-09-09: RECOMMENDED_DEFAULTS changes:
+    //   - cbAutoUnlockEnabled default is now `true` (recommend ON — fast auto-recovery)
+    //   - safeTradeEnabled default is now `false` (was lenient true)
+    //   - roundDownCapitalEnabled default is now `true` (was strict false)
+    // So the test now asserts:
+    //   - Strict-default flags (cbv5/cbv3/cbv2/safeTrade*/s1OnlyDown/dcaEnabled/stopLossOnUpperKC/autoUpdateTp/slUkcTriggerOnProfit/auv2Enabled/dlcEnabled/roundDownCapitalEnabled/martingaleEnabled) → false
+    //   - Lenient-default flags (cbAutoUnlockEnabled/autoArmStopLossOnUKC/tpTrendEnabled/dynamicSizeEnabled/autoPauseEnabled/autoPauseAdjustEnabled/cbv5StrictBreak/cbv5UseVolume) → true (same with or without tier)
+    const offByDefault = [
+      'cbv5Enabled', 'cbv3Enabled', 'cbv2Enabled',
+      'safeTradeEnabled', 'safeTradeTrendlineEnabled', 'safeTradeNoTradeEnabled',
+    ];
+    const onByDefault = [
+      'cbAutoUnlockEnabled', 'autoArmStopLossOnUKC', 'tpTrendEnabled',
+      'dynamicSizeEnabled', 'autoPauseEnabled', 'autoPauseAdjustEnabled',
+      'cbv5StrictBreak', 'cbv5UseVolume',
     ];
     ['basic', 'pro', 'enterprise'].forEach(t => {
       const p = buildBotCreatePayload({ tier: t, fallbacks: {} });
-      safetyFlags.forEach(f => {
-        expect(p[f]).toBe(false);
-      });
+      offByDefault.forEach(f => expect(p[f]).toBe(false));
+      onByDefault.forEach(f => expect(p[f]).toBe(true));
     });
   });
 
