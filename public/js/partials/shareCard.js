@@ -588,7 +588,14 @@
   }
 
   // ─── SVG → PNG ────────────────────────────────────────────────────────
-  function svgStringToPngBlob(svgString) {
+  // 2026-09-08: แยก compress option (scale + quality) ออกมา — Telegram ใช้
+  //   ภาพเล็กกว่า + quality ต่ำกว่าได้ (server-side compress อีกทีอยู่แล้ว) ทำให้
+  //   payload base64 ลดลง ~70% (จาก ~280 KB → ~80 KB) หลบ 413 Request Entity
+  //   Too Large จาก express.json limit 1 MB
+  // opts: { scale?: number (default 1), quality?: number 0..1 (default 0.95) }
+  function svgStringToPngBlob(svgString, opts) {
+    const scale = (opts && Number(opts.scale)) > 0 && (opts.scale) <= 1 ? Number(opts.scale) : 1;
+    const quality = opts && Number.isFinite(opts.quality) ? Number(opts.quality) : 0.95;
     return new Promise((resolve, reject) => {
       try {
         if (!svgString.startsWith('<?xml')) {
@@ -598,21 +605,22 @@
         const url = URL.createObjectURL(blob);
         const img = new Image();
         img.onload = () => {
-          // render twice with a tiny delay so the animation has time to advance
-          // (helps PNG snapshot capture animated fireworks mid-burst)
+          // render with a tiny delay so animation can tick before snapshot
           setTimeout(() => {
             const canvas = document.createElement('canvas');
-            canvas.width = W;
-            canvas.height = H;
+            const outW = Math.round(W * scale);
+            const outH = Math.round(H * scale);
+            canvas.width = outW;
+            canvas.height = outH;
             const ctx = canvas.getContext('2d');
             ctx.imageSmoothingEnabled = true;
             ctx.imageSmoothingQuality = 'high';
-            ctx.drawImage(img, 0, 0, W, H);
+            ctx.drawImage(img, 0, 0, outW, outH);
             URL.revokeObjectURL(url);
             canvas.toBlob((pngBlob) => {
               if (pngBlob) resolve(pngBlob);
               else reject(new Error('canvas.toBlob returned null'));
-            }, 'image/png', 0.95);
+            }, 'image/png', quality);
           }, 200);
         };
         img.onerror = () => {
@@ -820,8 +828,10 @@
     try {
       btn.disabled = true;
       btn.innerHTML = '⏳ กำลังแปลงเป็น PNG...';
-      // Re-rasterize fresh PNG (the blob we showed is SVG, not PNG)
-      const pngBlob = await svgStringToPngBlob(svgString);
+      // 2026-09-08: compress (scale 0.75 → 600×825, quality 0.85) เพื่อหลบ
+      //   HTTP 413 Request Entity Too Large จาก express.json limit 1 MB
+      //   Telegram ก็ compress ฝั่ง server + แสดงสูงสุด ~1280px width อยู่แล้ว
+      const pngBlob = await svgStringToPngBlob(svgString, { scale: 0.75, quality: 0.85 });
       if (!pngBlob) throw new Error('PNG conversion failed');
       btn.innerHTML = '⏳ กำลังส่งไป Telegram...';
       // base64 encode for POST

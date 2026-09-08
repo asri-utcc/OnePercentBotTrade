@@ -14,7 +14,7 @@
  *
  * Security:
  *   - requireAuth (session cookie) — only logged-in owner can send
- *   - PNG size cap 2 MB (base64 ~2.7 MB)
+ *   - PNG size cap 4 MB (base64 ~5.5 MB — fits under express.json limit 5 MB)
  *   - caption cap 1024 chars (Telegram limit)
  *   - No token leaks — only used server-side, never echoed
  */
@@ -28,8 +28,8 @@ const logger = require('../../utils/logger');
 
 const router = express.Router();
 
-// PNG size cap: 2 MB binary → ~2.7 MB base64
-const MAX_PNG_BYTES = 2 * 1024 * 1024;
+// PNG size cap: 4 MB binary → ~5.5 MB base64 (fits under express.json 5 MB limit)
+const MAX_PNG_BYTES = 4 * 1024 * 1024;
 const MAX_CAPTION_LEN = 1024;
 
 router.post('/send-telegram', requireAuth, async (req, res) => {
