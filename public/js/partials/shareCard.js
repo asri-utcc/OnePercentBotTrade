@@ -587,6 +587,22 @@
     return svg;
   }
 
+  // ─── Blob → data URL helper ────────────────────────────────────────────
+  // FIX-2026-09-08: ใช้ data: URL แทน blob: URL เพื่อหลบ Edge Tracking Prevention
+  //   block + HTTPS insecure warning + revoke timing race condition
+  function blobToDataUrl(blob) {
+    return new Promise((resolve, reject) => {
+      try {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result);
+        reader.onerror = () => reject(reader.error || new Error('FileReader failed'));
+        reader.readAsDataURL(blob);
+      } catch (err) {
+        reject(err);
+      }
+    });
+  }
+
   // ─── SVG → PNG ────────────────────────────────────────────────────────
   // 2026-09-08: แยก compress option (scale + quality) ออกมา — Telegram ใช้
   //   ภาพเล็กกว่า + quality ต่ำกว่าได้ (server-side compress อีกทีอยู่แล้ว) ทำให้
@@ -602,49 +618,50 @@
           svgString = '<?xml version="1.0" encoding="UTF-8"?>' + svgString;
         }
         const blob = new Blob([svgString], { type: 'image/svg+xml;charset=utf-8' });
-        const url = URL.createObjectURL(blob);
-        const img = new Image();
-        img.onload = () => {
-          // render with a tiny delay so animation can tick before snapshot
-          setTimeout(() => {
-            const canvas = document.createElement('canvas');
-            const outW = Math.round(W * scale);
-            const outH = Math.round(H * scale);
-            canvas.width = outW;
-            canvas.height = outH;
-            const ctx = canvas.getContext('2d');
-            ctx.imageSmoothingEnabled = true;
-            ctx.imageSmoothingQuality = 'high';
-            ctx.drawImage(img, 0, 0, outW, outH);
-            URL.revokeObjectURL(url);
-            canvas.toBlob((pngBlob) => {
-              if (pngBlob) resolve(pngBlob);
-              else reject(new Error('canvas.toBlob returned null'));
-            }, 'image/png', quality);
-          }, 200);
-        };
-        img.onerror = () => {
-          URL.revokeObjectURL(url);
-          reject(new Error('SVG image failed to load'));
-        };
-        img.src = url;
+        // FIX-2026-09-08: data: URL แทน blob: URL — หลบ Tracking Prevention block
+        //   + revoke timing race condition (เพราะ data: URL ไม่ต้อง revoke)
+        //   SVG ~30-50KB → data: URL ~40-67KB ใหญ่กว่า blob: ~30-50KB เล็กน้อย
+        //   แต่ trade-off คุ้มเพราะ blob URL โดน block
+        blobToDataUrl(blob).then((url) => {
+          const img = new Image();
+          img.onload = () => {
+            // render with a tiny delay so animation can tick before snapshot
+            setTimeout(() => {
+              const canvas = document.createElement('canvas');
+              const outW = Math.round(W * scale);
+              const outH = Math.round(H * scale);
+              canvas.width = outW;
+              canvas.height = outH;
+              const ctx = canvas.getContext('2d');
+              ctx.imageSmoothingEnabled = true;
+              ctx.imageSmoothingQuality = 'high';
+              ctx.drawImage(img, 0, 0, outW, outH);
+              // FIX-2026-09-08: revoke หลัง toBlob resolve (เดิม revoke ก่อน → race)
+              canvas.toBlob((pngBlob) => {
+                if (pngBlob) resolve(pngBlob);
+                else reject(new Error('canvas.toBlob returned null'));
+              }, 'image/png', quality);
+            }, 200);
+          };
+          img.onerror = () => reject(new Error('SVG image failed to load'));
+          img.src = url;
+        }).catch(reject);
       } catch (err) {
         reject(err);
       }
     });
   }
 
-  function downloadBlob(blob, filename) {
-    const url = URL.createObjectURL(blob);
+  async function downloadBlob(blob, filename) {
+    // FIX-2026-09-08: data: URL แทน blob: URL — หลบ Edge Tracking Prevention
+    //   block + ไม่มี HTTPS insecure warning + ไม่ต้อง revoke
+    const dataUrl = await blobToDataUrl(blob);
     const a = document.createElement('a');
-    a.href = url;
+    a.href = dataUrl;
     a.download = filename;
     document.body.appendChild(a);
     a.click();
-    setTimeout(() => {
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
-    }, 100);
+    document.body.removeChild(a);
   }
 
   function defaultFilename(d) {
@@ -729,13 +746,18 @@
     const svg = buildSvg(dataWithTs);
     const caption = buildTelegramCaption(dataWithTs);
 
+    // FIX-2026-09-08: data: URL แทน blob: URL สำหรับ preview — หลบ Edge
+    //   Tracking Prevention block + HTTPS insecure warning + revoke race condition
+    //   (data: URL อยู่ใน DOM attribute ไม่ใช่ separate blob storage)
     const blob = new Blob([svg], { type: 'image/svg+xml;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    img.src = url;
+    blobToDataUrl(blob).then((dataUrl) => {
+      img.src = dataUrl;
+    }).catch((err) => {
+      console.warn('ShareCard preview dataURL failed', err);
+    });
     img.dataset.svg = svg;
     img.dataset.caption = caption;
     img.dataset.filename = defaultFilename(dataWithTs);
-    img.dataset.url = url;
 
     const newDl = dlBtn.cloneNode(true);
     dlBtn.parentNode.replaceChild(newDl, dlBtn);
@@ -870,11 +892,8 @@
     if (!modal) return;
     modal.classList.remove('is-open');
     document.body.classList.remove('share-card-modal-open');
-    const img = document.getElementById('share-card-preview-img');
-    if (img && img.dataset.url) {
-      URL.revokeObjectURL(img.dataset.url);
-      delete img.dataset.url;
-    }
+    // FIX-2026-09-08: ลบ URL.revokeObjectURL — preview ใช้ data: URL แล้ว (ไม่ต้อง revoke)
+    //   เก็บ img.src ไว้ก็ได้ เพราะ DOM element จะถูก GC ตอน modal ถูก remove
   }
 
   // ─── Public API ───────────────────────────────────────────────────────
