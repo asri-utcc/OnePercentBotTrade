@@ -41,24 +41,28 @@
     { id: 'mc-tpPercent', key: 'tpPercent', section: 'tp', order: 10, type: 'number', step: '0.05', min: '0.001', label: '🎯 กำไรเป้าหมายสุทธิ (TP%)' },
     { id: 'mc-suggestTpWindow', key: 'suggestTpWindow', section: 'tp', order: 20, type: 'number', step: '10', min: '30', max: '1000', label: '🪟 ช่วงข้อมูลแนะนำ TP (แท่ง)' },
     { id: 'mc-tpTrendMultiplier', key: 'tpTrendMultiplier', section: 'tp', order: 50, type: 'number', step: '1', min: '1', max: '10', label: '✖️ ตัวคูณ TP ตามแนวโน้ม' },
-    { id: 'mc-autoPauseMinKcPct', key: 'autoPauseMinKcPct', section: 'automation', order: 30, type: 'number', step: '0.1', min: '0.1', max: '50', label: '⏸️ Min-%KC threshold (%)' },
-    { id: 'mc-autoPauseMin24hVolUsdt', key: 'autoPauseMin24hVolUsdt', section: 'automation', order: 31, type: 'number', step: '1000', min: '0', label: '💵 Auto-pause Min 24h Vol (USDT)' },
+    { id: 'mc-autoPauseMinKcPct', key: 'autoPauseMinKcPct', section: 'automation', order: 30, type: 'number', step: '0.1', min: '0.1', max: '50', label: '⏸️ Min-%KC threshold (%) · default 1.2' },
+    { id: 'mc-autoPauseMin24hVolUsdt', key: 'autoPauseMin24hVolUsdt', section: 'automation', order: 31, type: 'number', step: '1000', min: '0', label: '💵 Auto-pause Min 24h Vol (USDT) · default 400000' },
     // FIX-2026-09-05: DLC per-bot base-loss default — sits NEXT to DPS tunables (was: invisible to user in ตั้งค่าระบบ)
     { id: 'mc-dlcBaseLossPct', key: 'dlcBaseLossPct', section: 'automation', order: 32, type: 'number', step: '0.5', min: '-95', max: '-1', label: '🪜 DLC Base Loss % (ติดลบ · ยิ่งติดลบมาก = ยิ่งต้องขาดทุนลึกก่ยเปิด layer ถัดไป)' },
+    // FIX-2026-09-09 Batch 4: DCA + Martingale numeric tunables (bulk-update) — were missing
+    { id: 'mc-dcaMaxLayers', key: 'dcaMaxLayers', section: 'automation', order: 33, type: 'number', step: '1', min: '1', max: '10', label: '📚 DCA Max Layers · default 3' },
+    { id: 'mc-martingaleMultiplier', key: 'martingaleMultiplier', section: 'automation', order: 34, type: 'number', step: '0.1', min: '1.1', max: '5', label: '🎲 Martingale Multiplier (×N) · default 1.5' },
+    { id: 'mc-martingaleMaxLayerNotional', key: 'martingaleMaxLayerNotional', section: 'automation', order: 35, type: 'number', step: '1', min: '1', max: '1000', label: '💴 Martingale Max Layer Notional (USDT) · default 100' },
     // FIX-2026-08-30 / Phase 4: per-bot Auto-Timing opt-in (3-state string → null/true/false at backend)
     { id: 'mc-autoTimingEnabled', key: 'autoTimingEnabled', section: 'automation', order: 40, type: 'select', options: ['inherit','true','false'], label: '⏱️ Auto-Timing (heatmap entry gate) · inherit=master' },
-    { id: 'mc-autoArmLossPct', key: 'autoArmLossPct', section: 'risk', order: 30, type: 'number', step: '0.5', min: '1', max: '99', label: '🛡️ ขาดทุนขั้นต่ำสำหรับ Auto-arm (%)' },
-    { id: 'mc-autoArmAgeHours', key: 'autoArmAgeHours', section: 'risk', order: 40, type: 'number', step: '0.5', min: '0.5', max: '999', label: '⏰ อายุ Position ขั้นต่ำสำหรับ Auto-arm (ชม.)' },
+    { id: 'mc-autoArmLossPct', key: 'autoArmLossPct', section: 'risk', order: 30, type: 'number', step: '0.5', min: '1', max: '99', label: '🛡️ ขาดทุนขั้นต่ำสำหรับ Auto-arm (%) · default 10' },
+    { id: 'mc-autoArmAgeHours', key: 'autoArmAgeHours', section: 'risk', order: 40, type: 'number', step: '0.5', min: '0.5', max: '999', label: '⏰ อายุ Position ขั้นต่ำสำหรับ Auto-arm (ชม.) · default 828' },
     // FIX-2026-09-06: AUv2 — Auto-Underwater v2 (F1 auto-arm variant) — Master Config bulk-update
-    { id: 'mc-auv2MinAgeHours',    key: 'auv2MinAgeHours', section: 'risk', order: 51, type: 'number', step: '0.5', min: '0.5', max: '999', label: '⏰ AUv2 อายุ Position ขั้นต่ำ (ชม.) · default 24' },
-    { id: 'mc-auv2LossMode',       key: 'auv2LossMode',    section: 'risk', order: 52, type: 'select', options: ['pct','thb'], label: '📐 AUv2 Loss Metric Mode · pct / thb' },
-    { id: 'mc-auv2MaxLossPct',     key: 'auv2MaxLossPct',  section: 'risk', order: 53, type: 'number', step: '0.1', min: '0.1', max: '50', label: '🛡️ AUv2 ขาดทุนตื้นสุด (%) · default 5' },
-    { id: 'mc-auv2MaxLossThb',     key: 'auv2MaxLossThb',  section: 'risk', order: 54, type: 'number', step: '1', min: '1', max: '100000', label: '💴 AUv2 ขาดทุนตื้นสุด (THB) · default 200' },
-    { id: 'mc-auv2MaxWaitDays',    key: 'auv2MaxWaitDays', section: 'risk', order: 55, type: 'number', step: '1', min: '0', max: '90', label: '⏳ AUv2 Hard Cap (วัน) · default 7, 0=no cap' },
-    { id: 'mc-cbv2LockHours', key: 'cbv2LockHours', section: 'risk', order: 80, type: 'number', step: '0.5', min: '0.5', max: '168', label: '⏱ ระยะเวลา CBv2 Cooldown (ชม.)' },
-    { id: 'mc-cbv3LockHours', key: 'cbv3LockHours', section: 'risk', order: 80, type: 'number', step: '0.5', min: '0.5', max: '168', label: '⏱ ระยะเวลา CBv3 Cooldown (ชม.)' },
+    { id: 'mc-auv2MinAgeHours',    key: 'auv2MinAgeHours', section: 'risk', order: 51, type: 'number', step: '0.5', min: '0.5', max: '999', label: '⏰ AUv2 อายุ Position ขั้นต่ำ (ชม.) · default 128' },
+    { id: 'mc-auv2LossMode',       key: 'auv2LossMode',    section: 'risk', order: 52, type: 'select', options: ['pct','thb'], label: '📐 AUv2 Loss Metric Mode · default thb' },
+    { id: 'mc-auv2MaxLossPct',     key: 'auv2MaxLossPct',  section: 'risk', order: 53, type: 'number', step: '0.1', min: '0.1', max: '50', label: '🛡️ AUv2 ขาดทุนตื้นสุด (%) · default 8' },
+    { id: 'mc-auv2MaxLossThb',     key: 'auv2MaxLossThb',  section: 'risk', order: 54, type: 'number', step: '1', min: '1', max: '100000', label: '💴 AUv2 ขาดทุนตื้นสุด (THB) · default 22' },
+    { id: 'mc-auv2MaxWaitDays',    key: 'auv2MaxWaitDays', section: 'risk', order: 55, type: 'number', step: '1', min: '0', max: '90', label: '⏳ AUv2 Hard Cap (วัน) · default 0 (no cap)' },
+    { id: 'mc-cbv2LockHours', key: 'cbv2LockHours', section: 'risk', order: 80, type: 'number', step: '0.5', min: '0.5', max: '168', label: '⏱ ระยะเวลา CBv2 Cooldown (ชม.) · default 8' },
+    { id: 'mc-cbv3LockHours', key: 'cbv3LockHours', section: 'risk', order: 80, type: 'number', step: '0.5', min: '0.5', max: '168', label: '⏱ ระยะเวลา CBv3 Cooldown (ชม.) · default 8' },
     { id: 'mc-cbv5LockHours', key: 'cbv5LockHours', section: 'risk', order: 81, type: 'number', step: '0.5', min: '0.5', max: '168', label: '⏱ ระยะเวลา CBv5 Cooldown (ชม.) · default 4' },
-    { id: 'mc-cbAutoUnlockThreshold', key: 'cbAutoUnlockThresholdPct', section: 'risk', order: 100, type: 'number', step: '0.1', min: '0.5', max: '5', label: '🔓 กำไรขั้นต่ำสำหรับ Auto-Unlock (%)' },
+    { id: 'mc-cbAutoUnlockThreshold', key: 'cbAutoUnlockThresholdPct', section: 'risk', order: 100, type: 'number', step: '0.1', min: '0.5', max: '5', label: '🔓 กำไรขั้นต่ำสำหรับ Auto-Unlock (%) · default 2' },
   ];
 
   // FIX-2026-08-10: CBv5 advanced params (KC + Pivot + Volume) — displayed under a
@@ -93,6 +97,9 @@
     //   - user reported "หา DLC ใน Master Config ไม่เจอ" (was only in ตั้งค่าระบบ section)
     //   - masterDlcEnabled (kill-switch) stays inline in bot-edit accordion
     { id: 'mc-dlcEnabled', key: 'dlcEnabled', section: 'automation', order: 11, label: '🪜 Dynamic Layer Control (DLC) · per-bot default (masterDlcEnabled kill-switch stays inline in bot-edit)' },
+    // FIX-2026-09-09 Batch 4: DCA + Martingale toggles (were missing — only fields were added)
+    { id: 'mc-dcaEnabled', key: 'dcaEnabled', section: 'automation', order: 12, label: '📚 DCA + BEP stack mode (mutex กับ DLC: ติ๊กได้อันเดียว)' },
+    { id: 'mc-martingaleEnabled', key: 'martingaleEnabled', section: 'automation', order: 13, label: '🎲 Martingale sizing (ต้องเปิด DCA ก่อน · enforced server-side)' },
     { id: 'mc-autoPauseEnabled', key: 'autoPauseEnabled', section: 'automation', order: 20, label: '⏸️ หยุดบอทเมื่อ Min-%KC หรือ 24h Vol ต่ำ' },
     // FIX-2026-08-29: per-bot opt-in for auto-pause threshold auto-adjust (default ON)
     { id: 'mc-autoPauseAdjustEnabled', key: 'autoPauseAdjustEnabled', section: 'automation', order: 25, label: '🔧 ให้ Auto-adjust threshold ของบอทนี้' },

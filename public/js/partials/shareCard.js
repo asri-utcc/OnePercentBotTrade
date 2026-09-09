@@ -434,12 +434,12 @@
       <text x="24" y="34" text-anchor="middle" font-size="22" font-weight="900" fill="${t.bgFrom}">1%</text>
     </g>
     <text x="68" y="32" font-size="22" font-weight="700" fill="${t.text}">OnePercent<tspan fill="${t.accent}">%</tspan>BotTrade</text>
-    <text x="68" y="52" font-size="15" fill="${t.textDim}">Daily Trading Report</text>
+    <text x="68" y="52" font-size="13" fill="${t.textDim}">Daily Trading Report</text>
   </g>
 
   <g transform="translate(${W - 60}, 70)">
     <rect x="-200" y="0" width="200" height="36" rx="18" fill="${t.cardBg}" stroke="${t.cardBorder}" stroke-width="1"/>
-    <text x="-100" y="24" text-anchor="middle" font-size="16" fill="${t.textDim}">📅 ${escapeXml(dateStr)}</text>
+    <text x="-100" y="23" text-anchor="middle" font-size="14" fill="${t.textDim}">📅 ${escapeXml(dateStr)}</text>
   </g>
 
   <!-- Zone badge -->
@@ -450,62 +450,62 @@
 
   <!-- Headline -->
   <g transform="translate(${W / 2}, 235)">
-    <text x="0" y="0" text-anchor="middle" font-size="26" font-weight="700" fill="${t.text}">${escapeXml(headline)}</text>
-    <text x="0" y="30" text-anchor="middle" font-size="17" fill="${t.textDim}">${escapeXml(headlineSub)}</text>
+    <text x="0" y="0" text-anchor="middle" font-size="22" font-weight="700" fill="${t.text}">${escapeXml(headline)}</text>
+    <text x="0" y="26" text-anchor="middle" font-size="14" fill="${t.textDim}">${escapeXml(headlineSub)}</text>
   </g>
 
   <!-- HERO: PnL THB (big) + USDT subtitle -->
   <g transform="translate(${W / 2}, 365)">
     <text x="0" y="0" text-anchor="middle" font-size="86" font-weight="900" fill="${pnlColor}" letter-spacing="-3">${heroThb}</text>
-    <text x="0" y="46" text-anchor="middle" font-size="26" fill="${t.textDim}" font-weight="600">${heroUsdt}</text>
+    <text x="0" y="40" text-anchor="middle" font-size="22" fill="${t.textDim}" font-weight="600">${heroUsdt}</text>
   </g>
 
   <!-- Progress bar -->
   <g transform="translate(${progX}, ${progY})">
-    <text x="0" y="-14" font-size="15" fill="${t.textDim}">🎯 เป้า ${fmtThb(targetThb, { dp: 0 })}</text>
-    <text x="${progW}" y="-14" text-anchor="end" font-size="16" font-weight="700" fill="${t.accent}">${fmtPct(pct)}</text>
+    <text x="0" y="-12" font-size="13" fill="${t.textDim}">🎯 เป้า ${fmtThb(targetThb, { dp: 0 })}</text>
+    <text x="${progW}" y="-12" text-anchor="end" font-size="14" font-weight="700" fill="${t.accent}">${fmtPct(pct)}</text>
     <rect x="0" y="0" width="${progW}" height="${progH}" rx="${progH / 2}" fill="${t.progressTrack}" stroke="${t.cardBorder}" stroke-width="1"/>
     ${pctClamped > 0 ? `<rect x="0" y="0" width="${(progW * pctClamped / 100).toFixed(1)}" height="${progH}" rx="${progH / 2}" fill="url(#prog-${nonce})"/>` : ''}
   </g>
 
   <!-- Portfolio Status section -->
   <g transform="translate(60, 540)">
-    <text x="0" y="0" font-size="16" font-weight="700" fill="${t.accent}" letter-spacing="2">📊 PORTFOLIO STATUS</text>
-    <line x1="195" y1="-5" x2="${W - 120}" y2="-5" stroke="${t.cardBorder}" stroke-width="1"/>
+    <text x="0" y="0" font-size="13" font-weight="700" fill="${t.accent}" letter-spacing="2">📊 PORTFOLIO STATUS</text>
+    <line x1="170" y1="-5" x2="${W - 120}" y2="-5" stroke="${t.cardBorder}" stroke-width="1"/>
 
     <!-- 2x2 grid -->
     <g transform="translate(0, 20)">
       <!-- Holding positions -->
       <g transform="translate(0, 0)">
         <rect width="330" height="120" rx="14" fill="${t.cardBg}" stroke="${t.cardBorder}" stroke-width="1"/>
-        <text x="20" y="32" font-size="14" fill="${t.textMuted}" letter-spacing="1">ถืออยู่ (HOLDING)</text>
-        <text x="20" y="70" font-size="34" font-weight="800" fill="${t.text}">${holdingCount} <tspan font-size="18" font-weight="500" fill="${t.textDim}">positions</tspan></text>
-        <text x="20" y="100" font-size="16" fill="${t.textDim}">ต้นทุน ${fmtThb(holdingCostThb, { dp: 0 })}</text>
+        <text x="20" y="30" font-size="12" fill="${t.textMuted}" letter-spacing="1">ถืออยู่ (HOLDING)</text>
+        <text x="20" y="68" font-size="34" font-weight="800" fill="${t.text}">${holdingCount} <tspan font-size="16" font-weight="500" fill="${t.textDim}">positions</tspan></text>
+        <text x="20" y="98" font-size="16" fill="${t.textDim}">ต้นทุน ${fmtThb(holdingCostThb, { dp: 0 })}</text>
         <text x="310" y="80" text-anchor="end" font-size="32">💼</text>
       </g>
 
       <!-- Total unrealized loss -->
       <g transform="translate(350, 0)">
         <rect width="330" height="120" rx="14" fill="${t.cardBg}" stroke="${t.cardBorder}" stroke-width="1"/>
-        <text x="20" y="32" font-size="14" fill="${t.textMuted}" letter-spacing="1">ขาดทุนรวม (UNREALIZED)</text>
-        <text x="20" y="70" font-size="32" font-weight="800" fill="${totalUnrealizedUsdt < 0 ? t.negative : (totalUnrealizedUsdt > 0 ? t.positive : t.textMuted)}">
+        <text x="20" y="30" font-size="12" fill="${t.textMuted}" letter-spacing="1">ขาดทุนรวม (UNREALIZED)</text>
+        <text x="20" y="68" font-size="32" font-weight="800" fill="${totalUnrealizedUsdt < 0 ? t.negative : (totalUnrealizedUsdt > 0 ? t.positive : t.textMuted)}">
           ${totalUnrealizedUsdt < 0 ? '−' : totalUnrealizedUsdt > 0 ? '+' : ''}${fmtThb(Math.abs(totalUnrealizedThb), { dp: 0 })}
         </text>
-        <text x="20" y="100" font-size="16" fill="${t.textDim}">${fmtUsdtSigned(totalUnrealizedUsdt, { dp: 2 })}</text>
+        <text x="20" y="98" font-size="14" fill="${t.textDim}">${fmtUsdtSigned(totalUnrealizedUsdt, { dp: 2 })}</text>
         <text x="310" y="80" text-anchor="end" font-size="32">${totalUnrealizedUsdt < 0 ? '📉' : totalUnrealizedUsdt > 0 ? '📈' : '➖'}</text>
       </g>
 
       <!-- Worst position -->
       <g transform="translate(0, 140)">
         <rect width="330" height="120" rx="14" fill="${t.cardBg}" stroke="${t.cardBorder}" stroke-width="1"/>
-        <text x="20" y="32" font-size="14" fill="${t.textMuted}" letter-spacing="1">ขาดทุนสุด (WORST)</text>
+        <text x="20" y="30" font-size="12" fill="${t.textMuted}" letter-spacing="1">ขาดทุนสุด (WORST)</text>
         ${worst ? `
-          <text x="20" y="64" font-size="22" font-weight="800" fill="${t.text}">${escapeXml(worst.symbol || '—')}</text>
-          <text x="20" y="94" font-size="22" font-weight="700" fill="${t.negative}">−${fmtThb(Math.abs(worst.unrealizedThb || 0), { dp: 0 })}</text>
-          <text x="20" y="114" font-size="15" fill="${t.textDim}">−${Math.abs(Number(worst.unrealizedUsdt) || 0).toFixed(2)} USDT${worst.pct != null ? ' · ' + fmtPct(worst.pct) : ''}</text>
+          <text x="20" y="62" font-size="22" font-weight="800" fill="${t.text}">${escapeXml(worst.symbol || '—')}</text>
+          <text x="20" y="92" font-size="22" font-weight="700" fill="${t.negative}">−${fmtThb(Math.abs(worst.unrealizedThb || 0), { dp: 0 })}</text>
+          <text x="20" y="112" font-size="13" fill="${t.textDim}">−${Math.abs(Number(worst.unrealizedUsdt) || 0).toFixed(2)} USDT${worst.pct != null ? ' · ' + fmtPct(worst.pct) : ''}</text>
           <text x="310" y="80" text-anchor="end" font-size="32">😱</text>
         ` : `
-          <text x="20" y="74" font-size="22" font-weight="600" fill="${t.textMuted}">ไม่มี position</text>
+          <text x="20" y="72" font-size="22" font-weight="600" fill="${t.textMuted}">ไม่มี position</text>
           <text x="310" y="80" text-anchor="end" font-size="32">😌</text>
         `}
       </g>
@@ -513,75 +513,75 @@
       <!-- Usable balance (USDT-first — ใช้ USDT เป็นหลัก) -->
       <g transform="translate(350, 140)">
         <rect width="330" height="120" rx="14" fill="${t.cardBg}" stroke="${t.cardBorder}" stroke-width="1"/>
-        <text x="20" y="32" font-size="14" fill="${t.textMuted}" letter-spacing="1">เงินคงเหลือ (USABLE)</text>
-        <text x="20" y="70" font-size="32" font-weight="800" fill="${t.accent}">${fmtUsdt(usableUsdt, { dp: 2 })}</text>
-        <text x="20" y="100" font-size="16" fill="${t.textDim}">${fmtThb(usableThb, { dp: 0 })}</text>
+        <text x="20" y="30" font-size="12" fill="${t.textMuted}" letter-spacing="1">เงินคงเหลือ (USABLE)</text>
+        <text x="20" y="68" font-size="32" font-weight="800" fill="${t.accent}">${fmtUsdt(usableUsdt, { dp: 2 })}</text>
+        <text x="20" y="98" font-size="14" fill="${t.textDim}">${fmtThb(usableThb, { dp: 0 })}</text>
         <text x="310" y="80" text-anchor="end" font-size="32">💰</text>
       </g>
     </g>
   </g>
 
   <!-- TODAY TRADING section -->
-  <g transform="translate(60, 830)">
-    <text x="0" y="0" font-size="16" font-weight="700" fill="${t.accent}" letter-spacing="2">📈 TODAY TRADING</text>
-    <line x1="180" y1="-5" x2="${W - 120}" y2="-5" stroke="${t.cardBorder}" stroke-width="1"/>
+  <g transform="translate(60, 850)">
+    <text x="0" y="0" font-size="13" font-weight="700" fill="${t.accent}" letter-spacing="2">📈 TODAY TRADING</text>
+    <line x1="160" y1="-5" x2="${W - 120}" y2="-5" stroke="${t.cardBorder}" stroke-width="1"/>
 
     <g transform="translate(0, 20)">
       <g transform="translate(0, 0)">
-        <text x="80" y="34" text-anchor="middle" font-size="34" font-weight="800" fill="${t.text}">${trades}</text>
-        <text x="80" y="58" text-anchor="middle" font-size="15" fill="${t.textMuted}" letter-spacing="1">TRADES</text>
+        <text x="80" y="32" text-anchor="middle" font-size="32" font-weight="800" fill="${t.text}">${trades}</text>
+        <text x="80" y="52" text-anchor="middle" font-size="11" fill="${t.textMuted}" letter-spacing="1">TRADES</text>
       </g>
       <g transform="translate(170, 0)">
-        <text x="80" y="34" text-anchor="middle" font-size="34" font-weight="800" fill="${trades > 0 ? t.positive : t.textMuted}">${trades > 0 ? fmtPct(winRate) : '—'}</text>
-        <text x="80" y="58" text-anchor="middle" font-size="15" fill="${t.textMuted}" letter-spacing="1">WIN RATE</text>
+        <text x="80" y="32" text-anchor="middle" font-size="32" font-weight="800" fill="${trades > 0 ? t.positive : t.textMuted}">${trades > 0 ? fmtPct(winRate) : '—'}</text>
+        <text x="80" y="52" text-anchor="middle" font-size="11" fill="${t.textMuted}" letter-spacing="1">WIN RATE</text>
       </g>
       <g transform="translate(340, 0)">
-        <text x="80" y="34" text-anchor="middle" font-size="30" font-weight="800" fill="${t.positive}">${wins}</text>
-        <text x="80" y="58" text-anchor="middle" font-size="15" fill="${t.textMuted}" letter-spacing="1">ชนะ</text>
+        <text x="80" y="32" text-anchor="middle" font-size="28" font-weight="800" fill="${t.positive}">${wins}</text>
+        <text x="80" y="52" text-anchor="middle" font-size="11" fill="${t.textMuted}" letter-spacing="1">ชนะ</text>
       </g>
       <g transform="translate(510, 0)">
-        <text x="80" y="34" text-anchor="middle" font-size="30" font-weight="800" fill="${losses > 0 ? t.negative : t.textMuted}">${losses}</text>
-        <text x="80" y="58" text-anchor="middle" font-size="15" fill="${t.textMuted}" letter-spacing="1">แพ้</text>
+        <text x="80" y="32" text-anchor="middle" font-size="28" font-weight="800" fill="${losses > 0 ? t.negative : t.textMuted}">${losses}</text>
+        <text x="80" y="52" text-anchor="middle" font-size="11" fill="${t.textMuted}" letter-spacing="1">แพ้</text>
       </g>
     </g>
   </g>
 
   <!-- MONTH TRADING section — 2026-09-05: เพิ่ม PnL เดือนนี้ -->
-  <g transform="translate(60, 920)">
-    <text x="0" y="0" font-size="16" font-weight="700" fill="${t.accent}" letter-spacing="2">📅 MONTH TRADING ${escapeXml(d.monthLabel || '')}</text>
-    <line x1="225" y1="-5" x2="${W - 120}" y2="-5" stroke="${t.cardBorder}" stroke-width="1"/>
+  <g transform="translate(60, 950)">
+    <text x="0" y="0" font-size="13" font-weight="700" fill="${t.accent}" letter-spacing="2">📅 MONTH TRADING ${escapeXml(d.monthLabel || '')}</text>
+    <line x1="200" y1="-5" x2="${W - 120}" y2="-5" stroke="${t.cardBorder}" stroke-width="1"/>
 
     <g transform="translate(0, 20)">
       <!-- Month PnL (THB big) -->
       <g transform="translate(0, 0)">
-        <text x="80" y="34" text-anchor="middle" font-size="28" font-weight="800" fill="${monthPnlUsdt >= 0 ? t.positive : t.negative}">${fmtThb(monthPnlThb, { dp: 0 })}</text>
-        <text x="80" y="58" text-anchor="middle" font-size="15" fill="${t.textMuted}" letter-spacing="1">MONTH PnL</text>
-        <text x="80" y="76" text-anchor="middle" font-size="14" fill="${t.textMuted}" opacity="0.85">${fmtUsdtSigned(monthPnlUsdt, { dp: 2 })}</text>
+        <text x="80" y="32" text-anchor="middle" font-size="28" font-weight="800" fill="${monthPnlUsdt >= 0 ? t.positive : t.negative}">${fmtThb(monthPnlThb, { dp: 0 })}</text>
+        <text x="80" y="52" text-anchor="middle" font-size="11" fill="${t.textMuted}" letter-spacing="1">MONTH PnL</text>
+        <text x="80" y="68" text-anchor="middle" font-size="10" fill="${t.textMuted}" opacity="0.75">${fmtUsdtSigned(monthPnlUsdt, { dp: 2 })}</text>
       </g>
       <!-- Month Trades -->
       <g transform="translate(170, 0)">
-        <text x="80" y="34" text-anchor="middle" font-size="34" font-weight="800" fill="${t.text}">${monthTrades}</text>
-        <text x="80" y="58" text-anchor="middle" font-size="15" fill="${t.textMuted}" letter-spacing="1">TRADES</text>
+        <text x="80" y="32" text-anchor="middle" font-size="32" font-weight="800" fill="${t.text}">${monthTrades}</text>
+        <text x="80" y="52" text-anchor="middle" font-size="11" fill="${t.textMuted}" letter-spacing="1">TRADES</text>
       </g>
       <!-- Month Win rate -->
       <g transform="translate(340, 0)">
-        <text x="80" y="34" text-anchor="middle" font-size="34" font-weight="800" fill="${monthTrades > 0 ? t.positive : t.textMuted}">${monthTrades > 0 ? fmtPct(monthWinRate) : '—'}</text>
-        <text x="80" y="58" text-anchor="middle" font-size="15" fill="${t.textMuted}" letter-spacing="1">WIN RATE</text>
+        <text x="80" y="32" text-anchor="middle" font-size="32" font-weight="800" fill="${monthTrades > 0 ? t.positive : t.textMuted}">${monthTrades > 0 ? fmtPct(monthWinRate) : '—'}</text>
+        <text x="80" y="52" text-anchor="middle" font-size="11" fill="${t.textMuted}" letter-spacing="1">WIN RATE</text>
       </g>
       <!-- Month W/L -->
       <g transform="translate(510, 0)">
-        <text x="80" y="22" text-anchor="middle" font-size="24" font-weight="800" fill="${t.positive}">${monthWins}W</text>
-        <text x="80" y="48" text-anchor="middle" font-size="24" font-weight="800" fill="${monthLosses > 0 ? t.negative : t.textMuted}">${monthLosses}L</text>
-        <text x="80" y="68" text-anchor="middle" font-size="15" fill="${t.textMuted}" letter-spacing="1">เดือนนี้</text>
+        <text x="80" y="20" text-anchor="middle" font-size="22" font-weight="800" fill="${t.positive}">${monthWins}W</text>
+        <text x="80" y="44" text-anchor="middle" font-size="22" font-weight="800" fill="${monthLosses > 0 ? t.negative : t.textMuted}">${monthLosses}L</text>
+        <text x="80" y="62" text-anchor="middle" font-size="11" fill="${t.textMuted}" letter-spacing="1">เดือนนี้</text>
       </g>
     </g>
   </g>
 
   <!-- Footer -->
-  <g transform="translate(${W / 2}, 1045)">
-    <text x="0" y="0" text-anchor="middle" font-size="15" font-weight="700" fill="${t.text}">#OnePercentBotTrade</text>
-    ${zone === 'achieved' ? `<text x="0" y="24" text-anchor="middle" font-size="14" fill="${t.textMuted}">✨ ทุกวันคือโอกาส — วันนี้คุณทำได้! ✨</text>` : ''}
-    <text x="0" y="${zone === 'achieved' ? 46 : 26}" text-anchor="middle" font-size="14" fill="${t.textMuted}" opacity="0.85">${escapeXml(generatedAtStr(d.generatedAt || d.ts || Date.now()))}</text>
+  <g transform="translate(${W / 2}, 1075)">
+    <text x="0" y="0" text-anchor="middle" font-size="13" font-weight="700" fill="${t.text}">#OnePercentBotTrade</text>
+    ${zone === 'achieved' ? `<text x="0" y="20" text-anchor="middle" font-size="11" fill="${t.textMuted}">✨ ทุกวันคือโอกาส — วันนี้คุณทำได้! ✨</text>` : ''}
+    <text x="0" y="${zone === 'achieved' ? 40 : 22}" text-anchor="middle" font-size="10" fill="${t.textMuted}" opacity="0.85">${escapeXml(generatedAtStr(d.generatedAt || d.ts || Date.now()))}</text>
   </g>
 </svg>`;
     return svg;
