@@ -21,7 +21,14 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
-const FINGERPRINT_FILE = path.join(__dirname, '..', '..', 'data', 'admin-machine-id.txt');
+// FIX-2026-09-09: Multi-instance support — allow per-instance machineId file
+//   via env `MACHINE_ID_FILE`. Default (single-instance path) is unchanged so
+//   existing deployments keep working. To run 2+ instances on one host,
+//   set MACHINE_ID_FILE=./data/<name>-machine-id.txt per instance AND
+//   pre-seed the file with a unique value before first start.
+const FINGERPRINT_FILE = process.env.MACHINE_ID_FILE
+  ? path.resolve(process.env.MACHINE_ID_FILE)
+  : path.join(__dirname, '..', '..', 'data', 'admin-machine-id.txt');
 
 function _gatherComponents() {
   const hostname = os.hostname();
