@@ -24,6 +24,8 @@ const adminMonitor = require('./admin-monitor'); // FIX-2026-08-26: OnePercentBo
 const eventBus = require('./services/eventBus');
 const consent = require('./consent'); // FIX-2026-08-26 Phase 2c: first-run consent gate (3 sections + admin DB + local file)
 const consentHandlers = require('./consent/handlers'); // FIX-2026-08-26 Phase 2c-v2: shared decision core — used for declined→accepted auto-resume
+const consentApi = require('./consent/api'); // FIX-2026-09-09: boot-time consent resync (push current decision to admin on every startup)
+const { getMachineId } = require('./admin-monitor/machineId');
 
 async function main() {
   logger.info({ env: config.env, port: config.port }, 'starting OnePercentBotTrade');
@@ -95,6 +97,23 @@ async function main() {
     } catch (err) {
       logger.error({ err: err.message }, 'consent: gate failed (treating as declined)');
       consentDecision = 'declined';
+    }
+    // FIX-2026-09-09: Boot-time consent resync.
+    //   recordDecision() only pushes to admin when the decision CHANGES, so a new
+    //   instance that boots with a pre-accepted state (e.g. friend reads the same
+    //   consent file as owner — see CONSENT_FILE_PATH env to isolate per-instance)
+    //   never tells admin. Push the current state on every startup so admin's
+    //   Machines tab always reflects the latest consent decision for this machine.
+    //   No-op on local file; idempotent on admin (upserts by machineId).
+    if (consentDecision === 'accepted' || consentDecision === 'declined') {
+      consentApi.pushDecision({
+        machineId: getMachineId(),
+        decision: consentDecision,
+        consentVersion: require('./consent/config').version,
+        source: 'boot_resync',
+      }).catch((err) => {
+        logger.warn({ err: err.message }, 'consent: boot_resync push threw (unexpected)');
+      });
     }
     // FIX-2026-08-30 Phase 3b-7: Force re-consent (admin → bot).
     //   - Log when admin triggers force_reconsent (file deleted + bot paused).
