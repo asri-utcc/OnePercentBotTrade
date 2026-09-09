@@ -92,6 +92,10 @@ const DEFAULT_EVENTS = {
   //   - autoTimingSuppressHit: แจ้งเมื่อ trader ข้าม BUY เพราะ Suppress cell (latch 1/bot/day)
   autoTimingWeeklySummary: false,
   autoTimingSuppressHit: false,
+  // FIX-2026-09-09: OneClick Update — TG notification when a newer bot version
+  //   is available (latched by updateChecker to avoid spam — fires once per
+  //   new release, not on every poll). Default ON.
+  updateAvailable: true,
 };
 const DEFAULT_THRESHOLDS = {
   positionLossPct: 2, positionProfitPct: 1, positionStuckMin: 30,
@@ -613,6 +617,16 @@ function renderMessage(eventKey, p, cfg) {
       // FIX-2026-08-08: Feature #3 — Auto unlock cooldown (CB unlocked after 3+ profitable signals)
       case 'botAutoUnlocked':
         return `🔓 Cooldown ปลดอัตโนมัติ (3+ profitable signals)\nBot: ${p.botName}\nSymbol: ${p.symbol}\nSignals found: ${p.signalsFound || '?'}\nThreshold: ${p.threshold || '?'}%\nSource: cbAutoUnlock service\n\n✅ บอทกลับมาเทรดได้แล้ว (BUY gate reset)`;
+      // FIX-2026-09-09: OneClick Update — soft-prompt when a newer bot release
+      //   is detected. Anti-spam already handled upstream (updateChecker sets
+      //   lastNotifiedVersion before dispatching).
+      case 'updateAvailable': {
+        const cur = p.currentVersion || '?';
+        const lat = p.latestVersion || '?';
+        const crit = p.critical ? '  ⚠️ CRITICAL' : '';
+        const cl = (p.changelog || '').slice(0, 500).replace(/\n+/g, '\n');
+        return `🆕 Bot update available${crit}\n\nCurrent: v${cur}\nLatest:  v${lat}\n\n${cl}\n\n→ เปิดบอท admin panel แล้วคลิก "Update Now" (modal จะเด้งขึ้นเอง)`;
+      }
       // FIX-2026-08-08: Feature #5 — Auto Delete Bot — warning (แจ้งล่วงหน้า N วัน)
       case 'autoDeleteBotWarning':
         return `⏰ Auto Delete Bot — แจ้งล่วงหน้า\nBot: ${p.botName}\nSymbol: ${p.symbol}\nDowntime: ${p.downtimeDays || '?'} วัน (threshold ${p.thresholdDays || '?'} วัน)\nRemaining: ${p.remainingDays || '?'} วัน\n\n⚠️ บอทจะถูก soft-delete (เก็บ 30 วัน แล้วลบถาวร) — ถ้าต้องการเก็บไว้ → enable บอทในหน้า bots.html`;

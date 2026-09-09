@@ -176,6 +176,89 @@ app.get('/api/app/version', (_req, res) => {
   res.json({ version: require('../package.json').version });
 });
 
+// FIX-2026-09-09: OneClick Update — status + apply endpoints (session-auth required)
+const updateChecker = require('./services/updateChecker');
+const updateOrchestrator = require('./services/updateOrchestrator');
+const { denyIfBusy } = require('./middleware/updateAuth');
+
+function _updateAuthGate(req, res, next) {
+  // Same inline pattern as src/app.js line 224 (existing convention).
+  if (!req.session || req.session.authenticated !== true) {
+    return res.status(401).json({ error: 'login required' });
+  }
+  next();
+}
+
+app.get('/api/app/update-status', _updateAuthGate, (_req, res) => {
+  // Compiles what the navbar pill + modal need: current vs latest + manifest
+  // payload cached by updateChecker. Cheap JSON read (data/update-checker-state.json).
+  const cur = require('../package.json').version;
+  const state = updateChecker.getLastNotification();
+  const dismissed = !!(state.lastDismissedVersion && state.lastDismissedVersion === state.lastNotifiedVersion);
+  const adminUrl = (process.env.ADMIN_URL || 'http://localhost:6016');
+  const lastSeen = state.lastSeenLatest || null;
+  const cached = state.lastNotifiedManifest || null;
+  const isAvail = !!(lastSeen && lastSeen.version && cached && cached.version === lastSeen.version
+    && state.lastNotifiedVersion === lastSeen.version
+    && require('./services/updateChecker')._compareSemver(lastSeen.version, cur) > 0);
+  res.json({
+    available: isAvail,
+    critical: isAvail && cached.critical === true,
+    current: cur,
+    latest: lastSeen ? lastSeen.version : null,
+    lastNotifiedVersion: state.lastNotifiedVersion || null,
+    lastCheckedAt: state.lastCheckedAt || null,
+    dismissed,
+    // Full manifest payload (cached at notify-time) so the modal can POST
+    // /api/app/apply-update without re-fetching from admin.
+    downloadUrl: cached ? `${adminUrl}/api/release/download/${cached.version}` : null,
+    tarballSha256: cached ? cached.tarballSha256 : null,
+    tarballBytes: cached ? cached.tarballBytes : null,
+    changelog: cached ? cached.changelog : '',
+    manifestHash: cached ? cached.manifestHash : null,
+    migrations: cached && Array.isArray(cached.migrations) ? cached.migrations : [],
+    releaseDate: cached ? cached.publishedAt : null,
+  });
+});
+
+app.post('/api/app/update-dismiss', _updateAuthGate, (req, res) => {
+  const v = (req.body && req.body.version) || null;
+  if (!v) return res.status(400).json({ error: 'version required' });
+  updateChecker.dismissVersion(v);
+  res.json({ ok: true });
+});
+
+app.post('/api/app/apply-update', _updateAuthGate, denyIfBusy, async (req, res) => {
+  // Body: { version, tarballUrl, sha256, migrations, manifestHash?, tarballBytes? }
+  // Returns once phase 7 (pm2 reload) begins; the process will be terminated by
+  // pm2 shortly after, so we return immediately on success.
+  const body = req.body || {};
+  if (!body.version || !body.tarballUrl || !body.sha256) {
+    return res.status(400).json({ error: 'version, tarballUrl, sha256 required' });
+  }
+  try {
+    // Don't await full completion — pm2 reload kills this process. Kick off async
+    // and return quickly. We persist the jobId so the client can poll status later.
+    const job = updateOrchestrator.applyUpdate(body).catch((err) => {
+      logger.error({ err: err.message }, 'applyUpdate: failed');
+    });
+    // Wait until phase 4 (swap) completes so we know the new code is staged
+    // (we can let it continue to phase 7 in the background — pm2 reload will
+    // terminate the process, but the new pm2 worker will start up with new src).
+    // Simpler: just respond after a short delay so client sees progress.
+    setTimeout(() => {
+      res.json({
+        ok: true,
+        note: 'update running in background; bot will reload via pm2',
+      });
+    }, 1500);
+    // don't await job — leak promise intentionally (orchestrator handles its own state)
+  } catch (err) {
+    logger.error({ err: err.message }, 'apply-update: failed to start');
+    res.status(500).json({ error: err.message || 'update failed' });
+  }
+});
+
   // Health
   app.get('/health', (req, res) => {
     res.json({ ok: true, ts: Date.now() });

@@ -78,6 +78,11 @@
              under the 🛡️ Consent & License group. -->
         <!-- FIX-2026-08-26: bot version pill — surfaces the running version to the user -->
         <span class="version-pill" id="nav-version" title="Bot version ที่กำลังรันอยู่">v…</span>
+        <!-- FIX-2026-09-09: OneClick Update — pill surfaces available update.
+             Hidden by default; shown by updater module (pages/update.js) when
+             /api/app/update-status reports available=true. Click opens modal.
+             Pages must include /js/pages/update.js AFTER ws-client.js. -->
+        <a class="update-pill" id="nav-update-pill" href="#" style="display:none;" title="Bot update available — click to update">v…</a>
         <!-- Phase 4-2026-08-29: Chat badge pill — shows unread DM count, links to /chat.html -->
         <a class="chat-pill" id="nav-chat-pill" href="/chat.html" title="Community + DM กับ admin" style="display:none;">
           💬 <span id="nav-chat-badge" class="chat-badge hidden">0</span>
@@ -438,3 +443,54 @@ window.usdtToThb = function usdtToThb(usdtValue, opts = {}) {
   if (opts.raw) return thb;
   return `≈ ฿${formatThb(thb)}`;
 };
+
+// ─────────────────────────────────────────────────────────────────────────────
+// FIX-2026-09-09: OneClick Update — pill poll + click handler.
+//   Nav renders the #nav-update-pill element (hidden by default). This block
+//   polls /api/app/update-status and shows the pill when available. Click
+//   delegates to window.openUpdateModal() (provided by pages that include
+//   /js/pages/update.js, e.g. index.html). On pages without that script,
+//   the pill still appears but click shows a thin confirm/prompt fallback.
+// ─────────────────────────────────────────────────────────────────────────────
+(function () {
+  const PILL_ID = 'nav-update-pill';
+  const POLL_MS = 5 * 60 * 1000;
+  function _render(state) {
+    const pill = document.getElementById(PILL_ID);
+    if (!pill) return;
+    if (!state || !state.available) { pill.style.display = 'none'; return; }
+    const crit = state.critical ? ' ⚠️' : '';
+    pill.textContent = `🆕 v${state.latest}${crit}`;
+    pill.title = `Update available: v${state.latest} (running v${state.current})`;
+    pill.style.display = '';
+  }
+  async function _poll() {
+    try {
+      const r = await API.get('/api/app/update-status');
+      _render(r);
+      return r;
+    } catch (_) { _render(null); return null; }
+  }
+  function _click(e) {
+    if (typeof window.openUpdateModal === 'function') {
+      e.preventDefault();
+      window.openUpdateModal();
+    } else {
+      // Fallback for pages that don't load update.js — show window.open to the
+      // upgrade modal URL (admin can be opened manually, but for the local user
+      // we just warn — the modal is the proper UX on dashboard pages).
+      e.preventDefault();
+      const r = window.confirm('Update available — open bot admin dashboard to update?');
+      if (r) location.href = '/index.html';
+    }
+  }
+  function _bind() {
+    const pill = document.getElementById(PILL_ID);
+    if (pill) pill.addEventListener('click', _click);
+  }
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', () => { _bind(); _poll(); });
+  } else { _bind(); _poll(); }
+  setInterval(_poll, POLL_MS);
+  window.refreshUpdateStatus = _poll;
+})();

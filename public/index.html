@@ -33,6 +33,9 @@
   </script>
   <script>window.NAV_ACTIVE = 'bots';</script>
   <script src="/js/partials/nav.js?v=2026-09-04-dlc-everywhere"></script>
+  <!-- FIX-2026-09-09: OneClick Update — modal + auto-open UI. Loaded AFTER
+       ws-client.js (needs AdminModalAlert) + nav.js (provides #nav-update-pill). -->
+  <script src="/js/pages/update.js?v=2026-09-09-initial"></script>
   <script src="/js/partials/dailyTargetGauge.js?v=2026-09-04-dlc-everywhere"></script>
   <script src="/js/partials/rateLimitGauge.js?v=2026-09-04-dlc-everywhere"></script>
 </body>

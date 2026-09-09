@@ -370,6 +370,37 @@ const handlers = {
       port,
     };
   },
+
+  // FIX-2026-09-09: OneClick Update — admin-triggered apply_update command.
+  //   Payload: { version, tarballUrl, sha256, migrations, manifestHash?, tarballBytes? }
+  //   Reuses the same orchestrator as the local /api/app/apply-update endpoint.
+  //   Returns immediately; orchestrator runs in background and the pm2 reload
+  //   will terminate this process when phase 7 completes.
+  async apply_update(payload, _ctx) {
+    const required = ['version', 'tarballUrl', 'sha256'];
+    for (const k of required) {
+      if (!payload || !payload[k]) {
+        return { ok: false, action: 'apply_update', error: `missing ${k}` };
+      }
+    }
+    try {
+      const orchestrator = require('../services/updateOrchestrator');
+      // Kick off — don't await; pm2 reload will kill us at phase 7
+      orchestrator.applyUpdate({
+        version: payload.version,
+        tarballUrl: payload.tarballUrl,
+        sha256: payload.sha256,
+        migrations: Array.isArray(payload.migrations) ? payload.migrations : [],
+        manifestHash: payload.manifestHash,
+        tarballBytes: payload.tarballBytes,
+      }).catch((err) => {
+        logger.error({ err: err.message }, 'apply_update: orchestrator failed');
+      });
+      return { ok: true, action: 'apply_update', version: payload.version, note: 'kicked off; pm2 reload will activate' };
+    } catch (err) {
+      return { ok: false, action: 'apply_update', error: err.message };
+    }
+  },
 };
 
 /**

@@ -324,11 +324,24 @@ async function main() {
           runningBots,
           activePositions,
           uptime: Math.floor(process.uptime()),
+          botVersion: require('../package.json').version,
         };
       },
     });
   } catch (err) {
     logger.warn({ err: err.message }, 'adminMonitor start failed (non-fatal)');
+  }
+
+  // FIX-2026-09-09: OneClick Update — start update checker AFTER adminMonitor
+  //   (so we already have licenseKey + adminUrl loaded). Polls /api/release/latest
+  //   every 24h (configurable via ADMIN_UPDATE_CHECK_MS), emits `updateAvailable`
+  //   on eventBus + dispatches Telegram notification. Skipped if ADMIN_ENABLED
+  //   is not 'true' (handled inside start()).
+  try {
+    const updateChecker = require('./services/updateChecker');
+    updateChecker.start();
+  } catch (err) {
+    logger.warn({ err: err.message }, 'updateChecker start failed (non-fatal)');
   }
 
   // Phase 4-2026-08-29: chatLocalStore bootstrap — load chatDisplayName from AppConfig,
