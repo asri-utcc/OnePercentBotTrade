@@ -20,7 +20,13 @@
     "pm2:delete": "pm2 delete onepercentbot",
     "pm2:logs": "pm2 logs onepercentbot",
     "pm2:status": "pm2 status",
-    "pm2:monit": "pm2 monit"
+    "pm2:monit": "pm2 monit",
+    "pm2:start:faiz": "pm2 start ecosystem.faiz.config.js --env production",
+    "pm2:dev:faiz": "pm2 start ecosystem.faiz.config.js --env development",
+    "pm2:stop:faiz": "pm2 stop onepercentbot-faiz",
+    "pm2:reload:faiz": "pm2 reload onepercentbot-faiz",
+    "pm2:delete:faiz": "pm2 delete onepercentbot-faiz",
+    "pm2:logs:faiz": "pm2 logs onepercentbot-faiz"
   },
   "engines": {
     "node": ">=18.0.0"
