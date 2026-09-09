@@ -549,6 +549,32 @@ class BotManager {
               if (['selling', 'sold'].includes(trade.state)) {
                 logger.debug({ tradeId: trade._id.toString(), dbState: trade.state }, 'reconcile: BUY filled, trade already in selling/sold — skip');
               } else {
+                // FIX-2026-09-09 (ETCUSDT orphan bug): pre-check Binance ก่อนบอกว่า orphan
+                //   เคส: state='filled' + sellOrderId ค้างใน DB แต่ SELL ยังมีชีวิตบนกระดานจริง
+                //   (status='NEW' รอ fill ที่ TP) → reconcile เดิมบอก "no SELL on book" ตลอด 7 ชม.
+                //   fix: ถาม Binance ก่อน ถ้า SELL alive → sync state='selling' แล้ว skip orphan branch
+                if (trade.sellOrderId) {
+                  const liveSell = await binanceRest.getOrder({
+                    symbol: trade.symbol,
+                    orderId: trade.sellOrderId,
+                  }).catch(() => null);
+                  if (liveSell && ['NEW', 'PARTIALLY_FILLED'].includes(liveSell.status)) {
+                    await Trade.updateOne(
+                      { _id: trade._id, state: { $nin: ['sold'] } },
+                      { $set: { state: 'selling', sellStatus: liveSell.status } }
+                    );
+                    trade.state = 'selling';
+                    logger.warn({
+                      tradeId: trade._id.toString(),
+                      botId: trade.botId.toString(),
+                      sellOrderId: trade.sellOrderId,
+                      liveStatus: liveSell.status,
+                    }, 'reconcile: SELL alive on Binance — synced state to selling');
+                    continue;
+                  }
+                  // else: SELL cancelled/expired/not found → fall through to orphan logic
+                }
+
                 logger.warn({
                   tradeId: trade._id.toString(),
                   dbState: trade.state,
@@ -587,6 +613,27 @@ class BotManager {
                         buyPrice: buyPriceCalc,
                         buyQty: buyQtyCalc,
                         buyQuoteQty: parseFloat(order.cummulativeQuoteQty),
+                        // FIX-2026-09-09 (ETCUSDT orphan bug): เคย reset state='filled' แต่ไม่ล้าง
+                        //   sell fields → state='filled' แต่ sellOrderId/sellStatus ยังค้าง → mismatch
+                        //   → reconcile รอบถัดไปงงว่า SELL มีอยู่ไหม. fix: clear sell fields ที่อาจค้าง
+                        $unset: {
+                          sellOrderId: '',
+                          sellClientOrderId: '',
+                          sellStatus: '',
+                          sellPlacedAt: '',
+                          sellPrice: '',
+                          sellQty: '',
+                          sellFilledQty: '',
+                          sellAvgPrice: '',
+                          sellFilledAt: '',
+                          sellQuoteQty: '',
+                          sellCumulativeQuoteQty: '',
+                          sellFee: '',
+                          sellFeeAsset: '',
+                          sellInFlight: '',
+                          sellInFlightAt: '',
+                          // keep targetSellPrice — informational, used by telegram/UI
+                        },
                       }
                     );
                     trade.state = 'filled';
@@ -608,7 +655,27 @@ class BotManager {
                   //   - SELL อยู่บน order book ของ Binance แล้ว → fill เองได้แม้บอทปิดสนิท
                   //     และ positionWatchdog ดูแล state='selling' โดยไม่สน bot.enabled
                   const recoveryCount = trade.orphanBuyRecoveryCount || 0;
-                  const canRecover = bot.enabled === false
+                  // FIX-2026-09-09 (ETCUSDT orphan bug): backstop ก่อน auto-recovery
+                  //   - Fix A ข้างบนถาม Binance แล้วถ้า SELL alive → continue (skip orphan branch ทั้งหมด)
+                  //   - แต่ถ้า Fix A พลาด (API fail, race) และเข้ามาถึงตรงนี้: เช็ค Binance อีกครั้งก่อน
+                  //     เปิด BUY ใหม่/วาง SELL ใหม่ → กัน duplicate SELL (ออร์เดอร์เก่าค้าง + ออร์เดอร์ใหม่ซ้อน)
+                  //   - ถ้า SELL ยังมีชีวิตบนกระดาน → set recovered=true ข้าม handleBuyFilled ทั้งหมด
+                  if (trade.sellOrderId) {
+                    const preRecoverSell = await binanceRest.getOrder({
+                      symbol: trade.symbol,
+                      orderId: trade.sellOrderId,
+                    }).catch(() => null);
+                    if (preRecoverSell && ['NEW', 'PARTIALLY_FILLED', 'FILLED'].includes(preRecoverSell.status)) {
+                      recovered = true;
+                      logger.warn({
+                        tradeId: trade._id.toString(),
+                        sellOrderId: trade.sellOrderId,
+                        liveStatus: preRecoverSell.status,
+                        attempt: recoveryCount + 1,
+                      }, 'reconcile: pre-recovery backstop — SELL alive on Binance, skipping handleBuyFilled');
+                    }
+                  }
+                  const canRecover = !recovered && bot.enabled === false
                     && !bot.deletedAt
                     && ORPHAN_RECOVERABLE_PAUSE_REASONS.includes(bot.autoPauseReason)
                     && recoveryCount < MAX_ORPHAN_RECOVERY_ATTEMPTS
@@ -1003,12 +1070,28 @@ class BotManager {
               }
             } else if (order.status === 'NEW' && trade.state === 'selling') {
               // FIX: SELL ยังมีชีวิตอยู่ — ไม่ต้องทำอะไร
-              // (เคยมี bug: restart แล้ว reconcile วนซ้ำหรือไป trigger handleSellFilled ซ้ำ)
+              // (เคสมี bug: restart แล้ว reconcile วนซ้ำหรือไป trigger handleSellFilled ซ้ำ)
               // แค่ log debug เพื่อ visibility
               logger.debug({
                 tradeId: trade._id.toString(),
                 sellOrderId: trade.sellOrderId,
               }, 'reconcile: SELL still NEW on book, trade in selling state — skip');
+            } else if (['NEW', 'PARTIALLY_FILLED'].includes(order.status) && !['selling', 'sold'].includes(trade.state)) {
+              // FIX-2026-09-09 (ETCUSDT orphan bug): SELL อยู่บนกระดานจริง แต่ DB state mismatch
+              //   เคส: state='filled' หรือ 'placed' แต่ SELL มี orderId บน Binance รอ fill
+              //   → sync state='selling' + อัพเดต sellStatus จาก Binance เพื่อให้ positionWatchdog
+              //     และ UI เห็นตรงกัน และ reconcile รอบหน้าจะ skip (state='selling' ตรงเงื่อนไข)
+              await Trade.updateOne(
+                { _id: trade._id, state: { $nin: ['sold'] } },
+                { $set: { state: 'selling', sellStatus: order.status } }
+              );
+              logger.warn({
+                tradeId: trade._id.toString(),
+                botId: trade.botId.toString(),
+                sellOrderId: trade.sellOrderId,
+                liveStatus: order.status,
+                prevState: trade.state,
+              }, 'reconcile: SELL alive on Binance but DB state mismatch — synced to selling');
             }
           }
         }
