@@ -2270,22 +2270,22 @@ async function createBot() {
     safeTradeTrendlineEnabled: document.getElementById('nb-safe-trade-trendline-enabled').checked, // FIX-2026-08-03: Safe-trade filter #2 (LuxAlgo trendline) — opt-in, default OFF
     safeTradeNoTradeEnabled: document.getElementById('nb-safe-trade-no-trade-enabled').checked, // FIX-2026-08-05: Safe-trade filter #3 (no-trade engulfing/SS) — opt-in, default OFF
     autoPauseEnabled: document.getElementById('nb-auto-pause-enabled').checked, // FIX-2026-08-01: per-bot auto-pause on low Min-%KC (default ON)
-    autoPauseMinKcPct: parseFloat(document.getElementById('nb-auto-pause-min-kc').value) || 2, // FIX-2026-08-01: auto-pause threshold %
-    autoPauseMin24hVolUsdt: parseFloat(document.getElementById('nb-auto-pause-min-24h-vol').value) || 1000000, // FIX-2026-08-10: 24h volume guard (USDT, default 1M)
+    autoPauseMinKcPct: parseFloat(document.getElementById('nb-auto-pause-min-kc').value) || rec('autoPauseMinKcPct'), // FIX-2026-08-01: auto-pause threshold %
+    autoPauseMin24hVolUsdt: parseFloat(document.getElementById('nb-auto-pause-min-24h-vol').value) || rec('autoPauseMin24hVolUsdt'), // FIX-2026-08-10: 24h volume guard (USDT, default 1M)
     // FIX-2026-08-29: per-bot opt-in for auto-adjust (default ON; absent on legacy DOM → true)
     autoPauseAdjustEnabled: (() => { const e = document.getElementById('nb-auto-pause-adjust-enabled'); return e ? e.checked : true; })(),
     // FIX-2026-08-30 / Phase 4: per-bot Auto-Timing opt-in (3-state: null=inherit, true=force on, false=force off)
     autoTimingEnabled: (() => { const e = document.getElementById('nb-auto-timing-enabled'); if (!e) return null; return e.value === 'true' ? true : e.value === 'false' ? false : null; })(),
     autoArmStopLossOnUKC: document.getElementById('nb-auto-arm-stop-loss-ukc').checked, // FIX-2026-07-31 (F1): per-bot auto-arm SL-on-UKC toggle (default true)
-    autoArmLossPct: parseFloat(document.getElementById('nb-auto-arm-loss-pct').value) || 10, // FIX-2026-08-03 / EXT-2026-08-20: F1 loss threshold (1..99, default 10)
-    autoArmAgeHours: parseFloat(document.getElementById('nb-auto-arm-age-hours').value) || 4, // FIX-2026-08-03 / EXT-2026-08-20: F1 age threshold (0.5..999, default 4)
+    autoArmLossPct: parseFloat(document.getElementById('nb-auto-arm-loss-pct').value) || rec('autoArmLossPct'), // FIX-2026-08-03 / EXT-2026-08-20: F1 loss threshold (1..99, default 10)
+    autoArmAgeHours: parseFloat(document.getElementById('nb-auto-arm-age-hours').value) || rec('autoArmAgeHours'), // FIX-2026-08-03 / EXT-2026-08-20: F1 age threshold (0.5..999, default 4)
     slUkcTriggerOnProfit: document.getElementById('nb-sl-ukc-trigger-on-profit').checked, // FIX-2026-08-03: SL-UKC trigger on profit (default false)
     tpTrendEnabled: document.getElementById('nb-tp-trend-enabled').checked, // FIX-2026-08-01: per-bot TP trend ×N master toggle (default true)
-    tpTrendMultiplier: parseFloat(document.getElementById('nb-tp-trend-multiplier').value) || 2, // FIX-2026-07-31 (F2): per-bot TP ×N multiplier (1..10, default 2)
+    tpTrendMultiplier: parseFloat(document.getElementById('nb-tp-trend-multiplier').value) || rec('tpTrendMultiplier'), // FIX-2026-07-31 (F2): per-bot TP ×N multiplier (1..10, default 2)
     autoUpdateTp: document.getElementById('nb-auto-update-tp').checked, // FIX-2026-07-23: TP auto-update toggle
     // FIX-2026-09-02: Round-down Capital (opt-in per-bot) — ลด notional ให้พอดียอดคงเหลือ
     roundDownCapitalEnabled: document.getElementById('nb-round-down-capital-enabled') ? document.getElementById('nb-round-down-capital-enabled').checked : false,
-    roundDownCapitalMin: parseFloat(document.getElementById('nb-round-down-capital-min')?.value) || 5.5,
+    roundDownCapitalMin: parseFloat(document.getElementById('nb-round-down-capital-min')?.value) || rec('roundDownCapitalMin'),
     // FIX-2026-07-31: ส่ง enabled ตาม checkbox — atomic create + enable ใน 1 round-trip
     enabled: document.getElementById('nb-auto-enable').checked === true,
     password: document.getElementById('nb-password').value || undefined, // up-front pw if user typed it

@@ -276,12 +276,19 @@
                     <option value="1m">1m</option><option value="3m" selected>3m</option>
                     <option value="5m">5m</option><option value="15m">15m</option>
                     <option value="30m">30m</option><option value="1h">1h</option>
-                    <option value="2h">2h</option><option value="4h">4h</option><option value="1d">1d</option>
+                    <option value="2h">2h</option><option value="4h">4h</option>
+                    <option value="6h">6h</option>
+                    <option value="8h">8h</option>
+                    <option value="12h">12h</option>
+                    <option value="1d">1d</option>
+                    <option value="3d">3d</option>
+                    <option value="1w">1w</option>
+                    <option value="1M">1M</option>
                   </select>
                 </div>
                 <div class="bot-settings-field">
                   <label class="lux-form-label" for="nb-capital">ทุนต่อไม้ (USDT)</label>
-                  <input type="number" class="form-control" id="nb-capital" value="9" step="0.01" min="1" />
+                  <input type="number" class="form-control" id="nb-capital" value="8" step="0.01" min="1" />
                 </div>
                 <div class="bot-settings-field">
                   <label class="lux-form-label" for="nb-maxtrades">จำนวนไม้สูงสุด</label>
@@ -290,7 +297,7 @@
                 <!-- FIX-2026-09-02: Round-down Capital (opt-in per-bot) -->
                 <div class="bot-settings-option is-full">
                   <label class="form-check form-switch">
-                    <input class="form-check-input" type="checkbox" id="nb-round-down-capital-enabled" />
+                    <input class="form-check-input" type="checkbox" id="nb-round-down-capital-enabled" checked />
                     <span class="form-check-label">💸 <strong>Round-down ทุนเมื่อเงินไม่พอ</strong></span>
                   </label>
                   <div class="bot-settings-dependent">
@@ -339,14 +346,14 @@
                 </div>
                 <div class="bot-settings-option is-full">
                   <label class="form-check form-switch">
-                    <input class="form-check-input" type="checkbox" id="nb-s1-only-down" checked />
+                    <input class="form-check-input" type="checkbox" id="nb-s1-only-down" />
                     <span class="form-check-label">📉 <strong>S1 เฉพาะ bg 2→3 (ขาลง)</strong> — ข้าม bg 2→1 เพื่อลดการซื้อราคาสูง</span>
                   </label>
                   <small class="text-muted d-block mt-1">เปิด: รับเฉพาะสัญญาณ bg_prev=2 และ bg=3 · ปิด: รับทั้ง bg=1 และ bg=3</small>
                 </div>
                 <div class="bot-settings-option is-full">
                   <label class="form-check form-switch">
-                    <input class="form-check-input" type="checkbox" id="nb-xs1-enabled" checked />
+                    <input class="form-check-input" type="checkbox" id="nb-xs1-enabled" />
                     <span class="form-check-label">🚫 <strong>XS1 anti-dump gate</strong> — ข้าม S1 เมื่อพบ candle-wide dump</span>
                   </label>
                   <small class="text-muted d-block mt-1">ช่วยป้องกันการซื้อระหว่างราคากำลังไหลลงเร็ว (เปิดเป็นค่าเริ่มต้น)</small>
@@ -416,7 +423,7 @@
                 </div>
                 <div class="bot-settings-option">
                   <label class="form-check form-switch">
-                    <input class="form-check-input" type="checkbox" id="nb-dlc-enabled" />
+                    <input class="form-check-input" type="checkbox" id="nb-dlc-enabled" checked />
                     <span class="form-check-label">🪜 <strong>Dynamic Layer Control (DLC)</strong></span>
                   </label>
                   <div class="alert alert-warning py-1 px-2 mt-1" id="nb-dlc-warning" style="display:none; font-size:0.85rem;">
@@ -443,12 +450,12 @@
                     <div class="row g-2">
                       <div class="col-md-6">
                         <label class="form-label" for="nb-auto-pause-min-kc">Min-%KC threshold (%)</label>
-                        <input type="number" class="form-control form-control-sm" id="nb-auto-pause-min-kc" value="2" step="0.1" min="0.1" max="50" />
+                        <input type="number" class="form-control form-control-sm" id="nb-auto-pause-min-kc" value="1.2" step="0.1" min="0.1" max="50" />
                         <small class="text-muted">pause เมื่อ Keltner Channel width ต่ำกว่า</small>
                       </div>
                       <div class="col-md-6">
                         <label class="form-label" for="nb-auto-pause-min-24h-vol">Min 24h Vol (USDT)</label>
-                        <input type="number" class="form-control form-control-sm" id="nb-auto-pause-min-24h-vol" value="1000000" step="1000" min="0" />
+                        <input type="number" class="form-control form-control-sm" id="nb-auto-pause-min-24h-vol" value="400000" step="1000" min="0" />
                         <small class="text-muted">pause เมื่อ 24h quote-volume ต่ำกว่า; resume ต้องผ่านทั้ง 2 เงื่อนไข</small>
                       </div>
                     </div>
@@ -487,11 +494,11 @@
                   <div class="bot-settings-dependent bot-settings-grid">
                     <div>
                       <label class="form-label" for="nb-auto-arm-loss-pct">ขาดทุนขั้นต่ำ (%)</label>
-                      <input type="number" class="form-control" id="nb-auto-arm-loss-pct" step="0.5" min="1" max="90" value="6.3" />
+                      <input type="number" class="form-control" id="nb-auto-arm-loss-pct" step="0.5" min="1" max="90" value="10" />
                     </div>
                     <div>
                       <label class="form-label" for="nb-auto-arm-age-hours">อายุ Position ขั้นต่ำ (ชม.)</label>
-                      <input type="number" class="form-control" id="nb-auto-arm-age-hours" step="0.5" min="0.5" max="168" value="4" />
+                      <input type="number" class="form-control" id="nb-auto-arm-age-hours" step="0.5" min="0.5" max="999" value="828" />
                     </div>
                   </div>
                   <small class="text-muted d-block mt-2">เมื่อครบทั้ง loss% และอายุ ระบบจะ arm safety flag ให้ position นั้น</small>
@@ -573,12 +580,12 @@
                 </div>
                 <div class="bot-settings-option is-full">
                   <label class="form-check form-switch mb-0">
-                    <input class="form-check-input" type="checkbox" id="nb-cb-auto-unlock-enabled" />
+                    <input class="form-check-input" type="checkbox" id="nb-cb-auto-unlock-enabled" checked />
                     <span class="form-check-label">🔓 <strong>ปลด CB Cooldown อัตโนมัติ</strong></span>
                   </label>
                   <div class="bot-settings-dependent">
                     <label for="nb-cb-auto-unlock-threshold" class="form-label">กำไรขั้นต่ำของสัญญาณ (%)</label>
-                    <input type="number" class="form-control form-control-sm" id="nb-cb-auto-unlock-threshold" min="0.5" max="5" step="0.1" value="1" />
+                    <input type="number" class="form-control form-control-sm" id="nb-cb-auto-unlock-threshold" min="0.5" max="5" step="0.1" value="2" />
                     <small class="text-muted">ปลดเมื่อพบ profitable signals อย่างน้อย 3 ครั้ง (ไม่มี whipsaw guard)</small>
                   </div>
                 </div>
@@ -603,14 +610,14 @@
                 </div>
                 <div class="bot-settings-option is-full">
                   <label class="form-check form-switch">
-                    <input class="form-check-input" type="checkbox" id="nb-safe-trade-trendline-enabled" checked />
+                    <input class="form-check-input" type="checkbox" id="nb-safe-trade-trendline-enabled" />
                     <span class="form-check-label">📐 <strong>Safe Trade #2 — Trendline Support</strong></span>
                   </label>
                   <small class="text-muted d-block mt-1">ข้าม BUY เมื่อราคาต่ำกว่าเส้น LuxAlgo pivot-low บน upper-TF · ไม่แนะนำสำหรับ DCA</small>
                 </div>
                 <div class="bot-settings-option is-full">
                   <label class="form-check form-switch">
-                    <input class="form-check-input" type="checkbox" id="nb-safe-trade-no-trade-enabled" checked />
+                    <input class="form-check-input" type="checkbox" id="nb-safe-trade-no-trade-enabled" />
                     <span class="form-check-label">🚫 <strong>Safe Trade #3 — Bearish Engulfing / Shooting Star</strong></span>
                   </label>
                   <small class="text-muted d-block mt-1">ข้าม BUY เมื่อ upper-TF มี no-trade pattern แบบ real-time · ไม่แนะนำสำหรับ DCA · FAIL-OPEN เมื่อข้อมูลไม่พอ</small>
