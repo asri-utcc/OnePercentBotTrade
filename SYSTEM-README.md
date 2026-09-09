@@ -1,6 +1,6 @@
 # OnePercentBot System
 
-Binance Spot maker-only trading bot with central admin monitor + license control. Three sibling projects, one shared MongoDB.
+Binance Spot maker-only trading bot with central admin monitor + license control. Two sibling projects sharing one MongoDB.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
@@ -17,12 +17,6 @@ Binance Spot maker-only trading bot with central admin monitor + license control
 │                │                                     │              │
 │                └──────────► MongoDB ◄────────────────┘              │
 │                              27017                                  │
-│                                                                     │
-│   OnePercentBotPentest                                                 │
-│   ┌───────────────────────────┐                                       │
-│   │ Security audit tooling    │                                       │
-│   │ Brute-force testing       │                                       │
-│   └───────────────────────────┘                                       │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -32,7 +26,6 @@ Binance Spot maker-only trading bot with central admin monitor + license control
 |---------|------|---------|--------|
 | [OnePercentBotTrade](OnePercentBotTrade/) | **6015** | The trading bot itself (signal engine + dashboard + executor) | [README](OnePercentBotTrade/README.md) |
 | [OnePercentBot-Admin](OnePercentBot-Admin/) | **6016** | Central monitor, license control, audit log | [README](OnePercentBot-Admin/README.md) |
-| [OnePercentBotPentest](OnePercentBotPentest/) | — | Security audit tooling | [README](OnePercentBotPentest/README.md) |
 
 ## Quick Links
 

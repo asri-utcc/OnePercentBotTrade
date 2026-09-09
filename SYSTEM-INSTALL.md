@@ -38,7 +38,6 @@ cd OnePercentBot-System
 # Install each project
 cd OnePercentBotTrade && npm install && cd ..
 cd OnePercentBot-Admin && npm install && cd ..
-cd OnePercentBotPentest && npm install && cd ..
 ```
 
 ## 2. Generate Secrets
