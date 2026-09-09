@@ -478,13 +478,20 @@
         });
       };
     }
-    document.getElementById('mc-select-deleted').onclick = () => {
-      container.querySelectorAll('.mc-bot-check').forEach((checkbox, index) => {
-        checkbox.checked = cachedBots[index] && !!cachedBots[index].deletedAt;
-      });
-    };
     const restoreBtn = document.getElementById('mc-toggle-restore');
     if (restoreBtn) restoreBtn.onclick = bulkRestore;
+    // FIX-2026-09-09: mc-select-deleted is conditional on deletedCount > 0
+    //   (template line 431). New instances with 0 deleted bots threw
+    //   "Cannot set properties of null (setting 'onclick')" here. Mirror
+    //   the not-deleted/restore guards above.
+    const deletedBtn = document.getElementById('mc-select-deleted');
+    if (deletedBtn) {
+      deletedBtn.onclick = () => {
+        container.querySelectorAll('.mc-bot-check').forEach((checkbox, index) => {
+          checkbox.checked = cachedBots[index] && !!cachedBots[index].deletedAt;
+        });
+      };
+    }
 
     document.getElementById('mc-toggle-stop').onclick = () => bulkToggle('disable', '⏸ Stop');
     // FIX-2026-08-14: Set to new bot — collect form values, stash in sessionStorage, open New Bot modal
