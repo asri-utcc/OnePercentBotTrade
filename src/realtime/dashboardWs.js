@@ -4,6 +4,9 @@ const WebSocket = require('ws');
 const url = require('url');
 const eventBus = require('../services/eventBus');
 const logger = require('../utils/logger');
+// FIX-2026-09-09: hoisted to top so the per-instance session cookie name
+//   (config.sessionCookieName) is available during WS auth.
+const config = require('../../config');
 
 const EVENTS_TO_FORWARD = [
   'bot:status',
@@ -116,14 +119,16 @@ class DashboardWs {
       })
     );
 
-    const sid = cookies['connect.sid'];
+    // FIX-2026-09-09: cookie name is configurable per-instance (see config.sessionCookieName).
+    //   Multi-instance browsers need separate cookies per bot, so we read the configured
+    //   name instead of the hardcoded 'connect.sid'.
+    const sid = cookies[config.sessionCookieName];
     if (!sid) return false;
 
     // ตรวจ session โดยตรงใน MongoStore
     const session = await new Promise((resolve) => {
       // ใช้ connect-mongo โดยตรง
       const MongoStore = require('connect-mongo');
-      const config = require('../../config');
       const store = MongoStore.create({
         mongoUrl: config.mongoUri,
         collectionName: 'sessions',

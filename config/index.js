@@ -28,6 +28,13 @@ const config = {
 
   // Auth / session
   sessionSecret: required('SESSION_SECRET'),
+  // FIX-2026-09-09: per-instance cookie name. When 2+ bots run on the same host
+  //   and the user opens them in the same browser, the default 'connect.sid'
+  //   cookie name collides across ports (cookies are domain-scoped, NOT port-scoped)
+  //   → logging into one overwrites the other's session cookie. Use a unique
+  //   name per instance (e.g. 'connect.sid.gigi', 'connect.sid.faiz') so each
+  //   instance gets its own cookie in the same browser jar.
+  sessionCookieName: optional('SESSION_COOKIE_NAME', 'connect.sid'),
   dashboardPassword: optional('DASHBOARD_PASSWORD', ''),
   // Password ที่ต้องใส่เพื่อทำ action อันตราย (สร้าง/ลบ/เปิด/ปิดบอท)
   // ถ้าไม่ตั้ง จะ fallback ไปใช้ dashboardPassword (เพื่อไม่ให้ใช้งานเดิม break)

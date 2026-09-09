@@ -86,6 +86,10 @@ function createApp() {
 
   // Session
   app.use(session({
+    // FIX-2026-09-09: per-instance cookie name — see config.sessionCookieName.
+    //   Defaults to 'connect.sid' for single-instance back-compat. Multi-instance
+    //   deployments set SESSION_COOKIE_NAME per .env.<name>.
+    name: config.sessionCookieName,
     secret: config.sessionSecret,
     resave: false,
     saveUninitialized: false,
