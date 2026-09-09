@@ -29,6 +29,9 @@
   <!-- FIX-2026-08-14: Import/Export bot settings (shared across 4 surfaces) -->
   <script src="/js/botConfigIO.js?v=2026-09-04-dlc-everywhere"></script>
   <script src="/js/pages/autoTiming.js?v=2026-09-01-pnl-strip"></script>
-  <script src="/js/pages/settings.js?v=2026-09-04-dlc-everywhere"></script>
+  <!-- FIX-2026-09-09: Browser-side mirror of src/services/botDefaults.js → RECOMMENDED_DEFAULTS.
+       MUST load before any page script that reads window.RECOMMENDED_DEFAULTS / window.rec(). -->
+  <script src="/js/utils/recommendedDefaults.js?v=2026-09-09-recommended"></script>
+  <script src="/js/pages/settings.js?v=2026-09-09-batch3"></script>
 </body>
 </html>

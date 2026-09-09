@@ -18,6 +18,7 @@ let autoReserveCfg = null; // FIX-2026-08-24: auto reserve/release USDT config
 let autoPauseAdjustCfg = null; // FIX-2026-08-29: auto-pause threshold auto-adjust config
 let consentStatus = null;  // FIX-2026-08-26 Phase 3a: GET /api/consent/status for Settings page
 let licenseInfo = null;   // FIX-2026-08-26 Phase 3a: GET /api/license/info for Settings page
+let currentCbVersion = 'v3'; // FIX-2026-09-09 Batch 3: populated by loadConfig() from adminCfg.config.cbVersion — gates Bot Defaults CBv2/CBv3 toggle visibility
 let configBackupPreview = null; // FIX-2026-08-29: GET /api/admin/config/backup/preview
 let autoTimingCfg = null; // FIX-2026-08-30 / Phase 4: Auto-Timing config
 
@@ -62,9 +63,12 @@ async function loadConfig() {
     }
     try {
       adminCfg = await API.get('/api/admin/app-config');
+      // FIX-2026-09-09 Batch 3: expose cbVersion globally so renderBotDefaultsSection can gate CBv2/CBv3 toggles
+      currentCbVersion = (adminCfg && adminCfg.config && adminCfg.config.cbVersion) || 'v3';
     } catch (err) {
       console.warn('admin app-config load failed:', err.message);
       adminCfg = { config: {} };
+      currentCbVersion = 'v3';
     }
     // FIX-2026-08-08 (rev3): Bot Defaults
     try {
@@ -269,6 +273,7 @@ function renderBotDefaultsSection() {
       <strong>📌 วิธีใช้:</strong> ตั้งค่าเริ่มต้นทุก field ที่จะใช้ตอนสร้างบอทใหม่ (POST /api/bots)
       · ค่าเหล่านี้จะถูก pre-fill ใน New Bot modal บน <a href="/bots.html">bots.html</a>
       · บอทเดิมที่มีอยู่ไม่เปลี่ยนแปลง (ต้องแก้ทีละบอทผ่าน <a href="/bot-edit.html">bot-edit</a>)
+      <a href="#group-chat" class="float-end badge text-bg-secondary text-decoration-none">💬 → Chat Display Name</a>
     </div>
 
     <!-- ทุน & ความเสี่ยง -->
@@ -346,18 +351,21 @@ function renderBotDefaultsSection() {
           <span class="form-check-label">🚨 Circuit-breaker panic-sell (CB)</span>
         </label>
       </div>
+      ${(typeof currentCbVersion === 'undefined' || currentCbVersion === 'v2') ? `
       <div class="col-md-4">
         <label class="form-check form-switch">
           <input type="checkbox" class="form-check-input" id="bd-cbv2-enabled" ${d.cbv2Enabled ? 'checked' : ''} />
           <span class="form-check-label">💎 CBv2 sustained panic-sell</span>
         </label>
-      </div>
+      </div>` : ''}
+      ${(typeof currentCbVersion === 'undefined' || currentCbVersion === 'v3') ? `
       <div class="col-md-4">
         <label class="form-check form-switch">
           <input type="checkbox" class="form-check-input" id="bd-cbv3-enabled" ${d.cbv3Enabled ? 'checked' : ''} />
           <span class="form-check-label">💎 CBv3 panic-sell (CBv2 + ST3)</span>
         </label>
-      </div>
+      </div>` : ''}
+      <div class="col-md-12"><small class="text-muted-3">⚙️ Active CB version: <strong>${typeof currentCbVersion !== 'undefined' ? currentCbVersion : 'v3 (default)'}</strong> · กำหนดที่ <a href="#group-cb-version">🔧 CB Version</a> section ด้านบน</small></div>
       <div class="col-md-4">
         <label class="form-check form-switch">
           <input type="checkbox" class="form-check-input" id="bd-cbv5-enabled" ${d.cbv5Enabled ? 'checked' : ''} />
@@ -406,10 +414,6 @@ function renderBotDefaultsSection() {
           <input type="checkbox" class="form-check-input" id="bd-round-down-capital-enabled" ${d.roundDownCapitalEnabled ? 'checked' : ''} />
           <span class="form-check-label">💸 Round-down ทุนเมื่อเงินไม่พอ</span>
         </label>
-      </div>
-      <div class="col-md-4">
-        <label class="form-label" for="bd-auto-timing-enabled">⏱️ Auto-Timing (heatmap-driven)</label>
-        <select class="form-select form-select-sm" id="bd-auto-timing-enabled">
       </div>
       <div class="col-md-4">
         <label class="form-check form-switch">
@@ -468,6 +472,24 @@ function renderBotDefaultsSection() {
           <input type="checkbox" class="form-check-input" id="bd-dca-enabled" ${d.dcaEnabled ? 'checked' : ''} />
           <span class="form-check-label">📚 DCA + BEP stack mode</span>
         </label>
+        <div class="mt-1 ms-4">
+          <label class="form-label small mb-0">Max layers</label>
+          <input type="number" class="form-control form-control-sm" id="bd-dca-max-layers" value="${d.dcaMaxLayers ?? 3}" step="1" min="1" max="10" style="max-width:90px;" />
+        </div>
+      </div>
+      <!-- FIX-2026-09-09 Batch 3: Martingale per-bot defaults (was missing from form — only present in BD_RECOMMENDED) -->
+      <div class="col-md-4">
+        <label class="form-check form-switch">
+          <input type="checkbox" class="form-check-input" id="bd-martingale-enabled" ${d.martingaleEnabled ? 'checked' : ''} />
+          <span class="form-check-label">🎲 Martingale sizing (×N)</span>
+        </label>
+        <div class="mt-1 ms-4">
+          <label class="form-label small mb-0">Multiplier × N</label>
+          <input type="number" class="form-control form-control-sm" id="bd-martingale-multiplier" value="${d.martingaleMultiplier ?? 1.5}" step="0.1" min="1.1" max="5" style="max-width:90px;" />
+          <label class="form-label small mb-0 mt-1">Max layer notional (USDT)</label>
+          <input type="number" class="form-control form-control-sm" id="bd-martingale-max-notional" value="${d.martingaleMaxLayerNotional ?? 100}" step="1" min="1" max="1000" style="max-width:110px;" />
+          <small class="text-muted-3">Martingale ต้องเปิด DCA ก่อน (mutex enforced server-side)</small>
+        </div>
       </div>
       <!-- FIX-2026-09-05: DLC per-bot default toggle — sits NEXT to DPS in Bot Defaults
            (was: missing → user reported "หาใน setting bot default ไม่มีให้แก้ไขเปิดปิดเหมือนกัน") -->
@@ -2706,10 +2728,13 @@ async function resetDpsStateAll() {
 }
 
 // ════════ Bot Defaults (NEW 2026-08-08 rev3) ════════
+// FIX-2026-09-09 audit Batch 3: mirror of src/services/botDefaults.js → RECOMMENDED_DEFAULTS
+//   browser-side mirror lives at public/js/utils/recommendedDefaults.js
+//   Tests: tests/recommendedDefaultsMirrorSync.test.js verifies both stay in sync.
 const BD_RECOMMENDED = {
   defaultSymbol: 'BNBUSDT',
   defaultTimeframe: '3m',
-  capitalPerTrade: 9,
+  capitalPerTrade: 8,
   maxTrades: 1,
   tpPercent: 0.1,
   retryTimeMin: 0.2,
@@ -2723,14 +2748,12 @@ const BD_RECOMMENDED = {
   martingaleMultiplier: 1.5,
   martingaleMaxLayerNotional: 100,
   s1OnlyDown: false,
-  xs1Enabled: true,
-  cbEnabled: true,
-  // FIX-2026-09-04: align with round-4 directive — CB family default OFF (was true, caused invisible divergence)
+  xs1Enabled: false,
+  cbEnabled: false,
   cbv2Enabled: false,
   cbv2LockHours: 8,
   cbv3Enabled: false,
   cbv3LockHours: 8,
-  // FIX-2026-09-03: CBv5 opt-in (was true) — see src/services/tierTemplates.js
   cbv5Enabled: false,
   cbv5LockHours: 4,
   cbv5KcLen: 20,
@@ -2743,36 +2766,36 @@ const BD_RECOMMENDED = {
   cbv5VolMaLen: 20,
   cbv5VolMultiplier: 1.5,
   cbv5DebounceCandles: 5,
-  cbAutoUnlockEnabled: false,
-  cbAutoUnlockThresholdPct: 1.0,
+  cbAutoUnlockEnabled: true,
+  cbAutoUnlockThresholdPct: 2,
   dynamicSizeEnabled: true,
-  safeTradeEnabled: true,
+  safeTradeEnabled: false,
   safeTradeTrendlineEnabled: false,
   safeTradeNoTradeEnabled: false,
   autoPauseEnabled: true,
-  autoPauseMinKcPct: 2,
-  autoPauseMin24hVolUsdt: 1_000_000,
-  autoPauseAdjustEnabled: true, // FIX-2026-08-29: per-bot opt-in for auto-adjust (default ON)
+  autoPauseMinKcPct: 1.2,
+  autoPauseMin24hVolUsdt: 400000,
+  autoPauseAdjustEnabled: true,
   autoArmStopLossOnUKC: true,
-  autoArmLossPct: 6.3,
-  autoArmAgeHours: 4,
-  // FIX-2026-09-06: AUv2 — F1 v2 (shallow-loss exit) — default OFF (opt-in)
-  auv2Enabled: false,
-  auv2MinAgeHours: 24,
-  auv2LossMode: 'pct',
-  auv2MaxLossPct: 5,
-  auv2MaxLossThb: 200,
-  auv2MaxWaitDays: 7,
-  slUkcTriggerOnProfit: false,
+  autoArmLossPct: 10,
+  autoArmAgeHours: 828,
+  // AUv2 — F1 v2 (shallow-loss exit) — DEFAULT ON with thb mode
+  auv2Enabled: true,
+  auv2MinAgeHours: 128,
+  auv2LossMode: 'thb',
+  auv2MaxLossPct: 8,
+  auv2MaxLossThb: 22,
+  auv2MaxWaitDays: 0,
+  slUkcTriggerOnProfit: true,
   tpTrendEnabled: true,
   tpTrendMultiplier: 2,
   autoUpdateTp: true,
   stopLossOnUpperKC: false,
-  // FIX-2026-09-02: Round-down Capital (opt-in per-bot — default OFF, min 5.5 USDT)
-  roundDownCapitalEnabled: false,
+  // Round-down Capital — DEFAULT ON (recommend flexible notional)
+  roundDownCapitalEnabled: true,
   roundDownCapitalMin: 5.5,
-  // FIX-2026-09-05: DLC per-bot default (opt-in, like DPS recommended=true) — but DLC is mutually exclusive with DCA, so default OFF keeps DCA available
-  dlcEnabled: false,
+  // DLC — DEFAULT ON (since DCA/Martingale are OFF)
+  dlcEnabled: true,
   dlcBaseLossPct: -10,
 };
 
@@ -2801,6 +2824,9 @@ async function saveBotDefaults() {
     suggestTpWindow: int('bd-suggest-tp-window'),
     dcaEnabled: isChecked('bd-dca-enabled'),
     dcaMaxLayers: int('bd-dca-max-layers'),
+    martingaleEnabled: isChecked('bd-martingale-enabled'),
+    martingaleMultiplier: num('bd-martingale-multiplier'),
+    martingaleMaxLayerNotional: num('bd-martingale-max-notional'),
     // FIX-2026-09-05: DLC per-bot defaults — dlcEnabled toggle + dlcBaseLossPct field (mirror DPS pattern in admin whitelist)
     //   - dlcEnabled=true requires dcaEnabled=false (mutex handled by admin.routes.js bulk mutex check)
     dlcEnabled: isChecked('bd-dlc-enabled'),
