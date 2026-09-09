@@ -27,7 +27,7 @@ docker run -d --name mongodb -p 27017:27017 mongo:7
 
 ### 2. ติดตั้ง dependencies
 ```bash
-cd e:\NodeJS\OnePercentBotTrade
+cd OnePercentBotTrade  # adjust path to where you cloned the repo
 npm install
 ```
 
@@ -50,8 +50,10 @@ npm run dev
 
 ### 5. เปิด Dashboard
 ```
-http://localhost:3000
+http://localhost:6015
 ```
+
+(Port 6015 is the default; override via `PORT=` in `.env`. Admin monitor uses **6016**.)
 
 ครั้งแรกจะให้ตั้ง password + (optional) ใส่ Binance API keys
 
@@ -64,8 +66,6 @@ http://localhost:3000
 
 ## Architecture
 
-ดูรายละเอียดใน [C:\Users\asriu\.claude\plans\curious-humming-thacker.md](../../.claude/plans/curious-humming-thacker.md) (plan file)
-
 ```
 src/
 ├── server.js          # bootstrap
@@ -73,15 +73,20 @@ src/
 ├── db/                # Mongoose models + connection
 ├── binance/           # REST, WS, symbolInfo, fees
 ├── core/              # signalEngine, trader, botManager, backtester
-├── services/          # eventBus, klineCache, crypto
+├── services/          # eventBus, klineCache, crypto, botDefaults
 ├── api/routes/        # auth, bots, trades, signals, chart, backtest, account
+├── admin-monitor/     # phone-home (heartbeat) + command executor
 ├── realtime/          # dashboardWs (WebSocket server)
 └── utils/             # logger, rateLimiter
 
 public/                # Frontend dashboard (plain HTML/JS)
-├── login.html, bots.html, bot-edit.html, chart.html, backtest.html
+├── login.html, bots.html, bot-edit.html, chart.html, chart-monitor.html, backtest.html
 └── js/, css/
 ```
+
+For system-wide overview (3 sibling projects), see [SYSTEM-README.md](./SYSTEM-README.md).
+For install instructions, see [SYSTEM-INSTALL.md](./SYSTEM-INSTALL.md).
+For connecting multiple bots/admins, see [SYSTEM-CONNECTION.md](./SYSTEM-CONNECTION.md).
 
 ## Verification / Testing
 
