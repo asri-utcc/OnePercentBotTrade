@@ -27,6 +27,9 @@
   <script src="/js/partials/rateLimitGauge.js?v=2026-09-04-dlc-everywhere"></script>
   <!-- FIX-2026-08-14: Import/Export bot settings (shared across 4 surfaces) -->
   <script src="/js/botConfigIO.js?v=2026-09-04-dlc-everywhere"></script>
-  <script src="/js/pages/bot-edit.js?v=2026-09-04-dlc-everywhere"></script>
+  <!-- FIX-2026-09-09: Browser-side mirror of src/services/botDefaults.js → RECOMMENDED_DEFAULTS.
+       MUST load before any page script that reads window.RECOMMENDED_DEFAULTS / window.rec(). -->
+  <script src="/js/utils/recommendedDefaults.js?v=2026-09-09-recommended"></script>
+  <script src="/js/pages/bot-edit.js?v=2026-09-09-recommended-batch2"></script>
 </body>
 </html>
