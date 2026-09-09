@@ -50,7 +50,11 @@ const IGNORE_EXTS = new Set(['.bak', '.tmp', '.log']);
 const manifestHash = sha256( Σ sorted(file→hash pairs) );
 ```
 
-Current bot hash (2026-09-09): `4165261f997255e7ea46c3b8dcacd42a791acfea5491829c408edc69b653a6db` (135 files).
+Current bot hash (2026-09-09): `21ac0891d3c7acdb7a28414ee92e0bce7639ff53f289deba77bd88c5270d200d` (135 files).
+
+> **Changelog**
+> - 2026-09-09 21ac0891... (135 files) — MACHINE_ID_FILE env override added to `src/admin-monitor/machineId.js` for multi-instance support
+> - 2026-09-09 4165261f... (135 files) — initial reference hash
 
 ## Strengths ✅
 
@@ -122,7 +126,7 @@ Current bot hash (2026-09-09): `4165261f997255e7ea46c3b8dcacd42a791acfea5491829c
 # Verify hash tool runs against clean bot repo
 cd OnePercentBot-Admin
 node tools/hash-bot-src.js --json
-# → {"ok":true,"manifestHash":"416526...","fileCount":135,...}
+# → {"ok":true,"manifestHash":"21ac0891...","fileCount":135,...}
 
 # Set codeHash via API
 curl -X POST http://localhost:6016/api/admin/licenses/<KEY>/set-code-hash \

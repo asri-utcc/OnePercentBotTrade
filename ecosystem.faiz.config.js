@@ -27,6 +27,34 @@
  * Recommended: 3000 per instance when running 2, 2000 when running 3.
  */
 
+const fs = require('fs');
+const path = require('path');
+
+/**
+ * Load .env.faiz into a flat object so we can inline it into PM2's `env` block.
+ * Why not `env_file:`? PM2 6.x's env_file is unreliable across versions; inlining
+ * via the `env` block is the most portable — every PM2 release honors it.
+ * Format: KEY=VALUE per line, # comments, no quoting/escaping needed for our keys.
+ */
+function loadEnvFile(filePath) {
+  if (!fs.existsSync(filePath)) {
+    throw new Error(`[ecosystem.faiz] Required env file missing: ${filePath}`);
+  }
+  const out = {};
+  for (const raw of fs.readFileSync(filePath, 'utf8').split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line || line.startsWith('#')) continue;
+    const eq = line.indexOf('=');
+    if (eq <= 0) continue;
+    const key = line.slice(0, eq).trim();
+    const val = line.slice(eq + 1).trim();
+    out[key] = val;
+  }
+  return out;
+}
+
+const FAIZ_ENV = loadEnvFile(path.resolve(__dirname, '.env.faiz'));
+
 module.exports = {
   apps: [
     {
@@ -41,12 +69,16 @@ module.exports = {
       kill_timeout: 10000,
       wait_ready: false,
       listen_timeout: 10000,
-      // Load env from .env.faiz — PM2 will overlay these on top of the env block below
-      // (use --env production to pick up NODE_ENV=production; .env.faiz holds the rest)
+      // FIX-2026-09-09: Inline .env.faiz into env block (PM2's env_file is
+      //   flaky across versions; inlining is the most portable — every PM2
+      //   release honors the `env` block). NODE_ENV can still be toggled via
+      //   `--env production|development` without touching .env.faiz.
       env: {
+        ...FAIZ_ENV,
         NODE_ENV: 'production',
       },
       env_development: {
+        ...FAIZ_ENV,
         NODE_ENV: 'development',
       },
       // Separate log files (avoid mixing with owner instance)
