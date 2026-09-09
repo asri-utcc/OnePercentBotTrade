@@ -286,7 +286,7 @@ function renderBotDefaultsSection() {
       <div class="col-md-3">
         <label class="form-label">Timeframe default</label>
         <select class="form-select" id="bd-tf">
-          ${['1m','3m','5m','15m','30m','1h','2h','4h','1d'].map((tf) => `<option value="${tf}" ${d.defaultTimeframe === tf ? 'selected' : ''}>${tf}</option>`).join('')}
+          ${['1m','3m','5m','15m','30m','1h','2h','4h','6h','8h','12h','1d','3d','1w','1M'].map((tf) => `<option value="${tf}" ${d.defaultTimeframe === tf ? 'selected' : ''}>${tf}</option>`).join('')}
         </select>
       </div>
       <div class="col-md-3">
@@ -717,7 +717,7 @@ function renderAutoAddBotSection(aabStatus, aabLastRunAt, aabTickCount, aabInFli
       <div class="col-md-2">
         <label class="form-label">Timeframe</label>
         <select id="aab-tf" class="form-select">
-          ${['1m','3m','5m','15m','30m','1h','2h','4h'].map((tf) => `<option value="${tf}" ${autoAddBotCfg.scanTimeframe === tf ? 'selected' : ''}>${tf}</option>`).join('')}
+          ${['1m','3m','5m','15m','30m','1h','2h','4h','6h','8h','12h','1d','3d','1w','1M'].map((tf) => `<option value="${tf}" ${autoAddBotCfg.scanTimeframe === tf ? 'selected' : ''}>${tf}</option>`).join('')}
         </select>
       </div>
       <div class="col-md-2">
