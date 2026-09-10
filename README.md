@@ -34,28 +34,57 @@ npm install
 ### 3. ตั้งค่า environment
 ```bash
 cp .env.example .env
-# แก้ไข .env:
-#   SESSION_SECRET=<random 64 chars>
-#   ENCRYPTION_KEY=<random 32 chars>
-#   BINANCE_API_KEY=<your key>
-#   BINANCE_API_SECRET=<your secret>
 ```
+
+สร้าง secret 2 ตัว:
+```bash
+node -e "console.log(require('crypto').randomBytes(48).toString('hex'))"   # → SESSION_SECRET
+node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"   # → ENCRYPTION_KEY
+```
+
+แล้วกรอกใน `.env`:
+```bash
+SESSION_SECRET=<วางค่าตัวที่ 1>
+ENCRYPTION_KEY=<วางค่าตัวที่ 2 — hex 64 ตัว>
+ADMIN_LICENSE_KEY=<คีย์ที่ผู้ดูแลระบบออกให้>
+ADMIN_CUSTOMER_TAG=<ชื่อของคุณ>
+BINANCE_API_KEY=<your key>
+BINANCE_API_SECRET=<your secret>
+```
+
+> ⚠️ `ENCRYPTION_KEY` ต้องยาวอย่างน้อย 32 ตัว — แนะนำ hex 64 ตัวเพื่อใช้เป็นกุญแจ AES-256 ตรงๆ
+> ตั้งแล้ว **ห้ามเปลี่ยน** หลังบันทึก API key ลงระบบ ไม่งั้นถอดรหัสของเก่าไม่ออก
+>
+> ⚠️ **ห้ามแก้ `ADMIN_URL`** — ตั้งค่ามาให้ถูกแล้ว เปลี่ยนเป็น `127.0.0.1` แล้วจะต่อ Admin ไม่ติด
+>
+> คำอธิบายทุกตัวแปร + ตารางแก้ปัญหาอยู่ใน [.env.example](./.env.example)
 
 ### 4. รัน
 ```bash
-npm start
-# หรือ dev mode
-npm run dev
+npm run pm2:start    # ใช้งานจริง (แนะนำ)
+npm start            # รันตรงๆ
+npm run dev          # dev mode (auto-restart)
 ```
+
+> ⚠️ แก้ `.env` เมื่อไหร่ ต้อง `npm run pm2:delete && npm run pm2:start`
+> — `pm2 reload` ไม่โหลดค่า env ใหม่
 
 ### 5. เปิด Dashboard
 ```
 http://localhost:6015
 ```
 
-(Port 6015 is the default; override via `PORT=` in `.env`. Admin monitor uses **6016**.)
+(Port 6015 คือค่าเริ่มต้น เปลี่ยนได้ที่ `PORT=` ใน `.env` — ถ้าเปลี่ยนต้องแก้ `ADMIN_BOT_URL` ให้ตรงกันด้วย Admin monitor ใช้ **6016**)
 
-ครั้งแรกจะให้ตั้ง password + (optional) ใส่ Binance API keys
+ครั้งแรกจะให้ตั้ง password → หน้ายินยอม (กด Accept) → ใส่ Binance API keys
+
+### 6. เช็คว่าต่อ Admin ติดแล้ว
+```bash
+npm run pm2:logs | grep -E "admin-monitor|license-gate"
+# ต่อสำเร็จ: admin-monitor: heartbeat sent / license-gate: validated
+```
+
+ต่อไม่ติด → ดูตารางแก้ปัญหาท้ายไฟล์ [.env.example](./.env.example) หรือ [SYSTEM-CONNECTION.md](./SYSTEM-CONNECTION.md)
 
 ## ⚠️ Binance API Key Best Practices
 

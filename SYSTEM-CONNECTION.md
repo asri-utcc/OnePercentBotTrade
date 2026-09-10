@@ -1,161 +1,174 @@
-# CONNECTION — Connecting to a Remote Bot
+# CONNECTION — การเชื่อมต่อบอท ↔ Admin
 
-How to connect your admin to someone else's bot (or vice versa). The system uses **phone-home** (bot → admin), not the other way around, so the bot must be able to reach the admin's URL.
+อธิบายว่าบอทคุยกับ Admin ยังไง ต้องเปิดพอร์ตตรงไหนบ้าง และเวลาต่อไม่ติดต้องดูอะไร
 
-## Topology
+## หลักการสำคัญ: บอทเป็นฝ่ายโทรออก (phone-home)
 
 ```
-┌──────────────┐                          ┌──────────────┐
-│ Friend's Bot │ ───── heartbeat ──────►  │  Your Admin  │
-│   :6015      │   every 5 min            │    :6016     │
-└──────────────┘                          └──────────────┘
+   เครื่องผู้ใช้                                      เครื่อง Admin
+┌──────────────────┐                              ┌──────────────────┐
+│  บอท :6015       │ ──── heartbeat / 5 นาที ───► │   Admin :6016    │
+│                  │ ──── ถามคำสั่ง / 1 นาที ────► │                  │
+│                  │ ──── snapshot / 5 นาที ────► │                  │
+└──────────────────┘                              └──────────────────┘
+      โทรออกอย่างเดียว                             เปิดพอร์ตรอรับ
+      ไม่ต้องเปิดพอร์ต                              ต้อง forward 6016
 ```
 
-**Two connection models:**
+**Admin ไม่เคยวิ่งเข้าไปหาบอท** — บอทเป็นคนเปิดการเชื่อมต่อออกไปเองทุกครั้ง
 
-| Model | Who hosts admin | Friend's bot phones home to | License scope |
-|-------|-----------------|-----------------------------|---------------|
-| **Centralized** (you host admin) | You (your server) | `http://<your-public-IP>:6016` | You issue 1 license per friend |
-| **Distributed** (friend hosts admin) | Each friend (their own) | `http://<friend-public-IP>:6016` | Each friend self-issues |
+ผลที่ตามมา:
 
-For a **demo / trial**, the simplest is: **each friend runs their own admin + their own bot** on their machine, and they all phone-home to a central admin (yours).
+| คำถามที่เจอบ่อย | คำตอบ |
+|---|---|
+| ผู้ใช้ต้อง forward พอร์ตที่เราเตอร์ไหม | **ไม่ต้อง** เลย |
+| ผู้ใช้ต้องมี public IP / DDNS ไหม | **ไม่ต้อง** |
+| ต่อ Admin ไม่ติด แก้ `HOST=0.0.0.0` ช่วยไหม | **ไม่ช่วย** — `HOST` คุมแค่ว่าใครเปิดหน้าเว็บบอทได้ ไม่เกี่ยวกับ phone-home |
+| ผู้ใช้อยู่หลัง NAT / มือถือ / VPN ใช้ได้ไหม | **ได้** ขอแค่ออกเน็ตไปพอร์ต 6016 ของ Admin ได้ |
+| Admin ล่ม บอทจะหยุดเทรดไหม | ไม่หยุดทันที — แต่ถ้าติดต่อไม่ได้เกิน **48 ชม.** บอทจะหยุดเปิดไม้ใหม่ |
 
-## Friend Setup (Distributed — each friend runs their own admin + bot)
+## รูปแบบการใช้งาน 2 แบบ
 
-Each friend needs to run BOTH OnePercentBotTrade (port 6015) and OnePercentBot-Admin (port 6016) on their machine.
+| แบบ | ใครรัน Admin | `ADMIN_URL` ของบอท | ใครออก license |
+|---|---|---|---|
+| **รวมศูนย์** (ใช้จริงตอนนี้) | เจ้าของระบบคนเดียว | `http://gigi.thaiddns.com:6016` | เจ้าของระบบออกให้ทุกคน |
+| **ต่างคนต่างรัน** | ทุกคนรันของตัวเอง | `http://127.0.0.1:6016` | แต่ละคนออกเอง |
 
-### Step 1: Friend installs
+ค่าเริ่มต้นใน `.env.example` ตั้งไว้เป็นแบบ **รวมศูนย์** แล้ว — ผู้ใช้ทั่วไปไม่ต้องแก้ `ADMIN_URL`
 
-See [INSTALL.md](INSTALL.md) — full instructions. TL;DR:
+---
 
-```bash
-cd OnePercentBot-System/OnePercentBotTrade && npm install && cp .env.example .env
-cd ../OnePercentBot-Admin && npm install && cp .env.example .env
-```
+## ฝั่งผู้ใช้ต้องตั้งอะไรบ้าง
 
-### Step 2: Friend opens port 6015 + 6016 to the internet (optional, only if you want remote access)
+ใน `OnePercentBotTrade/.env` แค่ 4 บรรทัดนี้:
 
-Two options:
-
-**A. Direct public IP (if friend has static IP)**
-- Router: port-forward 6015 → friend's local IP:6015
-- Router: port-forward 6016 → friend's local IP:6016
-- Set `HOST=0.0.0.0` in both .env files
-
-**B. Dynamic DNS (e.g., DuckDNS / No-IP)**
-- Friend signs up for free DDNS (e.g., `yourfriend.duckdns.org`)
-- Router: dynamic-DNS client
-- Set `HOST=0.0.0.0`
-- Friend's URL becomes `http://yourfriend.duckdns.org:6015`
-
-### Step 3: Friend starts both services
-
-```bash
-# In each project:
-npm run pm2:start
-
-# Verify:
-pm2 status
-```
-
-### Step 4: Friend generates their own license
-
-```bash
-cd OnePercentBot-Admin
-node tools/generate-license.js --owner="<friend-name>" --max-bots=10 --max-machines=2 --tier=basic
-# Output: License Key: AAAA-BBBB-CCCC-DDDD
-```
-
-Friend pastes this key into `OnePercentBotTrade/.env` as `ADMIN_LICENSE_KEY`, then reloads:
-```bash
-cd ../OnePercentBotTrade
-npm run pm2:delete && npm run pm2:start
-```
-
-### Step 5: Friend verifies
-
-Open `http://localhost:6016` → should see "1 machine online" → click → confirm bot's port/version/uptime.
-
-## Connection Test (Curl)
-
-From your machine (admin side), test friend's bot:
-
-```bash
-# Should return 200 + JSON (login required for most endpoints)
-curl -i http://<friend-public-ip>:6016/api/machines
-
-# Public endpoint (no auth)
-curl http://<friend-public-ip>:6015/api/consent/status
-```
-
-If `connection refused`: port-forward not set up, or firewall blocking.
-If `timeout`: friend is offline, or wrong IP/hostname.
-
-## Demo Scenario: Centralized Admin
-
-You run admin on your machine. Friend runs ONLY bot. Friend's bot phones-home to your admin.
-
-### Friend's bot .env:
 ```bash
 ADMIN_ENABLED=true
-ADMIN_URL=http://<your-public-ip>:6016
-ADMIN_LICENSE_KEY=<key you issued>
-HOST=0.0.0.0
-PORT=6015
+ADMIN_URL=http://gigi.thaiddns.com:6016   # ตั้งมาให้แล้ว ห้ามแก้
+ADMIN_LICENSE_KEY=AAAA-BBBB-CCCC-DDDD     # ขอจากผู้ดูแลระบบ
+ADMIN_CUSTOMER_TAG=ชื่อของคุณ
 ```
 
-### You (admin) .env:
+แก้เสร็จต้อง **delete + start** (แค่ `reload` ไม่โหลด env ใหม่):
 ```bash
-JWT_SECRET=...
-MONGODB_URI=mongodb://127.0.0.1:27017/onepercentbot_admin
-PORT=6016
-HOST=0.0.0.0
-```
-
-### Issue a license to friend:
-```bash
-cd OnePercentBot-Admin
-node tools/generate-license.js --owner="friend-name" --max-bots=5 --tier=basic
-# Send the AAAA-BBBB-CCCC-DDDD key to friend
-```
-
-### Friend configures + starts:
-```bash
-cd OnePercentBotTrade
-# paste ADMIN_LICENSE_KEY
 npm run pm2:delete && npm run pm2:start
 ```
 
-### You verify:
-Open `http://localhost:6016` → Machines → friend should appear within 5 min.
+รายละเอียดครบทุกตัวแปรอยู่ใน `OnePercentBotTrade/.env.example`
 
-## Security Notes
+---
 
-⚠️ **Phone-home is HMAC-signed** — the bot signs every heartbeat with `ADMIN_LICENSE_KEY`. The admin verifies the signature before accepting. So even if someone knows your admin URL, they can't impersonate without the key.
+## ฝั่ง Admin ต้องเตรียมอะไร
 
-⚠️ **API keys stay on the bot's machine.** Admin NEVER sees Binance API keys. Admin only sees: port, version, uptime, public IP, license-allowed bot count, error counts.
+1. เปิดพอร์ต 6016 ออกอินเทอร์เน็ต (forward ที่เราเตอร์ + อนุญาตใน firewall)
+2. ใช้ Dynamic DNS ถ้า IP ไม่นิ่ง
+3. ออก license key ให้ผู้ใช้แต่ละคน:
 
-⚠️ **If you don't trust the admin URL** (e.g., shared hosting), set `ADMIN_ENABLED=false` and run standalone. The bot works fully without admin.
+```bash
+cd OnePercentBot-Admin
+node tools/generate-license.js --owner="ชื่อผู้ใช้" --max-bots=10 --max-machines=2 --tier=basic
+```
 
-## Troubleshooting
+> ⚠️ `--max-machines` ค่าเริ่มต้นคือ **1** — ถ้าผู้ใช้จะรัน 2 เครื่องต้องระบุเอง ไม่งั้นเครื่องที่ 2 จะโดน `403 machine_limit_exceeded`
+> ⚠️ ระบบ**ไม่**ออก license อัตโนมัติให้คีย์ที่ไม่รู้จัก (`LICENSE_AUTO_TRIAL_ENABLED` ปิดอยู่) — คีย์มั่วจะได้ `401` เสมอ
 
-### Friend's bot shows "offline" on your admin
-- Wait 5 min (heartbeat interval)
-- Check friend's bot logs: `cd OnePercentBotTrade && npm run pm2:logs | grep -i "phone-home"`
-- Test friend's URL from your machine: `curl http://<friend-ip>:6015/api/consent/status`
-- If curl times out: friend firewall / port-forward issue
+---
 
-### "401 Unauthorized" on heartbeat
-- License key mismatch. Friend's `ADMIN_LICENSE_KEY` doesn't match what admin has.
-- Verify in admin dashboard: Machines → friend → click "Validate License"
+## บอทเรียก API อะไรบ้าง
 
-### "HMAC signature invalid"
-- Bot's local time is more than 5 min off from admin's time.
-- Run `w32tm /resync` (Windows) or `sudo ntpdate pool.ntp.org` (Linux) on BOTH machines.
+ทุกเส้นส่ง header `X-License-Key` และวิ่งไปที่ `ADMIN_URL`
 
-## See Also
+| ทำอะไร | เมธอด + path | ทุกกี่นาที |
+|---|---|---|
+| heartbeat (แจ้งว่ายังอยู่) | `POST /api/instances/heartbeat` | 5 |
+| ถามคำสั่งจาก Admin | `GET /api/instances/{machineId}/commands` | 1 |
+| ส่งผลการทำคำสั่ง | `POST /api/instances/command-result` | เมื่อมีคำสั่ง |
+| ตรวจสอบ license ซ้ำ | `POST /api/instances/validate` | 60 |
+| ส่ง snapshot (บอท/ไม้ที่ถือ) | `POST /api/instances/snapshot` | 5 |
+| ส่งสถานะการยินยอม | `POST /api/instances/consent` | ตอนบูต + ตอนเปลี่ยนคำตอบ |
+| แชทกับผู้ดูแล | `POST /api/instances/{machineId}/chat/send`<br>`GET /api/instances/{machineId}/chat/inbox` | ทุก 3-5 วินาที |
 
-- [INSTALL.md](INSTALL.md) — full install
-- [README.md](README.md) — system overview
-- [OnePercentBotTrade/src/admin-monitor/heartbeat.js](OnePercentBotTrade/src/admin-monitor/heartbeat.js) — phone-home source
-- [OnePercentBot-Admin/README.md](OnePercentBot-Admin/README.md) — admin docs
+ข้อมูลใน heartbeat: `machineId`, hostname, platform, เวอร์ชัน Node, เวอร์ชันบอท, จำนวนบอท/ไม้ที่เปิด, พอร์ต, public IP, `customerTag`, สถานะ anti-tamper
+
+**ไม่มี** Binance API key หรือรหัสผ่านใดๆ ส่งไปที่ Admin — คีย์ถูกเข้ารหัส AES-256-GCM เก็บอยู่ในเครื่องผู้ใช้เท่านั้น
+
+---
+
+## ลำดับการเชื่อมต่อครั้งแรก
+
+```
+1. บอทบูต → ตรวจ license (POST /api/instances/validate)
+              └─ ยังไม่เคยส่ง heartbeat → ได้ 404 machine_not_registered (ปกติ)
+2. ผ่านหน้ายินยอม → กด Accept
+3. ส่งสถานะยินยอมไป Admin (POST /api/instances/consent, source=boot_resync)
+4. heartbeat ตัวแรกออก → Admin สร้าง Machine record → ขึ้นในหน้า Machines
+5. หลังจากนั้น validate จะผ่าน + คำสั่งจาก Admin เริ่มทำงาน
+```
+
+เครื่องจะโผล่ในหน้า Admin หลัง **heartbeat ตัวแรก** ซึ่งอาจใช้เวลาถึง 5 นาที — รอก่อนอย่าเพิ่งตกใจ
+
+---
+
+## ตรวจสอบว่าต่อติดไหม
+
+### ฝั่งผู้ใช้
+```bash
+cd OnePercentBotTrade
+npm run pm2:logs | grep -E "admin-monitor|license-gate|consent"
+```
+
+ต่อสำเร็จ:
+```
+admin-monitor: heartbeat sent
+admin-monitor: command listener started
+license-gate: validated
+```
+
+### ทดสอบว่าคุยกับ Admin ได้ไหม
+```bash
+curl -i http://gigi.thaiddns.com:6016/health
+```
+- ได้ `200` + JSON → เน็ตถึง Admin ปกติ ปัญหาอยู่ที่ license key หรือ config
+- `Connection refused` → พอร์ตไม่ได้ forward หรือ Admin ไม่ได้รัน
+- `timeout` → firewall บล็อก หรือ hostname/IP ผิด
+
+### ฝั่ง Admin
+เปิด `http://localhost:6016` → เมนู **Machines** → ดูคอลัมน์ `lastHeartbeatAt`
+(นับว่าออนไลน์ถ้า heartbeat ล่าสุดอยู่ในช่วง 15 นาที)
+
+---
+
+## ตารางแก้ปัญหา
+
+| อาการ / ข้อความใน log | สาเหตุ | วิธีแก้ |
+|---|---|---|
+| ไม่มี log `admin-monitor` เลย | `ADMIN_ENABLED` ไม่ใช่ `true` | ตั้ง `ADMIN_ENABLED=true` แล้ว delete+start |
+| `ADMIN_LICENSE_KEY not set, heartbeat disabled` | ไม่ได้ใส่คีย์ | ขอคีย์จากผู้ดูแลระบบ |
+| `heartbeat failed ... ECONNREFUSED 127.0.0.1:6016` | `ADMIN_URL` ชี้เครื่องตัวเอง | แก้เป็น URL ของ Admin จริง |
+| `heartbeat failed ... ETIMEDOUT` | firewall / Admin ปิด | `curl http://<admin>:6016/health` |
+| `heartbeat failed ... status: 401` | คีย์ผิด / ถูกยกเลิก / หมดอายุ | ขอคีย์ใหม่ |
+| `heartbeat failed ... status: 403` | เกิน `max-machines` | ขอเพิ่มโควตาเครื่อง |
+| `consent: declined — botManager.start() SKIPPED` | กด Decline | เปิด `/consent` กด Accept |
+| ขึ้นออนไลน์แต่ไม่มีข้อมูลบอท | `ADMIN_BOT_URL` ไม่ตรง `PORT` | ตั้งให้ตรงกัน แล้ว delete+start |
+| รัน 2 ตัว แต่เห็นเครื่องเดียว | `MACHINE_ID_FILE` ชนกัน | แยกไฟล์ + pre-seed ค่าที่ไม่ซ้ำ |
+| `command signature verification failed` | HMAC ไม่ตรง | ลบ `ADMIN_COMMAND_HMAC_SECRET` ออก ให้ระบบคำนวณเองจาก license key |
+| `anti-tamper: MISMATCH` | โค้ด `src/` ต่างจาก hash ที่ผูกไว้ | ไม่ทำให้บอทดับ แต่ขึ้นธงแดงที่ Admin — แจ้งผู้ดูแล |
+| `phone-home DOWN — bot will pause new positions` | ติดต่อ Admin ไม่ได้เกิน 48 ชม. | แก้ heartbeat ให้กลับมาก่อน |
+
+---
+
+## ความปลอดภัย
+
+- 🔐 คำสั่งจาก Admin ถูกเซ็นด้วย HMAC-SHA256 — ปลอมคำสั่งไม่ได้ถ้าไม่มี license key
+- 🔐 Binance API key ไม่เคยออกจากเครื่องผู้ใช้ Admin เห็นแค่: พอร์ต, เวอร์ชัน, uptime, public IP, จำนวนบอท/ไม้, สถานะ tamper
+- 🔐 ไม่ไว้ใจ Admin? ตั้ง `ADMIN_ENABLED=false` — บอทยังเทรดได้ครบทุกฟีเจอร์ แต่จะไม่ขึ้นในหน้า Admin
+- ⚠️ อย่าเปิดพอร์ต 27017 (MongoDB) ออกอินเทอร์เน็ตเด็ดขาด
+
+---
+
+## อ่านต่อ
+
+- [INSTALL.md](INSTALL.md) — คู่มือติดตั้งแบบเต็ม
+- [README.md](README.md) — ภาพรวมระบบ
+- `OnePercentBotTrade/.env.example` — คำอธิบายทุกตัวแปร
+- `OnePercentBotTrade/src/admin-monitor/` — ซอร์สโค้ดฝั่ง phone-home
