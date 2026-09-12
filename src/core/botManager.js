@@ -880,10 +880,27 @@ class BotManager {
 
         // ตรวจ SELL order (กรณี state=selling หรือ holding ที่ SELL อาจ fill จริง)
         if (trade.sellOrderId) {
+          // FIX-2026-09-12: critical=true to bypass circuit breaker for reconcile sweep.
+          //   - reconcilePendingTrades is the SAFETY NET for orphan detection — must not be
+          //     blocked by circuit breaker (which opens on Binance rate-limit > 95%).
+          //   - 21 enabled bots × reconcile sweep every 5 min burst → base weight 2700+
+          //     → circuit opens frequently; without critical=true, getOrder() throws CIRCUIT_OPEN
+          //     → catch(() => null) → orphan branch skipped → orphan accumulates silently.
+          //   - reconcile has its own throttle (5 min interval) so bypassing circuit is safe.
+          //   - critical=true does NOT bypass Binance errors (-2010, -2011 etc.) — those still
+          //     throw and get caught → return null → skip (correct behavior).
           const order = await binanceRest.getOrder({
             symbol: trade.symbol,
             orderId: trade.sellOrderId,
-          }).catch(() => null);
+          }, { critical: true }).catch((err) => {
+            if (!/CIRCUIT_OPEN/i.test(err.message)) {
+              logger.warn({
+                err: err.message, tradeId: trade._id.toString(),
+                symbol: trade.symbol, orderId: trade.sellOrderId,
+              }, 'reconcile: getOrder failed (non-circuit)');
+            }
+            return null;
+          });
           if (order) {
             if (order.status === 'FILLED' && trade.state !== 'sold') {
               logger.warn({

@@ -64,7 +64,12 @@ try { licenseService = require('./licenseService'); } catch (_) { /* ignore — 
 //   for EVERY license (including enterprise). Removal makes AUv2 work like F1:
 //   only master toggle (AppConfig.auv2Enabled) + per-bot opt-in gate it.
 
-const DEFAULT_INTERVAL_MS = 180000;
+// FIX-2026-09-12: 180s → 300s (5 min) — FIX orphan-mismatch stampede
+//   - root cause: 21 bots × auv2 (3 min) + positionWatchdog (3 min) + trader reconcile (5 min)
+//     burst ใน window 2-3 วินาที → base weight 2700+ → ชน 3000 cap → circuit breaker เปิดถี่
+//   - align auv2 กับ trader reconcile (5 min) เพื่อให้ 2 sweep ไม่ชนกัน
+//   - jitter ±10% → ±25% กระจาย burst ออกจาก watchdog + trader
+const DEFAULT_INTERVAL_MS = 300000;
 const KLINE_FETCH_LIMIT = 2; // last close only
 
 // Mirrors OPEN_STATES in trader.js:1355 — kept locally to avoid circular require
@@ -154,8 +159,9 @@ class AutoUnderwaterV2 {
     if (this.interval) return;
     const base = intervalMs || DEFAULT_INTERVAL_MS;
     this.intervalMs = base;
-    // Jitter ±10% (mirror positionWatchdog — prevent burst alignment)
-    const jitteredInterval = Math.round(base * (1 + (Math.random() * 2 - 1) * 0.1));
+    // FIX-2026-09-12: Jitter ±10% → ±25% (mirror positionWatchdog — prevent burst alignment)
+    //   ±25% jitter กระจาย burst ออกจาก watchdog (10 min) + trader reconcile (5 min)
+    const jitteredInterval = Math.round(base * (1 + (Math.random() * 2 - 1) * 0.25));
     this.interval = setInterval(() => this._tickSafe(), jitteredInterval);
     logger.info({ intervalMs: base, jitteredIntervalMs: jitteredInterval }, 'auv2: started');
     // initial random delay 0-5s

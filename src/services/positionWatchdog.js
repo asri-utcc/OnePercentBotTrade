@@ -76,7 +76,12 @@ const cbCrossCooldown = require('../core/cbCrossCooldown'); // FIX-2026-08-10: C
 // FIX-2026-08-04: 60s → 180s (ลด Binance kline API load — watchdog เป็น read-only check)
 //   - logic เดิม 100% — F1 auto-arm + SL-UKC ยังทำงานเหมือนเดิม
 //   - delay 120s สำหรับ armed positions เป็นที่ยอมรับได้ (ไม่กระทบ bot operations)
-const DEFAULT_INTERVAL_MS = 180000;
+// FIX-2026-09-12: 180s → 600s (10 min) — FIX orphan-mismatch stampede
+//   - root cause: 21 bots × positionWatchdog (3 min) + auv2 (3 min) + trader reconcile (5 min) + reconcileKlines
+//     burst ใน window 2-3 วินาที → base weight 2700+ → ชน 3000 cap → circuit breaker เปิดถี่
+//   - watchdog เป็น read-only check (no order placement) → 10 min ยังเพียงพอสำหรับ F1 auto-arm
+//   - jitter ±10% → ±25% กระจาย burst ออกจาก trader reconcile
+const DEFAULT_INTERVAL_MS = 600000;
 const KLINE_FETCH_LIMIT = 30; // need >= 21 for KC warmup
 
 class PositionWatchdog {
@@ -97,8 +102,12 @@ class PositionWatchdog {
     //   - เดิม: setImmediate fixed → aligned กับ botManager._jitter base 100% (trader reconcile + auto-pause
     //     ทุก subsystem เริ่ม t=0) → burst รวมที่ t=0 + fixed schedule
     //   - fix: random delay 0-5s before first tick → กระจาย initial burst
-    //   - subsequent ticks: setInterval with jittered interval (±10%)
-    const jitteredInterval = Math.round(intervalMs * (1 + (Math.random() * 2 - 1) * 0.1));
+    //   - subsequent ticks: setInterval with jittered interval
+    // FIX-2026-09-12: jitter ±10% → ±25% (กระจาย burst ออกจาก trader reconcile 5 นาที)
+    //   - root cause orphan-mismatch stampede: 21 bots × watchdog (3 min) + auv2 (3 min) + trader reconcile
+    //     burst ใน 2-3 วินาที → base weight 2700+ → ชน 3000 cap → circuit breaker เปิดถี่
+    //   - ±25% jitter กระจายให้ tick ไม่ตรงกันในทุก subsystem
+    const jitteredInterval = Math.round(intervalMs * (1 + (Math.random() * 2 - 1) * 0.25));
     this.interval = setInterval(() => this._tickSafe(), jitteredInterval);
     logger.info({ intervalMs, jitteredIntervalMs: jitteredInterval }, 'positionWatchdog: started');
     // run once immediately on start, with random delay 0-5s to de-align
