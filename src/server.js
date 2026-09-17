@@ -237,8 +237,8 @@ async function main() {
 
   // FIX-2026-09-06: AUv2 — Auto-Underwater v2 (F1 auto-arm variant)
   //   Singleton scheduler: ตรวจ position ที่อายุ ≥ auv2MinAgeHours + loss shallower than trigger → MARKET SELL
-  //   Master toggle: AppConfig.masterAuv2Enabled (default false). เริ่มเสมอเมื่อ server boot
-  //   (engine ตรวจ master/license ภายใน tick — start/stop overhead negligible)
+  //   Master toggle: AppConfig.auv2Enabled (default false). เริ่มเสมอเมื่อ server boot
+  //   (engine ตรวจ master ภายใน tick — start/stop overhead negligible)
   autoUnderwaterV2.start();
   await sleep(SUBSYSTEM_STAGGER_MS);
 

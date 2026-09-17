@@ -29,14 +29,19 @@
  *
  * Skip reasons (return pure helper — testable without mocks):
  *   - 'master_off'    : AppConfig.auv2Enabled === false
- *   - 'license_off'   : RETIRED 2026-09-06 (license gate removed — AUv2 is safety, not premium)
  *   - 'bot_optout'    : bot.auv2Enabled === false
+ *   - 'bot_disabled'  : bot.enabled !== true (FIX-2026-09-17 — skip user-paused bots)
  *   - 'dca_skip'      : trade.isDcaStack === true (AUv2 ไม่ใช้กับ DCA — DCA มี logic ของตัวเอง)
  *   - 'not_open'      : trade.state not in OPEN_STATES
  *   - 'too_young'     : age < bot.auv2MinAgeHours
  *   - 'not_shallow'   : loss ยังไม่ตื้นพอ + ไม่เกิน hard cap
  *   - 'no_close'      : Binance kline fetch failed
  *   - 'no_ref_price'  : refPrice invalid (buyPrice <= 0)
+ *
+ * Note: license gate was REMOVED 2026-09-06 (Bug #2 fix) — see commit 5d85d3d.
+ *       `skippedLicenseOff` telemetry bucket is kept as no-op (always 0) for
+ *       backward compat with existing dashboards/tests; do not re-introduce
+ *       the gate without putting `auv2` in licenseService._getFeatures().
  *
  * Race-safety:
  *   - forceCloseTrade has atomic state-in-OPEN_STATES guard → idempotent
@@ -52,9 +57,6 @@ const forceClose = require('../core/forceClose');
 const fxService = require('./fxService');
 const eventBus = require('./eventBus');
 const logger = require('../utils/logger');
-
-let licenseService = null;
-try { licenseService = require('./licenseService'); } catch (_) { /* ignore — feature stays off */ }
 
 // FIX-2026-09-06: AUv2 mirrors F1 auto-arm (trader.js:_autoArmStopLossOnUKC) —
 //   safety feature, NOT premium. F1 has NO license gate; AUv2 should follow.
@@ -93,13 +95,16 @@ class AutoUnderwaterV2 {
    *
    * @param {object} bot  — bot document (lean or full) with auv2* fields
    * @param {object} trade — trade document (lean) with buyFilledAt, buyPrice, isDcaStack, stackBep, qty
-   * @param {object} ctx  — { now, lastClose, fxRate, masterOn, licenseOn }
+   * @param {object} ctx  — { now, lastClose, fxRate, masterOn }
    * @returns {string|null} skip reason or null when trigger
    */
   static _evaluate({ bot, trade, ctx }) {
     if (!ctx.masterOn) return 'master_off';
-    if (!ctx.licenseOn) return 'license_off';
     if (bot.auv2Enabled !== true) return 'bot_optout';
+    // FIX-2026-09-17: skip user-paused bots (bot.enabled !== true). Mirror pattern
+    //   from positionWatchdog _cbv3SkipReason — pausing a bot should freeze ALL
+    //   automated risk-management, not just CB tiers.
+    if (bot.enabled !== true) return 'bot_disabled';
     // FIX-2026-09-06: AUv2 skip DCA stacks (ไม่ต้องใช้กับ DCA — DCA มี BEP/TP logic ของตัวเอง)
     if (trade.isDcaStack === true) return 'dca_skip';
     if (!OPEN_STATES.includes(trade.state)) return 'not_open';
@@ -216,7 +221,10 @@ class AutoUnderwaterV2 {
     this.lastTickAt = t0;
     const stats = {
       scanned: 0, triggered: 0, closed: 0, errors: 0,
-      skippedMasterOff: 0, skippedLicenseOff: 0, skippedBotOptOut: 0,
+      skippedMasterOff: 0,
+      // skippedLicenseOff kept as always-0 for backward compat with dashboards/tests
+      // (license gate was REMOVED 2026-09-06 — see Bug #2 fix commit 5d85d3d)
+      skippedLicenseOff: 0, skippedBotOptOut: 0, skippedBotDisabled: 0,
       skippedDca: 0,
       skippedNotOpen: 0, skippedTooYoung: 0, skippedNotShallow: 0,
       skippedNoClose: 0, skippedNoRefPrice: 0,
@@ -241,10 +249,9 @@ class AutoUnderwaterV2 {
       return;
     }
 
-    // 1. License gate — REMOVED 2026-09-06 (AUv2 mirrors F1, which has no license gate)
-    //    Kept as no-op for backward compat with tests + telemetry bucket.
+    // (License gate intentionally absent — see skip-reasons docstring note above)
 
-    // 2. Fetch all open-state trades
+    // 1. Fetch all open-state trades
     const candidates = await Trade.find({ state: { $in: OPEN_STATES } }).lean();
     if (candidates.length === 0) return;
 
@@ -277,7 +284,9 @@ class AutoUnderwaterV2 {
     const lastCloseBySymTf = new Map();
     const symTfSet = new Set();
     for (const bot of bots) {
-      if (bot && bot.symbol && bot.timeframe && bot.auv2Enabled === true) {
+      // FIX-2026-09-17: also require bot.enabled === true to skip Binance fetch
+      //   for paused bots — saves a kline call per disabled bot per tick.
+      if (bot && bot.symbol && bot.timeframe && bot.auv2Enabled === true && bot.enabled === true) {
         symTfSet.add(`${bot.symbol}|${bot.timeframe}`);
       }
     }
@@ -288,7 +297,7 @@ class AutoUnderwaterV2 {
     }
 
     const now = Date.now();
-    const ctx = { now, fxRate, masterOn: true, licenseOn: true };
+    const ctx = { now, fxRate, masterOn: true };
 
     // 7. Per-bot evaluation
     for (const [botIdStr, trades] of byBot) {
@@ -307,6 +316,14 @@ class AutoUnderwaterV2 {
         }
         continue;
       }
+      // FIX-2026-09-17: skip user-paused bots (mirror positionWatchdog pattern)
+      if (bot.enabled !== true) {
+        for (const t of trades) {
+          stats.scanned++;
+          stats.skippedBotDisabled++;
+        }
+        continue;
+      }
 
       const lastClose = lastCloseBySymTf.get(`${bot.symbol}|${bot.timeframe}`);
       const tradeCtx = { ...ctx, lastClose };
@@ -317,8 +334,9 @@ class AutoUnderwaterV2 {
         if (skip) {
           // bucket by skip reason
           if (skip === 'master_off') stats.skippedMasterOff++;
-          else if (skip === 'license_off') stats.skippedLicenseOff++;
+          else if (skip === 'license_off') stats.skippedLicenseOff++; // always 0 post-2026-09-06 — kept for compat
           else if (skip === 'bot_optout') stats.skippedBotOptOut++;
+          else if (skip === 'bot_disabled') stats.skippedBotDisabled++;
           else if (skip === 'dca_skip') stats.skippedDca++;
           else if (skip === 'not_open') stats.skippedNotOpen++;
           else if (skip === 'too_young') stats.skippedTooYoung++;
