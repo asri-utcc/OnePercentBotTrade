@@ -59,6 +59,9 @@
     { id: 'mc-auv2MaxLossPct',     key: 'auv2MaxLossPct',  section: 'risk', order: 53, type: 'number', step: '0.1', min: '0.1', max: '50', label: '🛡️ AUv2 ขาดทุนตื้นสุด (%) · default 8' },
     { id: 'mc-auv2MaxLossThb',     key: 'auv2MaxLossThb',  section: 'risk', order: 54, type: 'number', step: '1', min: '1', max: '100000', label: '💴 AUv2 ขาดทุนตื้นสุด (THB) · default 22' },
     { id: 'mc-auv2MaxWaitDays',    key: 'auv2MaxWaitDays', section: 'risk', order: 55, type: 'number', step: '1', min: '0', max: '90', label: '⏳ AUv2 Hard Cap (วัน) · default 0 (no cap)' },
+    // FIX-2026-09-17: orphan-SELL sweeper — auto force-close LIMIT_MAKER SELL ที่ค้างบนกระดานนานเกิน threshold
+    //   (Binance GTC ไม่มี TTL; ZENUSDT เคยค้าง 8 วัน — sweep ทุก reconcile tick จะ cancel + MARKET SELL เมื่อ ageH ≥ threshold)
+    { id: 'mc-orphanSellMaxAgeHours', key: 'orphanSellMaxAgeHours', section: 'risk', order: 60, type: 'number', step: '1', min: '1', max: '168', label: '🧹 Orphan SELL — อายุสูงสุดก่อน force-close (ชม.) · default 24' },
     { id: 'mc-cbv2LockHours', key: 'cbv2LockHours', section: 'risk', order: 80, type: 'number', step: '0.5', min: '0.5', max: '168', label: '⏱ ระยะเวลา CBv2 Cooldown (ชม.) · default 8' },
     { id: 'mc-cbv3LockHours', key: 'cbv3LockHours', section: 'risk', order: 80, type: 'number', step: '0.5', min: '0.5', max: '168', label: '⏱ ระยะเวลา CBv3 Cooldown (ชม.) · default 8' },
     { id: 'mc-cbv5LockHours', key: 'cbv5LockHours', section: 'risk', order: 81, type: 'number', step: '0.5', min: '0.5', max: '168', label: '⏱ ระยะเวลา CBv5 Cooldown (ชม.) · default 4' },
@@ -577,10 +580,18 @@
       autoReserveEnabled: document.getElementById('mc-master-auto-reserve').checked,
       autoAddBotEnabled: document.getElementById('mc-master-auto-add-bot').checked,
       autoPauseAdjustEnabled: document.getElementById('mc-master-auto-pause-adjust').checked,
-      // FIX-2026-09-04: DLC master toggles removed from Master Config (moved inline to bot-edit DLC accordion).
-      //   masterDlcEnabled + dlcBaseLossPct are still accepted via PUT /api/admin/app-config
-      //   for DB-direct updates; UI exposes them next to per-bot DLC toggle.
     };
+    // FIX-2026-09-17: orphan-SELL sweeper threshold — AppConfig.orphanSellMaxAgeHours
+    //   numeric input lives in MASTER_CONFIG_FIELDS (mc-orphanSellMaxAgeHours) in risk section
+    //   value is read directly here because it's an AppConfig-level field (not per-bot).
+    //   Skip when NaN so backend clamp doesn't store NaN (Math.max/min on NaN = NaN).
+    const orphanVal = parseInt(document.getElementById('mc-orphanSellMaxAgeHours').value, 10);
+    if (Number.isFinite(orphanVal)) {
+      payload.orphanSellMaxAgeHours = orphanVal;
+    }
+    // FIX-2026-09-04: DLC master toggles removed from Master Config (moved inline to bot-edit DLC accordion).
+    //   masterDlcEnabled + dlcBaseLossPct are still accepted via PUT /api/admin/app-config
+    //   for DB-direct updates; UI exposes them next to per-bot DLC toggle.
     status.textContent = '⏳ กำลังบันทึก…';
     status.style.color = 'var(--text-3)';
     try {
