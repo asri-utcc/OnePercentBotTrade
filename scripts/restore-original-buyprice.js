@@ -24,6 +24,31 @@ process.env.MONGODB_URI = isFaiz
   : 'mongodb://127.0.0.1:27017/onepercentbottrade';
 
 const binanceRest = require('../src/binance/binanceRest');
+const config = require('../config');
+const axios = require('axios');
+
+// Inline myTrades — binanceRest doesn't export it
+const http = axios.create({
+  baseURL: config.binance.base || 'https://api.binance.com',
+  timeout: 15000,
+  headers: { 'X-MBX-APIKEY': config.binance.apiKey },
+});
+
+async function myTrades({ symbol, startTime, endTime, limit = 1000 } = {}) {
+  const params = { symbol };
+  if (startTime) params.startTime = startTime;
+  if (endTime) params.endTime = endTime;
+  if (limit) params.limit = limit;
+  // Sign with recvWindow + timestamp
+  const qs = binanceRest.signQuery({
+    ...params,
+    recvWindow: config.binance.recvWindow,
+    timestamp: binanceRest.nowMsBinance(),
+  });
+  const url = `/api/v3/myTrades?${qs}`;
+  const r = await http.get(url);
+  return r.data;
+}
 
 function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 
@@ -43,12 +68,12 @@ function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 
   for (const [symbol, symTrades] of Object.entries(bySymbol)) {
     process.stdout.write(`\n${symbol}: ${symTrades.length} trade(s) → fetching myTrades...`);
-    let myTrades;
+    let fetchedTrades;
     try {
       // Fetch all trades for this symbol from earliest recoveryOriginalTradeCreatedAt - 1 day
       const earliest = Math.min(...symTrades.map((t) => new Date(t.recoveryOriginalTradeCreatedAt).getTime()));
       const startTime = earliest - 24 * 60 * 60 * 1000; // 1 day before
-      myTrades = await binanceRest.getMyTrades({ symbol, startTime }, { critical: false });
+      fetchedTrades = await myTrades({ symbol, startTime });
     } catch (e) {
       console.log(` ERR fetch: ${e.message}`);
       errors++;
@@ -62,7 +87,7 @@ function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
       // Look for BUY trade within 5 min window
       const windowStart = originalCreatedMs - 5 * 60 * 1000;
       const windowEnd = originalCreatedMs + 5 * 60 * 1000;
-      const candidates = (myTrades || [])
+      const candidates = (fetchedTrades || [])
         .filter((tr) => tr.isBuyer === true && tr.time >= windowStart && tr.time <= windowEnd);
       if (candidates.length === 0) {
         console.log(`\n  ✗ ${symbol}: no BUY found near ${new Date(originalCreatedMs).toISOString()}`);
