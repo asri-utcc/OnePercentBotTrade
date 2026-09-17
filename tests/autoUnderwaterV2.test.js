@@ -29,6 +29,7 @@ const DAY = 24 * HOUR;
 function bot(overrides = {}) {
   return {
     auv2Enabled: true,
+    enabled: true, // FIX-2026-09-17: bot must be active (mirror production behavior)
     auv2MinAgeHours: 24,
     auv2LossMode: 'pct',
     auv2MaxLossPct: 5,
@@ -57,7 +58,7 @@ function ctx(overrides = {}) {
     lastClose: 95, // -5% from buyPrice=100
     fxRate: 35,
     masterOn: true,
-    licenseOn: true,
+    // FIX-2026-09-17: licenseOn field removed (dead code — license gate REMOVED 2026-09-06)
     ...overrides,
   };
 }
@@ -112,9 +113,10 @@ describe('AutoUnderwaterV2._evaluate', () => {
     expect(skip).toBe('master_off');
   });
 
-  test('returns "license_off" when ctx.licenseOn=false', () => {
-    const skip = eval_({ ctx: ctx({ licenseOn: false }) });
-    expect(skip).toBe('license_off');
+  // FIX-2026-09-17: replaced 'license_off' test with 'bot_disabled' (license gate REMOVED 2026-09-06)
+  test('returns "bot_disabled" when bot.enabled !== true', () => {
+    const skip = eval_({ bot: bot({ enabled: false }) });
+    expect(skip).toBe('bot_disabled');
   });
 
   test('returns "bot_optout" when bot.auv2Enabled !== true', () => {
