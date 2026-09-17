@@ -362,7 +362,10 @@ router.get('/', requireAuth, async (req, res) => {
 //   - return { asOf, count, totalCostUsdt, totalUnrealizedUsdt, positions: [...] }
 //   ใช้ในหน้า /bots.html สำหรับ Open Positions tile + modal รายละเอียด
 // IMPORTANT: declare BEFORE /:id route เพื่อหลีกเลี่ยง Express match "positions" เป็น id
-const OPEN_POSITIONS_STATES_FOR_API = ['placed', 'partial_wait', 'filled', 'retrying', 'holding', 'selling', 'stopping'];
+// FIX-2026-09-17 EMERGENCY RECOVERY: include 'waiting_sell_recovery' so the UI shows
+//   positions that were force-closed by the orphan-SELL sweeper and restored with target
+//   TP above PRICE_FILTER (waiting for price to recover). unrealized PnL displayed.
+const OPEN_POSITIONS_STATES_FOR_API = ['placed', 'partial_wait', 'filled', 'retrying', 'holding', 'selling', 'stopping', 'waiting_sell_recovery'];
 
 // FIX-2026-08-03: Safe-trade filter #2 (trendline) — live status endpoint
 //   - GET /api/bots/safe-trade-trendline → returns map of botId → status (all bots)

@@ -44,17 +44,16 @@ async function getBaseAssetAndLot(symbol) {
   // Try up to 3 times to handle cold cache (root cause of Sc 5/7)
   for (let i = 0; i < 3; i++) {
     const info = await symbolInfo.loadSymbol(symbol).catch(() => null);
-    if (info && info.filters) {
-      const lot = (info.filters || []).find((f) => f.filterType === 'LOT_SIZE');
-      const notional = (info.filters || []).find((f) => f.filterType === 'NOTIONAL' || f.filterType === 'MIN_NOTIONAL');
-      const priceFilter = (info.filters || []).find((f) => f.filterType === 'PRICE_FILTER');
+    if (info && info.lotSize) {
+      // symbolInfo API returns: { lotSize:{minQty,maxQty,stepSize}, priceFilter:{...}, notional:{...} }
+      // stepSize/tickSize are Decimal objects — convert to numbers
       return {
         base: info.baseAsset || symbol.replace(/USDT$|BUSD$|FDUSD$/, ''),
         status: info.status,
-        stepSize: lot ? parseFloat(lot.stepSize) : null,
-        minQty: lot ? parseFloat(lot.minQty) : null,
-        tickSize: parseFloat(priceFilter?.tickSize || '0.00000001'),
-        minNotional: parseFloat(notional?.minNotional || notional?.notional || 5),
+        stepSize: info.lotSize?.stepSize ? info.lotSize.stepSize.toNumber() : null,
+        minQty: info.lotSize?.minQty ? info.lotSize.minQty.toNumber() : null,
+        tickSize: info.priceFilter?.tickSize ? info.priceFilter.tickSize.toNumber() : 0.00000001,
+        minNotional: info.notional?.minNotional ? info.notional.minNotional.toNumber() : 5,
       };
     }
     await sleep(300);
@@ -82,8 +81,9 @@ async function getFreeBalance(asset) {
 
 async function getMarketPrice(symbol) {
   try {
-    const t = await binanceRest.getBookTicker({ symbol }, { critical: false });
-    return parseFloat(t.askPrice || t.bidPrice || t.data?.askPrice || 0);
+    // getBookTicker takes a STRING symbol (not object), returns { symbol, bidPrice, bidQty, askPrice, askQty }
+    const t = await binanceRest.getBookTicker(symbol);
+    return parseFloat(t?.askPrice || t?.bidPrice || 0);
   } catch (_) { return 0; }
 }
 
