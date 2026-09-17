@@ -88,6 +88,14 @@ router.put('/app-config', requireAuth, async (req, res) => {
       autoDeleteBotEnabled: 'boolean',
       autoDeleteBotDays: 'number',
       autoDeleteBotWarningDays: 'number',
+      // FIX-2026-09-17: 3 master toggles that were missing from whitelist — caused
+      //   silent no-op when admin POSTed via API (root cause: same as 2026-09-05
+      //   masterDlcEnabled silent-drop bug). Each must be added in 4 layers:
+      //   1) AppConfig schema (already exists), 2) whitelist (this file),
+      //   3) masterConfigModal UI (added this commit), 4) service reader (already correct)
+      autoReserveEnabled: 'boolean',
+      autoAddBotEnabled: 'boolean',
+      autoPauseAdjustEnabled: 'boolean',
       cbVersion: 'string',
       // FIX-2026-08-31: System-level Auto-Timing master (AppConfig.autoTimingEnabled)
       //   Master switch for the heatmap-driven entry gate; per-bot opt-in lives on Bot.autoTimingEnabled.

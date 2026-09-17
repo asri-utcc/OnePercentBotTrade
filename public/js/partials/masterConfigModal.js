@@ -402,6 +402,39 @@
                   </label>
                 </div>
               </div>
+              <!-- FIX-2026-09-17: 4 master toggles that were missing from UI (silent-off via 4-layer whitelist chain gap) -->
+              <div class="col-md-4">
+                <div class="bot-settings-option h-100">
+                  <label class="form-check form-switch d-flex align-items-start gap-2 mb-0" style="cursor:pointer;">
+                    <input type="checkbox" class="form-check-input" id="mc-master-auv2" ${cfg.auv2Enabled === true ? 'checked' : ''} />
+                    <span>🌊 <strong>AUv2 Master</strong><small class="text-muted-3 d-block">เปิด AUv2 (ตัดขาดทุนตื้นอัตโนมัติ) ทั้งระบบ · per-bot auv2Enabled ต้องเปิดด้วย</small></span>
+                  </label>
+                </div>
+              </div>
+              <div class="col-md-4">
+                <div class="bot-settings-option h-100">
+                  <label class="form-check form-switch d-flex align-items-start gap-2 mb-0" style="cursor:pointer;">
+                    <input type="checkbox" class="form-check-input" id="mc-master-auto-reserve" ${cfg.autoReserveEnabled === true ? 'checked' : ''} />
+                    <span>💰 <strong>Auto Reserve Master</strong><small class="text-muted-3 d-block">เปิด Auto Reserve (จอง USDT สำหรับ open positions) ทั้งระบบ</small></span>
+                  </label>
+                </div>
+              </div>
+              <div class="col-md-4">
+                <div class="bot-settings-option h-100">
+                  <label class="form-check form-switch d-flex align-items-start gap-2 mb-0" style="cursor:pointer;">
+                    <input type="checkbox" class="form-check-input" id="mc-master-auto-add-bot" ${cfg.autoAddBotEnabled === true ? 'checked' : ''} />
+                    <span>🤖 <strong>Auto Add Bot Master</strong><small class="text-muted-3 d-block">เปิด Auto Add Bot (สร้างบอทตาม universe scan) ทั้งระบบ</small></span>
+                  </label>
+                </div>
+              </div>
+              <div class="col-md-4">
+                <div class="bot-settings-option h-100">
+                  <label class="form-check form-switch d-flex align-items-start gap-2 mb-0" style="cursor:pointer;">
+                    <input type="checkbox" class="form-check-input" id="mc-master-auto-pause-adjust" ${cfg.autoPauseAdjustEnabled === true ? 'checked' : ''} />
+                    <span>⏸️ <strong>Auto Pause Adjust Master</strong><small class="text-muted-3 d-block">เปิด Auto Pause Adjust (ปรับ KC threshold อัตโนมัติ) ทั้งระบบ</small></span>
+                  </label>
+                </div>
+              </div>
               <!-- FIX-2026-09-04: DLC master + base loss moved OUT of Master Config into inline bot-edit DLC accordion (user: "อย่าใส่ใน ตั้งค่าระบบ ใช้งานยาก") -->
             </div>
             <div class="bot-settings-actions mt-3">
@@ -537,6 +570,13 @@
       // FIX-2026-08-31: System-level Auto-Timing master (AppConfig.autoTimingEnabled)
       //   Distinct from mc-autoTimingEnabled (per-bot tristate) below.
       autoTimingEnabled: document.getElementById('mc-master-auto-timing').checked,
+      // FIX-2026-09-17: 4 master toggles that were missing from UI (silent-off via 4-layer
+      //   whitelist chain gap — UI layer missing while backend whitelist accepted them).
+      //   Closing the chain at the UI surface prevents future silent-disable regressions.
+      auv2Enabled: document.getElementById('mc-master-auv2').checked,
+      autoReserveEnabled: document.getElementById('mc-master-auto-reserve').checked,
+      autoAddBotEnabled: document.getElementById('mc-master-auto-add-bot').checked,
+      autoPauseAdjustEnabled: document.getElementById('mc-master-auto-pause-adjust').checked,
       // FIX-2026-09-04: DLC master toggles removed from Master Config (moved inline to bot-edit DLC accordion).
       //   masterDlcEnabled + dlcBaseLossPct are still accepted via PUT /api/admin/app-config
       //   for DB-direct updates; UI exposes them next to per-bot DLC toggle.

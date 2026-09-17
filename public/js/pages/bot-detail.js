@@ -13,6 +13,9 @@ let detail = null;
 let refreshTimer = null;
 let activeTab = 'overview';
 let currentPrice = null; // latest close price from kline:update WS (for live % PnL/% to TP on Positions tab)
+// FIX-2026-09-17: cached AppConfig snapshot — used to warn "per-bot ON but master OFF"
+//   silent-off anti-pattern (auz2 silent-off debug incident).
+let appConfigCache = null;
 
 /* Charts */
 let priceChart = null;
@@ -60,6 +63,15 @@ async function init() {
   setupTabs();
   setupButtons();
   setupCharts();
+
+  // FIX-2026-09-17: preload master toggles so we can warn when per-bot ON but master OFF
+  //   (saves round-trip in renderAll). Failure tolerated — fall back to "unknown" state.
+  try {
+    const cfg = await API.get('/api/admin/app-config');
+    appConfigCache = cfg || null;
+  } catch (_) {
+    appConfigCache = null;
+  }
 
   // FIX-2026-07-31: preload Binance tickSize precision สำหรับ PriceFormat
   if (window.PriceFormat) await window.PriceFormat.load();
@@ -709,7 +721,13 @@ function renderCfgGrid(id) {
     { k: 'KC Mult', v: `${b.kcMult ?? 1.5} (${(b.kcMult ?? 1.5) < 1.5 ? 'KC แคบ — sensitive' : (b.kcMult ?? 1.5) > 1.5 ? 'KC กว้าง — conservative' : 'ค่าเดิม'})` },
     { k: 'Stop Loss (upper-KC)', v: b.stopLossOnUpperKC ? '🛑 เปิด — ปิด position ขาดทุนเมื่อราคาทะลุ upper-KC' : '⏸ ปิดอยู่' },
     { k: 'AUv2 (F1 v2)', v: b.auv2Enabled
-        ? `🌊 เปิด — ขายเมื่ออายุ ≥ ${b.auv2MinAgeHours ?? 24}ชม. + loss ตื้นกว่า ${b.auv2LossMode === 'thb' ? `${b.auv2MaxLossThb ?? 200} THB` : `${b.auv2MaxLossPct ?? 5}%`} (hard cap ${b.auv2MaxWaitDays ?? 7} วัน)`
+        ? `🌊 เปิด — ขายเมื่ออายุ ≥ ${b.auv2MinAgeHours ?? 24}ชม. + loss ตื้นกว่า ${b.auv2LossMode === 'thb' ? `${b.auv2MaxLossThb ?? 200} THB` : `${b.auv2MaxLossPct ?? 5}%`} (hard cap ${b.auv2MaxWaitDays ?? 7} วัน) · ${
+            // FIX-2026-09-17: warn when per-bot ON but master kill-switch is OFF —
+            //   silent-off anti-pattern (root cause of BERAUSDT 2026-09-06).
+            appConfigCache && appConfigCache.auv2Enabled === true
+              ? '✅ master ON'
+              : '⛔ <strong class="text-danger">Master AUv2 OFF — scheduler จะ skip บอทนี้</strong>'
+          }`
         : '⏸ ปิดอยู่' },
     { k: 'Auto-update TP%', v: b.autoUpdateTp
         ? `⏰ เปิด — recompute ทุกต้นชั่วโมง${b.updateTpAt ? ` (ล่าสุด: ${fmtDateTime(b.updateTpAt)})` : ''}`
