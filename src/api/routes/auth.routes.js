@@ -25,6 +25,7 @@ const LoginAttempt = require('../../db/models/LoginAttempt');
 const { getClientIp } = require('../../utils/clientIp');
 // FIX-2026-08-28 B6: gate telegramLogin feature via license (basic tier = OFF)
 const licenseService = require('../../services/licenseService');
+const safetyDefaults = require('../../utils/safetyDefaults'); // FIX-2026-09-17: env-var → AppConfig safety defaults (auv2Enabled etc.)
 
 // Brute-force protection สำหรับ /login (สำคัญมากถ้า expose port ออกเน็ต)
 const loginGuard = new LoginGuard({
@@ -118,6 +119,20 @@ router.post('/setup', authSetupLimiter, async (req, res) => {
     if (typeof useBnbForFees === 'boolean') {
       configDoc.useBnbForFees = useBnbForFees;
     }
+
+    // FIX-2026-09-17: apply env-derived safety defaults BEFORE first save
+    //   - env vars (AUV2_ENABLED, ORPHAN_SELL_MAX_AGE_HOURS, etc.) seed
+    //     fresh AppConfig so safety features are NOT silently-OFF after deploy
+    //   - existing DB values always win (never override user's UI choices)
+    //   - skipped keys (invalid env) are logged for debugging
+    const { changed: sdChanged, applied: sdApplied } = safetyDefaults.applySafetyDefaults(configDoc);
+    if (sdChanged) {
+      logger.info({
+        applied: sdApplied,
+        envSource: process.env.AUV2_ENABLED != null ? 'env-vars-present' : 'none',
+      }, 'setup: safety defaults applied from env');
+    }
+
     configDoc.setupCompleted = true;
     configDoc.setupAt = new Date();
 

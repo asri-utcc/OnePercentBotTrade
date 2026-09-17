@@ -86,6 +86,32 @@ BINANCE_API_SECRET=
 > ⚠️ **ห้ามแก้ `ADMIN_URL`** — ตั้งค่าไว้ให้ถูกแล้ว (`http://gigi.thaiddns.com:6016`)
 > เปลี่ยนเป็น `127.0.0.1` เมื่อไหร่ = บอทจะโทรกลับหาเครื่องตัวเอง แล้วต่อ Admin ไม่ติดทันที
 
+### A3.5 (แนะนำ) เปิด safety features ตั้งแต่ติดตั้งครั้งแรก
+
+**ปัญหา:** ถ้า deploy instance ใหม่แล้วไม่ตั้งค่าเพิ่ม — safety toggles ทั้งหมด (AUv2, orphan-SELL sweeper, waiting_sell_recovery scheduler) จะใช้ค่า default ของ schema ซึ่งส่วนใหญ่เป็น `false` → scheduler จะ skip ทุก tick (silent-off bug class — ZENUSDT ค้าง 8 วัน, BERAUSDT)
+
+**ทางแก้:** ใส่ใน `.env` ก่อน `npm run pm2:start` (env vars จะถูก apply ตอน POST /api/auth/setup):
+
+```bash
+# 🌊 AUv2 — ปิด underwater ตื้นๆ อัตโนมัติ (แนะนำ: true)
+AUV2_ENABLED=true
+
+# 🧹 Orphan-SELL sweeper — กัน stuck-SELL ค้างบน Binance (1..168 ชม., default 24)
+ORPHAN_SELL_MAX_AGE_HOURS=24
+
+# 🔄 Waiting-Sell-Recovery scheduler (default TRUE — auto-recover หลัง orphan rollback)
+WAITING_SELL_RECOVERY_ENABLED=true
+WAITING_SELL_RECOVERY_INTERVAL_MS=14400000
+```
+
+**ถ้าลืมตั้งตอนแรก:** apply ทีหลังได้
+```bash
+node scripts/seed-appconfig-from-env.js --owner        # ดู preview + 5s confirm
+node scripts/seed-appconfig-from-env.js --owner --force # force override existing DB values
+```
+
+⚠️ กฎ: env values **ไม่ override DB ที่ตั้งค่าแล้ว** (existing wins) — ป้องกันการเผลอ reset ค่าที่ user ตั้งผ่าน UI ใช้ `--force` เฉพาะตอนรู้ตัวว่าต้องการ force เท่านั้น
+
 ### A4. ตั้งค่า Binance API key
 
 สร้างที่ https://www.binance.com/en/my/settings/api-management
