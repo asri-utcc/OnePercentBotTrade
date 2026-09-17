@@ -447,6 +447,15 @@ const appConfigSchema = new mongoose.Schema(
     auv2LastError:       { type: String, default: null },
 
     // ═══════════════════════════════════════════════════════════════════════
+    // FIX-2026-09-17: orphan-SELL sweeper telemetry — written by reconcileTelemetry.js
+    //   from botManager.reconcilePendingTrades() on each tick where orphans found
+    //   - stats: { scanned, cancelled, forced, errors } — Phase D /api/health/schedulers reads
+    //   - Mongoose strict mode would silently drop these $set fields if not declared
+    // ═══════════════════════════════════════════════════════════════════════
+    orphanRecoveryLastStats: { type: Object, default: null },
+    orphanRecoveryLastRunAt: { type: Date,   default: null },
+
+    // ═══════════════════════════════════════════════════════════════════════
     // Phase 4-2026-08-29: Chat System — Operator display name
     //   - Used as identity when posting to admin community room or DM
     //   - Empty → resolved at send time: customerTag || first 8 chars of machineId
