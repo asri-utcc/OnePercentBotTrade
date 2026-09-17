@@ -10,6 +10,7 @@ const botManager = require('./core/botManager');
 const healthMonitor = require('./services/healthMonitor');
 const positionWatchdog = require('./services/positionWatchdog');
 const autoUnderwaterV2 = require('./services/autoUnderwaterV2'); // FIX-2026-09-06: AUv2 — F1 auto-arm v2 (shallow-loss exit gate)
+const waitingSellRecovery = require('./services/waitingSellRecovery'); // FIX-2026-09-17: re-place SELL for recovery-injected trades
 const autoBnbBuyer = require('./services/autoBnbBuyer'); // FIX-2026-08-05: auto-buy BNB service
 const autoAddBot = require('./services/autoAddBot'); // FIX-2026-08-07: auto-add new bot service
 const delistMonitor = require('./services/binanceDelistMonitor'); // FIX-2026-08-06: binance delist detection
@@ -242,6 +243,14 @@ async function main() {
   autoUnderwaterV2.start();
   await sleep(SUBSYSTEM_STAGGER_MS);
 
+  // FIX-2026-09-17: waiting_sell_recovery — re-place SELL for recovery-injected
+  //   trades that were restored with target TP above PRICE_FILTER (market × 1.20).
+  //   Re-checks every 4h (configurable 1h..24h) and places LIMIT_MAKER SELL
+  //   when the gap closes. Master toggle: AppConfig.waitingSellRecoveryEnabled
+  //   (default TRUE — recovery positions should auto-recover).
+  waitingSellRecovery.start();
+  await sleep(SUBSYSTEM_STAGGER_MS);
+
   // FIX-2026-08-05: Auto-Buy BNB — periodic scan + MARKET BUY BNB/USDT when value < threshold
   //   user-configurable via /api/bnb-auto-buy/config (default OFF — must opt-in)
   autoBnbBuyer.start();
@@ -379,6 +388,7 @@ async function main() {
     try { autoReserve.stop(); } catch (e) { /* ignore */ }
     try { autoTiming.stop(); } catch (e) { /* ignore */ }
     try { autoUnderwaterV2.stop(); } catch (e) { /* ignore */ }
+    try { waitingSellRecovery.stop(); } catch (e) { /* ignore */ }
     try { adminMonitor.stop(); } catch (e) { /* ignore */ }
     try { await botManager.flushActiveTimeOnShutdown(); } catch (e) { /* ignore */ }
     try { await botManager.stop(); } catch (e) { /* ignore */ }

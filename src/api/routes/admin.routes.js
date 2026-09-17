@@ -132,6 +132,10 @@ router.put('/app-config', requireAuth, async (req, res) => {
       //   When SELL alive > this, reconcile sweep force-cancels + MARKET SELLs
       //   (closes silent-off 'selling' stuck loop that hit ZENUSDT for 8 days).
       orphanSellMaxAgeHours: 'number',
+      // FIX-2026-09-17: waiting_sell_recovery scheduler — re-place SELL for
+      //   recovery trades waiting on PRICE_FILTER to pass.
+      waitingSellRecoveryEnabled: 'boolean',
+      waitingSellRecoveryIntervalMs: 'number',
     };
     const set = {};
     // FIX-2026-09-01 audit H15: track unknown keys so admin sees a warning
@@ -194,6 +198,13 @@ router.put('/app-config', requireAuth, async (req, res) => {
     //   (mirror AppConfig.orphanSellMaxAgeHours schema range)
     if (set.orphanSellMaxAgeHours != null) {
       set.orphanSellMaxAgeHours = Math.max(1, Math.min(168, set.orphanSellMaxAgeHours));
+    }
+    // FIX-2026-09-17: waiting_sell_recovery interval clamp — 1h..24h
+    if (set.waitingSellRecoveryIntervalMs != null) {
+      set.waitingSellRecoveryIntervalMs = Math.max(
+        1 * 60 * 60 * 1000,
+        Math.min(24 * 60 * 60 * 1000, set.waitingSellRecoveryIntervalMs)
+      );
     }
 
     // FIX-2026-08-08 (rev2): cross-field DPS validation (merge DB เดิม + set ใหม่ก่อนเช็ค)

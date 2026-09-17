@@ -590,6 +590,13 @@ function renderMessage(eventKey, p, cfg) {
           : `\n\n⏸ บอทอยู่ในสถานะ DISABLED — ไปเปิดที่หน้า bots.html ถ้าต้องการเทรด`;
         return `🤖↩️ Auto Add Bot — restore + activate บอทเก่าอัตโนมัติ\nBot: ${p.botName}\nSymbol: ${p.symbol} (${tf})\nScore: ${score}\nkcMin: ${kcMin}%\nTP (NET): ${tp}%\nRestore window: ${days}d since soft-delete${tail}`;
       }
+      // FIX-2026-09-17: waiting_sell_recovery scheduler placed a SELL — trade
+      //   transitioned from waiting_sell_recovery → selling. Will fill normally
+      //   when price reaches target.
+      case 'waitingSellRecoveryPlaced': {
+        const gapStr = p.gapPct != null ? `${p.gapPct >= 0 ? '+' : ''}${p.gapPct.toFixed(2)}%` : '?';
+        return `🔄 Waiting Sell Recovery — SELL placed\nSymbol: ${p.symbol}\nOrder: ${p.sellOrderId}\nPrice: ${p.sellPx}\nQty: ${p.sellQty}\nTarget: ${p.target}\nMarket: ${p.market}\nGap: ${gapStr}\n\n📌 Trade transitioned state → selling — รอ fill ที่ target ตามปกติ`;
+      }
       // FIX-2026-08-08: Feature #2 — CBv3 panic-close (mirror cbv2PanicClose but with ST3 upper-TF gate)
       case 'cbv3PanicClose':
         return `💎 CBv3 panic-sell (CBv2 + ST3) — ปิดทุก position + cooldown BUY\nBot: ${p.botName}\nSymbol: ${p.symbol} (${p.timeframe || '?'})\nCBv2 + ST3 no-trade on upper-TF → กันกราฟไหลต่อเนื่อง\nClosed: ${p.closedCount} ไม้\nCooldown: ${p.lockHours || '?'} ชั่วโมง (until ${p.lockedUntil || '?'})\nLowerKC: ${p.lastLower || '?'}\n\n⏸ บอทยัง enable + Auto-pause/resume ยังทำงานปกติ — แค่กั้น S1 BUY ระหว่าง cooldown\n📌 Manual clear cooldown: POST /api/bots/<id>/unlock-cbv2`;
@@ -1448,6 +1455,27 @@ function bindEventHandlers() {
       });
     } catch (err) {
       logger.warn({ err: err.message }, 'telegramNotifier: autoAddBot:restored handler error');
+    }
+  });
+
+  // FIX-2026-09-17: waiting_sell_recovery — emitted from waitingSellRecovery.js
+  //   when scheduler places a LIMIT_MAKER SELL for a recovery trade that was
+  //   waiting on PRICE_FILTER to pass. Trade now in 'selling' state.
+  eventBus.on('waitingSellRecovery:placed', async (p) => {
+    try {
+      if (!p || !p.symbol || !p.sellOrderId) return;
+      await dispatch('waitingSellRecoveryPlaced', {
+        symbol: p.symbol,
+        tradeId: p.tradeId,
+        sellOrderId: p.sellOrderId,
+        sellPx: p.sellPx,
+        sellQty: p.sellQty,
+        target: p.target,
+        market: p.market,
+        gapPct: p.gapPct,
+      });
+    } catch (err) {
+      logger.warn({ err: err.message }, 'telegramNotifier: waitingSellRecovery:placed handler error');
     }
   });
 

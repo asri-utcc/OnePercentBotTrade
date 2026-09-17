@@ -193,6 +193,18 @@ const appConfigSchema = new mongoose.Schema(
   //   Range: 1..168 hours (1 week max). Set to a very high value to disable.
   orphanSellMaxAgeHours: { type: Number, default: 24, min: 1, max: 168 },
 
+  // FIX-2026-09-17: waiting_sell_recovery scheduler — re-place SELL for
+  //   recovery-injected trades that were restored with target TP above
+  //   PRICE_FILTER (market × 1.20). When market recovers to within range,
+  //   scheduler places LIMIT_MAKER SELL and transitions state→selling.
+  //
+  //   Default TRUE — recovery positions are expected to auto-recover.
+  //   Interval 4h balances "react fast to recovery" vs "Binance weight budget".
+  //
+  //   waitingSellRecoveryIntervalMs range: 1h..24h (3,600,000..86,400,000)
+  waitingSellRecoveryEnabled:    { type: Boolean, default: true },
+  waitingSellRecoveryIntervalMs: { type: Number,  default: 4 * 60 * 60 * 1000, min: 1 * 60 * 60 * 1000, max: 24 * 60 * 60 * 1000 },
+
     // ═══════════════════════════════════════════════════════════════════════
     // FIX-2026-08-08 (rev2): DPS tunables — ย้ายจาก hardcode ใน dynamicPositionSizing.js
     //   - ปรับได้จากหน้า /settings.html section 🔟
@@ -454,6 +466,16 @@ const appConfigSchema = new mongoose.Schema(
     // ═══════════════════════════════════════════════════════════════════════
     orphanRecoveryLastStats: { type: Object, default: null },
     orphanRecoveryLastRunAt: { type: Date,   default: null },
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // FIX-2026-09-17: waiting_sell_recovery scheduler telemetry — written by
+    //   waitingSellRecovery.js each tick. Stats: { scanned, placed, errors,
+    //   skippedPriceFilter, skippedDust, skippedNoMarket, skippedNoSymbol,
+    //   skippedSellRejected, durationMs }. Read by /api/health/schedulers.
+    // ═══════════════════════════════════════════════════════════════════════
+    waitingSellRecoveryLastStats: { type: Object, default: null },
+    waitingSellRecoveryLastRunAt: { type: Date,   default: null },
+    waitingSellRecoveryLastError: { type: String, default: null },
 
     // ═══════════════════════════════════════════════════════════════════════
     // Phase 4-2026-08-29: Chat System — Operator display name
