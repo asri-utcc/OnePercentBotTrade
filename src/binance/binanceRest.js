@@ -651,11 +651,18 @@ async function cancelOrder({ symbol, orderId = null, origClientOrderId = null })
   return signedRequest('DELETE', '/api/v3/order', params, 1, { critical: true });
 }
 
-async function getOrder({ symbol, orderId = null, origClientOrderId = null }) {
+async function getOrder({ symbol, orderId = null, origClientOrderId = null }, opts = {}) {
   const params = { symbol };
   if (orderId) params.orderId = orderId;
   if (origClientOrderId) params.origClientOrderId = origClientOrderId;
-  return signedRequest('GET', '/api/v3/order', params, 4, { critical: false });
+  // FIX-2026-09-17: forward opts.critical to signedRequest
+  //   - default false (preserves P0-audit behavior — non-reconcile callers respect CB)
+  //   - reconcile safety-net callers (botManager.reconcilePendingTrades) pass
+  //     { critical: true } to bypass CB (FIX-2026-09-12 intent)
+  //   - bug: pre-fix signature was `(args)` only — second arg silently dropped,
+  //     every reconcile sweep was treated as critical:false → blocked by CB
+  //     → orphan SELLs stuck for hours/days (36 confirmed stuck at fix time)
+  return signedRequest('GET', '/api/v3/order', params, 4, { critical: opts.critical === true });
 }
 
 async function getOpenOrders({ symbol = null } = {}) {

@@ -534,10 +534,15 @@ class BotManager {
 
         // ตรวจ BUY order (กรณี state=placed หรือ cancelled ที่ BUY อาจ fill จริง)
         if (trade.buyOrderId) {
+          // FIX-2026-09-17: critical=true to bypass CB (safety-net reconcile path)
+          //   - reconcile sweep = 36+ trades x 2 calls each every 5min
+          //   - without critical=true, CB opens frequently on rate-spike and EVERY
+          //     orphan BUY detection silently skipped -> orphan BUY accumulates
+          //     (e.g. 1000CATUSDT stuck 265h with no SELL on book)
           const order = await binanceRest.getOrder({
             symbol: trade.symbol,
             orderId: trade.buyOrderId,
-          }).catch(() => null);
+          }, { critical: true }).catch(() => null);
           if (order) {
             // BUY filled จริง — ไม่ว่า trade.state จะเป็นอะไร ต้อง proceed SELL
             // FIX-2026-07-31 (BUG-22): don't call handleBuyFilled for PARTIALLY_FILLED — the BUY
@@ -554,10 +559,11 @@ class BotManager {
                 //   (status='NEW' รอ fill ที่ TP) → reconcile เดิมบอก "no SELL on book" ตลอด 7 ชม.
                 //   fix: ถาม Binance ก่อน ถ้า SELL alive → sync state='selling' แล้ว skip orphan branch
                 if (trade.sellOrderId) {
+                  // FIX-2026-09-17: critical=true (safety-net reconcile path)
                   const liveSell = await binanceRest.getOrder({
                     symbol: trade.symbol,
                     orderId: trade.sellOrderId,
-                  }).catch(() => null);
+                  }, { critical: true }).catch(() => null);
                   if (liveSell && ['NEW', 'PARTIALLY_FILLED'].includes(liveSell.status)) {
                     await Trade.updateOne(
                       { _id: trade._id, state: { $nin: ['sold'] } },
@@ -655,16 +661,26 @@ class BotManager {
                   //   - SELL อยู่บน order book ของ Binance แล้ว → fill เองได้แม้บอทปิดสนิท
                   //     และ positionWatchdog ดูแล state='selling' โดยไม่สน bot.enabled
                   const recoveryCount = trade.orphanBuyRecoveryCount || 0;
+                  // FIX-2026-09-17 (TDZ bug): declare `recovered` BEFORE first use
+                  //   - bug: old code declared `let recovered = false` AFTER the
+                  //     if (trade.sellOrderId) block that may set recovered=true.
+                  //     When sellOrderId is undefined (orphan BUY w/ no SELL yet, e.g.
+                  //     1000CATUSDT) `!recovered` at canRecover hit TDZ → ReferenceError
+                  //     → outer try/catch caught it → recovery NEVER fired for this
+                  //     trade class. Hidden because previous CB-block prevented
+                  //     reconcile from reaching this code at all.
+                  let recovered = false;
                   // FIX-2026-09-09 (ETCUSDT orphan bug): backstop ก่อน auto-recovery
                   //   - Fix A ข้างบนถาม Binance แล้วถ้า SELL alive → continue (skip orphan branch ทั้งหมด)
                   //   - แต่ถ้า Fix A พลาด (API fail, race) และเข้ามาถึงตรงนี้: เช็ค Binance อีกครั้งก่อน
                   //     เปิด BUY ใหม่/วาง SELL ใหม่ → กัน duplicate SELL (ออร์เดอร์เก่าค้าง + ออร์เดอร์ใหม่ซ้อน)
                   //   - ถ้า SELL ยังมีชีวิตบนกระดาน → set recovered=true ข้าม handleBuyFilled ทั้งหมด
                   if (trade.sellOrderId) {
+                    // FIX-2026-09-17: critical=true (safety-net reconcile path)
                     const preRecoverSell = await binanceRest.getOrder({
                       symbol: trade.symbol,
                       orderId: trade.sellOrderId,
-                    }).catch(() => null);
+                    }, { critical: true }).catch(() => null);
                     if (preRecoverSell && ['NEW', 'PARTIALLY_FILLED', 'FILLED'].includes(preRecoverSell.status)) {
                       recovered = true;
                       logger.warn({
@@ -680,7 +696,6 @@ class BotManager {
                     && ORPHAN_RECOVERABLE_PAUSE_REASONS.includes(bot.autoPauseReason)
                     && recoveryCount < MAX_ORPHAN_RECOVERY_ATTEMPTS
                     && !this.traders.has(bot._id.toString());
-                  let recovered = false;
                   let recoveryError = null;
 
                   if (canRecover) {
