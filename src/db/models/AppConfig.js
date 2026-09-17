@@ -174,6 +174,25 @@ const appConfigSchema = new mongoose.Schema(
     //     autoArmStopLossOnUKC, dlcEnabled, etc.) — see [[onepercentbot-master-config-autoTiming-fix]]
     auv2Enabled: { type: Boolean, default: false },
 
+  // FIX-2026-09-17: Orphan-SELL sweeper config — auto-cancel + force-close
+  //   trades where LIMIT_MAKER SELL has been alive on Binance > N hours
+  //   and DB state is still 'selling'. The reconcile sweep previously
+  //   silent-no-op'd this case (botManager.js:1103-1110 — design assumption
+  //   was that Binance GTC would expire naturally, but GTC doesn't expire).
+  //
+  //   When age >= orphanSellMaxAgeHours:
+  //     1. Cancel stuck SELL on Binance
+  //     2. forceCloseTrade({ allowMarketSell: true, source: 'orphan-recovery-sweep' })
+  //     3. Mark sellReason = 'orphan_recovery_sweeper'
+  //     4. Emit eventBus 'trade:closed' → telegramNotifier fires
+  //
+  //   Default 24h: balances "give legitimate TP targets time to fill" vs
+  //   "don't let stale SELLs accumulate". Adjustable via Master Config Modal
+  //   (added in Phase B).
+  //
+  //   Range: 1..168 hours (1 week max). Set to a very high value to disable.
+  orphanSellMaxAgeHours: { type: Number, default: 24, min: 1, max: 168 },
+
     // ═══════════════════════════════════════════════════════════════════════
     // FIX-2026-08-08 (rev2): DPS tunables — ย้ายจาก hardcode ใน dynamicPositionSizing.js
     //   - ปรับได้จากหน้า /settings.html section 🔟

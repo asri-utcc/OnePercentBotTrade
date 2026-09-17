@@ -128,6 +128,10 @@ router.put('/app-config', requireAuth, async (req, res) => {
       auv2MaxLossPct: 'number',
       auv2MaxLossThb: 'number',
       auv2MaxWaitDays: 'number',
+      // FIX-2026-09-17: Orphan-SELL sweeper threshold — 1..168 hours.
+      //   When SELL alive > this, reconcile sweep force-cancels + MARKET SELLs
+      //   (closes silent-off 'selling' stuck loop that hit ZENUSDT for 8 days).
+      orphanSellMaxAgeHours: 'number',
     };
     const set = {};
     // FIX-2026-09-01 audit H15: track unknown keys so admin sees a warning
@@ -185,6 +189,11 @@ router.put('/app-config', requireAuth, async (req, res) => {
     // FIX-2026-09-06: AUv2 loss-mode enum (mirror Bot schema enum ['pct','thb'])
     if (set.auv2LossMode != null && !['pct', 'thb'].includes(set.auv2LossMode)) {
       delete set.auv2LossMode;
+    }
+    // FIX-2026-09-17: Orphan-SELL sweeper threshold clamp — 1..168 hours
+    //   (mirror AppConfig.orphanSellMaxAgeHours schema range)
+    if (set.orphanSellMaxAgeHours != null) {
+      set.orphanSellMaxAgeHours = Math.max(1, Math.min(168, set.orphanSellMaxAgeHours));
     }
 
     // FIX-2026-08-08 (rev2): cross-field DPS validation (merge DB เดิม + set ใหม่ก่อนเช็ค)

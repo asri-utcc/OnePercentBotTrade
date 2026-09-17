@@ -19,6 +19,8 @@ const autoTiming = require('../services/autoTiming');
 const logger = require('../utils/logger');
 const Bot = require('../db/models/Bot');
 const Trade = require('../db/models/Trade');
+const AppConfig = require('../db/models/AppConfig'); // FIX-2026-09-17: orphan-SELL sweeper reads threshold
+const forceClose = require('./forceClose'); // FIX-2026-09-17: orphan-SELL sweeper uses forceCloseTrade atomic claim
 const Trader = require('./trader');
 // FIX-2026-07-23: TP auto-updater (per-bot autoUpdateTp toggle → top-of-hour recompute)
 const tpUpdater = require('./tpUpdater');
@@ -526,6 +528,19 @@ class BotManager {
     ]);
     const botMap = new Map(botsArr.map((b) => [String(b._id), b]));
     const signalMap = new Map(signalsArr.map((s) => [String(s._id), s]));
+
+    // FIX-2026-09-17: orphan-SELL sweeper — read age threshold once per sweep (admin-tunable)
+    //   - default 24h, can be flipped via Master Config Modal → AppConfig.orphanSellMaxAgeHours
+    //   - purpose: kill LIMIT_MAKER SELL orders stuck on Binance with no fill (Binance GTC has no TTL,
+    //     so a stuck SELL = silent capital lock until manual cancel). The reconcile no-op at L1105
+    //     silently accepted this state; this sweep force-closes via atomic forceCloseTrade claim.
+    const { orphanSellMaxAgeHours } = await AppConfig.findOne({ key: 'singleton' }, { orphanSellMaxAgeHours: 1 })
+      .lean()
+      .catch(() => ({})) || {};
+    const orphanThreshold = Number.isFinite(orphanSellMaxAgeHours) && orphanSellMaxAgeHours > 0
+      ? orphanSellMaxAgeHours
+      : 24;
+    const sweepStats = { scanned: 0, cancelled: 0, forced: 0, errors: 0 };
 
     for (const trade of pending) {
       try {
@@ -1101,13 +1116,70 @@ class BotManager {
                 }
               }
             } else if (order.status === 'NEW' && trade.state === 'selling') {
-              // FIX: SELL ยังมีชีวิตอยู่ — ไม่ต้องทำอะไร
-              // (เคสมี bug: restart แล้ว reconcile วนซ้ำหรือไป trigger handleSellFilled ซ้ำ)
-              // แค่ log debug เพื่อ visibility
+              // FIX-2026-09-17 (orphan-SELL sweeper): SELL ยังมีชีวิตอยู่ แต่ถ้าแก่เกิน threshold → force-close
+              //   เคส: ZENUSDT stuck 8 วัน (no Binance TTL on LIMIT_MAKER GTC). เดิม no-op ตลอด → silent capital lock.
+              //   ใหม่: ถ้า sellPlacedAt ageH ≥ orphanThreshold → cancel + forceCloseTrade (atomic claim prevents double-sell)
+              //         else → debug log (existing behavior, just visibility)
+              sweepStats.scanned++;
+              const placedAtMs = new Date(
+                trade.sellPlacedAt || trade.updatedAt || trade.buyFilledAt || Date.now()
+              ).getTime();
+              const ageH = (Date.now() - placedAtMs) / 3600000;
+              if (ageH >= orphanThreshold) {
+                sweepStats.cancelled++;
+                logger.warn({
+                  tradeId: trade._id.toString(),
+                  botId: trade.botId.toString(),
+                  symbol: trade.symbol,
+                  sellOrderId: trade.sellOrderId,
+                  ageHours: ageH.toFixed(2),
+                  thresholdHours: orphanThreshold,
+                }, 'reconcile: ORPHAN-SELL detected — SELL alive >threshold, force-closing via MARKET');
+                const fresh = await Trade.findById(trade._id).lean().catch(() => null);
+                if (!fresh || fresh.state === 'sold') {
+                  sweepStats.errors++;
+                  continue;
+                }
+                const result = await forceClose.forceCloseTrade({
+                  trade: fresh, bot, allowMarketSell: true, source: 'orphan-recovery-sweep',
+                });
+                if (result.ok) {
+                  sweepStats.forced++;
+                  Trade.updateOne(
+                    { _id: fresh._id, state: 'sold' },
+                    {
+                      $set: {
+                        sellReason: 'orphan_recovery_sweeper',
+                        sellReasonDetail: `SELL alive ${ageH.toFixed(1)}h on Binance (threshold=${orphanThreshold}h) — auto-cancelled + MARKET SELL via orphan-recovery-sweep`,
+                        sellReasonSource: 'botManager.orphanRecoverySweep',
+                        sellReasonAt: new Date(),
+                      },
+                    }
+                  ).catch((err) => logger.warn({ err: err.message }, 'reconcile: sellReason override (orphan) failed (non-fatal)'));
+                  eventBus.emit('trade:closed', {
+                    tradeId: fresh._id,
+                    botId: trade.botId.toString(),
+                    symbol: fresh.symbol,
+                    source: 'orphan-recovery-sweep',
+                    pnl: result.pnl,
+                    avgSellPrice: result.avgSellPrice,
+                  });
+                } else {
+                  sweepStats.errors++;
+                  logger.error({
+                    tradeId: trade._id.toString(),
+                    botId: trade.botId.toString(),
+                    symbol: trade.symbol,
+                    err: result.error,
+                  }, 'reconcile: orphan-recovery-sweep forceCloseTrade failed');
+                }
+                continue;
+              }
               logger.debug({
                 tradeId: trade._id.toString(),
                 sellOrderId: trade.sellOrderId,
-              }, 'reconcile: SELL still NEW on book, trade in selling state — skip');
+                ageHours: ageH.toFixed(2),
+              }, 'reconcile: SELL still NEW on book, trade in selling state — skip (below orphan threshold)');
             } else if (['NEW', 'PARTIALLY_FILLED'].includes(order.status) && !['selling', 'sold'].includes(trade.state)) {
               // FIX-2026-09-09 (ETCUSDT orphan bug): SELL อยู่บนกระดานจริง แต่ DB state mismatch
               //   เคส: state='filled' หรือ 'placed' แต่ SELL มี orderId บน Binance รอ fill
@@ -1159,6 +1231,18 @@ class BotManager {
         }
       } catch (err) {
         logger.error({ err: err.message, tradeId: trade._id.toString() }, 'reconcile error');
+      }
+    }
+
+    // FIX-2026-09-17: persist orphan-SELL sweep stats (mirrors auv2 telemetry pattern)
+    //   - skip persist when sweep found nothing (no-op ticks would clutter AppConfig)
+    //   - Phase D health endpoint will surface this via /api/health/schedulers
+    if (sweepStats.scanned > 0 || sweepStats.forced > 0 || sweepStats.errors > 0) {
+      try {
+        const reconcileTelemetry = require('../services/reconcileTelemetry');
+        reconcileTelemetry.recordTick(sweepStats);
+      } catch (err) {
+        logger.warn({ err: err.message }, 'reconcile: telemetry persist failed (non-fatal)');
       }
     }
   }
@@ -1775,7 +1859,7 @@ async function checkDelistScheduleBots() {
   let stats = { scheduledSymbols: 0, botsAffected: 0, paused: 0, forceClosed: 0, errors: 0 };
   try {
     const delistMonitor = require('../services/binanceDelistMonitor');
-    const forceClose = require('../core/forceClose');
+    // FIX-2026-09-17: forceClose moved to top-level require (orphan-SELL sweeper also uses it)
     const scheduled = delistMonitor.getScheduledSymbols();
     stats.scheduledSymbols = scheduled.length;
     if (scheduled.length === 0) return;
