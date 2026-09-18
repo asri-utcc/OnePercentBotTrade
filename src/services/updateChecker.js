@@ -24,6 +24,8 @@ const https = require('https');
 const { URL } = require('url');
 
 const logger = require('../utils/logger');
+// FIX-2026-09-17: per-instance first-fire stagger
+const { scheduledInterval, clearScheduledInterval } = require('../utils/scheduledInterval');
 const adminConfig = require('../admin-monitor/config');
 const telegramNotifier = require('./telegramNotifier');
 const eventBus = require('./eventBus');
@@ -195,14 +197,17 @@ function start(opts = {}) {
   _stopped = false;
   // Initial check after short delay (so it doesn't block boot)
   setTimeout(() => { checkOnce().catch(() => {}); }, 3000);
-  _timer = setInterval(() => { checkOnce().catch(() => {}); }, intervalMs);
-  _timer.unref?.();
-  logger.info({ intervalMs }, 'updateChecker: started');
+  // FIX-2026-09-17: SCHEDULE_OFFSET_SEC applied (admin REST, 24h cadence)
+  _timer = scheduledInterval(() => { checkOnce().catch(() => {}); }, intervalMs, {
+    unref: true,
+    meta: 'updateChecker',
+  });
+  logger.info({ baseMs: intervalMs }, 'updateChecker: started');
 }
 
 function stop() {
   _stopped = true;
-  if (_timer) { clearInterval(_timer); _timer = null; }
+  if (_timer) { clearScheduledInterval(_timer); _timer = null; }
 }
 
 function getLastNotification() {

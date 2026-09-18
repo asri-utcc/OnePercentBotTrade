@@ -34,6 +34,8 @@ const binanceRest = require('../binance/binanceRest');
 const symbolInfo = require('../binance/symbolInfo');
 const eventBus = require('./eventBus');
 const logger = require('../utils/logger');
+// FIX-2026-09-17: per-instance first-fire stagger
+const { scheduledInterval, clearScheduledInterval } = require('../utils/scheduledInterval');
 
 const BNB_SYMBOL = 'BNBUSDT';
 const DEFAULT_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
@@ -83,15 +85,19 @@ class AutoBnbBuyer {
   start({ intervalMs = DEFAULT_INTERVAL_MS } = {}) {
     if (this.interval) return;
     this.intervalMs = intervalMs;
-    this.interval = setInterval(() => this._tickSafe(), this.intervalMs);
-    logger.info({ intervalMs, bnbSymbol: BNB_SYMBOL }, 'autoBnbBuyer: started');
-    // initial tick 30s after start (รอ bookTicker + symbolInfo cache warm up)
+    // FIX-2026-09-17: SCHEDULE_OFFSET_SEC applied
+    this.interval = scheduledInterval(() => this._tickSafe(), this.intervalMs, {
+      unref: true,
+      meta: 'autoBnbBuyer',
+    });
+    logger.info({ baseMs: intervalMs, bnbSymbol: BNB_SYMBOL }, 'autoBnbBuyer: started');
+    // initial tick 30s after start (รอ bookTicker + symbolInfo cache warm up) — defensive warm-up
     setTimeout(() => this._tickSafe(), 30_000);
   }
 
   stop() {
     if (this.interval) {
-      clearInterval(this.interval);
+      clearScheduledInterval(this.interval);
       this.interval = null;
     }
     logger.info('autoBnbBuyer: stopped');
@@ -102,7 +108,7 @@ class AutoBnbBuyer {
    */
   reloadConfig() {
     if (this.interval) {
-      clearInterval(this.interval);
+      clearScheduledInterval(this.interval);
       this.interval = null;
     }
     this.start({ intervalMs: this.intervalMs });
@@ -327,8 +333,12 @@ class AutoBnbBuyer {
       const newIntervalMs = checkIntervalMin * 60 * 1000;
       if (newIntervalMs !== this.intervalMs && this.interval) {
         this.intervalMs = newIntervalMs;
-        clearInterval(this.interval);
-        this.interval = setInterval(() => this._tickSafe(), this.intervalMs);
+        // FIX-2026-09-17: clearScheduledInterval + scheduledInterval (offset applies on new schedule)
+        clearScheduledInterval(this.interval);
+        this.interval = scheduledInterval(() => this._tickSafe(), this.intervalMs, {
+          unref: true,
+          meta: 'autoBnbBuyer:reload',
+        });
       }
       return { enabled, topUpUsdt, thresholdUsdt, checkIntervalMin, maxUsdtPerDay, cooldownMin };
     } catch (err) {

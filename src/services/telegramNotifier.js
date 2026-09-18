@@ -9,6 +9,8 @@
 
 const https = require('https');
 const logger = require('../utils/logger');
+// FIX-2026-09-17: per-instance first-fire stagger
+const { scheduledInterval, clearScheduledInterval } = require('../utils/scheduledInterval');
 const eventBus = require('./eventBus');
 const AppConfig = require('../db/models/AppConfig');
 const Trade = require('../db/models/Trade');
@@ -1809,24 +1811,25 @@ async function scanBnbBalance() {
 
 async function start() {
   bindEventHandlers();
-  if (pnlTimer) clearInterval(pnlTimer);
-  if (stuckTimer) clearInterval(stuckTimer);
-  if (summaryTimer) clearInterval(summaryTimer);
-  if (bnbBalanceTimer) clearInterval(bnbBalanceTimer); // FIX-2026-08-05
-  pnlTimer = setInterval(() => {
+  if (pnlTimer) clearScheduledInterval(pnlTimer);
+  if (stuckTimer) clearScheduledInterval(stuckTimer);
+  if (summaryTimer) clearScheduledInterval(summaryTimer);
+  if (bnbBalanceTimer) clearScheduledInterval(bnbBalanceTimer); // FIX-2026-08-05
+  // FIX-2026-09-17: SCHEDULE_OFFSET_SEC applied to all 4 telegramNotifier timers
+  pnlTimer = scheduledInterval(() => {
     scanOpenPositions().catch((err) => logger.warn({ err: err.message }, 'telegramNotifier: pnl scan failed'));
-  }, PNL_SCAN_INTERVAL_MS);
-  stuckTimer = setInterval(() => {
+  }, PNL_SCAN_INTERVAL_MS, { meta: 'telegramNotifier:pnl' });
+  stuckTimer = scheduledInterval(() => {
     scanOpenPositions().catch((err) => logger.warn({ err: err.message }, 'telegramNotifier: stuck scan failed'));
-  }, STUCK_SCAN_INTERVAL_MS);
+  }, STUCK_SCAN_INTERVAL_MS, { meta: 'telegramNotifier:stuck' });
   // FIX-2026-07-26: summary scanner — เช็คทุก 60s ว่าถึงเวลาส่ง summary หรือยัง
-  summaryTimer = setInterval(() => {
+  summaryTimer = scheduledInterval(() => {
     scanAndDispatchSummaries().catch((err) => logger.warn({ err: err.message }, 'telegramNotifier: summary scan failed'));
-  }, SUMMARY_SCAN_INTERVAL_MS);
+  }, SUMMARY_SCAN_INTERVAL_MS, { meta: 'telegramNotifier:summary' });
   // FIX-2026-08-05: BNB balance scanner — เช็คทุก 5 นาทีว่า BNB value ต่ำกว่า threshold หรือไม่
-  bnbBalanceTimer = setInterval(() => {
+  bnbBalanceTimer = scheduledInterval(() => {
     scanBnbBalance().catch((err) => logger.warn({ err: err.message }, 'telegramNotifier: bnb balance scan failed'));
-  }, BNB_BALANCE_SCAN_INTERVAL_MS);
+  }, BNB_BALANCE_SCAN_INTERVAL_MS, { unref: true, meta: 'telegramNotifier:bnb-balance' });
   // initial scan หลัง 5s (ให้ eventBus + bookTicker warm up)
   setTimeout(() => {
     scanOpenPositions().catch((err) => logger.warn({ err: err.message }, 'telegramNotifier: initial scan failed'));
@@ -1845,10 +1848,10 @@ async function start() {
 }
 
 function stop() {
-  if (pnlTimer) { clearInterval(pnlTimer); pnlTimer = null; }
-  if (stuckTimer) { clearInterval(stuckTimer); stuckTimer = null; }
-  if (summaryTimer) { clearInterval(summaryTimer); summaryTimer = null; }
-  if (bnbBalanceTimer) { clearInterval(bnbBalanceTimer); bnbBalanceTimer = null; } // FIX-2026-08-05
+  if (pnlTimer) { clearScheduledInterval(pnlTimer); pnlTimer = null; }
+  if (stuckTimer) { clearScheduledInterval(stuckTimer); stuckTimer = null; }
+  if (summaryTimer) { clearScheduledInterval(summaryTimer); summaryTimer = null; }
+  if (bnbBalanceTimer) { clearScheduledInterval(bnbBalanceTimer); bnbBalanceTimer = null; } // FIX-2026-08-05
   eventBus.removeAllListeners('trade:update');
   eventBus.removeAllListeners('bot:enabled');
   eventBus.removeAllListeners('bot:disabled');

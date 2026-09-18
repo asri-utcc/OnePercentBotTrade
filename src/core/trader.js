@@ -26,6 +26,8 @@ const licenseService = require('../services/licenseService'); // FIX-2026-08-27 
 const autoTiming = require('../services/autoTiming'); // FIX-2026-08-30 Phase 4: Auto-Timing (heatmap-driven entry gate)
 const roundDownCapital = require('../services/roundDownCapital'); // FIX-2026-09-02: Round-down Capital math (single source of truth)
 const logger = require('../utils/logger');
+// FIX-2026-09-17: per-instance first-fire stagger for periodic timers
+const { scheduledInterval, clearScheduledInterval } = require('../utils/scheduledInterval');
 const Bot = require('../db/models/Bot');
 const Trade = require('../db/models/Trade');
 const Signal = require('../db/models/Signal');
@@ -181,13 +183,14 @@ class Trader {
     //   - guard sweepInFlight กัน overlap
     this.sweepTimer = null;
     this.sweepInFlight = false;
-    this.sweepTimer = setInterval(() => {
+    // FIX-2026-09-17: SCHEDULE_OFFSET_SEC applied; sweepIntervalMs keeps its constructor-set jitter
+    this.sweepTimer = scheduledInterval(() => {
       if (!this.running || this.sweepInFlight) return;
       this.sweepInFlight = true;
       this.reconcileKlines('periodic-sweep')
         .catch((err) => logger.warn({ err: err.message }, 'trader: periodic sweep failed'))
         .finally(() => { this.sweepInFlight = false; });
-    }, this.sweepIntervalMs);
+    }, this.sweepIntervalMs, { meta: `trader:sweep:${this.bot.symbol}` });
 
     // FIX-2026-07-31 (BUG-9): periodic reconcileAccountBalance — previously fired only on startup
     //   (one-shot L166) so SELL-orphan cross-check + balance reconciliation never ran after first
@@ -196,8 +199,8 @@ class Trader {
     //   - orphan detection ยังครบถ้วน แค่ห่างขึ้น
     this.reconcileBalanceTimer = null;
     this._reconcileBalanceInFlight = false;
-    // FIX-2026-08-22 (weight spike): per-instance jitter set in constructor (this.reconcileBalanceIntervalMs)
-    this.reconcileBalanceTimer = setInterval(() => {
+    // FIX-2026-09-17: SCHEDULE_OFFSET_SEC applied; this.reconcileBalanceIntervalMs keeps its constructor-set jitter
+    this.reconcileBalanceTimer = scheduledInterval(() => {
       if (!this.running || this._reconcileBalanceInFlight) return;
       this._reconcileBalanceInFlight = true;
       this.reconcileAccountBalance({ force: false })
@@ -630,7 +633,7 @@ class Trader {
     }
     // FIX-2026-07-15: clear sweep timer + reconnect debounce
     if (this.sweepTimer) {
-      clearInterval(this.sweepTimer);
+      clearScheduledInterval(this.sweepTimer);
       this.sweepTimer = null;
     }
     // FIX-2026-08-22: clear per-symbol debounce Map (replace legacy single _marketReconnectDebounce)
@@ -652,7 +655,7 @@ class Trader {
     }
     // FIX-2026-07-31 (BUG-9 / FIX-C3): clear periodic reconcile-balance interval
     if (this.reconcileBalanceTimer) {
-      clearInterval(this.reconcileBalanceTimer);
+      clearScheduledInterval(this.reconcileBalanceTimer);
       this.reconcileBalanceTimer = null;
     }
     // FIX-2026-07-31 (BUG-14): clear startup timers (T3/T4) + BUY cooldown timer (T5)

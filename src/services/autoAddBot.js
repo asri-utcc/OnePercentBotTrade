@@ -33,6 +33,8 @@ const eventBus = require('./eventBus');
 const { getBotDefaults, buildBotCreatePayload } = require('./botDefaults'); // FIX-2026-08-09: share defaults source with manual POST /api/bots
 const licenseService = require('./licenseService'); // FIX-2026-08-27 Phase 3b-1: pass tier to buildBotCreatePayload
 const logger = require('../utils/logger');
+// FIX-2026-09-17: per-instance first-fire stagger
+const { scheduledInterval, clearScheduledInterval } = require('../utils/scheduledInterval');
 
 const DEFAULT_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
 const MIN_INTERVAL_MS = 5 * 60 * 1000; // 5 min (กันพลาดตั้งค่า interval ต่ำเกิน)
@@ -66,7 +68,7 @@ class AutoAddBot {
 
   stop() {
     if (this.interval) {
-      clearInterval(this.interval);
+      clearScheduledInterval(this.interval);
       this.interval = null;
     }
     logger.info('autoAddBot: stopped');
@@ -98,10 +100,14 @@ class AutoAddBot {
   }
 
   _installInterval(intervalMs) {
-    if (this.interval) clearInterval(this.interval);
+    if (this.interval) clearScheduledInterval(this.interval);
     this.intervalMs = Math.max(MIN_INTERVAL_MS, intervalMs || DEFAULT_INTERVAL_MS);
-    this.interval = setInterval(() => this._tickSafe(), this.intervalMs);
-    // immediate first tick — ให้ user เห็นผลทันทีหลังเปิด toggle (ถ้ามี symbols ที่ผ่านเกณฑ์)
+    // FIX-2026-09-17: SCHEDULE_OFFSET_SEC applied (Binance kline read)
+    this.interval = scheduledInterval(() => this._tickSafe(), this.intervalMs, {
+      unref: true,
+      meta: 'autoAddBot',
+    });
+    // immediate first tick — ให้ user เห็นผลทันทีหลังเปิด toggle (independent of offset)
     setImmediate(() => this._tickSafe());
   }
 

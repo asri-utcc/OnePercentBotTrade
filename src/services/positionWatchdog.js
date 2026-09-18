@@ -60,6 +60,8 @@ const signalEngine = require('../core/signalEngine');
 const forceClose = require('../core/forceClose');
 const eventBus = require('./eventBus');
 const logger = require('../utils/logger');
+// FIX-2026-09-17: per-instance first-fire stagger
+const { scheduledInterval, clearScheduledInterval } = require('../utils/scheduledInterval');
 // FIX-2026-08-07: Phase 3 (CBv2 panic-close for disabled bots) needs telegram alerts
 const telegramNotifier = require('./telegramNotifier');
 // FIX-2026-08-08: Feature #2 — CBv3 version routing (mutually exclusive with CBv2)
@@ -108,16 +110,20 @@ class PositionWatchdog {
     //     burst ใน 2-3 วินาที → base weight 2700+ → ชน 3000 cap → circuit breaker เปิดถี่
     //   - ±25% jitter กระจายให้ tick ไม่ตรงกันในทุก subsystem
     const jitteredInterval = Math.round(intervalMs * (1 + (Math.random() * 2 - 1) * 0.25));
-    this.interval = setInterval(() => this._tickSafe(), jitteredInterval);
-    logger.info({ intervalMs, jitteredIntervalMs: jitteredInterval }, 'positionWatchdog: started');
-    // run once immediately on start, with random delay 0-5s to de-align
+    // FIX-2026-09-17: SCHEDULE_OFFSET_SEC applied (per-instance stagger); ±25% jitter kept additive
+    this.interval = scheduledInterval(() => this._tickSafe(), jitteredInterval, {
+      unref: true,
+      meta: 'positionWatchdog',
+    });
+    logger.info({ baseMs: intervalMs, jitteredIntervalMs: jitteredInterval }, 'positionWatchdog: started');
+    // keep the existing 0-5s random delay as defensive layer (per-instance clock-skew safety)
     const initialDelayMs = Math.floor(Math.random() * 5000);
     setTimeout(() => this._tickSafe(), initialDelayMs);
   }
 
   stop() {
     if (this.interval) {
-      clearInterval(this.interval);
+      clearScheduledInterval(this.interval);
       this.interval = null;
     }
     logger.info('positionWatchdog: stopped');

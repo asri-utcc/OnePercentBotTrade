@@ -52,6 +52,8 @@ const klineCache = require('./klineCache');
 const walletReserve = require('./walletReserve');
 const eventBus = require('./eventBus');
 const logger = require('../utils/logger');
+// FIX-2026-09-17: per-instance first-fire stagger
+const { scheduledInterval, clearScheduledInterval } = require('../utils/scheduledInterval');
 
 const TICK_INTERVAL_MS = 60 * 1000; // 60s — same as tpUpdater
 const MAX_RESERVE = walletReserve.MAX_RESERVE || 1_000_000;
@@ -186,7 +188,7 @@ class AutoReserve {
 
   stop() {
     if (this.interval) {
-      clearInterval(this.interval);
+      clearScheduledInterval(this.interval);
       this.interval = null;
     }
     this.lastFiredHourKey = -1;
@@ -218,9 +220,12 @@ class AutoReserve {
   }
 
   _installInterval() {
-    if (this.interval) clearInterval(this.interval);
-    this.interval = setInterval(() => this._tickSafe(), TICK_INTERVAL_MS);
-    // immediate first tick — let user see status right after enable
+    if (this.interval) clearScheduledInterval(this.interval);
+    // FIX-2026-09-17: SCHEDULE_OFFSET_SEC applied
+    this.interval = scheduledInterval(() => this._tickSafe(), TICK_INTERVAL_MS, {
+      meta: 'autoReserve',
+    });
+    // immediate first tick — let user see status right after enable (independent of offset)
     setImmediate(() => this._tickSafe());
   }
 

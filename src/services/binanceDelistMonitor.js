@@ -28,6 +28,8 @@ const https = require('https');
 const binanceRest = require('../binance/binanceRest');
 const eventBus = require('./eventBus');
 const logger = require('../utils/logger');
+// FIX-2026-09-17: per-instance first-fire stagger
+const { scheduledInterval, clearScheduledInterval } = require('../utils/scheduledInterval');
 
 // ─── Config ────────────────────────────────────────────
 const MARKETING_LIST_URL = 'www.binance.com';
@@ -295,17 +297,17 @@ async function start({ intervalMs = DEFAULT_INTERVAL_MS } = {}) {
     refreshDelistSchedule({ force: true }),
   ]);
   // Periodic tick — re-check TTL + emit diff
-  intervalHandle = setInterval(() => {
+  // FIX-2026-09-17: SCHEDULE_OFFSET_SEC applied (Binance public REST)
+  intervalHandle = scheduledInterval(() => {
     Promise.allSettled([
       refreshMonitoredSymbols(),
       refreshDelistSchedule(),
     ]).catch((err) => logger.warn({ err: err.message }, 'delistMonitor: tick refresh failed'));
-  }, intervalMs);
-  if (intervalHandle.unref) intervalHandle.unref();
+  }, intervalMs, { unref: true, meta: 'delistMonitor' });
 }
 
 function stop() {
-  if (intervalHandle) { clearInterval(intervalHandle); intervalHandle = null; }
+  if (intervalHandle) { clearScheduledInterval(intervalHandle); intervalHandle = null; }
   running = false;
   logger.info('delistMonitor: stopped');
 }

@@ -57,6 +57,8 @@ const forceClose = require('../core/forceClose');
 const fxService = require('./fxService');
 const eventBus = require('./eventBus');
 const logger = require('../utils/logger');
+// FIX-2026-09-17: per-instance first-fire stagger
+const { scheduledInterval, clearScheduledInterval } = require('../utils/scheduledInterval');
 
 // FIX-2026-09-06: AUv2 mirrors F1 auto-arm (trader.js:_autoArmStopLossOnUKC) —
 //   safety feature, NOT premium. F1 has NO license gate; AUv2 should follow.
@@ -167,16 +169,20 @@ class AutoUnderwaterV2 {
     // FIX-2026-09-12: Jitter ±10% → ±25% (mirror positionWatchdog — prevent burst alignment)
     //   ±25% jitter กระจาย burst ออกจาก watchdog (10 min) + trader reconcile (5 min)
     const jitteredInterval = Math.round(base * (1 + (Math.random() * 2 - 1) * 0.25));
-    this.interval = setInterval(() => this._tickSafe(), jitteredInterval);
-    logger.info({ intervalMs: base, jitteredIntervalMs: jitteredInterval }, 'auv2: started');
-    // initial random delay 0-5s
+    // FIX-2026-09-17: SCHEDULE_OFFSET_SEC applied; ±25% jitter kept additive
+    this.interval = scheduledInterval(() => this._tickSafe(), jitteredInterval, {
+      unref: true,
+      meta: 'auv2',
+    });
+    logger.info({ baseMs: base, jitteredIntervalMs: jitteredInterval }, 'auv2: started');
+    // keep defensive 0-5s random delay as defensive layer
     const initialDelayMs = Math.floor(Math.random() * 5000);
     setTimeout(() => this._tickSafe(), initialDelayMs);
   }
 
   stop() {
     if (this.interval) {
-      clearInterval(this.interval);
+      clearScheduledInterval(this.interval);
       this.interval = null;
     }
     logger.info('auv2: stopped');

@@ -7,6 +7,8 @@ const { marketWs, userDataWs } = require('../binance/binanceWs');
 const botManager = require('../core/botManager');
 const config = require('../../config');
 const logger = require('../utils/logger');
+// FIX-2026-09-17: per-instance first-fire stagger (apply only to Binance ping; health tick is event-bus only)
+const { scheduledInterval, clearScheduledInterval } = require('../utils/scheduledInterval');
 
 /**
  * Health Monitor — เช็คสถานะ component ต่างๆ เป็นระยะ
@@ -43,7 +45,11 @@ class HealthMonitor {
     this._tick();
 
     this.interval = setInterval(() => this._tick(), HEALTH_INTERVAL_MS);
-    this.binancePingInterval = setInterval(() => this._pingBinance(), BINANCE_PING_INTERVAL_MS);
+    // FIX-2026-09-17: SCHEDULE_OFFSET_SEC applied to Binance ping (1 min cadence hits Binance API)
+    this.binancePingInterval = scheduledInterval(() => this._pingBinance(), BINANCE_PING_INTERVAL_MS, {
+      unref: true,
+      meta: 'healthMonitor:binance-ping',
+    });
 
     // ping ครั้งแรกทันที
     this._pingBinance();
@@ -57,7 +63,7 @@ class HealthMonitor {
       this.interval = null;
     }
     if (this.binancePingInterval) {
-      clearInterval(this.binancePingInterval);
+      clearScheduledInterval(this.binancePingInterval);
       this.binancePingInterval = null;
     }
     logger.info('healthMonitor stopped');

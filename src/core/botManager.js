@@ -17,6 +17,13 @@ const autoPauseAdjust = require('../services/autoPauseAdjust');
 //   a thin-KC trap).
 const autoTiming = require('../services/autoTiming');
 const logger = require('../utils/logger');
+// FIX-2026-09-17: per-instance first-fire stagger for periodic timers
+//   - 2 PM2 instances on same IP share Binance weight budget; existing _jitter(±10%)
+//     spreads each instance's own ticks but both instances boot seconds apart, so
+//     their jitter windows still overlap → combined weight spike → CB opens.
+//   - helper reads SCHEDULE_OFFSET_SEC (0..59) once at module load, e.g. owner=12 faiz=42.
+//   - existing _jitter is kept additive at call sites (it spreads tick-to-tick).
+const { scheduledInterval, clearScheduledInterval } = require('../utils/scheduledInterval');
 const Bot = require('../db/models/Bot');
 const Trade = require('../db/models/Trade');
 const AppConfig = require('../db/models/AppConfig'); // FIX-2026-09-17: orphan-SELL sweeper reads threshold
@@ -198,16 +205,15 @@ class BotManager {
     //   - ห่าง RECONCILE_INTERVAL_MS (default 2 นาที) — กัน WS event หลุดระหว่าง runtime
     //   - clearInterval ตอน stop()
     //   - guard reconcileInFlight กัน overlap กรณี reconcile นาน (เช่น reconcile 50 trades)
-    if (this.reconcileTimer) clearInterval(this.reconcileTimer);
-    const reconcileIntervalMs = _jitter(RECONCILE_INTERVAL_MS);
-    this.reconcileTimer = setInterval(() => {
+    if (this.reconcileTimer) clearScheduledInterval(this.reconcileTimer);
+    // FIX-2026-09-17: SCHEDULE_OFFSET_SEC applied here (per-instance stagger across PM2 fleet)
+    this.reconcileTimer = scheduledInterval(() => {
       if (!this.running || this.reconcileInFlight) return;
       this.reconcileInFlight = true;
       this.reconcilePendingTrades()
         .catch((err) => logger.error({ err: err.message }, 'botManager: periodic reconcile failed'))
         .finally(() => { this.reconcileInFlight = false; });
-    }, reconcileIntervalMs);
-    logger.info({ intervalMs: reconcileIntervalMs, baseMs: RECONCILE_INTERVAL_MS }, 'botManager: periodic reconcile scheduled');
+    }, RECONCILE_INTERVAL_MS, { meta: 'botManager:reconcile' });
 
     // FIX-2026-07-23: schedule TP auto-updater (recompute TP% top-of-hour สำหรับบอทที่ autoUpdateTp=true)
     tpUpdater.scheduleHourlyTpUpdate();
@@ -223,26 +229,21 @@ class BotManager {
     // FIX-2026-08-06 (BANK incident): bind this → BotManager instance
     //   - checkAutoPauseBots เป็น standalone function (declared outside class) ที่ใช้ this.traders / this._resetStaleReplayCursorOnEnable / this.spawnTrader
     //   - ถ้าเรียกเป็น free function `this` = undefined (strict mode) → auto-resume crash ทุกครั้งที่ cursor > 30 min
-    const autoPauseIntervalMs = _jitter(AUTO_PAUSE_INTERVAL_MS);
-    autoPauseTimer = setInterval(() => {
+    autoPauseTimer = scheduledInterval(() => {
       checkAutoPauseBots.call(this).catch((err) => logger.warn({ err: err.message }, 'botManager: auto-pause tick failed'));
-    }, autoPauseIntervalMs);
-    if (autoPauseTimer && typeof autoPauseTimer.unref === 'function') autoPauseTimer.unref();
-    logger.info({ intervalMs: autoPauseIntervalMs, baseMs: AUTO_PAUSE_INTERVAL_MS }, 'botManager: auto-pause scanner scheduled');
+    }, AUTO_PAUSE_INTERVAL_MS, { unref: true, meta: 'botManager:auto-pause' });
 
     // FIX-2026-08-03: Safe-trade #2 (trendline) live status scanner
     //   - ทุก 60s scan บอทที่ safeTradeTrendlineEnabled=true → populate _trendlineStatusCache
     //   - UI bot card badge reads from this cache via /api/bots response (sl fields)
     //   - immediate first scan (non-blocking) so badge shows on page load
-    const trendlineIntervalMs = _jitter(TRENDLINE_SCAN_INTERVAL_MS);
-    trendlineScanTimer = setInterval(() => {
+    trendlineScanTimer = scheduledInterval(() => {
       checkTrendlineStatusBots().catch((err) => logger.warn({ err: err.message }, 'botManager: trendline status tick failed'));
-    }, trendlineIntervalMs);
-    if (trendlineScanTimer && typeof trendlineScanTimer.unref === 'function') trendlineScanTimer.unref();
+    }, TRENDLINE_SCAN_INTERVAL_MS, { unref: true, meta: 'botManager:trendline-scan' });
+    // keep immediate first scan via setImmediate (UI must show data fast — independent of offset semantics)
     setImmediate(() => {
       checkTrendlineStatusBots().catch((err) => logger.warn({ err: err.message }, 'botManager: trendline status initial scan failed'));
     });
-    logger.info({ intervalMs: trendlineIntervalMs, baseMs: TRENDLINE_SCAN_INTERVAL_MS }, 'botManager: trendline status scanner scheduled');
 
     // FIX-2026-08-06: delist scheduler — auto-pause + force-close บอทที่อยู่ใน delist schedule
     //   - tick ทุก 5 นาที: scan delistMonitor.getScheduledSymbols() → บอทที่ trade symbol นั้น:
@@ -250,12 +251,9 @@ class BotManager {
     //     * auto-pause (set enabled=false) ถ้า daysUntil <= 7
     //   - botManager scheduler handles BOTH enabled และ disabled bots (force-close ต้องทำแม้บอทปิด)
     //   - emit telegram event (delistMonitor:scheduled ที่ telegramNotifier bind แล้ว)
-    const delistIntervalMs = _jitter(DELIST_SCHEDULE_INTERVAL_MS);
-    delistSchedulerTimer = setInterval(() => {
+    delistSchedulerTimer = scheduledInterval(() => {
       checkDelistScheduleBots.call(this).catch((err) => logger.warn({ err: err.message }, 'botManager: delist scheduler tick failed'));
-    }, delistIntervalMs);
-    if (delistSchedulerTimer && typeof delistSchedulerTimer.unref === 'function') delistSchedulerTimer.unref();
-    logger.info({ intervalMs: delistIntervalMs, baseMs: DELIST_SCHEDULE_INTERVAL_MS }, 'botManager: delist scheduler scheduled');
+    }, DELIST_SCHEDULE_INTERVAL_MS, { unref: true, meta: 'botManager:delist-scheduler' });
 
     // FIX-2026-07-24: start Telegram notifier (subscribe eventBus + periodic PnL scan)
     // FIX-2026-08-27 Phase 3a C2: gate by License.features.telegram (premium feature toggle).
@@ -280,18 +278,18 @@ class BotManager {
     this.running = false;
     // FIX-2026-07-14: clear periodic reconcile timer ด้วย
     if (this.reconcileTimer) {
-      clearInterval(this.reconcileTimer);
+      clearScheduledInterval(this.reconcileTimer);
       this.reconcileTimer = null;
     }
     // FIX-2026-07-23: หยุด TP auto-updater timer
     tpUpdater.stopHourlyTpUpdate();
     // FIX-2026-08-01: หยุด auto-pause scanner timer
-    if (autoPauseTimer) { clearInterval(autoPauseTimer); autoPauseTimer = null; }
+    if (autoPauseTimer) { clearScheduledInterval(autoPauseTimer); autoPauseTimer = null; }
     // FIX-2026-08-03: หยุด trendline status scanner timer + clear cache
-    if (trendlineScanTimer) { clearInterval(trendlineScanTimer); trendlineScanTimer = null; }
+    if (trendlineScanTimer) { clearScheduledInterval(trendlineScanTimer); trendlineScanTimer = null; }
     _trendlineStatusCache.clear();
     // FIX-2026-08-06: หยุด delist scheduler
-    if (delistSchedulerTimer) { clearInterval(delistSchedulerTimer); delistSchedulerTimer = null; }
+    if (delistSchedulerTimer) { clearScheduledInterval(delistSchedulerTimer); delistSchedulerTimer = null; }
     // FIX-2026-08-29: หยุด auto-pause adjust scheduler
     try { autoPauseAdjust.stop(); } catch (_) { /* ignore */ }
     // FIX-2026-07-24: หยุด Telegram notifier (clear listeners + timers)
