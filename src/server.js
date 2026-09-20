@@ -21,6 +21,7 @@ const binanceRest = require('./binance/binanceRest'); // FIX-2026-08-21: apply c
 const walletSnapshot = require('./services/walletSnapshot'); // FIX-2026-08-22: daily portfolio-value snapshot scheduler
 const autoReserve = require('./services/autoReserve'); // FIX-2026-08-24: auto reserve/release USDT scheduler
 const autoTiming = require('./services/autoTiming'); // FIX-2026-08-30 Phase 4: Auto-Timing (heatmap-driven entry gate)
+const btcTrendMonitor = require('./services/btcTrendMonitor'); // FIX-2026-09-21: BTC Trend Pattern global monitor (BTCUSDT 1h)
 const adminMonitor = require('./admin-monitor'); // FIX-2026-08-26: OnePercentBot-Admin heartbeat + command listener
 const eventBus = require('./services/eventBus');
 const consent = require('./consent'); // FIX-2026-08-26 Phase 2c: first-run consent gate (3 sections + admin DB + local file)
@@ -287,6 +288,11 @@ async function main() {
   //   - When gated, manual PUT /api/wallet/auto-reserve/config will still PERSIST but the
   //     scheduler won't run. Users see this state on /wallet.html (tier badge in next phase).
   const licenseService = require('./services/licenseService');
+  // FIX-2026-09-21: BTC Trend Pattern — global monitor (BTCUSDT 1h).
+  //   - Runs BEFORE autoReserve.start() so the BTC mode state is populated
+  //     before autoReserve reads it (future integration).
+  //   - Not license-gated — always runs (read-only public Binance data).
+  btcTrendMonitor.start();
   if (licenseService.isFeatureEnabled('autoReserve')) {
     autoReserve.start();
   } else {
@@ -386,6 +392,7 @@ async function main() {
     try { autoDeleteBot.stop(); } catch (e) { /* ignore */ }
     try { walletSnapshot.stop(); } catch (e) { /* ignore */ }
     try { autoReserve.stop(); } catch (e) { /* ignore */ }
+    try { btcTrendMonitor.stop(); } catch (e) { /* ignore */ }
     try { autoTiming.stop(); } catch (e) { /* ignore */ }
     try { autoUnderwaterV2.stop(); } catch (e) { /* ignore */ }
     try { waitingSellRecovery.stop(); } catch (e) { /* ignore */ }

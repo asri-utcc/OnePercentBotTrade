@@ -44,6 +44,8 @@ const rateLimitRoutes = require('./api/routes/rateLimit.routes');
 const consentRoutes = require('./api/routes/consent.routes');
 // Phase 4-2026-08-29: Chat routes — community room + DM to admin
 const chatRoutes = require('./api/routes/chat.routes');
+// FIX-2026-09-21: BTC Trend Pattern — global background monitor snapshot
+const btcTrendRoutes = require('./api/routes/btcTrend.routes');
 
 function createApp() {
   const app = express();
@@ -169,6 +171,8 @@ app.use('/api/share-card', require('./api/routes/shareCard.routes'));
 
 // Phase 4-2026-08-29: Chat routes (requireAuth) — community + DM to admin
 app.use('/api/chat', chatRoutes);
+// FIX-2026-09-21: BTC Trend Pattern — current mode snapshot for Settings mini-widget
+app.use('/api/btc-trend', btcTrendRoutes);
 // FIX 2026-09-04: chat v2 attachment routes removed per user request.
 
 // FIX-2026-08-26: App version endpoint — public, used by navbar to show user what version is running

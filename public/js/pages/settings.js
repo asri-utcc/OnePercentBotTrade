@@ -21,6 +21,7 @@ let licenseInfo = null;   // FIX-2026-08-26 Phase 3a: GET /api/license/info for 
 let currentCbVersion = 'v3'; // FIX-2026-09-09 Batch 3: populated by loadConfig() from adminCfg.config.cbVersion — gates Bot Defaults CBv2/CBv3 toggle visibility
 let configBackupPreview = null; // FIX-2026-08-29: GET /api/admin/config/backup/preview
 let autoTimingCfg = null; // FIX-2026-08-30 / Phase 4: Auto-Timing config
+let btcTrendState = null; // FIX-2026-09-21: BTC Trend Pattern — BTCUSDT 1h global indicator state
 
 async function init() {
   const me = await API.get('/api/auth/me').catch(() => null);
@@ -131,6 +132,13 @@ async function loadConfig() {
     } else {
       autoTimingCfg = { config: null, status: null, bands: [], defaultBands: {} };
     }
+    // FIX-2026-09-21: BTC Trend Pattern — global indicator state (mini-widget)
+    try {
+      btcTrendState = await API.get('/api/btc-trend/current');
+    } catch (err) {
+      console.warn('btc-trend state load failed:', err.message);
+      btcTrendState = { mode: 'normal', lastComputedAt: null, lastError: 'unavailable', tickCount: 0, isRunning: false };
+    }
     render();
     // FIX-2026-08-30 / Phase 4: Auto-Timing uses its own renderer, bind its section events after render()
     if (window.AutoTimingUI && typeof window.AutoTimingUI.bind === 'function') {
@@ -203,6 +211,7 @@ function render() {
         <p class="text-muted-3 small mb-3">ค่าเกี่ยวกับการเทรด (DPS + CB Version + Daily Target)</p>
 
         ${renderRateLimitSection()}
+        ${renderBtcTrendSection()}
         ${renderAutoReserveSection()}
         ${renderAutoPauseAdjustSection()}
         ${(function () {
@@ -1041,6 +1050,75 @@ function renderRateLimitSection() {
         <br/>ถ้าเห็น <code class="text-danger">weight approaching limit</code> ใน log → ลดค่า หรือรอ spread ให้กระจายดีขึ้น
       </small>
     </div>
+  `);
+}
+
+// ─── 📊 Section: BTC Trend Pattern (FIX-2026-09-21) ────────────────
+// Mini-widget — shows current BTC Trend Pattern mode + monitor health.
+// Background service (btcTrendMonitor) ticks every 15min, computes mode for
+// BTCUSDT 1h, emits 'btc-trend:mode' on transition. Used by future autoReserve
+// integration (out of scope this phase).
+const BTC_TREND_MODE_COLORS = {
+  'normal':        { bg: '#e5e7eb', fg: '#374151' },
+  'waiting-boots': { bg: 'rgba(255, 152, 0, 0.85)', fg: '#fff' },
+  'boots':         { bg: 'rgba(34, 197, 94, 0.85)',  fg: '#fff' },
+  'waiting-break': { bg: 'rgba(59, 130, 246, 0.85)', fg: '#fff' },
+  'break':         { bg: 'rgba(239, 68, 68, 0.85)',  fg: '#fff' },
+};
+const BTC_TREND_MODE_LABEL = {
+  'normal':        '⚪ Normal',
+  'waiting-boots': '🟠 Waiting-boots',
+  'boots':         '🟢 Boots',
+  'waiting-break': '🔵 Waiting-break',
+  'break':         '🔴 Break',
+};
+function renderBtcTrendSection() {
+  const s = btcTrendState || {};
+  const mode = s.mode || 'normal';
+  const color = BTC_TREND_MODE_COLORS[mode] || BTC_TREND_MODE_COLORS.normal;
+  const lastComputedAt = s.lastComputedAt ? new Date(s.lastComputedAt).toLocaleString() : '—';
+  const tickCount = s.tickCount != null ? s.tickCount : 0;
+  const isRunning = !!s.isRunning;
+  const lastError = s.lastError || null;
+  return section('sec-btc-trend', '📊', 'BTC Trend Pattern — BTCUSDT 1h system indicator', false, `
+    <div class="alert alert-info small mb-3">
+      <strong>📌 จุดประสงค์:</strong> background service คำนวณ mode ของ BTCUSDT 1h ทุก 15 นาที
+      (dual Keltner Channel — inner mult=0.8 / outer mult=2.2, EMA20 + Wilder ATR)
+      — เก็บ state ไว้ใน in-memory cache + emit <code>'btc-trend:mode'</code> event เมื่อ mode เปลี่ยน
+      รอใช้กับ <code>autoReserve</code> ในอนาคต
+    </div>
+
+    <div class="d-flex flex-wrap align-items-center gap-3 mb-3">
+      <span class="badge" style="background:${color.bg};color:${color.fg};font-size:1rem;padding:0.5rem 0.9rem;">
+        ${BTC_TREND_MODE_LABEL[mode] || mode}
+      </span>
+      <div class="small text-muted-2">
+        <div>🕒 last computed: <strong>${escapeHtml(lastComputedAt)}</strong></div>
+        <div>🔁 ticks: <strong>${tickCount}</strong> · running: <strong>${isRunning ? '✅' : '⏸️'}</strong></div>
+        ${s.prevMode ? `<div>↪️ prev: <code>${escapeHtml(s.prevMode)}</code></div>` : ''}
+        ${lastError ? `<div class="text-danger">⚠️ last error: ${escapeHtml(lastError)}</div>` : ''}
+      </div>
+    </div>
+
+    <details class="lux-details mt-2">
+      <summary class="lux-details-summary">
+        <span>📘</span>
+        <span>คำอธิบาย 5 Mode</span>
+      </summary>
+      <div class="lux-details-body small">
+        <ul class="mb-2">
+          <li><strong>⚪ Normal</strong> — ราคาอยู่ในกรอบ (ระหว่าง inner + outer KC) สถานะปกติ</li>
+          <li><strong>🟠 Waiting-boots</strong> — ราคาหลุด outer lower KC → เตรียมตัวเด้งกลับ</li>
+          <li><strong>🟢 Boots</strong> — ราคาดีดกลับเข้ามาเหนือ inner lower KC → ยืนยันการฟื้นตัว</li>
+          <li><strong>🔵 Waiting-break</strong> — ราคาทะลุ outer upper KC → รอย่อตัว</li>
+          <li><strong>🔴 Break</strong> — ราคาย่อกลับมาใต้ inner upper KC → ยืนยันจบชุดพัก</li>
+        </ul>
+        <p class="text-muted-2 mb-0">
+          ใช้ <code>Keltner Channel</code> 2 ชั้น: inner (mult=0.8, แคบ) + outer (mult=2.2, กว้าง)
+          คำนวณเหมือน Pine Script v5 — รัน background ตลอดเวลา ไม่ส่งผลต่อการเทรดของบอท
+        </p>
+      </div>
+    </details>
   `);
 }
 
