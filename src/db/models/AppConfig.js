@@ -374,6 +374,22 @@ const appConfigSchema = new mongoose.Schema(
     autoReserveLastRunAt:        { type: Date,    default: null },
     autoReserveLastStats:        { type: Object,  default: null },
     autoReserveLastError:        { type: String,  default: null },
+    // ═══════════════════════════════════════════════════════════════════════
+    // FIX-2026-09-21: BTC Trend Driven Adjust — auto-reserve preset based on
+    // BTCUSDT 1h Trend Pattern mode (see src/services/btcTrendMonitor.js).
+    //   - autoReserveBtcDrivenEnabled: master toggle
+    //   - autoReserveBtcDrivenLastMode: last BTC mode we acted on
+    //   - autoReserveBtcDrivenLastAppliedAt: timestamp of last preset write
+    // Preset table (hardcoded in src/services/autoReserveBtcDriven.js):
+    //   conservative (break/waiting-boots): pole=2, usdt=6, loss=4%, check=6h, step=6
+    //   aggressive   (boots/waiting-break): pole=5, usdt=9, loss=2%, check=2h, step=9
+    //   normal       → no preset (user values คงเดิม)
+    // Toggle OFF ไม่ restore — ค่าใน DB คงเป็นค่าที่ BTC apply ล่าสุด
+    // Engine: src/services/autoReserveBtcDriven.js (subscribe 'btc-trend:mode')
+    // ═══════════════════════════════════════════════════════════════════════
+    autoReserveBtcDrivenEnabled:      { type: Boolean, default: false },
+    autoReserveBtcDrivenLastMode:     { type: String,  default: null },
+    autoReserveBtcDrivenLastAppliedAt:{ type: Date,    default: null },
 
     // ═══════════════════════════════════════════════════════════════════════
     // FIX-2026-08-21: Binance API rate-limit capacity (token-bucket)

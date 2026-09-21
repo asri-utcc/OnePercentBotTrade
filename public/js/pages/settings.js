@@ -15,6 +15,7 @@ let adminCfg = null;   // FIX-2026-08-08 (rev2): DPS tunables
 let botDefaults = null; // FIX-2026-08-08 (rev3): Bot Defaults
 let rateLimit = null;  // FIX-2026-08-21: Binance API rate-limit capacity
 let autoReserveCfg = null; // FIX-2026-08-24: auto reserve/release USDT config
+let btcDrivenCfg = null;    // FIX-2026-09-21: BTC trend driven adjust (autoReserve preset by BTC mode)
 let autoPauseAdjustCfg = null; // FIX-2026-08-29: auto-pause threshold auto-adjust config
 let consentStatus = null;  // FIX-2026-08-26 Phase 3a: GET /api/consent/status for Settings page
 let licenseInfo = null;   // FIX-2026-08-26 Phase 3a: GET /api/license/info for Settings page
@@ -93,6 +94,13 @@ async function loadConfig() {
     } catch (err) {
       console.warn('auto-reserve config load failed:', err.message);
       autoReserveCfg = { config: { enabled: false, poleCount: 3, usdtPerPole: 10, lossThresholdPct: 2, checkHours: 4, stepUsdt: 10 }, status: {} };
+    }
+    // FIX-2026-09-21: BTC Trend Driven Adjust — autoReserve preset switch
+    try {
+      btcDrivenCfg = await API.get('/api/wallet/auto-reserve/btc-driven');
+    } catch (err) {
+      console.warn('btc-driven config load failed:', err.message);
+      btcDrivenCfg = { enabled: false, lastMode: null, lastAppliedAt: null, currentMode: 'normal', presets: {}, modeMapping: {} };
     }
     // FIX-2026-08-29: Auto-pause threshold auto-adjust (master settings)
     try {
@@ -1123,6 +1131,14 @@ function renderBtcTrendSection() {
 }
 
 // ─── 🛒 Section: Auto Reserve / Release (FIX-2026-08-24) ─────────
+// FIX-2026-09-21: BTC-driven preset mapping (mirror src/services/autoReserveBtcDriven.js)
+const BTC_DRIVEN_MODE_TO_PRESET = {
+  'break':         'conservative',
+  'waiting-boots': 'conservative',
+  'boots':         'aggressive',
+  'waiting-break': 'aggressive',
+  // 'normal' → no preset
+};
 function renderAutoReserveSection() {
   const cfg = (autoReserveCfg && autoReserveCfg.config) || {};
   const status = (autoReserveCfg && autoReserveCfg.status) || {};
@@ -1190,7 +1206,105 @@ function renderAutoReserveSection() {
       ${lastStats ? `<br /><strong>Last stats:</strong> outcome=${escapeHtml(lastStats.outcome || '—')} · action=${escapeHtml(lastStats.action || '—')} · deltaUsdt=${lastStats.deltaUsdt ?? 0} · usablePole=${lastStats.usablePoleCount ?? '?'} · lossPole=${lastStats.lossPoleCount ?? 0} · available=${lastStats.availablePoleCount ?? '?'} · target=${lastStats.targetPoleCount ?? '?'} · positions=${lastStats.positionCount ?? 0}` : ''}
       ${status.lastRunError ? `<br /><strong>Last error:</strong> <span class="text-danger">${escapeHtml(status.lastRunError)}</span>` : ''}
     </div>
+
+    ${renderAutoReserveBtcDrivenSubSection()}
   `);
+}
+
+// FIX-2026-09-21: BTC Trend Driven Adjust — sub-section inside autoReserve
+// Toggle (form-switch) + status badge (current BTC mode + preset being applied
+// + last applied timestamp) + read-only preset table + Save button.
+function renderAutoReserveBtcDrivenSubSection() {
+  const cfg = btcDrivenCfg || {};
+  const btcEnabled = !!cfg.enabled;
+  const btcCurrentMode = cfg.currentMode || 'normal';
+  const btcLastMode = cfg.lastMode;
+  const lastAppliedAt = cfg.lastAppliedAt ? new Date(cfg.lastAppliedAt).toLocaleString() : '—';
+  const effectivePresetKey = btcLastMode ? BTC_DRIVEN_MODE_TO_PRESET[btcLastMode] : null;
+  const presets = cfg.presets || {};
+  const effectivePreset = effectivePresetKey ? presets[effectivePresetKey] : null;
+  const toggleStatus = btcEnabled ? '▶️ ON' : '⏹ OFF';
+  const modeColor = btcEnabled ? 'bg-success' : 'bg-secondary';
+  return `
+    <hr class="my-4" />
+    <h6 class="mt-3 mb-2">🤖 BTC Trend Driven Adjust</h6>
+    <div class="alert alert-info small mb-3">
+      <strong>📌 หลักการ:</strong> ระบบจะตรวจสอบ <code>BTC Trend Pattern</code> mode (BTCUSDT 1h)
+      และปรับค่า reserve อัตโนมัติเมื่อ mode เปลี่ยน — ใช้ BTC เป็น macro signal ปรับ aggressiveness ของทุกบอท
+      <ul class="mb-1 mt-1">
+        <li><code>break / waiting-boots</code> → <strong>conservative</strong> preset (เน้นปลอดภัย — pole=2, USDT=6, loss=4%, check=6ชม., step=6)</li>
+        <li><code>boots / waiting-break</code> → <strong>aggressive</strong> preset (เน้นรีบ — pole=5, USDT=9, loss=2%, check=2ชม., step=9)</li>
+        <li><code>normal</code> → <strong>ไม่ปรับ</strong> (ใช้ค่าที่ตั้งไว้ด้านบน)</li>
+      </ul>
+      ⚠️ <strong>ปิด toggle = ค่าใน DB คงเป็นค่าที่ BTC apply ล่าสุด</strong> (ไม่ restore กลับเป็นค่าก่อนเปิด)
+    </div>
+
+    <div class="mb-3">
+      <label class="form-check form-switch">
+        <input type="checkbox" class="form-check-input" id="ar-btc-driven-enabled" ${btcEnabled ? 'checked' : ''} />
+        <span class="form-check-label">
+          <strong>เปิด BTC-driven auto-adjust</strong>
+          <span class="text-muted small ms-2">(apply preset ทันทีที่ BTC mode เปลี่ยน)</span>
+        </span>
+      </label>
+    </div>
+
+    <div class="row g-2 mb-3 small">
+      <div class="col-md-4">
+        <div class="text-muted-2">BTC mode ปัจจุบัน:</div>
+        <span class="badge ${modeColor}">${escapeHtml(btcCurrentMode)}</span>
+        <span class="ms-1 text-muted">${toggleStatus}</span>
+      </div>
+      <div class="col-md-4">
+        <div class="text-muted-2">Preset ที่ apply ล่าสุด:</div>
+        ${effectivePresetKey
+          ? `<strong>${escapeHtml(effectivePresetKey)}</strong>${effectivePreset ? ` <span class="text-muted-2">(${effectivePreset.poleCount}p / ${effectivePreset.usdtPerPole}u / ${effectivePreset.lossThresholdPct}% / ${effectivePreset.checkHours}h / ${effectivePreset.stepUsdt}s)</span>` : ''}`
+          : '<span class="text-muted-2">—</span>'}
+      </div>
+      <div class="col-md-4">
+        <div class="text-muted-2">Last applied:</div>
+        <strong>${escapeHtml(lastAppliedAt)}</strong>
+      </div>
+    </div>
+
+    <details class="lux-details">
+      <summary class="lux-details-summary">
+        <span>📋</span>
+        <span>Preset table (read-only)</span>
+      </summary>
+      <div class="lux-details-body">
+        <table class="table table-sm small mb-0">
+          <thead>
+            <tr>
+              <th>Preset</th>
+              <th>poleCount</th>
+              <th>usdtPerPole</th>
+              <th>lossThresholdPct</th>
+              <th>checkHours</th>
+              <th>stepUsdt</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${Object.entries(presets).map(([k, p]) => `
+              <tr>
+                <td><strong>${escapeHtml(k)}</strong></td>
+                <td>${p.poleCount}</td>
+                <td>${p.usdtPerPole}</td>
+                <td>${p.lossThresholdPct}</td>
+                <td>${p.checkHours}</td>
+                <td>${p.stepUsdt}</td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      </div>
+    </details>
+
+    <div class="d-flex align-items-center gap-2 mt-3">
+      <button type="button" class="btn btn-primary" id="btn-save-ar-btc-driven">💾 Save BTC-driven toggle</button>
+      <span class="ms-2 text-muted small" id="ar-btc-driven-status"></span>
+    </div>
+  `;
 }
 
 // ─── 🛒 Section: Auto-adjust Auto-pause thresholds (FIX-2026-08-29) ───
@@ -2049,6 +2163,9 @@ function bindEvents() {
   if (sar) sar.onclick = saveAutoReserveConfig;
   const tar = document.getElementById('btn-trigger-ar');
   if (tar) tar.onclick = triggerAutoReserve;
+  // FIX-2026-09-21: BTC Trend Driven Adjust (sub-section inside autoReserve)
+  const sbtd = document.getElementById('btn-save-ar-btc-driven');
+  if (sbtd) sbtd.onclick = saveBtcDrivenConfig;
 
   // FIX-2026-08-29: Auto-adjust Auto-pause thresholds
   const sapa = document.getElementById('btn-save-apa');
@@ -2553,6 +2670,57 @@ async function saveAutoReserveConfig() {
     setStatus('ar-status', `✅ บันทึกแล้ว · ${c.enabled ? '🟢 ON' : '⚪ OFF'} · poleCount=${c.poleCount} · usdtPerPole=${c.usdtPerPole} · lossThr=${c.lossThresholdPct}% · checkHours=${c.checkHours} · step=${c.stepUsdt}`);
     await loadConfig();
   } catch (err) { setStatus('ar-status', '❌ ' + (err.body && err.body.error ? err.body.error : err.message), true); }
+}
+
+// FIX-2026-09-21: BTC Trend Driven Adjust — Save toggle
+// Toggle ON → server applies preset immediately based on current BTC mode
+// Toggle OFF → server keeps last BTC-applied values (per user decision)
+async function saveBtcDrivenConfig() {
+  const enabled = !!document.getElementById('ar-btc-driven-enabled').checked;
+  const wasEnabled = !!(btcDrivenCfg && btcDrivenCfg.enabled);
+
+  // Confirm-on-enable (transition OFF→ON)
+  if (enabled && !wasEnabled) {
+    const ok = window.LUX_CONFIRM
+      ? await window.LUX_CONFIRM({
+          title: '⚠️ เปิด BTC-driven auto-adjust?',
+          message:
+            'ระบบจะตรวจสอบ BTC Trend Pattern mode (BTCUSDT 1h) และเขียนทับค่า reserve 5 fields\n' +
+            '(poleCount, usdtPerPole, lossThresholdPct, checkHours, stepUsdt)\n' +
+            'อัตโนมัติเมื่อ BTC mode เปลี่ยน\n\n' +
+            '🎯 conservative preset: break / waiting-boots → pole=2 USDT=6 loss=4% check=6ชม. step=6\n' +
+            '🎯 aggressive preset:  boots / waiting-break → pole=5 USDT=9 loss=2% check=2ชม. step=9\n' +
+            '⚪ normal mode: ไม่ปรับ (ใช้ค่าที่ตั้งไว้)\n\n' +
+            '⚠️ ค่าที่ตั้งใน dashboard จะถูก overwrite อัตโนมัติ\n' +
+            '⚠️ ปิด toggle = ค่าคงเป็นค่าที่ BTC apply ล่าสุด (ไม่ restore)',
+          confirmLabel: 'เปิด BTC-driven',
+          cancelLabel: 'ยกเลิก',
+          requirePassword: false,
+        })
+      : await AdminModalAlert.confirm({
+          title: '⚠️ เปิด BTC-driven auto-adjust?',
+          message: 'ระบบจะตรวจสอบ BTC Trend Pattern mode และเขียนทับค่า reserve 5 fields อัตโนมัติเมื่อ mode เปลี่ยน',
+          level: 'warn',
+          okLabel: 'เปิด',
+        });
+    if (!ok) {
+      document.getElementById('ar-btc-driven-enabled').checked = false;
+      return;
+    }
+  }
+
+  setStatus('ar-btc-driven-status', '⏳ กำลังบันทึก...');
+  try {
+    const r = await API.put('/api/wallet/auto-reserve/btc-driven', { enabled });
+    const c = (r && r) || {};
+    setStatus(
+      'ar-btc-driven-status',
+      `✅ บันทึกแล้ว · ${c.enabled ? '▶️ BTC-driven ON' : '⏹ BTC-driven OFF'} · currentMode=${escapeHtml(c.currentMode || '—')} · lastMode=${escapeHtml(c.lastMode || '—')}`
+    );
+    await loadConfig();
+  } catch (err) {
+    setStatus('ar-btc-driven-status', '❌ ' + (err.body && err.body.error ? err.body.error : err.message), true);
+  }
 }
 
 async function triggerAutoReserve() {

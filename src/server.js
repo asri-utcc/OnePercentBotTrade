@@ -22,6 +22,7 @@ const walletSnapshot = require('./services/walletSnapshot'); // FIX-2026-08-22: 
 const autoReserve = require('./services/autoReserve'); // FIX-2026-08-24: auto reserve/release USDT scheduler
 const autoTiming = require('./services/autoTiming'); // FIX-2026-08-30 Phase 4: Auto-Timing (heatmap-driven entry gate)
 const btcTrendMonitor = require('./services/btcTrendMonitor'); // FIX-2026-09-21: BTC Trend Pattern global monitor (BTCUSDT 1h)
+const autoReserveBtcDriven = require('./services/autoReserveBtcDriven'); // FIX-2026-09-21: BTC-driven autoReserve preset
 const adminMonitor = require('./admin-monitor'); // FIX-2026-08-26: OnePercentBot-Admin heartbeat + command listener
 const eventBus = require('./services/eventBus');
 const consent = require('./consent'); // FIX-2026-08-26 Phase 2c: first-run consent gate (3 sections + admin DB + local file)
@@ -298,6 +299,10 @@ async function main() {
   } else {
     logger.info('server: autoReserve skipped (License.features.autoReserve === false or no license)');
   }
+  // FIX-2026-09-21: BTC-driven autoReserve — subscribes 'btc-trend:mode' event,
+  //   applies preset to AppConfig.autoReserve* when BTC mode changes.
+  //   No-op when disabled. Always starts (cheap — just DB read + optional subscribe).
+  autoReserveBtcDriven.start();
 
   // FIX-2026-08-30 Phase 4: Auto-Timing (heatmap-driven entry gate) — premium feature
   //   - License-gated: requires License.features.autoTiming === true
@@ -393,6 +398,7 @@ async function main() {
     try { walletSnapshot.stop(); } catch (e) { /* ignore */ }
     try { autoReserve.stop(); } catch (e) { /* ignore */ }
     try { btcTrendMonitor.stop(); } catch (e) { /* ignore */ }
+    try { autoReserveBtcDriven.stop(); } catch (e) { /* ignore */ }
     try { autoTiming.stop(); } catch (e) { /* ignore */ }
     try { autoUnderwaterV2.stop(); } catch (e) { /* ignore */ }
     try { waitingSellRecovery.stop(); } catch (e) { /* ignore */ }

@@ -28,6 +28,8 @@ const binanceRest = require('../../binance/binanceRest');
 const fxService = require('../../services/fxService');
 const walletReserve = require('../../services/walletReserve');
 const autoReserve = require('../../services/autoReserve');
+const autoReserveBtcDriven = require('../../services/autoReserveBtcDriven'); // FIX-2026-09-21: BTC trend driven adjust
+const btcTrendMonitor = require('../../services/btcTrendMonitor');           // FIX-2026-09-21: read current BTC mode
 const AppConfig = require('../../db/models/AppConfig');
 const Trade = require('../../db/models/Trade');
 const WalletSnapshot = require('../../db/models/WalletSnapshot');
@@ -396,7 +398,46 @@ router.post('/auto-reserve/run', requireAuth, async (req, res) => {
   }
 });
 
-// ─── Time-range helpers (chart query params) ───────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════
+// FIX-2026-09-21: BTC Trend Driven Adjust — autoReserve preset switch
+//   - GET  /api/wallet/auto-reserve/btc-driven  → service status + current BTC mode
+//   - PUT  /api/wallet/auto-reserve/btc-driven  → toggle master switch
+// Engine: src/services/autoReserveBtcDriven.js (subscribes 'btc-trend:mode')
+// Note: Toggle ON  → snapshot taken, preset applied immediately based on current BTC mode
+//       Toggle OFF → DB autoReserve values are KEPT (per user decision 2026-09-21,
+//                    last BTC-applied values remain in dashboard)
+// ═══════════════════════════════════════════════════════════════════════════
+router.get('/auto-reserve/btc-driven', requireAuth, (_req, res) => {
+  try {
+    const status = autoReserveBtcDriven.getStatus();
+    const currentMode = btcTrendMonitor.getState().mode;
+    res.json({ ...status, currentMode });
+  } catch (err) {
+    logger.error({ err: err.message }, 'wallet: btc-driven GET failed');
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.put('/auto-reserve/btc-driven', requireAuth, async (req, res) => {
+  try {
+    const body = req.body || {};
+    if (typeof body.enabled !== 'boolean') {
+      return res.status(400).json({ error: 'enabled (boolean) required' });
+    }
+    await autoReserveBtcDriven.setEnabled(body.enabled);
+    const currentMode = btcTrendMonitor.getState().mode;
+    logger.info({ enabled: body.enabled, currentMode }, 'wallet: btc-driven toggle updated');
+    res.json({
+      ok: true,
+      ...autoReserveBtcDriven.getStatus(),
+      currentMode,
+      ts: Date.now(),
+    });
+  } catch (err) {
+    logger.error({ err: err.message }, 'wallet: btc-driven PUT failed');
+    res.status(500).json({ error: err.message });
+  }
+});
 // FIX-2026-08-22: store entries UPPERCASE — range param is uppercased before lookup,
 //   so 'all' from frontend becomes 'ALL' which matches the Set. (Pre-fix stored
 //   'all' lowercase → Set.has('ALL') = false → 400 even though rangeToMs handled it.)
