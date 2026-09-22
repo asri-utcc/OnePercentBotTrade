@@ -1,6 +1,8 @@
 'use strict';
 
 const mongoose = require('mongoose');
+const { clampOutOfRangeNumbers, DEFAULT_SKIP_PATHS } = require('../../utils/appConfigRepair');
+const logger = require('../../utils/logger');
 
 // Singleton: เก็บแค่ document เดียว (key = 'singleton')
 const appConfigSchema = new mongoose.Schema(
@@ -514,5 +516,28 @@ const appConfigSchema = new mongoose.Schema(
   },
   { timestamps: true }
 );
+
+// FIX-2026-09-22: schema self-heal — clamp out-of-range Number fields on save.
+//   Background: emergency scripts (e.g. pause-sweeper.js) may write raw values
+//   outside min/max via raw mongo collection.updateOne(). MongoDB stores them
+//   (no schema enforcement at storage layer). On any subsequent .save() (e.g.
+//   POST /api/auth/sync-bot-action-password), Mongoose validates the entire
+//   document and throws ValidationError even when the caller didn't touch the
+//   drifted field.
+//   Fix: pre('save') hook clamps out-of-range Number fields silently + warns.
+//   - Idempotent — valid data unchanged (covered by tests/appConfigRepair20260922).
+//   - Non-throwing — never blocks .save() on unrelated fields.
+//   - Emergency-state markers (sweeperEmergencyPaused*) skipped — those are
+//     intentional operator state, not data drift.
+// See: src/utils/appConfigRepair.js for rationale + shared utility.
+appConfigSchema.pre('save', function clampNumericFieldsBeforeSave(next) {
+  try {
+    clampOutOfRangeNumbers(this, { logger, skipPaths: DEFAULT_SKIP_PATHS });
+  } catch (err) {
+    // Never block save on self-heal failure — log and proceed.
+    logger.warn({ err: err.message }, 'AppConfig.pre(save) clamp hook failed (non-fatal)');
+  }
+  next();
+});
 
 module.exports = mongoose.model('AppConfig', appConfigSchema);

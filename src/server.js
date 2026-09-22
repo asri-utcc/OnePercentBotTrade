@@ -86,6 +86,31 @@ async function main() {
       logger.warn({ err: err.message }, 'anti-tamper: check failed (non-fatal)');
     }
 
+    // FIX-2026-09-22: AppConfig boot-repair — clamp out-of-range numeric fields.
+    //   Background: emergency scripts (e.g. pause-sweeper.js) may write raw values
+    //   outside min/max. Without this repair, .save() routes (change-password /
+    //   sync-bot-action-password / useBnbForFees) throw ValidationError on the
+    //   stale field even though the caller didn't touch it.
+    //   Non-fatal by design — boot always proceeds; repair is a one-shot clamp.
+    //   Self-heal at the schema layer also fires on .save() (see AppConfig pre-save
+    //   hook), so this is defense-in-depth + handles legacy data on first deploy.
+    try {
+      const AppConfig = require('./db/models/AppConfig');
+      const { repairAppConfig } = require('./utils/appConfigRepair');
+      const r = await repairAppConfig({ AppConfig, logger });
+      if (r.persisted) {
+        logger.warn({ count: r.repaired.length, repaired: r.repaired }, 'AppConfig boot-repair persisted');
+      } else if (r.docFound && r.error) {
+        // already warned inside repairAppConfig
+      } else if (!r.docFound) {
+        logger.info('AppConfig boot-repair: no singleton doc yet (fresh deploy)');
+      } else {
+        logger.debug('AppConfig boot-repair: nothing to repair');
+      }
+    } catch (err) {
+      logger.warn({ err: err.message }, 'AppConfig boot-repair failed (non-fatal)');
+    }
+
     // FIX-2026-08-26 Phase 2c: Consent gate — runs AFTER license check, BEFORE botManager.start
     //   - on first run: opens /consent page, BLOCKS until user Accept/Decline
     //   - if accepted: returns decision='accepted' → caller proceeds
