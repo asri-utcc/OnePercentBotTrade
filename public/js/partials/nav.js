@@ -446,11 +446,13 @@ window.usdtToThb = function usdtToThb(usdtValue, opts = {}) {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // FIX-2026-09-09: OneClick Update — pill poll + click handler.
+// FIX-2026-09-22: fallback lazy-loads /js/pages/update.js so the styled modal
+//   opens on ANY page (not only index.html). Previously a native window.confirm()
+//   fallback on chart-monitor.html hit a redirect loop via /index.html.
 //   Nav renders the #nav-update-pill element (hidden by default). This block
 //   polls /api/app/update-status and shows the pill when available. Click
-//   delegates to window.openUpdateModal() (provided by pages that include
-//   /js/pages/update.js, e.g. index.html). On pages without that script,
-//   the pill still appears but click shows a thin confirm/prompt fallback.
+//   delegates to window.openUpdateModal() if defined; otherwise injects
+//   the update.js script tag on demand, then opens the modal.
 // ─────────────────────────────────────────────────────────────────────────────
 (function () {
   const PILL_ID = 'nav-update-pill';
@@ -472,17 +474,34 @@ window.usdtToThb = function usdtToThb(usdtValue, opts = {}) {
     } catch (_) { _render(null); return null; }
   }
   function _click(e) {
+    e.preventDefault();
+    // Preferred path: styled AdminModalAlert modal on pages that include update.js.
     if (typeof window.openUpdateModal === 'function') {
-      e.preventDefault();
       window.openUpdateModal();
-    } else {
-      // Fallback for pages that don't load update.js — show window.open to the
-      // upgrade modal URL (admin can be opened manually, but for the local user
-      // we just warn — the modal is the proper UX on dashboard pages).
-      e.preventDefault();
-      const r = window.confirm('Update available — open bot admin dashboard to update?');
-      if (r) location.href = '/index.html';
+      return;
     }
+    // Fallback (FIX-2026-09-22): pages without /js/pages/update.js (e.g. chart-monitor.html)
+    //   used to fall through to a native window.confirm() that redirected to /index.html,
+    //   which auth-redirects right back — a redirect loop. Instead, lazy-load update.js
+    //   from the same origin, then call window.openUpdateModal() once the script is ready.
+    //   Guarded by a flag so a duplicate load doesn't fire (e.g. user spams the pill).
+    if (_click._loadingUpdateJs) return;
+    _click._loadingUpdateJs = true;
+    const s = document.createElement('script');
+    s.src = '/js/pages/update.js?v=2026-09-09-initial';
+    s.onload = () => {
+      _click._loadingUpdateJs = false;
+      if (typeof window.openUpdateModal === 'function') {
+        window.openUpdateModal();
+      } else {
+        window.alert('Update UI failed to load. Open the Bots page to update.');
+      }
+    };
+    s.onerror = () => {
+      _click._loadingUpdateJs = false;
+      window.alert('Failed to load update UI.');
+    };
+    document.head.appendChild(s);
   }
   function _bind() {
     const pill = document.getElementById(PILL_ID);
