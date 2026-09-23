@@ -4467,7 +4467,31 @@ class Trader {
       // FIX-2026-08-31: claimedBuy now hoisted to top of placeBuy() — removed duplicate.
 
       try {
-        const account = await binanceRest.getAccount();
+        // FIX-2026-09-23 (skip signal from CB cascade): retry getAccount() once on CIRCUIT_OPEN
+        //   - เดิม: getAccount() marked critical:false → blocked when CB opens → trader treats
+        //     blocked call as "balance pre-check failed (fail-closed)" → SKIP BUY
+        //   - root cause: 174 stopped-bot symbols /positions endpoint spam bookTicker (348 w/req)
+        //     drove CB open → getAccount blocked → legitimate BUY signals silently skipped
+        //   - fix: retry once after 1s on CIRCUIT_OPEN (CB cooldownMs=30s; usually clears).
+        //     If retry also fails (or error is not CIRCUIT_OPEN), fall through to outer
+        //     fail-closed catch — preserves original "Binance hiccup = protect reserve" behavior.
+        //   - does NOT change getAccount() criticality — P0 audit still requires critical:false.
+        let account;
+        try {
+          account = await binanceRest.getAccount();
+        } catch (cbErr) {
+          if (cbErr && cbErr.code === 'CIRCUIT_OPEN') {
+            logger.warn({
+              err: cbErr.message,
+              botId: this.bot._id.toString(),
+              symbol: this.bot.symbol,
+            }, 'trader: balance pre-check hit CIRCUIT_OPEN — waiting 1s and retrying once before fail-closed');
+            await new Promise((r) => setTimeout(r, 1000));
+            account = await binanceRest.getAccount();
+          } else {
+            throw cbErr;
+          }
+        }
         const usdtBal = (account.balances || []).find((b) => b.asset === 'USDT');
         const freeUsdt = usdtBal ? parseFloat(usdtBal.free) : 0;
         // FIX-2026-08-21: ไม่นับ locked เ�็น available (locked = USDT ที่ commit ไปแล้ว)

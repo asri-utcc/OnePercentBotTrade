@@ -3,6 +3,10 @@
 const express = require('express');
 // FIX-2026-08-24 (P1 audit): bulk operations stagger — must match botManager.SPAWN_STAGGER_MS
 const SPAWN_STAGGER_MS = 300;
+// FIX-2026-09-23 (positions weight spike): cap unique symbols fetched per /positions request
+//   - bounds bulk bookTicker URL length + caps worst-case Binance weight (cap × 0.02 per request)
+//   - 30 covers >95% of typical open-positions tile; capped symbols silently fall back to klineCache
+const POSITIONS_PRICE_SYMBOL_CAP = 30;
 const { requireAuth, requireAuthOrLicenseKey } = require('../middleware/auth');
 const Bot = require('../../db/models/Bot');
 const Trade = require('../../db/models/Trade');
@@ -486,26 +490,43 @@ router.get('/positions', requireAuthOrLicenseKey, async (req, res) => {
     let stoppedBotFetchFailed = [];
     if (stoppedBotSymbols.size > 0) {
       const uniqueSymbols = [...stoppedBotSymbols];
-      const settled = await Promise.allSettled(
-        uniqueSymbols.map(async (sym) => {
-          const ticker = await binanceRest.getBookTicker(sym);
-          const bid = parseFloat(ticker.bidPrice);
-          const ask = parseFloat(ticker.askPrice);
-          if (!Number.isFinite(bid) || !Number.isFinite(ask) || bid <= 0 || ask <= 0) {
-            throw new Error(`bookTicker invalid for ${sym}`);
-          }
-          return { sym, midPrice: (bid + ask) / 2 };
-        })
-      );
-      for (let i = 0; i < settled.length; i += 1) {
-        const s = settled[i];
-        const sym = uniqueSymbols[i];
-        if (s.status === 'fulfilled' && s.value && Number.isFinite(s.value.midPrice)) {
-          stoppedBotPriceMap.set(sym, s.value.midPrice);
-        } else {
-          stoppedBotFetchFailed.push(sym);
-          logger.warn({ symbol: sym, err: s.reason && s.reason.message }, 'positions stopped-bot price fetch failed, will fallback to klineCache');
+      try {
+        // FIX-2026-09-23 (positions weight spike): bulk fetch + 30s cache
+        //   - เดิม: Promise.all parallel singles = N×weight 2 = 174×2=348 weight per request
+        //   - ใหม่: 1 batch (or few chunks of ≤100 symbols) + module cache → max 2 weight if cache miss
+        //   - cap 30 symbols to keep response bounded (P95 dashboard load)
+        const capped = uniqueSymbols.slice(0, POSITIONS_PRICE_SYMBOL_CAP);
+        if (uniqueSymbols.length > POSITIONS_PRICE_SYMBOL_CAP) {
+          logger.warn({
+            requested: uniqueSymbols.length,
+            capped: POSITIONS_PRICE_SYMBOL_CAP,
+          }, 'positions stopped-bot symbols capped (most-recent will use klineCache fallback)');
         }
+        const tickerMap = await binanceRest.getBookTickers(capped);
+        for (const sym of capped) {
+          const t = tickerMap.get(sym);
+          if (t) {
+            const bid = parseFloat(t.bidPrice);
+            const ask = parseFloat(t.askPrice);
+            if (Number.isFinite(bid) && Number.isFinite(ask) && bid > 0 && ask > 0) {
+              stoppedBotPriceMap.set(sym, (bid + ask) / 2);
+              continue;
+            }
+          }
+          stoppedBotFetchFailed.push(sym);
+        }
+        if (stoppedBotFetchFailed.length > 0) {
+          logger.warn({
+            failedCount: stoppedBotFetchFailed.length,
+            sample: stoppedBotFetchFailed.slice(0, 5),
+          }, 'positions stopped-bot price fetch incomplete, will fallback to klineCache');
+        }
+      } catch (err) {
+        stoppedBotFetchFailed.push(...uniqueSymbols);
+        logger.warn({
+          err: err.message,
+          symbolCount: uniqueSymbols.length,
+        }, 'positions stopped-bot bulk price fetch failed, will fallback to klineCache');
       }
     }
 
@@ -547,26 +568,41 @@ router.get('/positions', requireAuthOrLicenseKey, async (req, res) => {
     let freshFailedSymbols = [];
     if (freshMode) {
       const uniqueSymbols = [...new Set(validTrades.map((t) => t.symbol))];
-      const settled = await Promise.allSettled(
-        uniqueSymbols.map(async (sym) => {
-          const ticker = await binanceRest.getBookTicker(sym);
-          const bid = parseFloat(ticker.bidPrice);
-          const ask = parseFloat(ticker.askPrice);
-          if (!Number.isFinite(bid) || !Number.isFinite(ask) || bid <= 0 || ask <= 0) {
-            throw new Error(`bookTicker invalid for ${sym}`);
-          }
-          return { sym, midPrice: (bid + ask) / 2 };
-        })
-      );
-      for (let i = 0; i < settled.length; i += 1) {
-        const s = settled[i];
-        const sym = uniqueSymbols[i];
-        if (s.status === 'fulfilled' && s.value && Number.isFinite(s.value.midPrice)) {
-          freshPriceMap.set(sym, s.value.midPrice);
-        } else {
-          freshFailedSymbols.push(sym);
-          logger.warn({ symbol: sym, err: s.reason && s.reason.message }, 'positions ?fresh=1 — bookTicker fetch failed, will fallback to klineCache');
+      try {
+        // FIX-2026-09-23: use bulk + cache (same path as stopped-bot above)
+        //   - caps at POSITIONS_PRICE_SYMBOL_CAP to bound response + weight
+        const capped = uniqueSymbols.slice(0, POSITIONS_PRICE_SYMBOL_CAP);
+        if (uniqueSymbols.length > POSITIONS_PRICE_SYMBOL_CAP) {
+          logger.warn({
+            requested: uniqueSymbols.length,
+            capped: POSITIONS_PRICE_SYMBOL_CAP,
+          }, 'positions ?fresh=1 symbols capped (rest will use klineCache fallback)');
         }
+        const tickerMap = await binanceRest.getBookTickers(capped);
+        for (const sym of capped) {
+          const t = tickerMap.get(sym);
+          if (t) {
+            const bid = parseFloat(t.bidPrice);
+            const ask = parseFloat(t.askPrice);
+            if (Number.isFinite(bid) && Number.isFinite(ask) && bid > 0 && ask > 0) {
+              freshPriceMap.set(sym, (bid + ask) / 2);
+              continue;
+            }
+          }
+          freshFailedSymbols.push(sym);
+        }
+        if (freshFailedSymbols.length > 0) {
+          logger.warn({
+            failedCount: freshFailedSymbols.length,
+            sample: freshFailedSymbols.slice(0, 5),
+          }, 'positions ?fresh=1 price fetch incomplete, will fallback to klineCache');
+        }
+      } catch (err) {
+        freshFailedSymbols.push(...uniqueSymbols);
+        logger.warn({
+          err: err.message,
+          symbolCount: uniqueSymbols.length,
+        }, 'positions ?fresh=1 bulk price fetch failed, will fallback to klineCache');
       }
     }
 

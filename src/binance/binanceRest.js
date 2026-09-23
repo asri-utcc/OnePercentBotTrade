@@ -604,6 +604,86 @@ async function getBookTicker(symbol) {
   return publicGet('/api/v3/ticker/bookTicker', { symbol }, 2);
 }
 
+// FIX-2026-09-23: bulk bookTicker + module-level cache
+//   - Binance ?symbols=[...] form costs SAME weight 2 for the whole batch
+//     (per docs: weight=2 for single, weight=2 for batch of up to 100 symbols)
+//   - Cache 30s TTL — /positions refreshes on every WS event so 30s drastically cuts weight
+//   - 174 stopped-bot symbols / 1 bulk call = 2 weight (vs 348 weight with parallel singles)
+//   - hard cap 100 symbols per batch (Binance URL length safety)
+const _bookTickerCache = new Map(); // Map<symbol, { bidPrice, askPrice, ts }>
+const BOOK_TICKER_CACHE_TTL_MS = 30 * 1000;
+const BOOK_TICKER_BATCH_MAX = 100;
+
+function _bookTickerCacheGet(symbol) {
+  const e = _bookTickerCache.get(String(symbol).toUpperCase());
+  if (!e) return null;
+  if (Date.now() - e.ts > BOOK_TICKER_CACHE_TTL_MS) {
+    _bookTickerCache.delete(String(symbol).toUpperCase());
+    return null;
+  }
+  return e;
+}
+
+/**
+ * Bulk bookTicker — fetch best bid/ask for many symbols in 1 (or few) REST calls.
+ *
+ * FIX-2026-09-23 (positions weight spike): /positions endpoint used to do
+ *   Promise.all of N parallel getBookTicker calls (weight 2 each) → with
+ *   174 deleted bots holding positions, single request = 348 weight, and
+ *   dashboard 10s polling = ~2088 weight/min from this endpoint alone.
+ *
+ *   Now: batch via ?symbols=["BTCUSDT","ETHUSDT",...] (weight 2 for whole
+ *   batch, capped at 100 per call) + 30s cache → max 2 weight per request
+ *   if cache hit, else 2 weight per 100 symbols.
+ *
+ * @param {string[]} symbols — uppercase symbol list
+ * @returns {Promise<Map<string, {bidPrice: string, askPrice: string}>>}
+ *          resolved Map only contains symbols that were returned by Binance
+ *          (missing symbols are omitted — caller falls back to klineCache)
+ */
+async function getBookTickers(symbols) {
+  const result = new Map();
+  if (!Array.isArray(symbols) || symbols.length === 0) return result;
+
+  // Normalize + dedupe
+  const uniq = [...new Set(symbols.map((s) => String(s || '').toUpperCase()).filter(Boolean))];
+
+  // 1) Cache hits — skip Binance entirely
+  const missing = [];
+  for (const sym of uniq) {
+    const cached = _bookTickerCacheGet(sym);
+    if (cached) {
+      result.set(sym, { bidPrice: cached.bidPrice, askPrice: cached.askPrice });
+    } else {
+      missing.push(sym);
+    }
+  }
+  if (missing.length === 0) return result;
+
+  // 2) Batch fetch missing symbols (chunked at BOOK_TICKER_BATCH_MAX for URL safety)
+  const chunks = [];
+  for (let i = 0; i < missing.length; i += BOOK_TICKER_BATCH_MAX) {
+    chunks.push(missing.slice(i, i + BOOK_TICKER_BATCH_MAX));
+  }
+  await Promise.allSettled(chunks.map(async (chunk) => {
+    const resp = await publicGet('/api/v3/ticker/bookTicker', { symbols: JSON.stringify(chunk) }, 2);
+    if (!Array.isArray(resp)) return;
+    const now = Date.now();
+    for (const t of resp) {
+      if (!t || !t.symbol) continue;
+      const sym = String(t.symbol).toUpperCase();
+      _bookTickerCache.set(sym, { bidPrice: t.bidPrice, askPrice: t.askPrice, ts: now });
+      result.set(sym, { bidPrice: t.bidPrice, askPrice: t.askPrice });
+    }
+  }));
+
+  return result;
+}
+
+function _resetBookTickerCache() {
+  _bookTickerCache.clear();
+}
+
 // ─── Public endpoints (X-MBX-APIKEY only, no signature) ─────────────────
 // FIX-2026-08-06: Get Spot Delist Schedule
 //   - endpoint: GET https://api.binance.com/sapi/v1/spot/delist-schedule
@@ -757,6 +837,8 @@ module.exports = {
   get24hrTickers,
   _resetTickerCache,
   getBookTicker,
+  getBookTickers,         // FIX-2026-09-23: bulk + cached version (replaces parallel singles in /positions)
+  _resetBookTickerCache,  // exposed for tests
   getSpotDelistSchedule,  // FIX-2026-08-06: delist schedule for bot filter
   getAccount,
   newOrder,
