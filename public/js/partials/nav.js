@@ -53,7 +53,7 @@
 
   const desktopHtml = `
     <div class="d-flex align-items-center gap-2 flex-wrap" style="max-width: 1400px; margin: 0 auto;">
-      <a class="brand" href="/chart-monitor.html">
+      <a class="brand" href="/pnl.html">
         <img src="/favicon.svg" alt="OnePercentBotTrade" class="brand-logo" />
         <span>OnePercent<span style="color:var(--gold-1);">%</span>BotTrade</span>
       </a>

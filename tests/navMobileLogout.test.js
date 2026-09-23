@@ -2,10 +2,11 @@
 
 /**
  * FIX-2026-09-02: Lock down the mobile-nav logout placement + main page redirect.
+ * FIX-2026-09-23: Main page is now /pnl.html (was /chart-monitor.html).
  *
  * Two regressions to prevent:
  *   1. Mobile-only logout (in hamburger menu) — desktop header keeps its btn-lux Logout.
- *   2. Brand link in nav.js points to /chart-monitor.html (the landing page).
+ *   2. Brand link in nav.js points to /pnl.html (the landing page).
  *
  * These are pure-string assertions against the partial source — no DOM, no runtime.
  * Easier to maintain than a jsdom-based snapshot and catches accidental edits.
@@ -45,18 +46,18 @@ describe('FIX-2026-09-02 nav: mobile logout lives in mobile menu', () => {
   });
 });
 
-describe('FIX-2026-09-02 nav: brand link points to /chart-monitor.html (main page)', () => {
+describe('FIX-2026-09-23 nav: brand link points to /pnl.html (main page)', () => {
   const src = read(NAV_JS);
   const indexSrc = read(INDEX_HTML);
 
-  test('brand link in nav.js uses /chart-monitor.html', () => {
+  test('brand link in nav.js uses /pnl.html', () => {
     const brandMatch = src.match(/<a class="brand"[^>]*href="([^"]+)"/);
     expect(brandMatch).not.toBeNull();
-    expect(brandMatch[1]).toBe('/chart-monitor.html');
+    expect(brandMatch[1]).toBe('/pnl.html');
   });
 
-  test('index.html still redirects authenticated users to /chart-monitor.html', () => {
-    expect(indexSrc).toMatch(/location\.href\s*=\s*['"]\/chart-monitor\.html['"]/);
+  test('index.html still redirects authenticated users to /pnl.html', () => {
+    expect(indexSrc).toMatch(/location\.href\s*=\s*['"]\/pnl\.html['"]/);
   });
 });
 

@@ -128,7 +128,7 @@
     async function init() {
       const status = await API.get('/api/auth/status');
       if (status.authenticated) {
-        location.href = '/bots.html';
+        location.href = '/pnl.html';
         return;
       }
       if (!status.setupCompleted) {
@@ -155,7 +155,7 @@
       if (!password || password.length < 6) return showError('Password ต้องยาวอย่างน้อย 6 ตัวอักษร');
       try {
         await API.post('/api/auth/setup', { password, binanceApiKey: apiKey, binanceApiSecret: apiSecret, useBnbForFees: useBnb });
-        location.href = '/bots.html';
+        location.href = '/pnl.html';
       } catch (err) { showError(err.message); }
     };
 
@@ -231,7 +231,7 @@
       try {
         const resp = await API.post('/api/auth/login', { password });
         applyLoginStatus(resp);
-        if (resp && resp.ok) location.href = '/bots.html';
+        if (resp && resp.ok) location.href = '/pnl.html';
       } catch (err) {
         // err.body carries the 429/401 payload with attemptsRemaining etc.
         if (err && err.body) applyLoginStatus(err.body);
@@ -306,7 +306,7 @@
       setTgStatus('⏳ กำลังตรวจสอบ...', 'muted');
       try {
         await API.post('/api/auth/login-telegram/verify', { code });
-        location.href = '/bots.html';
+        location.href = '/pnl.html';
       } catch (err) {
         setTgStatus(`❌ ${err.message}`, 'bear');
         btn.disabled = false;
