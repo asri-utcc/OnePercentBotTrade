@@ -174,10 +174,14 @@ describe('P0-8: signedRequest criticality split', () => {
     expect(trueCalls).toBeGreaterThanOrEqual(3);
   });
 
-  test('source: signed reads (getAccount, getOrder, getOpenOrders) explicitly critical:false', () => {
+  test('source: signed reads (getAccount, getOrder, getOpenOrders) default to non-critical', () => {
     const src = fs.readFileSync(binanceRestPath, 'utf8');
-    const falseCalls = (src.match(/\{ critical: false \}/g) || []).length;
-    expect(falseCalls).toBeGreaterThanOrEqual(3);
+    // Accept either literal `{ critical: false }` (getAccount, getOpenOrders)
+    // OR the opts-override pattern `{ critical: opts.critical === true }` (getOrder post FIX-2026-09-17)
+    // Both default to critical:false at runtime, but the latter lets reconcile callers pass critical:true.
+    const literalFalse = (src.match(/\{ critical: false \}/g) || []).length;
+    const optsFalse = (src.match(/\{ critical: opts\.critical === true \}/g) || []).length;
+    expect(literalFalse + optsFalse).toBeGreaterThanOrEqual(3);
   });
 
   // functional: confirms critical:true bypass while critical:false is blocked by CB
