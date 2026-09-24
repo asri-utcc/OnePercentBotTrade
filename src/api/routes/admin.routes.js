@@ -132,6 +132,8 @@ router.put('/app-config', requireAuth, async (req, res) => {
       //   When SELL alive > this, reconcile sweep force-cancels + MARKET SELLs
       //   (closes silent-off 'selling' stuck loop that hit ZENUSDT for 8 days).
       orphanSellMaxAgeHours: 'number',
+      // FIX-2026-09-24: explicit kill-switch — when false (default), bot manages SELLs itself
+      orphanSellSweepEnabled: 'boolean',
       // FIX-2026-09-17: waiting_sell_recovery scheduler — re-place SELL for
       //   recovery trades waiting on PRICE_FILTER to pass.
       waitingSellRecoveryEnabled: 'boolean',

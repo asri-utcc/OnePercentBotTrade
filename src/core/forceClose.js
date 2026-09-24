@@ -254,6 +254,34 @@ async function forceCloseTrade({ trade, bot = null, allowMarketSell = true, sour
       return { ok: true, mode: 'already-sold', executedQty: 0, avgSellPrice: null, pnl: 0 };
     }
 
+    // FIX-2026-09-24: rate-limit CB safety — don't cancel LIMIT_MAKER SELL if we can't
+    //   immediately MARKET SELL afterward. If CB is open, we risk orphaning the
+    //   position (cancel succeeded on Binance but MARKET SELL blocked) which leaves
+    //   stranded free balance → bot's holding-retry then MARKET SELLs at slippage loss.
+    //   Leave the SELL alive on Binance and let the bot's normal holding-retry handle
+    //   the position when CB closes (next cycle). Return early so caller knows.
+    try {
+      const rlStatus = binanceRest.getRateLimitStatus();
+      if (rlStatus && rlStatus.circuitBreaker && rlStatus.circuitBreaker.state === 'open') {
+        logger.warn({
+          ...logCtx,
+          cbState: rlStatus.circuitBreaker.state,
+          used: rlStatus.usedEstimated,
+          capacity: rlStatus.capacity,
+        }, 'forceClose: CB open — skipping cancel + force-close to avoid orphan; bot will retry');
+        return {
+          ok: false,
+          mode: 'cb-open',
+          executedQty: 0,
+          avgSellPrice: null,
+          pnl: 0,
+          error: 'binance rate-limit CB open — force-close deferred to avoid orphan (SELL kept alive on Binance)',
+        };
+      }
+    } catch (cbErr) {
+      logger.warn({ ...logCtx, err: cbErr.message }, 'forceClose: CB state check failed (proceeding)');
+    }
+
     // Cancel any live SELL before attempting MARKET to avoid double-selling.
     const cancel = await cancelSellOrderIfAny(trade);
     if (cancel.error) {

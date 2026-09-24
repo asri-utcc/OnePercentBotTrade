@@ -195,6 +195,12 @@ const appConfigSchema = new mongoose.Schema(
   //   Range: 1..168 hours (1 week max). Set to a very high value to disable.
   orphanSellMaxAgeHours: { type: Number, default: 24, min: 1, max: 168 },
 
+  // FIX-2026-09-24: explicit kill-switch for the orphan-SELL sweeper
+  //   - when false (default): bot's normal TP logic manages SELLs (no force-close)
+  //   - when true: sweeper runs with threshold = orphanSellMaxAgeHours
+  //   - rationale: user prefers bot-managed sells; force-close causes unwanted losses
+  orphanSellSweepEnabled: { type: Boolean, default: false },
+
   // FIX-2026-09-17: waiting_sell_recovery scheduler — re-place SELL for
   //   recovery-injected trades that were restored with target TP above
   //   PRICE_FILTER (market × 1.20). When market recovers to within range,

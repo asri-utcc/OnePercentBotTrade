@@ -532,12 +532,21 @@ class BotManager {
     //   - purpose: kill LIMIT_MAKER SELL orders stuck on Binance with no fill (Binance GTC has no TTL,
     //     so a stuck SELL = silent capital lock until manual cancel). The reconcile no-op at L1105
     //     silently accepted this state; this sweep force-closes via atomic forceCloseTrade claim.
-    const { orphanSellMaxAgeHours } = await AppConfig.findOne({ key: 'singleton' }, { orphanSellMaxAgeHours: 1 })
-      .lean()
-      .catch(() => ({})) || {};
-    const orphanThreshold = Number.isFinite(orphanSellMaxAgeHours) && orphanSellMaxAgeHours > 0
-      ? orphanSellMaxAgeHours
-      : 24;
+    // FIX-2026-09-24: sweeper disabled by default — user wants bot's normal TP logic to manage SELLs
+    //   - re-enable via AppConfig.orphanSellSweepEnabled=true (admin modal)
+    //   - when disabled → orphanThreshold=Infinity → ageH >= Infinity never triggers
+    const { orphanSellMaxAgeHours, orphanSellSweepEnabled } = await AppConfig.findOne(
+      { key: 'singleton' },
+      { orphanSellMaxAgeHours: 1, orphanSellSweepEnabled: 1 }
+    ).lean().catch(() => ({})) || {};
+    const orphanThreshold = orphanSellSweepEnabled === true
+      ? (Number.isFinite(orphanSellMaxAgeHours) && orphanSellMaxAgeHours > 0
+          ? orphanSellMaxAgeHours
+          : 24)
+      : Infinity;
+    if (orphanSellSweepEnabled !== true) {
+      logger.debug({ orphanThreshold, orphanSellSweepEnabled }, 'reconcile: orphan-SELL sweeper disabled (AppConfig.orphanSellSweepEnabled != true)');
+    }
     const sweepStats = { scanned: 0, cancelled: 0, forced: 0, errors: 0 };
 
     for (const trade of pending) {
