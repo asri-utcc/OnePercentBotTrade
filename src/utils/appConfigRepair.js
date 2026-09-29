@@ -162,6 +162,55 @@ const DEFAULT_SKIP_PATHS = new Set([
 ]);
 
 /**
+ * FIX-2026-09-29: Bootstrap singleton doc with schema defaults if missing.
+ *   Runs only when no doc exists (fresh install). Schema-level `default:` factory
+ *   functions in AppConfig.js auto-populate every field (including Object types
+ *   like autoReserveBtcDrivenPresets, autoTimingBands, telegramEvents, etc.).
+ *
+ *   - Idempotent: no-op if doc already exists
+ *   - Non-fatal: returns { created: false, error } on failure
+ *   - Why this matters: without this, the first user request to read AppConfig
+ *     (e.g., GET /api/wallet/auto-reserve/btc-driven on a fresh deploy) sees
+ *     `null` fields. Frontend falls back to display defaults, but downstream
+ *     writes (e.g., PUT presets) hit a real doc without schema defaults applied.
+ *     Bootstrapping upfront ensures consistent state from the very first request.
+ *
+ * @param {object} args
+ * @param {object} args.AppConfig  Mongoose model
+ * @param {object} [args.logger]   Pino-style logger
+ * @returns {Promise<{created: boolean, docFound?: boolean, error?: string}>}
+ */
+async function bootstrapAppConfigDefaults({ AppConfig, logger = noopLogger } = {}) {
+  if (!AppConfig) {
+    return { created: false, error: 'AppConfig model missing' };
+  }
+
+  let existing;
+  try {
+    existing = await AppConfig.findOne({ key: 'singleton' }).lean();
+  } catch (e) {
+    logger.warn({ err: e.message }, 'AppConfig.bootstrap: findOne failed (non-fatal)');
+    return { created: false, error: e.message };
+  }
+  if (existing) {
+    return { created: false, docFound: true };
+  }
+
+  try {
+    const doc = new AppConfig({ key: 'singleton' });
+    await doc.save();
+    logger.info({ version: '2026-09-29' }, 'AppConfig.bootstrap: singleton created with schema defaults');
+    return { created: true, docFound: false };
+  } catch (e) {
+    logger.warn(
+      { err: e.message },
+      'AppConfig.bootstrap: save failed (non-fatal — setup wizard will retry)'
+    );
+    return { created: false, error: e.message };
+  }
+}
+
+/**
  * FIX-2026-09-29: One-shot migration — split legacy `autoReserveStepUsdt` into
  *   `autoReserveStepReserveUsdt` + `autoReserveStepReleaseUsdt` (round 3).
  *
@@ -172,16 +221,22 @@ const DEFAULT_SKIP_PATHS = new Set([
  *     we mirror the legacy value to both new fields on boot, IF new fields are missing.
  *   - Legacy field is kept in schema (deprecated) for backward compat with old clients.
  *
+ *   FIX-2026-09-29 (round 3 follow-up): if legacy is null/undefined/NaN AND new fields
+ *   are missing, fall back to schema default (10) — covers very-old v2.5.x docs that
+ *   predate the legacy field. Without this, very-old docs would have null split-step
+ *   fields forever (runtime fallback masks it but DB stays inconsistent).
+ *
  * Behavior:
  *   - Idempotent: if both new fields already present → no-op (returns { migrated: false })
  *   - Non-fatal: caller wraps in try/catch; returns { migrated, fields, error } on failure
- *   - Reads `autoReserveStepUsdt` from singleton doc, validates finite + in 1..1000 range
- *   - If valid → writes both new fields with the same value (clamped)
+ *   - Reads `autoReserveStepUsdt` from singleton doc
+ *   - If valid (finite + 1..1000) → mirrors to both new fields
+ *   - If invalid (null/NaN) → uses schema default (10) for missing new fields
  *
  * @param {object} args
  * @param {object} args.AppConfig  Mongoose model
  * @param {object} [args.logger]   Pino-style logger
- * @returns {Promise<{migrated: boolean, fields?: string[], error?: string}>}
+ * @returns {Promise<{migrated: boolean, fields?: string[], error?: string, legacyValid?: boolean}>}
  */
 async function migrateSplitStepFields({ AppConfig, logger = noopLogger } = {}) {
   if (!AppConfig) {
@@ -190,7 +245,10 @@ async function migrateSplitStepFields({ AppConfig, logger = noopLogger } = {}) {
 
   let doc;
   try {
-    doc = await AppConfig.findOne({ key: 'singleton' });
+    // FIX-2026-09-29: use .lean() — see migrateBtcDrivenPresets comment for rationale.
+    //   Without .lean(), Mongoose returns schema defaults for missing fields, which
+    //   causes the migration to incorrectly conclude the field is already set.
+    doc = await AppConfig.findOne({ key: 'singleton' }).lean();
   } catch (e) {
     logger.warn({ err: e.message }, 'AppConfig.migrateSplitStep: findOne failed (non-fatal)');
     return { migrated: false, error: e.message };
@@ -202,14 +260,15 @@ async function migrateSplitStepFields({ AppConfig, logger = noopLogger } = {}) {
   }
 
   const update = {};
-  const legacyVal = Number(doc.autoReserveStepUsdt);
-  if (Number.isFinite(legacyVal) && legacyVal >= 1 && legacyVal <= 1000) {
-    if (doc.autoReserveStepReserveUsdt == null) {
-      update.autoReserveStepReserveUsdt = legacyVal;
-    }
-    if (doc.autoReserveStepReleaseUsdt == null) {
-      update.autoReserveStepReleaseUsdt = legacyVal;
-    }
+  const legacyRaw = Number(doc.autoReserveStepUsdt);
+  const legacyValid = Number.isFinite(legacyRaw) && legacyRaw >= 1 && legacyRaw <= 1000;
+  const fallbackValue = 10; // matches schema default in AppConfig.js
+
+  if (doc.autoReserveStepReserveUsdt == null) {
+    update.autoReserveStepReserveUsdt = legacyValid ? legacyRaw : fallbackValue;
+  }
+  if (doc.autoReserveStepReleaseUsdt == null) {
+    update.autoReserveStepReleaseUsdt = legacyValid ? legacyRaw : fallbackValue;
   }
 
   if (Object.keys(update).length === 0) {
@@ -223,15 +282,173 @@ async function migrateSplitStepFields({ AppConfig, logger = noopLogger } = {}) {
       { new: true, upsert: true }
     );
     logger.info(
-      { version: '2026-09-29', fields: Object.keys(update), values: update },
-      'AppConfig.migrateSplitStep: legacy stepUsdt → split fields migrated'
+      { version: '2026-09-29', fields: Object.keys(update), values: update, legacyValid },
+      'AppConfig.migrateSplitStep: split fields ensured (legacy or default)'
     );
-    return { migrated: true, fields: Object.keys(update) };
+    return { migrated: true, fields: Object.keys(update), legacyValid };
   } catch (e) {
     logger.warn(
       { err: e.message },
       'AppConfig.migrateSplitStep: update failed (non-fatal — manual retry via repair script)'
     );
+    return { migrated: false, error: e.message };
+  }
+}
+
+/**
+ * FIX-2026-09-29: Migrate `autoReserveBtcDrivenPresets` Object field.
+ *   If the field is null/undefined OR missing required keys (conservative/aggressive),
+ *   write the schema default. Same pattern as migrateSplitStepFields.
+ *
+ *   Frontend runtime fallback (mergePresetsWithDefaults in service layer) already
+ *   handles missing fields, but this migration ensures DB state is consistent
+ *   from the very first read — no surprises in admin tools, backups, or exports.
+ *
+ * @param {object} args
+ * @param {object} args.AppConfig  Mongoose model
+ * @param {object} [args.logger]   Pino-style logger
+ * @returns {Promise<{migrated: boolean, error?: string}>}
+ */
+async function migrateBtcDrivenPresets({ AppConfig, logger = noopLogger } = {}) {
+  if (!AppConfig) {
+    return { migrated: false, error: 'AppConfig model missing' };
+  }
+
+  let doc;
+  try {
+    // FIX-2026-09-29: use .lean() to get RAW doc — Mongoose hydrates schema
+    //   defaults when accessing fields via a Mongoose document, so
+    //   `doc.autoReserveBtcDrivenPresets` would return the schema default
+    //   even when the field is missing from MongoDB. With .lean(), we get
+    //   the actual stored value (or undefined if absent), so the migration
+    //   correctly detects missing fields and writes defaults.
+    doc = await AppConfig.findOne({ key: 'singleton' }).lean();
+  } catch (e) {
+    logger.warn({ err: e.message }, 'AppConfig.migratePresets: findOne failed (non-fatal)');
+    return { migrated: false, error: e.message };
+  }
+  if (!doc) {
+    // bootstrap will handle — no doc yet
+    return { migrated: false };
+  }
+
+  const current = doc.autoReserveBtcDrivenPresets;
+  const valid =
+    current &&
+    typeof current === 'object' &&
+    !Array.isArray(current) &&
+    current.conservative &&
+    current.aggressive &&
+    typeof current.conservative === 'object' &&
+    typeof current.aggressive === 'object';
+  if (valid) {
+    return { migrated: false };
+  }
+
+  const defaults = {
+    conservative: { poleCount: 2, usdtPerPole: 6, lossThresholdPct: 4, checkHours: 6, stepReserveUsdt: 6, stepReleaseUsdt: 6 },
+    aggressive:   { poleCount: 5, usdtPerPole: 9, lossThresholdPct: 2, checkHours: 2, stepReserveUsdt: 9, stepReleaseUsdt: 9 },
+  };
+  try {
+    await AppConfig.findOneAndUpdate(
+      { key: 'singleton' },
+      { $set: { autoReserveBtcDrivenPresets: defaults } },
+      { new: true, upsert: true }
+    );
+    logger.info(
+      { version: '2026-09-29', keys: Object.keys(defaults) },
+      'AppConfig.migratePresets: defaults written'
+    );
+    return { migrated: true };
+  } catch (e) {
+    logger.warn({ err: e.message }, 'AppConfig.migratePresets: update failed (non-fatal)');
+    return { migrated: false, error: e.message };
+  }
+}
+
+/**
+ * FIX-2026-09-29: Migrate stepUsdt inside autoReserveBtcDrivenPresets sub-fields.
+ *   Round 2 stored single `stepUsdt` inside each preset (conservative/aggressive).
+ *   Round 3 splits into `stepReserveUsdt` + `stepReleaseUsdt`.
+ *
+ *   This is a sibling of migrateSplitStepFields but operates on the nested Object
+ *   `autoReserveBtcDrivenPresets[key].stepUsdt` — top-level migration only handles
+ *   the singular `autoReserveStepUsdt` field.
+ *
+ *   Per-key, per-field logic:
+ *     - If preset has legacy `stepUsdt` (finite, 1..1000) AND new fields are missing → mirror
+ *     - If preset has legacy `stepUsdt` but new fields already set → leave new fields alone (preserve)
+ *     - If preset has no `stepUsdt` at all AND new fields missing → skip (schema default applied at doc-create)
+ *
+ *   Why this matters: legacy preset shape `{stepUsdt:6}` would cause the Settings page
+ *   editable table to render empty cells (frontend checks `Number.isFinite(Number(p[f.key]))`
+ *   without fallback). On save, server clamps empty → 1 USDT, silently destroying user's
+ *   configured value.
+ *
+ * @param {object} args
+ * @param {object} args.AppConfig  Mongoose model
+ * @param {object} [args.logger]   Pino-style logger
+ * @returns {Promise<{migrated: boolean, presets?: object, error?: string}>}
+ */
+async function migratePresetsSubFields({ AppConfig, logger = noopLogger } = {}) {
+  if (!AppConfig) {
+    return { migrated: false, error: 'AppConfig model missing' };
+  }
+
+  let doc;
+  try {
+    // FIX-2026-09-29: use .lean() — see migrateBtcDrivenPresets comment for rationale.
+    doc = await AppConfig.findOne({ key: 'singleton' }).lean();
+  } catch (e) {
+    logger.warn({ err: e.message }, 'AppConfig.migratePresetsSubFields: findOne failed (non-fatal)');
+    return { migrated: false, error: e.message };
+  }
+  if (!doc) return { migrated: false };
+
+  const presets = doc.autoReserveBtcDrivenPresets;
+  if (!presets || typeof presets !== 'object' || Array.isArray(presets)) {
+    return { migrated: false };
+  }
+
+  const updated = {};
+  let anyChange = false;
+  for (const presetKey of Object.keys(presets)) {
+    const p = presets[presetKey];
+    if (!p || typeof p !== 'object') continue;
+
+    const legacyRaw = Number(p.stepUsdt);
+    const legacyValid = Number.isFinite(legacyRaw) && legacyRaw >= 1 && legacyRaw <= 1000;
+
+    const next = { ...p };
+    if (legacyValid) {
+      if (next.stepReserveUsdt == null) next.stepReserveUsdt = legacyRaw;
+      if (next.stepReleaseUsdt == null) next.stepReleaseUsdt = legacyRaw;
+      // Also keep legacy `stepUsdt` for backward-compat reads (mirror pattern used in BTC apply)
+      if (next.stepUsdt == null) next.stepUsdt = legacyRaw;
+    }
+
+    if (JSON.stringify(next) !== JSON.stringify(p)) {
+      updated[presetKey] = next;
+      anyChange = true;
+    }
+  }
+
+  if (!anyChange) return { migrated: false };
+
+  const merged = { ...presets, ...updated };
+  try {
+    await AppConfig.findOneAndUpdate(
+      { key: 'singleton' },
+      { $set: { autoReserveBtcDrivenPresets: merged } },
+      { new: true, upsert: true }
+    );
+    logger.info(
+      { version: '2026-09-29', updatedKeys: Object.keys(updated) },
+      'AppConfig.migratePresetsSubFields: preset stepUsdt → stepReserve/stepRelease mirrored'
+    );
+    return { migrated: true, presets: merged };
+  } catch (e) {
+    logger.warn({ err: e.message }, 'AppConfig.migratePresetsSubFields: update failed (non-fatal)');
     return { migrated: false, error: e.message };
   }
 }
@@ -246,6 +463,9 @@ module.exports = {
   REPAIR_VERSION,
   clampOutOfRangeNumbers,
   repairAppConfig,
+  bootstrapAppConfigDefaults,
   migrateSplitStepFields,
+  migrateBtcDrivenPresets,
+  migratePresetsSubFields,
   DEFAULT_SKIP_PATHS,
 };

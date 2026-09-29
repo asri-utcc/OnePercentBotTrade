@@ -111,18 +111,56 @@ async function main() {
       logger.warn({ err: err.message }, 'AppConfig boot-repair failed (non-fatal)');
     }
 
-    // FIX-2026-09-29: split-step migration (round 3) — mirror legacy autoReserveStepUsdt
-    //   to autoReserveStepReserveUsdt + autoReserveStepReleaseUsdt. Non-fatal.
-    //   Runs BEFORE autoReserve.start() so the loaded config reflects migrated values.
+    // FIX-2026-09-29: AppConfig bootstrap + migrations (round 3 follow-up).
+    //   Order matters:
+    //     1. repairAppConfig — clamps existing Number fields (no-op if no doc)
+    //     2. bootstrapAppConfigDefaults — creates singleton doc if missing (schema defaults apply)
+    //     3. migrateSplitStepFields — ensures top-level split-step fields
+    //     4. migrateBtcDrivenPresets — ensures top-level presets Object
+    //     5. migratePresetsSubFields — mirrors stepUsdt → stepReserve/stepRelease inside each preset
+    //   All 5 are non-fatal; boot always proceeds. See plan:
+    //   memory/onepercentbot-multi-instance-deployment-2026-09-09.md
     try {
-      const AppConfig2 = require('./db/models/AppConfig');
-      const { migrateSplitStepFields } = require('./utils/appConfigRepair');
-      const m = await migrateSplitStepFields({ AppConfig: AppConfig2, logger });
+      const AppConfig = require('./db/models/AppConfig');
+      const {
+        repairAppConfig,
+        bootstrapAppConfigDefaults,
+        migrateSplitStepFields,
+        migrateBtcDrivenPresets,
+        migratePresetsSubFields,
+      } = require('./utils/appConfigRepair');
+
+      const r = await repairAppConfig({ AppConfig, logger });
+      if (r.persisted) {
+        logger.warn(
+          { count: r.repaired.length, repaired: r.repaired },
+          'AppConfig boot-repair persisted'
+        );
+      } else if (!r.docFound) {
+        logger.info('AppConfig boot-repair: no singleton doc yet (fresh deploy)');
+      }
+
+      const b = await bootstrapAppConfigDefaults({ AppConfig, logger });
+      if (b.created) {
+        logger.info('AppConfig.bootstrap: singleton created with schema defaults');
+      }
+
+      const m = await migrateSplitStepFields({ AppConfig, logger });
       if (m.migrated) {
-        logger.info({ fields: m.fields }, 'AppConfig: split-step migration applied (round 3)');
+        logger.info({ fields: m.fields, legacyValid: m.legacyValid }, 'AppConfig: split-step migration applied');
+      }
+
+      const p = await migrateBtcDrivenPresets({ AppConfig, logger });
+      if (p.migrated) {
+        logger.info('AppConfig: BTC-driven presets migration applied');
+      }
+
+      const s = await migratePresetsSubFields({ AppConfig, logger });
+      if (s.migrated) {
+        logger.info('AppConfig: BTC-driven preset sub-fields migration applied');
       }
     } catch (err) {
-      logger.warn({ err: err.message }, 'AppConfig: split-step migration failed (non-fatal)');
+      logger.warn({ err: err.message }, 'AppConfig: bootstrap/migration cycle failed (non-fatal)');
     }
 
     // FIX-2026-08-26 Phase 2c: Consent gate — runs AFTER license check, BEFORE botManager.start

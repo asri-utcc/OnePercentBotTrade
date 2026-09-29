@@ -1,6 +1,6 @@
 {
   "name": "onepercentbottrade",
-  "version": "2.7.0",
+  "version": "2.7.1",
   "description": "Binance Spot Maker-only Trading Bot with S1 signal (BOD Keltner Channel)",
   "main": "src/server.js",
   "scripts": {
@@ -26,7 +26,8 @@
     "pm2:stop:faiz": "pm2 stop onepercentbot-faiz",
     "pm2:reload:faiz": "pm2 reload onepercentbot-faiz",
     "pm2:delete:faiz": "pm2 delete onepercentbot-faiz",
-    "pm2:logs:faiz": "pm2 logs onepercentbot-faiz"
+    "pm2:logs:faiz": "pm2 logs onepercentbot-faiz",
+    "deploy:faiz": "node tools/deploy-faiz.js"
   },
   "engines": {
     "node": ">=18.0.0"

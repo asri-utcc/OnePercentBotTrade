@@ -88,12 +88,20 @@ async function loadConfig() {
       rateLimit = { capacity: 6000, min: 500, max: 120000, default: 6000, limiter: { tokens: 0 } };
     }
     // FIX-2026-08-24: Auto Reserve / Release USDT
+    // FIX-2026-09-29: fallback shape includes round-3 split-step fields (stepReserveUsdt + stepReleaseUsdt)
     try {
       const r = await API.get('/api/wallet/auto-reserve/config');
       autoReserveCfg = r;
     } catch (err) {
       console.warn('auto-reserve config load failed:', err.message);
-      autoReserveCfg = { config: { enabled: false, poleCount: 3, usdtPerPole: 10, lossThresholdPct: 2, checkHours: 4, stepUsdt: 10 }, status: {} };
+      autoReserveCfg = {
+        config: {
+          enabled: false, poleCount: 3, usdtPerPole: 10, lossThresholdPct: 2, checkHours: 4,
+          stepUsdt: 10, // legacy
+          stepReserveUsdt: 10, stepReleaseUsdt: 10, // round 3 split
+        },
+        status: {},
+      };
     }
     // FIX-2026-09-21: BTC Trend Driven Adjust — autoReserve preset switch
     try {
@@ -1241,6 +1249,22 @@ function renderAutoReserveBtcDrivenSubSection() {
   const toggleStatus = btcEnabled ? '▶️ ON' : '⏹ OFF';
   const modeColor = btcEnabled ? 'bg-success' : 'bg-secondary';
 
+  // FIX-2026-09-29 (round 3 follow-up): preset cell value with legacy `stepUsdt` fallback.
+  //   Round 2 stored single `stepUsdt` per preset; round 3 splits into stepReserveUsdt +
+  //   stepReleaseUsdt. If a doc is mid-migration (has legacy but missing new fields), the
+  //   cell must still show the legacy value so the user doesn't lose their setting on first
+  //   edit (server clamps empty → bounds.min = 1 USDT).
+  //   Server-side migratePresetsSubFields() also handles this on next boot.
+  const getPresetCellValue = (preset, fieldKey) => {
+    const direct = Number(preset[fieldKey]);
+    if (Number.isFinite(direct)) return preset[fieldKey];
+    if (fieldKey === 'stepReserveUsdt' || fieldKey === 'stepReleaseUsdt') {
+      const legacy = Number(preset.stepUsdt);
+      if (Number.isFinite(legacy)) return legacy;
+    }
+    return null;
+  };
+
   // FIX-2026-09-29: editable table when toggle ON — cells become number inputs.
   // Toggle OFF keeps the original read-only text behavior.
   const renderPresetTableRows = (editable) => BTC_DRIVEN_PRESET_KEYS.map((key) => {
@@ -1249,21 +1273,28 @@ function renderAutoReserveBtcDrivenSubSection() {
       return `
         <tr data-preset="${escapeHtml(key)}">
           <td><strong>${escapeHtml(key)}</strong></td>
-          ${BTC_DRIVEN_PRESET_FIELDS.map((f) => `
-            <td>
-              <input type="number" class="form-control form-control-sm preset-input"
-                     data-field="${f.key}" value="${Number.isFinite(Number(p[f.key])) ? p[f.key] : ''}"
-                     min="${f.min}" max="${f.max}" step="${f.step}"
-                     style="min-width: 72px; padding: 2px 4px;" />
-            </td>
-          `).join('')}
+          ${BTC_DRIVEN_PRESET_FIELDS.map((f) => {
+            const cellVal = getPresetCellValue(p, f.key);
+            const displayVal = cellVal == null ? '' : cellVal;
+            return `
+              <td>
+                <input type="number" class="form-control form-control-sm preset-input"
+                       data-field="${f.key}" value="${displayVal}"
+                       min="${f.min}" max="${f.max}" step="${f.step}"
+                       style="min-width: 72px; padding: 2px 4px;" />
+              </td>
+            `;
+          }).join('')}
         </tr>
       `;
     }
     return `
       <tr>
         <td><strong>${escapeHtml(key)}</strong></td>
-        ${BTC_DRIVEN_PRESET_FIELDS.map((f) => `<td>${Number.isFinite(Number(p[f.key])) ? p[f.key] : '—'}</td>`).join('')}
+        ${BTC_DRIVEN_PRESET_FIELDS.map((f) => {
+          const cellVal = getPresetCellValue(p, f.key);
+          return `<td>${cellVal == null ? '—' : cellVal}</td>`;
+        }).join('')}
       </tr>
     `;
   }).join('');
