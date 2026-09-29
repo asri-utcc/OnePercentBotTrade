@@ -111,6 +111,20 @@ async function main() {
       logger.warn({ err: err.message }, 'AppConfig boot-repair failed (non-fatal)');
     }
 
+    // FIX-2026-09-29: split-step migration (round 3) — mirror legacy autoReserveStepUsdt
+    //   to autoReserveStepReserveUsdt + autoReserveStepReleaseUsdt. Non-fatal.
+    //   Runs BEFORE autoReserve.start() so the loaded config reflects migrated values.
+    try {
+      const AppConfig2 = require('./db/models/AppConfig');
+      const { migrateSplitStepFields } = require('./utils/appConfigRepair');
+      const m = await migrateSplitStepFields({ AppConfig: AppConfig2, logger });
+      if (m.migrated) {
+        logger.info({ fields: m.fields }, 'AppConfig: split-step migration applied (round 3)');
+      }
+    } catch (err) {
+      logger.warn({ err: err.message }, 'AppConfig: split-step migration failed (non-fatal)');
+    }
+
     // FIX-2026-08-26 Phase 2c: Consent gate — runs AFTER license check, BEFORE botManager.start
     //   - on first run: opens /consent page, BLOCKS until user Accept/Decline
     //   - if accepted: returns decision='accepted' → caller proceeds

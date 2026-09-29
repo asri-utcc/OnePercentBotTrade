@@ -343,12 +343,37 @@ router.put('/auto-reserve/config', requireAuth, async (req, res) => {
       }
       update.autoReserveCheckHours = Math.floor(n);
     }
-    if ('stepUsdt' in body) {
+    if ('stepReserveUsdt' in body) {
+      const n = Number(body.stepReserveUsdt);
+      if (!Number.isFinite(n) || n < 1 || n > 1000) {
+        return res.status(400).json({ error: 'stepReserveUsdt must be 1..1000' });
+      }
+      update.autoReserveStepReserveUsdt = n;
+      // FIX-2026-09-29: also mirror to legacy field for backward compat with old clients
+      update.autoReserveStepUsdt = n;
+    }
+    if ('stepReleaseUsdt' in body) {
+      const n = Number(body.stepReleaseUsdt);
+      if (!Number.isFinite(n) || n < 1 || n > 1000) {
+        return res.status(400).json({ error: 'stepReleaseUsdt must be 1..1000' });
+      }
+      update.autoReserveStepReleaseUsdt = n;
+      // Mirror to legacy field as well (only if stepReserveUsdt wasn't also sent —
+      // if both sent, stepReserveUsdt branch already mirrored)
+      if (!('stepReserveUsdt' in body)) {
+        update.autoReserveStepUsdt = n;
+      }
+    }
+    // FIX-2026-09-29: legacy stepUsdt — accepted only if new fields absent (backward compat for old clients)
+    if ('stepUsdt' in body && !('stepReserveUsdt' in body) && !('stepReleaseUsdt' in body)) {
       const n = Number(body.stepUsdt);
       if (!Number.isFinite(n) || n < 1 || n > 1000) {
         return res.status(400).json({ error: 'stepUsdt must be 1..1000' });
       }
-      update.autoReserveStepUsdt = n;
+      // Mirror to both new fields (legacy client doesn't know about split)
+      update.autoReserveStepReserveUsdt = n;
+      update.autoReserveStepReleaseUsdt = n;
+      update.autoReserveStepUsdt = n; // keep legacy for self-reference
     }
 
     if (Object.keys(update).length === 0) {
@@ -436,6 +461,29 @@ router.put('/auto-reserve/btc-driven', requireAuth, async (req, res) => {
   } catch (err) {
     logger.error({ err: err.message }, 'wallet: btc-driven PUT failed');
     res.status(500).json({ error: err.message });
+  }
+});
+
+// FIX-2026-09-29: editable preset table (round 3) — replaces hardcoded BTC_PRESETS.
+//   PUT /api/wallet/auto-reserve/btc-driven/presets
+//   Body: { presets: { conservative: {...}, aggressive: {...} } }
+//   Server auto-clamps per-field ranges (defense-in-depth). Returns updated presets.
+router.put('/auto-reserve/btc-driven/presets', requireAuth, async (req, res) => {
+  try {
+    const presets = req.body && req.body.presets;
+    if (!presets || typeof presets !== 'object' || Array.isArray(presets)) {
+      return res.status(400).json({ error: 'presets object required' });
+    }
+    const validated = await autoReserveBtcDriven.setPresets(presets);
+    logger.info({ presets: validated }, 'wallet: btc-driven presets updated');
+    res.json({
+      ok: true,
+      presets: validated,
+      ts: Date.now(),
+    });
+  } catch (err) {
+    logger.warn({ err: err.message }, 'wallet: btc-driven presets PUT failed');
+    res.status(400).json({ error: err.message || 'presets update failed' });
   }
 });
 // FIX-2026-08-22: store entries UPPERCASE — range param is uppercased before lookup,

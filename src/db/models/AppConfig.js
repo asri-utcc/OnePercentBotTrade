@@ -378,7 +378,18 @@ const appConfigSchema = new mongoose.Schema(
     autoReserveUsdtPerPole:      { type: Number,  default: 10,  min: 1,   max: 1000 },
     autoReserveLossThresholdPct: { type: Number,  default: 2,   min: 0.1, max: 50 },
     autoReserveCheckHours:       { type: Number,  default: 4,   min: 1,   max: 24 },
-    autoReserveStepUsdt:         { type: Number,  default: 10,  min: 1,   max: 1000 },
+    // FIX-2026-09-29: split step into reserve (กั้ก) + release (ปล่อย) — round 3
+    //   - autoReserveStepUsdt: @deprecated — kept for backward compat + legacy mirror
+    //     (botDashboard reads it for clients older than v2.7.0). New code reads
+    //     autoReserveStepReserveUsdt / autoReserveStepReleaseUsdt.
+    //   - autoReserveStepReserveUsdt: amount added per RESERVE action (always exact)
+    //   - autoReserveStepReleaseUsdt: amount subtracted per RELEASE action
+    //     (drained to 0 if reserve < step — asymmetric vs reserve branch)
+    // Migration: scripts/migrateSplitStepFields() at boot copies legacy value
+    //   to both new fields if new fields missing.
+    autoReserveStepUsdt:         { type: Number,  default: 10,  min: 1,   max: 1000 }, // @deprecated
+    autoReserveStepReserveUsdt:  { type: Number,  default: 10,  min: 1,   max: 1000 },
+    autoReserveStepReleaseUsdt:  { type: Number,  default: 10,  min: 1,   max: 1000 },
     autoReserveLastRunAt:        { type: Date,    default: null },
     autoReserveLastStats:        { type: Object,  default: null },
     autoReserveLastError:        { type: String,  default: null },
@@ -398,6 +409,18 @@ const appConfigSchema = new mongoose.Schema(
     autoReserveBtcDrivenEnabled:      { type: Boolean, default: false },
     autoReserveBtcDrivenLastMode:     { type: String,  default: null },
     autoReserveBtcDrivenLastAppliedAt:{ type: Date,    default: null },
+    // FIX-2026-09-29: editable preset table (round 3) — replaces hardcoded
+    //   BTC_PRESETS in src/services/autoReserveBtcDriven.js. Per-key Object schema
+    //   (no per-field Mongoose validation; clamp happens in service layer).
+    //   Defaults mirror previous hardcoded values. Split step into stepReserve +
+    //   stepRelease (round 3).
+    autoReserveBtcDrivenPresets: {
+      type: Object,
+      default: () => ({
+        conservative: { poleCount: 2, usdtPerPole: 6, lossThresholdPct: 4, checkHours: 6, stepReserveUsdt: 6, stepReleaseUsdt: 6 },
+        aggressive:   { poleCount: 5, usdtPerPole: 9, lossThresholdPct: 2, checkHours: 2, stepReserveUsdt: 9, stepReleaseUsdt: 9 },
+      }),
+    },
 
     // ═══════════════════════════════════════════════════════════════════════
     // FIX-2026-08-21: Binance API rate-limit capacity (token-bucket)

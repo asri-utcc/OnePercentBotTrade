@@ -1188,11 +1188,17 @@ function renderAutoReserveSection() {
     </div>
     <div class="row g-3 mt-1">
       <div class="col-md-3">
-        <label class="form-label">📏 Step USDT</label>
-        <input type="number" class="form-control" id="ar-step" value="${cfg.stepUsdt ?? 10}" step="1" min="1" max="1000" />
-        <small class="text-muted">กั๊ก/ปล่อยครั้งละกี่ USDT (default 10)</small>
+        <label class="form-label">📥 Step Reserve (USDT)</label>
+        <input type="number" class="form-control" id="ar-step-reserve" value="${cfg.stepReserveUsdt ?? cfg.stepUsdt ?? 10}" step="1" min="1" max="1000" />
+        <small class="text-muted">กั๊กครั้งละกี่ USDT (default 10)</small>
+      </div>
+      <div class="col-md-3">
+        <label class="form-label">📤 Step Release (USDT)</label>
+        <input type="number" class="form-control" id="ar-step-release" value="${cfg.stepReleaseUsdt ?? cfg.stepUsdt ?? 10}" step="1" min="1" max="1000" />
+        <small class="text-muted">ปล่อยครั้งละกี่ USDT (default 10)</small>
       </div>
     </div>
+    <small class="text-muted d-block mt-1">FIX-2026-09-29: แยก Step เป็น Reserve (กั้ก) + Release (ปล่อย) · ช่วง 1..1000 USDT · (เดิม: <code>stepUsdt</code> shared)</small>
 
     <div class="mt-3">
       <button type="button" class="btn btn-primary" id="btn-save-ar">💾 บันทึก Auto Reserve</button>
@@ -1201,7 +1207,7 @@ function renderAutoReserveSection() {
     </div>
 
     <div class="text-muted small mt-3">
-      <strong>สถานะ:</strong> ${enabled ? '🟢 enabled' : '⚪ disabled'} · poleCount=${cfg.poleCount ?? 3} · usdtPerPole=${cfg.usdtPerPole ?? 10} · lossThreshold=${cfg.lossThresholdPct ?? 2}% · checkHours=${cfg.checkHours ?? 4} · stepUsdt=${cfg.stepUsdt ?? 10} ${inFlight}
+      <strong>สถานะ:</strong> ${enabled ? '🟢 enabled' : '⚪ disabled'} · poleCount=${cfg.poleCount ?? 3} · usdtPerPole=${cfg.usdtPerPole ?? 10} · lossThreshold=${cfg.lossThresholdPct ?? 2}% · checkHours=${cfg.checkHours ?? 4} · stepReserve=${cfg.stepReserveUsdt ?? cfg.stepUsdt ?? 10} · stepRelease=${cfg.stepReleaseUsdt ?? cfg.stepUsdt ?? 10} ${inFlight}
       <br /><strong>Last fire:</strong> ${lastRunAt} · tickCount=${tickCount} <span class="text-muted-3">(อัปเดตเฉพาะตอนยิงจริงที่ HH:00 BKK ตาม checkHours — ไม่ใช่ทุก 60s tick)</span>
       ${lastStats ? `<br /><strong>Last stats:</strong> outcome=${escapeHtml(lastStats.outcome || '—')} · action=${escapeHtml(lastStats.action || '—')} · deltaUsdt=${lastStats.deltaUsdt ?? 0} · usablePole=${lastStats.usablePoleCount ?? '?'} · lossPole=${lastStats.lossPoleCount ?? 0} · available=${lastStats.availablePoleCount ?? '?'} · target=${lastStats.targetPoleCount ?? '?'} · positions=${lastStats.positionCount ?? 0}` : ''}
       ${status.lastRunError ? `<br /><strong>Last error:</strong> <span class="text-danger">${escapeHtml(status.lastRunError)}</span>` : ''}
@@ -1212,8 +1218,17 @@ function renderAutoReserveSection() {
 }
 
 // FIX-2026-09-21: BTC Trend Driven Adjust — sub-section inside autoReserve
-// Toggle (form-switch) + status badge (current BTC mode + preset being applied
-// + last applied timestamp) + read-only preset table + Save button.
+// FIX-2026-09-29: editable preset table when toggle ON (round 3 split-step + editable presets)
+const BTC_DRIVEN_PRESET_FIELDS = [
+  { key: 'poleCount',        label: '🎯 Pole',         min: 1,   max: 100,  step: 1   },
+  { key: 'usdtPerPole',      label: '💵 USDT/pole',    min: 0.1, max: 1000, step: 0.1 },
+  { key: 'lossThresholdPct', label: '📉 Loss%',        min: 0.1, max: 50,   step: 0.1 },
+  { key: 'checkHours',       label: '⏱ Check h',       min: 1,   max: 168,  step: 1   },
+  { key: 'stepReserveUsdt',  label: '📥 Step↑',        min: 1,   max: 1000, step: 1   },
+  { key: 'stepReleaseUsdt',  label: '📤 Step↓',        min: 1,   max: 1000, step: 1   },
+];
+const BTC_DRIVEN_PRESET_KEYS = ['conservative', 'aggressive'];
+
 function renderAutoReserveBtcDrivenSubSection() {
   const cfg = btcDrivenCfg || {};
   const btcEnabled = !!cfg.enabled;
@@ -1225,6 +1240,46 @@ function renderAutoReserveBtcDrivenSubSection() {
   const effectivePreset = effectivePresetKey ? presets[effectivePresetKey] : null;
   const toggleStatus = btcEnabled ? '▶️ ON' : '⏹ OFF';
   const modeColor = btcEnabled ? 'bg-success' : 'bg-secondary';
+
+  // FIX-2026-09-29: editable table when toggle ON — cells become number inputs.
+  // Toggle OFF keeps the original read-only text behavior.
+  const renderPresetTableRows = (editable) => BTC_DRIVEN_PRESET_KEYS.map((key) => {
+    const p = presets[key] || {};
+    if (editable) {
+      return `
+        <tr data-preset="${escapeHtml(key)}">
+          <td><strong>${escapeHtml(key)}</strong></td>
+          ${BTC_DRIVEN_PRESET_FIELDS.map((f) => `
+            <td>
+              <input type="number" class="form-control form-control-sm preset-input"
+                     data-field="${f.key}" value="${Number.isFinite(Number(p[f.key])) ? p[f.key] : ''}"
+                     min="${f.min}" max="${f.max}" step="${f.step}"
+                     style="min-width: 72px; padding: 2px 4px;" />
+            </td>
+          `).join('')}
+        </tr>
+      `;
+    }
+    return `
+      <tr>
+        <td><strong>${escapeHtml(key)}</strong></td>
+        ${BTC_DRIVEN_PRESET_FIELDS.map((f) => `<td>${Number.isFinite(Number(p[f.key])) ? p[f.key] : '—'}</td>`).join('')}
+      </tr>
+    `;
+  }).join('');
+
+  const effectivePresetSummary = effectivePreset
+    ? `<span class="text-muted-2">(${effectivePreset.poleCount}p / ${effectivePreset.usdtPerPole}u / ${effectivePreset.lossThresholdPct}% / ${effectivePreset.checkHours}h / step↑${effectivePreset.stepReserveUsdt ?? effectivePreset.stepUsdt ?? '?'} / step↓${effectivePreset.stepReleaseUsdt ?? effectivePreset.stepUsdt ?? '?'})</span>`
+    : '';
+
+  const savePresetsBtn = btcEnabled
+    ? `<button type="button" class="btn btn-outline-primary btn-sm mt-2" id="btn-save-ar-btc-driven-presets">💾 Save Presets</button>
+       <span class="ms-2 text-muted small" id="ar-btc-driven-presets-status"></span>`
+    : '';
+  const tableSummaryText = btcEnabled
+    ? 'Preset table (editable — cells are inputs)'
+    : 'Preset table (read-only)';
+
   return `
     <hr class="my-4" />
     <h6 class="mt-3 mb-2">🤖 BTC Trend Driven Adjust</h6>
@@ -1232,11 +1287,12 @@ function renderAutoReserveBtcDrivenSubSection() {
       <strong>📌 หลักการ:</strong> ระบบจะตรวจสอบ <code>BTC Trend Pattern</code> mode (BTCUSDT 1h)
       และปรับค่า reserve อัตโนมัติเมื่อ mode เปลี่ยน — ใช้ BTC เป็น macro signal ปรับ aggressiveness ของทุกบอท
       <ul class="mb-1 mt-1">
-        <li><code>break / waiting-boots</code> → <strong>conservative</strong> preset (เน้นปลอดภัย — pole=2, USDT=6, loss=4%, check=6ชม., step=6)</li>
-        <li><code>boots / waiting-break</code> → <strong>aggressive</strong> preset (เน้นรีบ — pole=5, USDT=9, loss=2%, check=2ชม., step=9)</li>
+        <li><code>break / waiting-boots</code> → <strong>conservative</strong> preset (เน้นปลอดภัย — pole=2, USDT=6, loss=4%, check=6ชม.)</li>
+        <li><code>boots / waiting-break</code> → <strong>aggressive</strong> preset (เน้นรีบ — pole=5, USDT=9, loss=2%, check=2ชม.)</li>
         <li><code>normal</code> → <strong>ไม่ปรับ</strong> (ใช้ค่าที่ตั้งไว้ด้านบน)</li>
       </ul>
       ⚠️ <strong>ปิด toggle = ค่าใน DB คงเป็นค่าที่ BTC apply ล่าสุด</strong> (ไม่ restore กลับเป็นค่าก่อนเปิด)
+      <br />✅ <strong>เปิด toggle = table แก้ไขได้</strong> — เปลี่ยนค่า preset แต่ละชุดได้ตามต้องการ (server clamp อัตโนมัติ)
     </div>
 
     <div class="mb-3">
@@ -1258,7 +1314,7 @@ function renderAutoReserveBtcDrivenSubSection() {
       <div class="col-md-4">
         <div class="text-muted-2">Preset ที่ apply ล่าสุด:</div>
         ${effectivePresetKey
-          ? `<strong>${escapeHtml(effectivePresetKey)}</strong>${effectivePreset ? ` <span class="text-muted-2">(${effectivePreset.poleCount}p / ${effectivePreset.usdtPerPole}u / ${effectivePreset.lossThresholdPct}% / ${effectivePreset.checkHours}h / ${effectivePreset.stepUsdt}s)</span>` : ''}`
+          ? `<strong>${escapeHtml(effectivePresetKey)}</strong>${effectivePresetSummary}`
           : '<span class="text-muted-2">—</span>'}
       </div>
       <div class="col-md-4">
@@ -1267,36 +1323,24 @@ function renderAutoReserveBtcDrivenSubSection() {
       </div>
     </div>
 
-    <details class="lux-details">
+    <details class="lux-details" ${btcEnabled ? 'open' : ''}>
       <summary class="lux-details-summary">
         <span>📋</span>
-        <span>Preset table (read-only)</span>
+        <span>${escapeHtml(tableSummaryText)}</span>
       </summary>
       <div class="lux-details-body">
         <table class="table table-sm small mb-0">
           <thead>
             <tr>
               <th>Preset</th>
-              <th>poleCount</th>
-              <th>usdtPerPole</th>
-              <th>lossThresholdPct</th>
-              <th>checkHours</th>
-              <th>stepUsdt</th>
+              ${BTC_DRIVEN_PRESET_FIELDS.map((f) => `<th>${f.label}</th>`).join('')}
             </tr>
           </thead>
           <tbody>
-            ${Object.entries(presets).map(([k, p]) => `
-              <tr>
-                <td><strong>${escapeHtml(k)}</strong></td>
-                <td>${p.poleCount}</td>
-                <td>${p.usdtPerPole}</td>
-                <td>${p.lossThresholdPct}</td>
-                <td>${p.checkHours}</td>
-                <td>${p.stepUsdt}</td>
-              </tr>
-            `).join('')}
+            ${renderPresetTableRows(btcEnabled)}
           </tbody>
         </table>
+        ${savePresetsBtn}
       </div>
     </details>
 
@@ -2166,6 +2210,9 @@ function bindEvents() {
   // FIX-2026-09-21: BTC Trend Driven Adjust (sub-section inside autoReserve)
   const sbtd = document.getElementById('btn-save-ar-btc-driven');
   if (sbtd) sbtd.onclick = saveBtcDrivenConfig;
+  // FIX-2026-09-29: editable preset save (only present when BTC-driven toggle is ON)
+  const sbp = document.getElementById('btn-save-ar-btc-driven-presets');
+  if (sbp) sbp.onclick = saveBtcDrivenPresets;
 
   // FIX-2026-08-29: Auto-adjust Auto-pause thresholds
   const sapa = document.getElementById('btn-save-apa');
@@ -2614,7 +2661,9 @@ async function saveAutoReserveConfig() {
   const usdtPerPole = parseFloat(document.getElementById('ar-usdtperpole').value);
   const lossThresholdPct = parseFloat(document.getElementById('ar-losspct').value);
   const checkHours = parseInt(document.getElementById('ar-checkhours').value, 10);
-  const stepUsdt = parseFloat(document.getElementById('ar-step').value);
+  // FIX-2026-09-29: split step — read both fields (Reserve + Release)
+  const stepReserveUsdt = parseFloat(document.getElementById('ar-step-reserve').value);
+  const stepReleaseUsdt = parseFloat(document.getElementById('ar-step-release').value);
   if (!Number.isFinite(poleCount) || poleCount < 1 || poleCount > 100) {
     setStatus('ar-status', '❌ Pole count ต้องอยู่ระหว่าง 1..100', true); return;
   }
@@ -2630,8 +2679,11 @@ async function saveAutoReserveConfig() {
   if (24 % checkHours !== 0) {
     setStatus('ar-status', '❌ Check hours ต้องหาร 24 ลงตัว (1, 2, 3, 4, 6, 8, 12, 24)', true); return;
   }
-  if (!Number.isFinite(stepUsdt) || stepUsdt < 1 || stepUsdt > 1000) {
-    setStatus('ar-status', '❌ Step USDT �้องอยู่ระหว่าง 1..1000', true); return;
+  if (!Number.isFinite(stepReserveUsdt) || stepReserveUsdt < 1 || stepReserveUsdt > 1000) {
+    setStatus('ar-status', '❌ Step Reserve ต้องอยู่ระหว่าง 1..1000', true); return;
+  }
+  if (!Number.isFinite(stepReleaseUsdt) || stepReleaseUsdt < 1 || stepReleaseUsdt > 1000) {
+    setStatus('ar-status', '❌ Step Release ต้องอยู่ระหว่าง 1..1000', true); return;
   }
 
   if (enabled) {
@@ -2641,7 +2693,7 @@ async function saveAutoReserveConfig() {
           message:
             `🤖 Auto Reserve จะปรับ USDT Reserve อัตโนมัติทุก ๆ ${checkHours} ชั่วโมง\n\n` +
             `เป้า: ${poleCount} ไม้ × ${usdtPerPole} = ${poleCount * usdtPerPole} USDT\n` +
-            `ทุกครั้งจะกั๊ก/ปล่อยครั้งละ ${stepUsdt} USDT\n` +
+            `กั้กครั้งละ ${stepReserveUsdt} USDT · ปล่อยครั้งละ ${stepReleaseUsdt} USDT\n` +
             `นับ position ที่ขาดทุน < ${lossThresholdPct}% เป็น 1 ไม้\n\n` +
             `⚠️ ถ้าเปิดแล้ว ระบบจะรันทันทีหลังบันทึก (first tick)\n\n` +
             `ต้องการเปิดหรือไม่?`,
@@ -2653,7 +2705,7 @@ async function saveAutoReserveConfig() {
           title: '🤖 เปิด Auto Reserve',
           message: `🤖 Auto Reserve จะปรับ USDT Reserve อัตโนมัติทุก ๆ ${checkHours} ชั่วโมง\n\n` +
             `เป้า: ${poleCount} ไม้ × ${usdtPerPole} = ${poleCount * usdtPerPole} USDT\n` +
-            `ทุกครั้งจะกั๊ก/ปล่อยครั้งละ ${stepUsdt} USDT\n\n` +
+            `กั้กครั้งละ ${stepReserveUsdt} USDT · ปล่อยครั้งละ ${stepReleaseUsdt} USDT\n\n` +
             `⚠️ ถ้าเปิดแล้ว ระบบจะรันทันทีหลังบันทึก\n\nต้องการเปิดหรือไม่?`,
           level: 'warn',
           okLabel: 'เปิด Auto Reserve',
@@ -2664,10 +2716,11 @@ async function saveAutoReserveConfig() {
   setStatus('ar-status', '⏳ กำลังบันทึก...');
   try {
     const r = await API.put('/api/wallet/auto-reserve/config', {
-      enabled, poleCount, usdtPerPole, lossThresholdPct, checkHours, stepUsdt,
+      enabled, poleCount, usdtPerPole, lossThresholdPct, checkHours,
+      stepReserveUsdt, stepReleaseUsdt,
     });
     const c = (r && r.config) || {};
-    setStatus('ar-status', `✅ บันทึกแล้ว · ${c.enabled ? '🟢 ON' : '⚪ OFF'} · poleCount=${c.poleCount} · usdtPerPole=${c.usdtPerPole} · lossThr=${c.lossThresholdPct}% · checkHours=${c.checkHours} · step=${c.stepUsdt}`);
+    setStatus('ar-status', `✅ บันทึกแล้ว · ${c.enabled ? '🟢 ON' : '⚪ OFF'} · poleCount=${c.poleCount} · usdtPerPole=${c.usdtPerPole} · lossThr=${c.lossThresholdPct}% · checkHours=${c.checkHours} · step↑=${c.stepReserveUsdt ?? c.stepUsdt} · step↓=${c.stepReleaseUsdt ?? c.stepUsdt}`);
     await loadConfig();
   } catch (err) { setStatus('ar-status', '❌ ' + (err.body && err.body.error ? err.body.error : err.message), true); }
 }
@@ -2720,6 +2773,52 @@ async function saveBtcDrivenConfig() {
     await loadConfig();
   } catch (err) {
     setStatus('ar-btc-driven-status', '❌ ' + (err.body && err.body.error ? err.body.error : err.message), true);
+  }
+}
+
+// FIX-2026-09-29: BTC-driven preset editor (round 3) — reads all .preset-input cells
+//   in <tr data-preset="..."> rows, builds { conservative: {...}, aggressive: {...} },
+//   PUTs to /api/wallet/auto-reserve/btc-driven/presets. Server auto-clamps per-field
+//   ranges + persists to AppConfig. Does NOT trigger preset re-apply — next BTC mode
+//   change (or toggle disable+enable) will use new values.
+async function saveBtcDrivenPresets() {
+  const rows = document.querySelectorAll('tr[data-preset]');
+  if (rows.length === 0) {
+    setStatus('ar-btc-driven-presets-status', '❌ ไม่พบแถว preset — ต้องเปิด toggle ก่อน', true);
+    return;
+  }
+  const presets = {};
+  let hasInvalid = false;
+  rows.forEach((row) => {
+    const key = row.dataset.preset;
+    const p = {};
+    row.querySelectorAll('.preset-input').forEach((inp) => {
+      const v = Number(inp.value);
+      if (!Number.isFinite(v)) hasInvalid = true;
+      p[inp.dataset.field] = v;
+    });
+    presets[key] = p;
+  });
+  if (hasInvalid) {
+    setStatus('ar-btc-driven-presets-status', '❌ มีค่าที่ไม่ใช่ตัวเลข — กรุณาตรวจสอบ', true);
+    return;
+  }
+
+  setStatus('ar-btc-driven-presets-status', '⏳ กำลังบันทึก...');
+  try {
+    const r = await API.put('/api/wallet/auto-reserve/btc-driven/presets', { presets });
+    const saved = (r && r.presets) || presets;
+    setStatus(
+      'ar-btc-driven-presets-status',
+      `✅ บันทึกแล้ว · conservative=(p${saved.conservative.poleCount}/u${saved.conservative.usdtPerPole}/l${saved.conservative.lossThresholdPct}%/h${saved.conservative.checkHours}/↑${saved.conservative.stepReserveUsdt}/↓${saved.conservative.stepReleaseUsdt}) · aggressive=(p${saved.aggressive.poleCount}/u${saved.aggressive.usdtPerPole}/l${saved.aggressive.lossThresholdPct}%/h${saved.aggressive.checkHours}/↑${saved.aggressive.stepReserveUsdt}/↓${saved.aggressive.stepReleaseUsdt})`
+    );
+    await loadConfig();
+  } catch (err) {
+    setStatus(
+      'ar-btc-driven-presets-status',
+      '❌ ' + (err.body && err.body.error ? err.body.error : err.message),
+      true
+    );
   }
 }
 

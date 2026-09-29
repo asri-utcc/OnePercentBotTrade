@@ -161,6 +161,81 @@ const DEFAULT_SKIP_PATHS = new Set([
   'sweeperEmergencyPauseReason',
 ]);
 
+/**
+ * FIX-2026-09-29: One-shot migration — split legacy `autoReserveStepUsdt` into
+ *   `autoReserveStepReserveUsdt` + `autoReserveStepReleaseUsdt` (round 3).
+ *
+ * Background:
+ *   - Round 2 used single `autoReserveStepUsdt` field for both reserve and release.
+ *   - Round 3 splits into 2 direction-specific fields.
+ *   - Per memory rule ("existing DB values always WIN — env never overrides"),
+ *     we mirror the legacy value to both new fields on boot, IF new fields are missing.
+ *   - Legacy field is kept in schema (deprecated) for backward compat with old clients.
+ *
+ * Behavior:
+ *   - Idempotent: if both new fields already present → no-op (returns { migrated: false })
+ *   - Non-fatal: caller wraps in try/catch; returns { migrated, fields, error } on failure
+ *   - Reads `autoReserveStepUsdt` from singleton doc, validates finite + in 1..1000 range
+ *   - If valid → writes both new fields with the same value (clamped)
+ *
+ * @param {object} args
+ * @param {object} args.AppConfig  Mongoose model
+ * @param {object} [args.logger]   Pino-style logger
+ * @returns {Promise<{migrated: boolean, fields?: string[], error?: string}>}
+ */
+async function migrateSplitStepFields({ AppConfig, logger = noopLogger } = {}) {
+  if (!AppConfig) {
+    return { migrated: false, error: 'AppConfig model missing' };
+  }
+
+  let doc;
+  try {
+    doc = await AppConfig.findOne({ key: 'singleton' });
+  } catch (e) {
+    logger.warn({ err: e.message }, 'AppConfig.migrateSplitStep: findOne failed (non-fatal)');
+    return { migrated: false, error: e.message };
+  }
+
+  if (!doc) {
+    // Fresh deploy — no singleton yet, nothing to migrate
+    return { migrated: false };
+  }
+
+  const update = {};
+  const legacyVal = Number(doc.autoReserveStepUsdt);
+  if (Number.isFinite(legacyVal) && legacyVal >= 1 && legacyVal <= 1000) {
+    if (doc.autoReserveStepReserveUsdt == null) {
+      update.autoReserveStepReserveUsdt = legacyVal;
+    }
+    if (doc.autoReserveStepReleaseUsdt == null) {
+      update.autoReserveStepReleaseUsdt = legacyVal;
+    }
+  }
+
+  if (Object.keys(update).length === 0) {
+    return { migrated: false };
+  }
+
+  try {
+    await AppConfig.findOneAndUpdate(
+      { key: 'singleton' },
+      { $set: update },
+      { new: true, upsert: true }
+    );
+    logger.info(
+      { version: '2026-09-29', fields: Object.keys(update), values: update },
+      'AppConfig.migrateSplitStep: legacy stepUsdt → split fields migrated'
+    );
+    return { migrated: true, fields: Object.keys(update) };
+  } catch (e) {
+    logger.warn(
+      { err: e.message },
+      'AppConfig.migrateSplitStep: update failed (non-fatal — manual retry via repair script)'
+    );
+    return { migrated: false, error: e.message };
+  }
+}
+
 const noopLogger = {
   warn: () => {},
   info: () => {},
@@ -171,5 +246,6 @@ module.exports = {
   REPAIR_VERSION,
   clampOutOfRangeNumbers,
   repairAppConfig,
+  migrateSplitStepFields,
   DEFAULT_SKIP_PATHS,
 };

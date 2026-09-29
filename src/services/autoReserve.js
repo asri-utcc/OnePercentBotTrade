@@ -105,53 +105,74 @@ function computeAvailablePoles({ usableUsdt, usdtPerPole, positions, lossThresho
 /**
  * Decide what to do: reserve / release / none.
  *
+ * FIX-2026-09-29: split stepUsdt into stepReserveUsdt (กั้ก) + stepReleaseUsdt (ปล่อย).
+ *   - RESERVE: adds exactly stepReserveUsdt (always exact, no partial — skip if can't fit)
+ *   - RELEASE: subtracts min(stepReleaseUsdt, reserveUsdt) — drains to 0 if reserve < step
+ *   - Asymmetric behavior preserved from FIX-2026-08-24.
+ *   - Backward compat: legacy stepUsdt param still respected (used as both when new fields absent).
+ *
  * @param {Object} args
  * @param {number} args.availablePoleCount - current count
  * @param {number} args.targetPoleCount    - desired count (e.g. 3)
  * @param {number} args.reserveUsdt        - current reserve
- * @param {number} args.stepUsdt           - amount per action
+ * @param {number} args.stepReserveUsdt    - amount added per RESERVE action (default 10)
+ * @param {number} args.stepReleaseUsdt    - amount subtracted per RELEASE action (default 10)
+ * @param {number} [args.stepUsdt]         - @deprecated legacy shared step (used only if stepReserve/stepRelease absent)
  * @param {number} args.totalUsdt          - total USDT on Binance (free+locked) — caps reserve ceiling
  * @returns {{ action: 'reserve'|'release'|'none', deltaUsdt: number, afterReserve: number, reason: string }}
  */
-function decideAction({ availablePoleCount, targetPoleCount, reserveUsdt, stepUsdt, totalUsdt }) {
+function decideAction({ availablePoleCount, targetPoleCount, reserveUsdt, stepReserveUsdt, stepReleaseUsdt, stepUsdt, totalUsdt }) {
   const safeReserve = Number.isFinite(reserveUsdt) ? Math.max(0, reserveUsdt) : 0;
-  const safeStep = Number.isFinite(stepUsdt) && stepUsdt > 0 ? stepUsdt : 0;
+  // Resolve per-direction step — new fields preferred, fall back to legacy stepUsdt.
+  // Legacy NaN/0 must NOT silently upgrade to default 10 (preserves old zero_step behavior).
+  const legacyStepValid = Number.isFinite(stepUsdt) && stepUsdt > 0;
+  const stepReserveRaw = Number.isFinite(stepReserveUsdt)
+    ? stepReserveUsdt
+    : (legacyStepValid ? stepUsdt : 0);
+  const stepReleaseRaw = Number.isFinite(stepReleaseUsdt)
+    ? stepReleaseUsdt
+    : (legacyStepValid ? stepUsdt : 0);
+  const safeStepReserve = stepReserveRaw > 0 ? stepReserveRaw : 0;
+  const safeStepRelease = stepReleaseRaw > 0 ? stepReleaseRaw : 0;
   const safeTotal = Number.isFinite(totalUsdt) ? Math.max(0, totalUsdt) : 0;
 
   if (!Number.isFinite(availablePoleCount) || !Number.isFinite(targetPoleCount)) {
     return { action: 'none', deltaUsdt: 0, afterReserve: safeReserve, reason: 'invalid_pole_count' };
   }
-  if (safeStep <= 0) {
-    return { action: 'none', deltaUsdt: 0, afterReserve: safeReserve, reason: 'zero_step' };
-  }
 
   if (availablePoleCount > targetPoleCount) {
-    // Reserve MORE: lock stepUsdt extra — but ONLY if full stepUsdt fits
-    //   - FIX-2026-08-24: skip partial reserve. ถ้า usable < stepUsdt → wait for
+    // RESERVE direction — uses stepReserveUsdt (FIX-2026-09-29: split from stepUsdt)
+    if (safeStepReserve <= 0) {
+      return { action: 'none', deltaUsdt: 0, afterReserve: safeReserve, reason: 'zero_step' };
+    }
+    //   - FIX-2026-08-24: skip partial reserve. ถ้า usable < stepReserveUsdt → wait for
     //     next tick ดีกว่า lock เศษ 2 USDT (พอกั๊กจริงไม่พอ)
-    //   - reserve_at_max เมื่อ safeReserve + step > MAX_RESERVE
-    //   - insufficient_usable_for_step เมื่อ safeReserve + step > totalUsdt
-    const fullAfter = safeReserve + safeStep;
+    //   - reserve_at_max เมื่อ safeReserve + stepReserve > MAX_RESERVE
+    //   - insufficient_usable_for_step เมื่อ safeReserve + stepReserve > totalUsdt
+    const fullAfter = safeReserve + safeStepReserve;
     if (fullAfter > MAX_RESERVE) {
       return { action: 'none', deltaUsdt: 0, afterReserve: safeReserve, reason: 'reserve_at_max' };
     }
     if (fullAfter > safeTotal) {
       return { action: 'none', deltaUsdt: 0, afterReserve: safeReserve, reason: 'insufficient_usable_for_step' };
     }
-    return { action: 'reserve', deltaUsdt: safeStep, afterReserve: fullAfter, reason: 'available_exceeds_target' };
+    return { action: 'reserve', deltaUsdt: safeStepReserve, afterReserve: fullAfter, reason: 'available_exceeds_target' };
   }
 
   if (availablePoleCount < targetPoleCount) {
-    // Release: unlock stepUsdt — but if reserve < step, release ALL remaining (FIX-2026-08-24)
+    // RELEASE direction — uses stepReleaseUsdt (FIX-2026-09-29: split from stepUsdt)
+    if (safeStepRelease <= 0) {
+      return { action: 'none', deltaUsdt: 0, afterReserve: safeReserve, reason: 'zero_step' };
+    }
     //   - Asymmetric vs reserve branch (which skips partial)
-    //   - ถ้า reserveUsdt=5, step=10 → release 5 ทั้งหมด (after=0) — drain leftover
+    //   - ถ้า reserveUsdt=5, stepRelease=10 → release 5 ทั้งหมด (after=0) — drain leftover
     //   - ถ้า reserveUsdt=0 → none (ไม่มีอะไรให้ปล่อย)
     if (safeReserve <= 0) {
       return { action: 'none', deltaUsdt: 0, afterReserve: 0, reason: 'reserve_already_zero' };
     }
-    const releaseAmount = Math.min(safeStep, safeReserve);
+    const releaseAmount = Math.min(safeStepRelease, safeReserve);
     const after = safeReserve - releaseAmount;
-    const reason = safeReserve < safeStep ? 'release_remaining_below_step' : 'available_below_target';
+    const reason = safeReserve < safeStepRelease ? 'release_remaining_below_step' : 'available_below_target';
     return { action: 'release', deltaUsdt: releaseAmount, afterReserve: after, reason };
   }
 
@@ -238,17 +259,27 @@ class AutoReserve {
         usdtPerPole: 10,
         lossThresholdPct: 2,
         checkHours: 4,
+        // FIX-2026-09-29: split step — both default to 10
+        stepReserveUsdt: 10,
+        stepReleaseUsdt: 10,
+        // legacy field kept for backward compat in callers (decideAction fallback)
         stepUsdt: 10,
       };
     }
     const checkHours = Math.max(1, Math.min(24, Number(cfg.autoReserveCheckHours) || 4));
+    // FIX-2026-09-29: read new split fields; fall back to legacy autoReserveStepUsdt
+    const legacyStep = Math.max(1, Math.min(1000, Number(cfg.autoReserveStepUsdt) || 10));
+    const stepReserve = Number(cfg.autoReserveStepReserveUsdt);
+    const stepRelease = Number(cfg.autoReserveStepReleaseUsdt);
     return {
       enabled: cfg.autoReserveEnabled === true,
       poleCount: Math.max(1, Math.min(100, Number(cfg.autoReservePoleCount) || 3)),
       usdtPerPole: Math.max(1, Math.min(1000, Number(cfg.autoReserveUsdtPerPole) || 10)),
       lossThresholdPct: Math.max(0.1, Math.min(50, Number(cfg.autoReserveLossThresholdPct) || 2)),
       checkHours,
-      stepUsdt: Math.max(1, Math.min(1000, Number(cfg.autoReserveStepUsdt) || 10)),
+      stepReserveUsdt: Number.isFinite(stepReserve) ? Math.max(1, Math.min(1000, stepReserve)) : legacyStep,
+      stepReleaseUsdt: Number.isFinite(stepRelease) ? Math.max(1, Math.min(1000, stepRelease)) : legacyStep,
+      stepUsdt: legacyStep, // legacy — kept for decideAction fallback + backward compat
     };
   }
 
@@ -358,11 +389,14 @@ class AutoReserve {
       });
 
       // 3. Decide action
+      // FIX-2026-09-29: pass split step fields (reserve/release) instead of single stepUsdt
       const decision = decideAction({
         availablePoleCount,
         targetPoleCount: this.config.poleCount,
         reserveUsdt,
-        stepUsdt: this.config.stepUsdt,
+        stepReserveUsdt: this.config.stepReserveUsdt,
+        stepReleaseUsdt: this.config.stepReleaseUsdt,
+        stepUsdt: this.config.stepUsdt, // legacy fallback (decideAction handles)
         totalUsdt,
       });
 

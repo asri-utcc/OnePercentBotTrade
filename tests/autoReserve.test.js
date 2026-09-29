@@ -539,6 +539,102 @@ describe('autoReserve — pure calculator functions', () => {
       expect(r.deltaUsdt).toBe(10);
     });
 
+    // ─────────────────────────────────────────────────────────────────
+    // FIX-2026-09-29: split-step tests — RESERVE uses stepReserveUsdt,
+    //   RELEASE uses stepReleaseUsdt. Asymmetric preserved.
+    //   Legacy stepUsdt still works when new fields absent (backward compat).
+    // ─────────────────────────────────────────────────────────────────
+    test('SPLIT-1: RESERVE uses stepReserveUsdt (not stepReleaseUsdt)', () => {
+      const r = autoReserve.decideAction({
+        availablePoleCount: 5,
+        targetPoleCount: 3,
+        reserveUsdt: 30,
+        stepReserveUsdt: 8,
+        stepReleaseUsdt: 999, // should be IGNORED for reserve direction
+        totalUsdt: 100,
+      });
+      expect(r.action).toBe('reserve');
+      expect(r.deltaUsdt).toBe(8);
+      expect(r.afterReserve).toBe(38);
+    });
+
+    test('SPLIT-2: RELEASE uses stepReleaseUsdt (not stepReserveUsdt)', () => {
+      const r = autoReserve.decideAction({
+        availablePoleCount: 1,
+        targetPoleCount: 3,
+        reserveUsdt: 30,
+        stepReserveUsdt: 999, // should be IGNORED for release direction
+        stepReleaseUsdt: 12,
+        totalUsdt: 100,
+      });
+      expect(r.action).toBe('release');
+      expect(r.deltaUsdt).toBe(12);
+      expect(r.afterReserve).toBe(18);
+    });
+
+    test('SPLIT-3: RELEASE drain-to-zero preserved with split step', () => {
+      // reserve=5, stepRelease=10 → release 5 (drain), stepReserve=999 must not matter
+      const r = autoReserve.decideAction({
+        availablePoleCount: 0,
+        targetPoleCount: 3,
+        reserveUsdt: 5,
+        stepReserveUsdt: 999,
+        stepReleaseUsdt: 10,
+        totalUsdt: 100,
+      });
+      expect(r.action).toBe('release');
+      expect(r.deltaUsdt).toBe(5);
+      expect(r.afterReserve).toBe(0);
+      expect(r.reason).toBe('release_remaining_below_step');
+    });
+
+    test('SPLIT-4: split step supports different reserve vs release values', () => {
+      // Real-world case: user wants reserve slow (step↑=5) but release fast (step↓=20)
+      const r1 = autoReserve.decideAction({
+        availablePoleCount: 5, targetPoleCount: 3, reserveUsdt: 30,
+        stepReserveUsdt: 5, stepReleaseUsdt: 20, totalUsdt: 100,
+      });
+      expect(r1.action).toBe('reserve');
+      expect(r1.deltaUsdt).toBe(5);
+      expect(r1.afterReserve).toBe(35);
+
+      const r2 = autoReserve.decideAction({
+        availablePoleCount: 1, targetPoleCount: 3, reserveUsdt: 30,
+        stepReserveUsdt: 5, stepReleaseUsdt: 20, totalUsdt: 100,
+      });
+      expect(r2.action).toBe('release');
+      expect(r2.deltaUsdt).toBe(20);
+      expect(r2.afterReserve).toBe(10);
+    });
+
+    test('SPLIT-5: backward compat — legacy stepUsdt still works when new fields absent', () => {
+      // No stepReserveUsdt / stepReleaseUsdt — fall back to legacy stepUsdt
+      const r = autoReserve.decideAction({
+        availablePoleCount: 4,
+        targetPoleCount: 3,
+        reserveUsdt: 30,
+        stepUsdt: 7,
+        totalUsdt: 100,
+      });
+      expect(r.action).toBe('reserve');
+      expect(r.deltaUsdt).toBe(7);
+      expect(r.afterReserve).toBe(37);
+    });
+
+    test('SPLIT-6: zero stepReserveUsdt → no reserve action (zero_step)', () => {
+      const r = autoReserve.decideAction({
+        availablePoleCount: 5,
+        targetPoleCount: 3,
+        reserveUsdt: 30,
+        stepReserveUsdt: 0,
+        stepReleaseUsdt: 5,
+        totalUsdt: 100,
+      });
+      expect(r.action).toBe('none');
+      expect(r.deltaUsdt).toBe(0);
+      expect(r.reason).toBe('zero_step');
+    });
+
     test('large step: step=100, available > target → SKIP (insufficient_usable_for_step) — FIX-2026-08-24', () => {
       // ก่อนหน้านี้: partial reserve (delta=70). หลังแก้: skip ทั้งดอก
       const r = autoReserve.decideAction({
