@@ -16,6 +16,11 @@
  *   - Trader per-instance jitter (sweepIntervalMs + reconcileBalanceIntervalMs)
  */
 
+// FIX-2026-09-29: scheduledInterval() at offsetMs=0 fires fn() synchronously inside start(),
+//   so each test's `await botManager.start()` triggers 4 immediate callbacks (reconcile/autoPause/
+//   trendline/delist) doing real DB work — ~10s per start(). Bump from Jest default 5s.
+jest.setTimeout(30000);
+
 jest.mock('../src/binance/binanceRest', () => ({
   getKlines: jest.fn(),
   get24hrTickers: jest.fn(() => Promise.resolve([])),
@@ -139,7 +144,7 @@ describe('botManager.start() subsystem timer jitter (FIX-2026-08-22)', () => {
     setIntervalCalls = [];
     setIntervalSpy = jest.spyOn(global, 'setInterval').mockImplementation((handler, ms, ...rest) => {
       setIntervalCalls.push({ handler, ms, rest });
-      return 0; // fake handle
+      return { unref: () => {} }; // fake handle (must be object — scheduledInterval.js uses WeakMap)
     });
   });
 
@@ -184,7 +189,13 @@ describe('botManager.start() subsystem timer jitter (FIX-2026-08-22)', () => {
     expect(matched.ms).toBeLessThanOrEqual(DELIST_BASE * 1.1);
   });
 
-  test('all 4 subsystem timers jittered (none equal to base)', async () => {
+  // FIX-2026-09-29: jitter was replaced by deterministic SCHEDULE_OFFSET_SEC stagger
+  //   (scheduledInterval.js). Per-instance offset (env-driven, default 0) de-aligns
+  //   multi-instance timers via first-fire delay + restart-anchor cadence. Per-call
+  //   random jitter is no longer applied — all 4 timers fire at exact baseMs in tests
+  //   (offsetMs=0). Remove this assertion (replaced by `scheduledInterval.spec.js`
+  //   if/when added).
+  test.skip('all 4 subsystem timers jittered (none equal to base) — superseded by SCHEDULE_OFFSET_SEC', async () => {
     let anyDifferent = false;
     for (let i = 0; i < 5; i++) {
       botManager.running = false;

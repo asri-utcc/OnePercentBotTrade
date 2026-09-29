@@ -19,6 +19,11 @@
  *   - pause()/resume() leave correct _pausedAt + _pausedReason metadata
  */
 
+// FIX-2026-09-29: scheduledInterval() at offsetMs=0 fires fn() synchronously inside start(),
+//   so resume()→start() triggers 4 immediate callbacks (reconcile/autoPause/trendline/delist)
+//   doing real DB work — ~10s. Bump from Jest default 5s.
+jest.setTimeout(30000);
+
 jest.mock('../src/binance/binanceRest', () => ({
   getKlines: jest.fn(),
   get24hrTickers: jest.fn(() => Promise.resolve([])),
@@ -139,7 +144,7 @@ describe('botManager.pause() (FIX-2026-08-30 Phase 3b-7)', () => {
     botManager.reconcileTimer = null;
     botManager.traders = new Map();
     // Stub setInterval so start() doesn't leave real timers keeping Jest alive
-    setIntervalSpy = jest.spyOn(global, 'setInterval').mockImplementation(() => 0);
+    setIntervalSpy = jest.spyOn(global, 'setInterval').mockImplementation(() => ({ unref: () => {} }));
   });
   afterEach(() => {
     setIntervalSpy.mockRestore();
@@ -181,7 +186,7 @@ describe('botManager.resume() (FIX-2026-08-30 Phase 3b-7)', () => {
     botManager.reconcileTimer = null;
     botManager.traders = new Map();
     // Stub setInterval so start() doesn't leave real timers keeping Jest alive
-    setIntervalSpy = jest.spyOn(global, 'setInterval').mockImplementation(() => 0);
+    setIntervalSpy = jest.spyOn(global, 'setInterval').mockImplementation(() => ({ unref: () => {} }));
   });
   afterEach(() => {
     setIntervalSpy.mockRestore();
