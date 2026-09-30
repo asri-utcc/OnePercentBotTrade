@@ -25,7 +25,7 @@
     { key: 'bots',          href: '/bots.html',     label: '🤖 Bots' },
     { key: 'detail',        href: botId ? `/bot-detail.html?id=${botId}` : '/bots.html', label: '📊 Detail' },
     { key: 'chart-monitor', href: '/chart-monitor.html', label: '📊 Chart Monitor' }, // 2026-08-06: grid of mini-charts for running bots
-    { key: 'chart',         href: '/chart.html',    label: '📈 Chart' },
+    // FIX-2026-09-30: 'chart' tab removed from nav — user wants to reach /chart.html from the Scan page instead
     { key: 'backtest',      href: '/backtest.html', label: '🧪 Backtest' },
     { key: 'scan',          href: '/scan-volatility.html', label: '🎰 Scan' },
     { key: 'pnl',           href: '/pnl.html',      label: '📅 PnL' },               // FIX-2026-07-29
