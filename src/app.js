@@ -203,18 +203,24 @@ app.get('/api/app/update-status', _updateAuthGate, (_req, res) => {
   // payload cached by updateChecker. Cheap JSON read (data/update-checker-state.json).
   const cur = require('../package.json').version;
   const state = updateChecker.getLastNotification();
-  const dismissed = !!(state.lastDismissedVersion && state.lastDismissedVersion === state.lastNotifiedVersion);
-  const adminUrl = (process.env.ADMIN_URL || 'http://localhost:6016');
-  const lastSeen = state.lastSeenLatest || null;
   const cached = state.lastNotifiedManifest || null;
-  const isAvail = !!(lastSeen && lastSeen.version && cached && cached.version === lastSeen.version
-    && state.lastNotifiedVersion === lastSeen.version
-    && require('./services/updateChecker')._compareSemver(lastSeen.version, cur) > 0);
+  // FIX-2026-09-30: availability must be based on what we've been NOTIFIED about
+  // (lastNotifiedVersion — set by either poll OR push), not lastSeenLatest which
+  // gets overwritten every poll. If the bot polls a different channel than what
+  // admin just pushed to, lastSeenLatest lags behind lastNotifiedVersion and
+  // the old condition `lastSeen === cached === lastNotified` becomes false,
+  // hiding a real available update.
+  const candidateVersion = state.lastNotifiedVersion || (state.lastSeenLatest && state.lastSeenLatest.version) || null;
+  const dismissed = !!(state.lastDismissedVersion && state.lastDismissedVersion === candidateVersion);
+  const isAvail = !!(candidateVersion && cached && cached.version === candidateVersion
+    && require('./services/updateChecker')._compareSemver(candidateVersion, cur) > 0
+    && !dismissed);
+  const adminUrl = (process.env.ADMIN_URL || 'http://localhost:6016');
   res.json({
     available: isAvail,
     critical: isAvail && cached.critical === true,
     current: cur,
-    latest: lastSeen ? lastSeen.version : null,
+    latest: candidateVersion,
     lastNotifiedVersion: state.lastNotifiedVersion || null,
     lastCheckedAt: state.lastCheckedAt || null,
     dismissed,
