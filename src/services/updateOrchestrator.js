@@ -173,10 +173,21 @@ function _extractTarball(tarballPath, extractDir) {
   // Uses system `tar`. Verified compatible with publish-release.js.
   // Output dir must not exist (we're extracting into a fresh staging dir).
   fs.mkdirSync(extractDir, { recursive: true });
-  // Tarball root = bot repo dir (e.g. `OnePercentBotTrade/`). We extract all of
-  // it then move the inner subdirs up. `--strip-components=1` would work IF tar
-  // supports it portably — GNU tar yes, BSD tar yes. Use it for safety.
-  const r = spawnSync('tar', ['-xzf', tarballPath, '--strip-components=1', '-C', extractDir], {
+  // FIX-2026-09-30: on Windows, tar interprets `D:` in absolute paths as a
+  //   remote host ("Cannot connect to D: resolve failed"). Pass the tarball
+  //   as a path RELATIVE to a cwd that contains it, same workaround as
+  //   releaseBuilder._buildTarball on the admin side.
+  const cwd = path.dirname(tarballPath);
+  let tarFileArg = path.basename(tarballPath);
+  let extractArg = extractDir;
+  if (process.platform === 'win32') {
+    const rel = path.relative(cwd, extractDir);
+    if (rel && !rel.startsWith('..') && !path.isAbsolute(rel)) {
+      extractArg = rel.split(path.sep).join('/');
+    }
+  }
+  const r = spawnSync('tar', ['-xzf', tarFileArg, '--strip-components=1', '-C', extractArg], {
+    cwd,
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   if (r.status !== 0) {
