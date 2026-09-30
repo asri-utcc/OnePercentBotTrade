@@ -205,6 +205,7 @@ app.get('/api/app/update-status', _updateAuthGate, (_req, res) => {
   const state = updateChecker.getLastNotification();
   const cached = state.lastNotifiedManifest || null;
   // FIX-2026-09-30: bumped to 2.7.4 (verify update-status fix end-to-end)
+  // FIX-2026-09-30: bumped to 2.7.7 (live test of full update cycle — bots at 2.7.6)
   // FIX-2026-09-30: availability must be based on what we've been NOTIFIED about
   // (lastNotifiedVersion — set by either poll OR push), not lastSeenLatest which
   // gets overwritten every poll. If the bot polls a different channel than what
