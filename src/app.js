@@ -46,6 +46,11 @@ const consentRoutes = require('./api/routes/consent.routes');
 const chatRoutes = require('./api/routes/chat.routes');
 // FIX-2026-09-21: BTC Trend Pattern — global background monitor snapshot
 const btcTrendRoutes = require('./api/routes/btcTrend.routes');
+// FIX-2026-09-22: OneClick Update — admin pushes a release manifest to this bot
+//   immediately after publish (admin uses X-License-Key auth; humans get the
+//   session-gated /api/app/* endpoints for their own actions).
+const { requireAuthOrLicenseKey } = require('./api/middleware/auth');
+const adminMonitorConfig = require('./admin-monitor/config');
 
 function createApp() {
   const app = express();
@@ -261,6 +266,63 @@ app.post('/api/app/apply-update', _updateAuthGate, denyIfBusy, async (req, res) 
     logger.error({ err: err.message }, 'apply-update: failed to start');
     res.status(500).json({ error: err.message || 'update failed' });
   }
+});
+
+// FIX-2026-09-22: OneClick Update — admin pushes a release manifest to this
+//   bot immediately after publishing. Reachable only by the admin that owns
+//   this bot's license (X-License-Key) or a logged-in human (session cookie).
+//   Idempotent — repeated pushes for the same version are no-ops, and a
+//   version ≤ current or already-dismissed is ignored without emitting.
+app.post('/api/release/push-update', requireAuthOrLicenseKey, (req, res) => {
+  const body = req.body || {};
+  const version = String(body.version || '').trim();
+  const tarballSha256 = String(body.tarballSha256 || '').trim();
+  const manifestHash = String(body.manifestHash || '').trim();
+  if (!version || !tarballSha256 || !manifestHash) {
+    return res.status(400).json({ error: 'version, tarballSha256, manifestHash required' });
+  }
+  if (!/^[0-9]+\.[0-9]+\.[0-9]+([-.][0-9a-zA-Z]+)*$/.test(version)) {
+    return res.status(400).json({ error: `invalid version '${version}'` });
+  }
+  const current = require('../package.json').version;
+  const cmp = updateChecker._compareSemver(version, current);
+  if (cmp <= 0) {
+    logger.info({ version, current }, 'push-update: ignored older/equal version');
+    return res.json({ ok: true, ignored: 'older-version', currentVersion: current, latestVersion: version });
+  }
+  // Honour existing dismissal — user said no, don't pester.
+  const state = updateChecker.getLastNotification();
+  if (state.lastDismissedVersion === version) {
+    logger.info({ version }, 'push-update: ignored previously-dismissed version');
+    return res.json({ ok: true, ignored: 'dismissed', currentVersion: current, latestVersion: version });
+  }
+  // Min-version gate (mirror of poll path)
+  const minV = body.minBotVersion || '0.0.0';
+  if (updateChecker._compareSemver(current, minV) < 0) {
+    logger.info({ version, current, minV }, 'push-update: ignored — current below minBotVersion');
+    return res.json({ ok: true, ignored: 'min-version-not-met', currentVersion: current, latestVersion: version, required: minV });
+  }
+  // Apply. The helper does: write state, emit updateAvailable on event bus,
+  // dispatch TG notification, log. The event bus emission triggers the WS
+  // forwarder to push `updateAvailable` to every open browser tab.
+  const payload = updateChecker.forceApplyManifest({
+    manifest: {
+      version,
+      channel: body.channel || 'stable',
+      tarballSha256,
+      manifestHash,
+      tarballBytes: Number(body.tarballBytes) || 0,
+      changelog: String(body.changelog || ''),
+      critical: body.critical === true || body.critical === 'true',
+      migrations: Array.isArray(body.migrations) ? body.migrations : (typeof body.migrations === 'string' && body.migrations ? body.migrations.split(',').map((s) => s.trim()).filter(Boolean) : []),
+      publishedAt: body.publishedAt || new Date().toISOString(),
+      minBotVersion: minV,
+    },
+    adminUrl: process.env.ADMIN_URL || 'http://localhost:6016',
+    source: 'push',
+  });
+  logger.info({ version, current, source: 'push' }, 'push-update: manifest applied');
+  return res.json({ ok: true, currentVersion: payload.currentVersion, latestVersion: payload.latestVersion });
 });
 
   // Health

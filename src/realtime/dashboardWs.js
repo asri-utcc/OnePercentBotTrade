@@ -27,6 +27,11 @@ const EVENTS_TO_FORWARD = [
   //   Emitted from commandExecutor.chat_message() and admin-monitor/chatInbox.js.
   //   Browser ws-client.js forwards to AdminToast + window CustomEvent for chatWidget.js.
   'chat:message',
+  // FIX-2026-09-22: OneClick Update — admin-pushed or poll-detected new release
+  //   manifest. Emitted from updateChecker.forceApplyManifest() with payload
+  //   { currentVersion, latestVersion, changelog, critical, ... }. Browser
+  //   ws-client.js auto-opens the update modal on this event.
+  'updateAvailable',
 ];
 
 /**

@@ -13,6 +13,8 @@ const WSClient = {
     this._installAdminToast();
     // Phase 4-2026-08-29: chat:message → window CustomEvent for chatWidget / chat page
     this._installChatEventForwarder();
+    // FIX-2026-09-22: OneClick Update — auto-open update modal on admin push.
+    this._installUpdateForwarder();
   },
 
   _connect() {
@@ -105,6 +107,62 @@ const WSClient = {
         }
       } catch (err) {
         console.error('chat:message forwarder failed', err);
+      }
+    });
+  },
+
+  /**
+   * FIX-2026-09-22: OneClick Update — real-time push from admin (or manual
+   *   poll-detected new release). Server emits `updateAvailable` with
+   *   payload { currentVersion, latestVersion, changelog, critical, ... }.
+   *   We auto-open the update modal on any page (lazy-loading update.js if
+   *   the current page doesn't include it). Guarded so we don't open twice
+   *   for the same version within the same session.
+   */
+  _installUpdateForwarder() {
+    if (this._updateForwarderInstalled) return;
+    this._updateForwarderInstalled = true;
+    this.on('updateAvailable', (payload) => {
+      try {
+        if (!payload || !payload.latestVersion) return;
+        // Re-fetch /api/app/update-status to honour `dismissed` flag — server is
+        //   source of truth, the WS payload alone doesn't carry it.
+        const open = () => {
+          if (typeof window.openUpdateModal === 'function') {
+            window.openUpdateModal();
+            return;
+          }
+          // Lazy-load update.js (same pattern as nav.js pill fallback) and then open.
+          if (window.__updateModalLoading) return;
+          window.__updateModalLoading = true;
+          const s = document.createElement('script');
+          s.src = '/js/pages/update.js?v=2026-09-22-auto';
+          s.onload = () => {
+            window.__updateModalLoading = false;
+            if (typeof window.openUpdateModal === 'function') {
+              window.openUpdateModal();
+            } else {
+              AdminToast.show(`🆕 Update v${payload.latestVersion} available`, 'info');
+            }
+          };
+          s.onerror = () => {
+            window.__updateModalLoading = false;
+            AdminToast.show(`🆕 Update v${payload.latestVersion} available`, 'info');
+          };
+          document.head.appendChild(s);
+        };
+        // Always refresh pill first so the navbar indicator reflects the new version.
+        if (typeof window.refreshUpdateStatus === 'function') {
+          window.refreshUpdateStatus().then(open);
+        } else {
+          // No refreshUpdateStatus (update.js never loaded) — try a direct fetch.
+          fetch('/api/app/update-status', { credentials: 'same-origin' })
+            .then((r) => (r.ok ? r.json() : null))
+            .then((s) => { if (s && s.available && !s.dismissed) open(); })
+            .catch(() => {});
+        }
+      } catch (err) {
+        console.error('updateAvailable handler failed', err);
       }
     });
   },

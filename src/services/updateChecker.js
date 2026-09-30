@@ -135,42 +135,15 @@ async function checkOnce() {
       _writeState(state);
       return { available: false, current, latest: manifest.version, reason: 'min-version-not-met', required: minV };
     }
-    // Emit + notify.
-    const payload = {
-      currentVersion: current,
-      latestVersion: manifest.version,
-      changelog: manifest.changelog || '',
-      critical: !!manifest.critical,
-      tarballBytes: manifest.tarballBytes || 0,
-      releaseDate: manifest.publishedAt || null,
-      tarballSha256: manifest.tarballSha256,
-      manifestHash: manifest.manifestHash,
-      migrations: Array.isArray(manifest.migrations) ? manifest.migrations : [],
-      downloadUrl: `${adminUrl}/api/release/download/${manifest.version}`,
-    };
-    try {
-      const bus = eventBus.getEventBus ? eventBus.getEventBus() : eventBus;
-      if (bus && typeof bus.emit === 'function') bus.emit('updateAvailable', payload);
-    } catch (_) {}
-    try {
-      telegramNotifier.dispatch('updateAvailable', payload);
-    } catch (e) {
-      logger.warn({ err: e.message }, 'updateChecker: telegram dispatch failed');
-    }
-    state.lastNotifiedVersion = manifest.version;
-    state.lastNotifiedAt = state.lastCheckedAt;
-    state.lastNotifiedManifest = {
-      version: manifest.version,
-      tarballSha256: manifest.tarballSha256,
-      tarballBytes: manifest.tarballBytes,
-      changelog: manifest.changelog || '',
-      critical: !!manifest.critical,
-      manifestHash: manifest.manifestHash,
-      migrations: Array.isArray(manifest.migrations) ? manifest.migrations : [],
-      publishedAt: manifest.publishedAt || null,
-      minBotVersion: manifest.minBotVersion || '0.0.0',
-    };
-    _writeState(state);
+    // FIX-2026-09-22: shared helper so admin-push path can apply a manifest
+    //   without re-implementing the same write+emit+notify dance.
+    const payload = forceApplyManifest({
+      manifest,
+      adminUrl,
+      source: 'poll',
+      state,
+      at: state.lastCheckedAt,
+    });
     logger.info({ current, latest: manifest.version }, 'updateChecker: new release detected');
     return { available: true, ...payload };
   } catch (err) {
@@ -229,12 +202,94 @@ function dismissVersion(version) {
   _writeState(s);
 }
 
+/**
+ * FIX-2026-09-22: Shared "apply a release manifest" path used by both the
+ *   poll-detector (checkOnce) and the admin push-update endpoint
+ *   (POST /api/release/push-update). Persists state, emits updateAvailable
+ *   on the event bus, and dispatches a TG notification.
+ *
+ * @param {object} args
+ * @param {object} args.manifest   release manifest (Release-doc shape: { version, tarballSha256, manifestHash, tarballBytes, changelog, critical, migrations, publishedAt, minBotVersion, channel })
+ * @param {string} args.adminUrl   admin base URL (used to compose downloadUrl)
+ * @param {string} [args.source]   'poll' | 'push' — diagnostic only
+ * @param {object} [args.state]    mutable state object; if omitted a fresh read happens
+ * @param {string} [args.at]       ISO timestamp (defaults to now)
+ * @returns {object} the payload emitted on updateAvailable
+ */
+function forceApplyManifest({ manifest, adminUrl, source = 'unknown', state, at }) {
+  const m = manifest || {};
+  const current = _currentVersion();
+  const atIso = at || new Date().toISOString();
+  const s = state || _readState();
+  s.lastCheckedAt = atIso;
+  s.lastSeenLatest = { version: m.version, at: atIso };
+  // Already-notified check (so duplicate admin pushes within the same window
+  //   don't re-emit). The caller (push-update route) gates by semver first
+  //   so this is mostly defensive for the poll path.
+  if ((s.lastNotifiedVersion || '') === m.version) {
+    _writeState(s);
+    return {
+      currentVersion: current,
+      latestVersion: m.version,
+      changelog: m.changelog || '',
+      critical: !!m.critical,
+      tarballBytes: m.tarballBytes || 0,
+      releaseDate: m.publishedAt || null,
+      tarballSha256: m.tarballSha256,
+      manifestHash: m.manifestHash,
+      migrations: Array.isArray(m.migrations) ? m.migrations : [],
+      downloadUrl: `${adminUrl}/api/release/download/${m.version}`,
+      source,
+    };
+  }
+  const payload = {
+    currentVersion: current,
+    latestVersion: m.version,
+    changelog: m.changelog || '',
+    critical: !!m.critical,
+    tarballBytes: m.tarballBytes || 0,
+    releaseDate: m.publishedAt || null,
+    tarballSha256: m.tarballSha256,
+    manifestHash: m.manifestHash,
+    migrations: Array.isArray(m.migrations) ? m.migrations : [],
+    downloadUrl: `${adminUrl}/api/release/download/${m.version}`,
+    source,
+  };
+  try {
+    const bus = eventBus.getEventBus ? eventBus.getEventBus() : eventBus;
+    if (bus && typeof bus.emit === 'function') bus.emit('updateAvailable', payload);
+  } catch (_) {}
+  try {
+    telegramNotifier.dispatch('updateAvailable', payload);
+  } catch (e) {
+    logger.warn({ err: e.message }, `updateChecker.${source}: telegram dispatch failed`);
+  }
+  s.lastNotifiedVersion = m.version;
+  s.lastNotifiedAt = atIso;
+  s.lastNotifiedManifest = {
+    version: m.version,
+    tarballSha256: m.tarballSha256,
+    tarballBytes: m.tarballBytes,
+    changelog: m.changelog || '',
+    critical: !!m.critical,
+    manifestHash: m.manifestHash,
+    migrations: Array.isArray(m.migrations) ? m.migrations : [],
+    publishedAt: m.publishedAt || null,
+    minBotVersion: m.minBotVersion || '0.0.0',
+    source,
+  };
+  _writeState(s);
+  logger.info({ current, latest: m.version, source }, 'updateChecker: manifest applied');
+  return payload;
+}
+
 module.exports = {
   start,
   stop,
   checkOnce,
   getLastNotification,
   dismissVersion,
+  forceApplyManifest,
   _compareSemver,
   STATE_FILE,
 };
