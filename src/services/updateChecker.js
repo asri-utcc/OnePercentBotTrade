@@ -137,6 +137,7 @@ async function checkOnce() {
     }
     // FIX-2026-09-22: shared helper so admin-push path can apply a manifest
     //   without re-implementing the same write+emit+notify dance.
+    // FIX-2026-09-30: bumped to 2.7.2 (smoke test for admin-push notification)
     const payload = forceApplyManifest({
       manifest,
       adminUrl,
