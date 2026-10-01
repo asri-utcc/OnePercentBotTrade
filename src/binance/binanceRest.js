@@ -298,20 +298,77 @@ function getRateLimitStatus() {
 }
 
 // ─── HTTP client ────────────────────────────────────────
+// FIX-2026-10-02: weight attribution — per-task Binance API weight usage tracking
+const callContext = require('../utils/callContext');
+const taskRegistry = require('../utils/taskRegistry');
+
+// Maps Binance API path → friendly call-site name so the UI shows
+// "getAccount 80 weight/min" instead of "/api/v3/account".
+const _ENDPOINT_LABELS = {
+  '/api/v3/account':           'getAccount',
+  '/api/v3/klines':            'getKlines',
+  '/api/v3/exchangeInfo':      'getExchangeInfo',
+  '/api/v3/ticker/24hr':       'getTicker24hr',
+  '/api/v3/ticker/bookTicker': 'getBookTicker',
+  '/api/v3/allOrders':         'getAllOrders',
+  '/api/v3/openOrders':        'getOpenOrders',
+  '/api/v3/myTrades':          'myTrades',
+  '/api/v3/order':             'orderOp',
+  '/api/v3/time':              'getServerTime',
+  '/api/v3/ping':              'ping',
+  '/sapi/v1/asset/wallet/':    'walletBalance',
+  '/sapi/v3/asset/wallet/balance': 'walletBalanceV3',
+};
+function _labelForPath(path) {
+  if (!path) return 'unknown';
+  // Strip query string if present
+  const clean = path.split('?')[0];
+  return _ENDPOINT_LABELS[clean] || clean;
+}
+
 const http = axios.create({
   baseURL: config.binanceApi.base,
   timeout: 15000,
   headers: { 'X-MBX-APIKEY': config.binance.apiKey || '' },
 });
 
+// Request interceptor: snapshot current usedEstimated so we can compute the delta
+//   after the response lands. Delta is what THIS call cost (in X-MBX-USED-WEIGHT-1M units).
+http.interceptors.request.use((cfg) => {
+  try {
+    cfg.__weightSnapshot = limiter.status().usedEstimated || 0;
+  } catch (_) { /* limiter may not have status yet */ }
+  return cfg;
+});
+
 http.interceptors.response.use(
   (resp) => {
     limiter.updateFromHeaders(resp.headers || {});
+    // FIX-2026-10-02: attribute this call's weight cost to the calling task
+    try {
+      const newUsed = parseInt((resp.headers || {})['x-mbx-used-weight-1m'] || '0', 10);
+      const before = resp.config && resp.config.__weightSnapshot ? resp.config.__weightSnapshot : 0;
+      const delta = Math.max(0, newUsed - before);
+      const taskName = callContext.currentTaskName();
+      const endpointLabel = _labelForPath(resp.config && resp.config.url);
+      if (delta > 0) taskRegistry.attributeWeight(taskName, delta, endpointLabel);
+    } catch (err) {
+      logger.warn({ err: err.message }, 'binance: weight attribution failed');
+    }
     return resp;
   },
   async (err) => {
     if (err.response && err.response.headers) {
       limiter.updateFromHeaders(err.response.headers);
+      // FIX-2026-10-02: same attribution on error path (some 4xx still consume weight)
+      try {
+        const newUsed = parseInt(err.response.headers['x-mbx-used-weight-1m'] || '0', 10);
+        const before = err.config && err.config.__weightSnapshot ? err.config.__weightSnapshot : 0;
+        const delta = Math.max(0, newUsed - before);
+        const taskName = callContext.currentTaskName();
+        const endpointLabel = _labelForPath(err.config && err.config.url);
+        if (delta > 0) taskRegistry.attributeWeight(taskName, delta, endpointLabel);
+      } catch (_) { /* swallow */ }
 
       // FIX-2026-08-22: detect Binance 418 IP ban + extract expiry from msg
       //   Binance body: { code: -1003, msg: "Way too much request weight used;

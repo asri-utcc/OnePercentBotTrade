@@ -33,6 +33,7 @@ const Trade = require('../db/models/Trade');
 const Signal = require('../db/models/Signal');
 // FIX-2026-10-01: Task Monitor — register per-Trader self-rescheduling timers
 const taskRegistry = require('../utils/taskRegistry');
+const callContext = require('../utils/callContext');
 
 // FIX-2026-08-01 (audit H1/R4): CB fire-suppression window
 //   - หลัง CB panic-close สำเร็จ ห้ามเปิด BUY ใหม่เป็นเวลา N ms
@@ -177,6 +178,14 @@ class Trader {
     try {
       taskRegistry.recordFire(this._taskName(name), { durationMs, error });
     } catch (_) { /* never throw out of tracking */ }
+  }
+
+  // FIX-2026-10-02: Task Monitor depth — wrap a setTimeout/setInterval callback so
+  //   binance API calls inside attribute their cost to this bot's timer
+  _withTaskContext(name, fn) {
+    const taskName = this._taskName(name);
+    // callContext.run returns fn() return value — preserves sync/async semantics
+    return callContext.run(taskName, fn);
   }
 
   // ─── Lifecycle ─────────────────────────────────────
@@ -403,9 +412,13 @@ class Trader {
     this.startupSweepTimer = setTimeout(() => {
       this.startupSweepTimer = null; // mark fired
       if (!this.running) return;
-      this.reconcileKlines('startup').catch((err) =>
-        logger.warn({ err: err.message }, 'trader: startup sweep failed')
-      );
+      // FIX-2026-10-02: weight attribution — wrap in callContext so any binance calls
+      //   inside reconcileKlines get attributed to trader:<botId>:startupSweep
+      callContext.run(this._taskName('startupSweep'), () => {
+        this.reconcileKlines('startup').catch((err) =>
+          logger.warn({ err: err.message }, 'trader: startup sweep failed')
+        );
+      });
       // FIX-2026-07-23: หลัง startup sweep ตรวจ Binance balance ของบอทนี้
       //   ถ้ามี base asset ค้างโดยไม่มี active trade → log orphan + sync BUY order ที่ยังมีชีวิต
       this._trackTimer('startupBalance', 4000);
@@ -413,9 +426,11 @@ class Trader {
       this.startupBalanceTimer = setTimeout(() => {
         this.startupBalanceTimer = null; // mark fired
         if (!this.running) return;
-        this.reconcileAccountBalance({ force: true }).catch((err) =>
-          logger.warn({ err: err.message }, 'trader: startup reconcileAccountBalance failed')
-        );
+        callContext.run(this._taskName('startupBalance'), () => {
+          this.reconcileAccountBalance({ force: true }).catch((err) =>
+            logger.warn({ err: err.message }, 'trader: startup reconcileAccountBalance failed')
+          );
+        });
       }, 4000);
     }, startupSweepJitterMs);
 
@@ -4078,6 +4093,8 @@ class Trader {
           this.buyCooldownTimer = null;
           if (!this.running || !this.bot.enabled || this.buyInFlight) return;
           logger.info({ botId: this.bot._id.toString() }, 'trader: cooldown expired — re-evaluating placeBuy with fresh kline');
+          // FIX-2026-10-02: Task Monitor depth — attribute any binance API weight to buyCooldown task
+          await callContext.run(this._taskName('buyCooldown'), async () => {
           try {
             const freshKlines = await binanceRest.getKlines({ symbol: this.bot.symbol, interval: this.bot.timeframe, limit: 2 });
             const latestClosed = freshKlines && freshKlines.length > 0 ? freshKlines[freshKlines.length - 1] : null;
@@ -4105,6 +4122,7 @@ class Trader {
           } catch (err) {
             logger.warn({ err: err.message }, 'trader: cooldown retry failed');
           }
+          });
         }, waitMs);
         if (typeof this.buyCooldownTimer.unref === 'function') this.buyCooldownTimer.unref();
         return;
@@ -5041,7 +5059,10 @@ class Trader {
     this._trackTimer('retryCheck', retryMs);
     this._recordTimerFire('retryCheck');
     this.retryCheckTimer = setTimeout(() => {
-      this.checkBuyOrder(signalDoc, candle);
+      // FIX-2026-10-02: Task Monitor depth — attribute any binance API weight to retryCheck task
+      callContext.run(this._taskName('retryCheck'), () => {
+        this.checkBuyOrder(signalDoc, candle);
+      });
     }, retryMs);
   }
 
@@ -6317,6 +6338,8 @@ class Trader {
     }
 
     this.holdingRetryTimer = setTimeout(async () => {
+      // FIX-2026-10-02: Task Monitor depth — attribute any binance API weight to holdingRetry task
+      await callContext.run(this._taskName('holdingRetry'), async () => {
       if (!this.running) return;
       try {
         // เช็คว่า trade ยังเป็น holding + มี asset จริง
@@ -6641,6 +6664,7 @@ class Trader {
           this.holdingRetryTimer = setTimeout(() => this.scheduleHoldingRetry(trade, qty, buyPrice, targetSellPrice), 60 * 1000);
         }
       }
+      });
     }, 30 * 1000);
   }
 
@@ -6875,11 +6899,14 @@ class Trader {
       deadlineAt: new Date(deadlineMs).toISOString(),
     }, 'trader: partial-fill watch scheduled with deadline');
     this.partialFillTimer = setTimeout(async () => {
+      // FIX-2026-10-02: Task Monitor depth — attribute any binance API weight to partialFill task
+      await callContext.run(this._taskName('partialFill'), async () => {
       try {
         await this.checkPartialFill(tradeIdStr);
       } catch (err) {
         logger.error({ err: err.message, tradeId: tradeIdStr }, 'trader: checkPartialFill crashed');
       }
+      });
     }, 30 * 1000);
   }
 
@@ -8775,11 +8802,14 @@ class Trader {
     }, 'trader: SELL partial-fill watch scheduled with deadline');
 
     this.sellPartialFillTimer = setTimeout(async () => {
+      // FIX-2026-10-02: Task Monitor depth — attribute any binance API weight to sellPartialFill task
+      await callContext.run(this._taskName('sellPartialFill'), async () => {
       try {
         await this.checkSellPartialFill(tradeIdStr);
       } catch (err) {
         logger.error({ err: err.message, tradeId: tradeIdStr }, 'trader: checkSellPartialFill crashed');
       }
+      });
     }, 30 * 1000);
   }
 

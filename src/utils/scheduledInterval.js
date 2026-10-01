@@ -46,6 +46,9 @@
 const logger = require('./logger');
 // FIX-2026-10-01: Task Monitor — record fires + errors in central registry
 const taskRegistry = require('./taskRegistry');
+// FIX-2026-10-02: Task Monitor depth — wrap fire in callContext so binance API weight
+//   can be attributed to the calling task
+const callContext = require('./callContext');
 
 // ── read env ONCE at module load (idempotent — frozen for process lifetime) ──
 function _parseOffsetSec() {
@@ -156,7 +159,8 @@ function scheduledInterval(fn, baseMs, opts = {}) {
   const fireAndTime = () => {
     const t0 = Date.now();
     try {
-      const ret = fn();
+      // FIX-2026-10-02: wrap in callContext so binance API weight is attributed to this task
+      const ret = callContext.run(taskName, fn);
       // If fn is async (returns a promise), record duration on settle too
       if (ret && typeof ret.then === 'function') {
         ret.catch((err) => {
@@ -280,7 +284,8 @@ function _instrumentedInterval(fn, baseMs, opts = {}) {
   const wrapped = () => {
     const t0 = Date.now();
     try {
-      const ret = fn();
+      // FIX-2026-10-02: wrap in callContext so binance API weight is attributed to this task
+      const ret = callContext.run(taskName, fn);
       if (ret && typeof ret.then === 'function') {
         ret.catch((err) => {
           taskRegistry.recordFire(taskName, { durationMs: Date.now() - t0, error: err });

@@ -26,6 +26,7 @@
     { key: 'detail',        href: botId ? `/bot-detail.html?id=${botId}` : '/bots.html', label: '📊 Detail' },
     { key: 'chart-monitor', href: '/chart-monitor.html', label: '📊 Chart Monitor' }, // 2026-08-06: grid of mini-charts for running bots
     // FIX-2026-09-30: 'chart' tab removed from nav — user wants to reach /chart.html from the Scan page instead
+    { key: 'task-monitor',  href: '/task-monitor.html',  label: '📊 Task Monitor' }, // FIX-2026-10-02: per-bot Task Monitor (perf + tasks + API weight)
     { key: 'backtest',      href: '/backtest.html', label: '🧪 Backtest' },
     { key: 'scan',          href: '/scan-volatility.html', label: '🎰 Scan' },
     { key: 'pnl',           href: '/pnl.html',      label: '📅 PnL' },               // FIX-2026-07-29

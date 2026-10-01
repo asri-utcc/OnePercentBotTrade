@@ -4,6 +4,8 @@ const express = require('express');
 const healthMonitor = require('../../services/healthMonitor');
 const positionWatchdog = require('../../services/positionWatchdog');
 const delistMonitor = require('../../services/binanceDelistMonitor'); // FIX-2026-08-06
+// FIX-2026-10-02: Task Monitor — per-task list endpoint (no auth like /api/health)
+const taskRegistry = require('../../utils/taskRegistry');
 const { requireAuth } = require('../middleware/auth');
 
 const router = express.Router();
@@ -16,6 +18,18 @@ router.get('/', (req, res) => {
   // FIX-2026-08-06: include delist monitor summary so dashboard can show "delistMonitor: 3 symbols scheduled"
   status.delistMonitor = delistMonitor.getStatus();
   res.json(status);
+});
+
+// FIX-2026-10-02: Task Monitor — full per-task list (not just summary in /api/health)
+router.get('/tasks', (req, res) => {
+  res.json(taskRegistry.getTaskSnapshot());
+});
+
+// FIX-2026-10-02: Task Monitor depth — per-task + per-endpoint weight attribution
+//   Lets user drill from "task X uses 200 weight/min" → "because getAccount 80 + getKlines 60 + ..."
+//   So they can identify WHICH function is burning weight, then fix it (cache more, batch calls, etc).
+router.get('/weight-attribution', (req, res) => {
+  res.json(taskRegistry.getWeightAttribution());
 });
 
 // FIX-2026-08-03: Position Watchdog status + manual trigger (admin)

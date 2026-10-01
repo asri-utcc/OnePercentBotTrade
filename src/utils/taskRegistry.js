@@ -39,6 +39,10 @@ class TaskRegistry {
     this._tasks = new Map();
     /** @type {Map<string, object>} */
     this._caches = new Map();
+    // FIX-2026-10-02: weight attribution — buckets for rolling 1min and all-time
+    //   { taskName: { minuteStart: epochMs, minuteCount: number, totalCount: number } }
+    /** @type {Map<string, {minAt: number, minCount: number, totalCount: number}>} */
+    this._weightBuckets = new Map();
   }
 
   /**
@@ -120,6 +124,101 @@ class TaskRegistry {
 
   unregisterCache(name) {
     return this._caches.delete(name);
+  }
+
+  /**
+   * FIX-2026-10-02: attribute weight consumption to a task.
+   * Called from binanceRest publicGet/publicPost/signedRequest on response.
+   *
+   *   - weightDelta: integer (typically 1-80). Can be 0 if Binance didn't respond
+   *     or weight header missing.
+   *   - endpointLabel: optional short name (e.g. 'getAccount', 'getKlines') so we can
+   *     break down WHICH API endpoint within a timer is the culprit — lets the user
+   *     drill from "task X uses 200 weight/min" → "because it calls getAccount 40×".
+   *     Default 'unknown' if caller doesn't supply.
+   *   - Auto-buckets into rolling 1-minute window (per task) so UI can show "weight/min"
+   *   - All-time total kept per task for sort-by-total
+   *
+   * Safe to call from anywhere — never throws. If `taskName` is unknown, it gets
+   * lazily registered under owner='untracked' so attribution is preserved.
+   */
+  attributeWeight(taskName, weightDelta, endpointLabel = 'unknown') {
+    if (!taskName || !weightDelta) return;
+    if (!this._tasks.has(taskName)) {
+      this.registerTask({ name: taskName, type: 'manual', owner: 'untracked', source: 'manual' });
+    }
+    const now = Date.now();
+    const minute = Math.floor(now / 60_000);
+    let b = this._weightBuckets.get(taskName);
+    if (!b) {
+      b = {
+        minAt: minute, minCount: 0, totalCount: 0,
+        // per-endpoint breakdown
+        perEndpoint: {},   // { endpointLabel: { minAt, minCount, totalCount } }
+      };
+      this._weightBuckets.set(taskName, b);
+    }
+    if (b.minAt !== minute) {
+      // New minute — keep last bucket for "previous minute" comparison in UI
+      b.prevMinCount = b.minCount;
+      b.minAt = minute;
+      b.minCount = 0;
+    }
+    b.minCount += weightDelta;
+    b.totalCount += weightDelta;
+    if (!b.perEndpoint[endpointLabel]) {
+      b.perEndpoint[endpointLabel] = { minAt: minute, minCount: 0, totalCount: 0, prevMinCount: 0 };
+    }
+    const ep = b.perEndpoint[endpointLabel];
+    if (ep.minAt !== minute) {
+      ep.prevMinCount = ep.minCount;
+      ep.minAt = minute;
+      ep.minCount = 0;
+    }
+    ep.minCount += weightDelta;
+    ep.totalCount += weightDelta;
+    // Update task metadata for snapshot
+    const t = this._tasks.get(taskName);
+    if (t) {
+      t.weightLastMinute = b.minCount;
+      t.weightPrevMinute = b.prevMinCount || 0;
+      t.weightTotal = b.totalCount;
+      t.weightAttributedAt = now;
+    }
+  }
+
+  /**
+   * Returns tasks sorted by weight/min DESC + total. Includes 'untracked'
+   * synthetic row for calls outside any tracked context.
+   * Each row also includes `endpoints[]` breakdown so the user can drill from
+   * "task X uses 200 weight/min" → "because getAccount 80 + getKlines 60 + ..."
+   */
+  getWeightAttribution() {
+    const now = Date.now();
+    const minute = Math.floor(now / 60_000);
+    const rows = [];
+    for (const [taskName, b] of this._weightBuckets.entries()) {
+      const t = this._tasks.get(taskName);
+      const isCurrentMin = b.minAt === minute;
+      const endpoints = Object.entries(b.perEndpoint || {}).map(([label, ep]) => ({
+        endpoint: label,
+        weightPerMin: ep.minAt === minute ? ep.minCount : 0,
+        weightPrevMin: ep.prevMinCount || 0,
+        weightTotal: ep.totalCount,
+      })).sort((a, b) => b.weightPerMin - a.weightPerMin || b.weightTotal - a.weightTotal);
+      rows.push({
+        taskName,
+        owner: t ? (t.owner || 'untracked') : 'untracked',
+        type: t ? (t.type || 'manual') : 'manual',
+        weightPerMin: isCurrentMin ? b.minCount : 0,
+        weightPrevMin: b.prevMinCount || 0,
+        weightTotal: b.totalCount,
+        endpoints,
+        tracked: !!t,
+      });
+    }
+    rows.sort((a, b) => (b.weightPerMin - a.weightPerMin) || (b.weightTotal - a.weightTotal));
+    return { sampledAt: now, minute, tasks: rows };
   }
 
   /**
