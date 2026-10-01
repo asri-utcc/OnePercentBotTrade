@@ -137,7 +137,8 @@ function scheduledInterval(fn, baseMs, opts = {}) {
   const entry = { intervalHandle: null, timeoutHandle: null };
 
   // FIX-2026-10-01: Task Monitor — derive owner from meta (`<component>:<task>`) and track duration of each fire
-  const taskName = opts.meta || `scheduledInterval@${now || Date.now()}`;
+  const _nowMs = Date.now();
+  const taskName = opts.meta || `scheduledInterval@${_nowMs}`;
   const owner = (() => {
     const m = (opts.meta || '').split(':');
     return m.length > 1 ? `service:${m[0]}` : `service:${opts.meta || 'unknown'}`;
@@ -148,7 +149,7 @@ function scheduledInterval(fn, baseMs, opts = {}) {
     owner,
     intervalMs: baseMs,
     source: 'scheduledInterval',
-    nextFireAt: now + offsetMs,
+    nextFireAt: _nowMs + offsetMs,
     fireCount: 0,
   });
 
