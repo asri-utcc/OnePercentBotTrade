@@ -44,6 +44,8 @@
  */
 
 const logger = require('./logger');
+// FIX-2026-10-01: Task Monitor — record fires + errors in central registry
+const taskRegistry = require('./taskRegistry');
 
 // ── read env ONCE at module load (idempotent — frozen for process lifetime) ──
 function _parseOffsetSec() {
@@ -134,8 +136,45 @@ function scheduledInterval(fn, baseMs, opts = {}) {
   let intervalHandle = null;
   const entry = { intervalHandle: null, timeoutHandle: null };
 
+  // FIX-2026-10-01: Task Monitor — derive owner from meta (`<component>:<task>`) and track duration of each fire
+  const taskName = opts.meta || `scheduledInterval@${now || Date.now()}`;
+  const owner = (() => {
+    const m = (opts.meta || '').split(':');
+    return m.length > 1 ? `service:${m[0]}` : `service:${opts.meta || 'unknown'}`;
+  })();
+  taskRegistry.registerTask({
+    name: taskName,
+    type: 'scheduled',
+    owner,
+    intervalMs: baseMs,
+    source: 'scheduledInterval',
+    nextFireAt: now + offsetMs,
+    fireCount: 0,
+  });
+
+  const fireAndTime = () => {
+    const t0 = Date.now();
+    try {
+      const ret = fn();
+      // If fn is async (returns a promise), record duration on settle too
+      if (ret && typeof ret.then === 'function') {
+        ret.catch((err) => {
+          taskRegistry.recordFire(taskName, { durationMs: Date.now() - t0, error: err });
+          logger.error({ err: err.message, meta: opts.meta }, 'scheduledInterval: async callback threw');
+        }).then(() => {
+          taskRegistry.recordFire(taskName, { durationMs: Date.now() - t0 });
+        });
+        return;
+      }
+      taskRegistry.recordFire(taskName, { durationMs: Date.now() - t0 });
+    } catch (err) {
+      taskRegistry.recordFire(taskName, { durationMs: Date.now() - t0, error: err });
+      logger.error({ err: err.message, meta: opts.meta }, 'scheduledInterval: callback threw');
+    }
+  };
+
   const startRecurring = () => {
-    intervalHandle = setInterval(fn, baseMs);
+    intervalHandle = setInterval(fireAndTime, baseMs);
     if (opts.unref && typeof intervalHandle.unref === 'function') {
       intervalHandle.unref();
     }
@@ -148,11 +187,7 @@ function scheduledInterval(fn, baseMs, opts = {}) {
       if (entry.timeoutHandle === null) return; // already cleared
       entry.timeoutHandle = null;
       // Fire first call, then start the recurring interval anchored at NOW
-      try {
-        fn();
-      } catch (err) {
-        logger.error({ err: err.message, meta: opts.meta }, 'scheduledInterval: first-fire callback threw');
-      }
+      fireAndTime();
       startRecurring();
     }, offsetMs);
     if (typeof entry.timeoutHandle.unref === 'function') {
@@ -160,11 +195,7 @@ function scheduledInterval(fn, baseMs, opts = {}) {
     }
   } else {
     // No offset: fire once immediately, then recurring
-    try {
-      fn();
-    } catch (err) {
-      logger.error({ err: err.message, meta: opts.meta }, 'scheduledInterval: first-fire callback threw');
-    }
+    fireAndTime();
     startRecurring();
   }
 
@@ -212,9 +243,70 @@ function clearScheduledInterval(handleOrEntry) {
   }
 }
 
+/**
+ * FIX-2026-10-01: Task Monitor — wrapper around raw setInterval that records fires
+ *   in taskRegistry. Use for legacy code that can't easily switch to scheduledInterval
+ *   (e.g. per-Trader timers where opts.meta is built at call site).
+ *
+ *   opts.meta — required, e.g. "trader:<botId>:buyInFlight"
+ *   opts.unref — call .unref() on the handle (PM2-shutdown safe)
+ *
+ *   Returns: a plain setInterval handle (clearable via clearInterval). Same shape as
+ *   native setInterval — callers don't need to change their stop() logic.
+ */
+function _instrumentedInterval(fn, baseMs, opts = {}) {
+  if (typeof fn !== 'function') {
+    throw new TypeError('_instrumentedInterval: fn must be a function');
+  }
+  if (!Number.isFinite(baseMs) || baseMs <= 0) {
+    logger.warn({ baseMs }, '_instrumentedInterval: invalid baseMs — not scheduling');
+    return null;
+  }
+  const taskName = opts.meta || `_instrumentedInterval@${Date.now()}`;
+  const owner = (() => {
+    const m = (opts.meta || '').split(':');
+    return m.length > 1 ? `${m[0]}:${m[1]}` : `service:${opts.meta || 'unknown'}`;
+  })();
+  taskRegistry.registerTask({
+    name: taskName,
+    type: 'scheduled',
+    owner,
+    intervalMs: baseMs,
+    source: 'instrumented',
+    nextFireAt: Date.now() + baseMs,
+    fireCount: 0,
+  });
+  const wrapped = () => {
+    const t0 = Date.now();
+    try {
+      const ret = fn();
+      if (ret && typeof ret.then === 'function') {
+        ret.catch((err) => {
+          taskRegistry.recordFire(taskName, { durationMs: Date.now() - t0, error: err });
+          logger.error({ err: err.message, meta: opts.meta }, '_instrumentedInterval: async callback threw');
+        }).then(() => {
+          taskRegistry.recordFire(taskName, { durationMs: Date.now() - t0 });
+        });
+        return;
+      }
+      taskRegistry.recordFire(taskName, { durationMs: Date.now() - t0 });
+    } catch (err) {
+      taskRegistry.recordFire(taskName, { durationMs: Date.now() - t0, error: err });
+      logger.error({ err: err.message, meta: opts.meta }, '_instrumentedInterval: callback threw');
+    }
+  };
+  const handle = setInterval(wrapped, baseMs);
+  if (opts.unref && typeof handle.unref === 'function') {
+    handle.unref();
+  }
+  return handle;
+}
+
 module.exports = {
   scheduledInterval,
   clearScheduledInterval,
+  // FIX-2026-10-01: Task Monitor — instrumented wrapper for legacy setInterval callers
+  _instrumentedInterval,
   // exposed for tests + diagnostics
   OFFSET_SEC,
   OFFSET_MS,

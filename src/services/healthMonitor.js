@@ -9,6 +9,9 @@ const config = require('../../config');
 const logger = require('../utils/logger');
 // FIX-2026-09-17: per-instance first-fire stagger (apply only to Binance ping; health tick is event-bus only)
 const { scheduledInterval, clearScheduledInterval } = require('../utils/scheduledInterval');
+// FIX-2026-10-01: Task Monitor — perf metrics (memory/CPU/EL lag) + task registry summary
+const perfMetrics = require('../utils/perfMetrics');
+const taskRegistry = require('../utils/taskRegistry');
 
 /**
  * Health Monitor — เช็คสถานะ component ต่างๆ เป็นระยะ
@@ -41,6 +44,9 @@ class HealthMonitor {
     if (this.interval) return;
     this.startedAt = Date.now();
 
+    // FIX-2026-10-01: Task Monitor — start perf sampler (memory/CPU/EL lag)
+    perfMetrics.start({ sampleMs: HEALTH_INTERVAL_MS });
+
     // เช็คทันที
     this._tick();
 
@@ -66,6 +72,8 @@ class HealthMonitor {
       clearScheduledInterval(this.binancePingInterval);
       this.binancePingInterval = null;
     }
+    // FIX-2026-10-01: Task Monitor — stop perf sampler
+    perfMetrics.stop();
     logger.info('healthMonitor stopped');
   }
 
@@ -187,6 +195,36 @@ class HealthMonitor {
           activeTraders,
         },
       },
+      // FIX-2026-10-01: Task Monitor — additional telemetry for admin WS feed
+      perf: perfMetrics.snapshot(),
+      rateLimit: (() => {
+        try {
+          const rl = binanceRest.getRateLimitStatus();
+          const usedPct = rl.capacity > 0
+            ? Math.round((rl.usedEstimated / rl.capacity) * 100)
+            : 0;
+          return {
+            capacity: rl.capacity,
+            tokens: Math.round(rl.tokens),
+            usedEstimated: Math.round(rl.usedEstimated),
+            usedPct,
+            refillRate: rl.refillRate,
+            banRemainingSec: rl.banRemainingSec,
+            circuitBreaker: rl.circuitBreaker
+              ? {
+                  state: rl.circuitBreaker.state,
+                  usedPct: Math.round(rl.circuitBreaker.usedPct * 100),
+                  cooldownRemainingMs: rl.circuitBreaker.cooldownRemainingMs,
+                  consecutiveHighUsed: rl.circuitBreaker.consecutiveHighUsed,
+                }
+              : null,
+          };
+        } catch (err) {
+          logger.warn({ err: err.message }, 'rateLimit snapshot failed');
+          return null;
+        }
+      })(),
+      tasks: taskRegistry.getSummary(),
     };
   }
 }
