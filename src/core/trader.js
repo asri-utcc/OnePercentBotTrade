@@ -31,6 +31,8 @@ const { scheduledInterval, clearScheduledInterval } = require('../utils/schedule
 const Bot = require('../db/models/Bot');
 const Trade = require('../db/models/Trade');
 const Signal = require('../db/models/Signal');
+// FIX-2026-10-01: Task Monitor — register per-Trader self-rescheduling timers
+const taskRegistry = require('../utils/taskRegistry');
 
 // FIX-2026-08-01 (audit H1/R4): CB fire-suppression window
 //   - หลัง CB panic-close สำเร็จ ห้ามเปิด BUY ใหม่เป็นเวลา N ms
@@ -153,6 +155,30 @@ class Trader {
     return this._statusEmitQueue;
   }
 
+  // FIX-2026-10-01: Task Monitor — per-Trader timer helpers
+  //   - name: short task label, e.g. "holdingRetry", "partialFill"
+  //   - intervalMs: pass 0 for one-shots; >0 for recurring
+  //   - Returns the full task name (trader:<botId>:<name>) so caller can recordFire on it.
+  _taskName(name) {
+    return `trader:${this.bot._id}:${name}`;
+  }
+  _trackTimer(name, intervalMs) {
+    taskRegistry.registerTask({
+      name: this._taskName(name),
+      type: intervalMs > 0 ? 'scheduled' : 'oneshot',
+      owner: `bot:${this.bot._id}`,
+      intervalMs: intervalMs > 0 ? intervalMs : null,
+      source: 'trader',
+      fireCount: 0,
+    });
+    return this._taskName(name);
+  }
+  _recordTimerFire(name, { durationMs, error } = {}) {
+    try {
+      taskRegistry.recordFire(this._taskName(name), { durationMs, error });
+    } catch (_) { /* never throw out of tracking */ }
+  }
+
   // ─── Lifecycle ─────────────────────────────────────
   start() {
     this.running = true;
@@ -206,7 +232,7 @@ class Trader {
       this.reconcileAccountBalance({ force: false })
         .catch((err) => logger.warn({ err: err.message }, 'trader: periodic reconcileAccountBalance failed'))
         .finally(() => { this._reconcileBalanceInFlight = false; });
-    }, this.reconcileBalanceIntervalMs);
+    }, this.reconcileBalanceIntervalMs, { meta: `trader:reconcileBalance:${this.bot.symbol}` });
 
     // FIX-2026-07-15: also reconcile on WS reconnect (immediate catch-up vs 90s sweep wait)
     // FIX-2026-08-22: per-symbol debounce + jitter — �ัน burst ตอน WS reconnect
@@ -371,6 +397,9 @@ class Trader {
     //   - downside: orphan BUY detection delay สูงสุด 34s vs เดิม 6s
     //     ยอมรับได้เพราะ periodic reconcileAccountBalance (15min) เป็น safety net อยู่แล้ว
     const startupSweepJitterMs = 2000 + Math.floor(Math.random() * 30000); // 2-32s
+    // FIX-2026-10-01: Task Monitor — track startup sweep + balance timers
+    this._trackTimer('startupSweep', startupSweepJitterMs);
+    this._recordTimerFire('startupSweep');
     this.startupSweepTimer = setTimeout(() => {
       this.startupSweepTimer = null; // mark fired
       if (!this.running) return;
@@ -379,6 +408,8 @@ class Trader {
       );
       // FIX-2026-07-23: หลัง startup sweep ตรวจ Binance balance ของบอทนี้
       //   ถ้ามี base asset ค้างโดยไม่มี active trade → log orphan + sync BUY order ที่ยังมีชีวิต
+      this._trackTimer('startupBalance', 4000);
+      this._recordTimerFire('startupBalance');
       this.startupBalanceTimer = setTimeout(() => {
         this.startupBalanceTimer = null; // mark fired
         if (!this.running) return;
@@ -4039,6 +4070,9 @@ class Trader {
         //   - This prevents a 5m bot from re-evaluating a 5m-candle that closed 20 minutes ago with the
         //     prices at the time of close (a stale-candle BUY is effectively a phantom signal).
         const signalCandleCloseTime = signalDoc?.candleCloseTime || (candle && candle.closeTime);
+        // FIX-2026-10-01: Task Monitor — track BUY cooldown timer
+        this._trackTimer('buyCooldown', waitMs);
+        this._recordTimerFire('buyCooldown');
         clearTimeout(this.buyCooldownTimer);
         this.buyCooldownTimer = setTimeout(async () => {
           this.buyCooldownTimer = null;
@@ -5002,9 +5036,13 @@ class Trader {
   scheduleRetryCheck(candle, signalDoc) {
     if (!this.running) return;
     if (this.retryCheckTimer) clearTimeout(this.retryCheckTimer);
+    // FIX-2026-10-01: Task Monitor — track retry check timer
+    const retryMs = this.bot.retryTimeMin * 60 * 1000;
+    this._trackTimer('retryCheck', retryMs);
+    this._recordTimerFire('retryCheck');
     this.retryCheckTimer = setTimeout(() => {
       this.checkBuyOrder(signalDoc, candle);
-    }, this.bot.retryTimeMin * 60 * 1000);
+    }, retryMs);
   }
 
   async checkBuyOrder(signalDoc, candle) {
@@ -6235,6 +6273,9 @@ class Trader {
   //   position มี budget แยก 10 retries แทนที่จะแชร์ global this.holdingRetryCount เดียว
   //   กัน multi-trade bots ที่ trade แรกหมด budget แล้ว trade อื่นถูกปล่อยทิ้ง
   async scheduleHoldingRetry(trade, qty, buyPrice, targetSellPrice) {
+    // FIX-2026-10-01: Task Monitor — register + record fire for recurring holdingRetry
+    this._trackTimer('holdingRetry', 30 * 1000);
+    this._recordTimerFire('holdingRetry');
     if (this.holdingRetryTimer) clearTimeout(this.holdingRetryTimer);
     if (!this.running) return;
 
@@ -6801,6 +6842,9 @@ class Trader {
   }
 
   schedulePartialFillWatch(trade) {
+    // FIX-2026-10-01: Task Monitor — register + record fire for partialFill watch
+    this._trackTimer('partialFill', 90 * 1000);
+    this._recordTimerFire('partialFill');
     if (this.partialFillTimer) {
       clearTimeout(this.partialFillTimer);
       this.partialFillTimer = null;
@@ -8696,6 +8740,9 @@ class Trader {
   //   poll สถานะ SELL order ทุก 30s; เมื่อครบ deadline → _finalizePartialSellAfterDeadline
   //   deadline = sellPlacedAt + 2 × retryTimeMin × retryMax (นาที) — 2× window เพราะ TP ใกล้ market กว่า BUY fill
   scheduleSellPartialFillWatch(trade) {
+    // FIX-2026-10-01: Task Monitor — register + record fire for sell partial-fill watch
+    this._trackTimer('sellPartialFill', 30 * 1000);
+    this._recordTimerFire('sellPartialFill');
     if (!this.running || !trade || !trade._id) return;
     const tradeIdStr = trade._id.toString();
     const retryMax = this.bot.retryMax ?? 1;
