@@ -32,6 +32,19 @@ const logger = rootLogger.child ? rootLogger.child({ module: 'admin-monitor/lice
 
 const REVALIDATE_MS = parseInt(process.env.ADMIN_LICENSE_REVALIDATE_MS || '3600000', 10); // 1h
 
+// FIX-2026-10-01: License-validate HTTP retry — admin at thaiddns.com:6016 sometimes
+//   blips on bot boot (one observed incident: 10s timeout on first attempt →
+//   botManager skipped → all bots dormant 1.5h until manual restart). Add 3-attempt
+//   retry with backoff so transient network blips don't block botManager.start().
+//   Worst-case added latency: 10s timeout × 3 attempts + 3s + 6s backoff = ~39s
+//   (one-time, on startup). Periodic revalidation (1h tick) benefits too.
+//   Override via env LICENSE_VALIDATE_MAX_RETRIES=1 to disable retries.
+//   Test override: LICENSE_VALIDATE_RETRY_DELAYS_MS=0,0 → no backoff between attempts.
+const VALIDATE_MAX_RETRIES = Math.max(1, parseInt(process.env.LICENSE_VALIDATE_MAX_RETRIES || '3', 10));
+const VALIDATE_RETRY_DELAYS_MS = (process.env.LICENSE_VALIDATE_RETRY_DELAYS_MS || '3000,6000')
+  .split(',')
+  .map((s) => Math.max(0, parseInt(s, 10) || 0));
+
 let _botManager = null;
 let _interval = null;
 let _lastValidLicense = null;
@@ -81,6 +94,40 @@ function _postJson(targetUrl, body, headers = {}) {
 }
 
 /**
+ * FIX-2026-10-01: Retry wrapper around _postJson for license validate.
+ *   - 3 attempts max by default (override via env LICENSE_VALIDATE_MAX_RETRIES)
+ *   - Delays: 0 before attempt 1, 3s before attempt 2, 6s before attempt 3
+ *   - Worst-case latency: 10s timeout × 3 + 3s + 6s backoff = ~39s
+ *   - Returns on first success; throws the LAST error after final attempt
+ */
+async function _postJsonWithRetry(targetUrl, body, headers = {}) {
+  let lastErr = null;
+  for (let attempt = 1; attempt <= VALIDATE_MAX_RETRIES; attempt += 1) {
+    const delayIdx = attempt - 2; // delay array index for attempt N (attempt 2 → index 0)
+    const delayMs = (attempt > 1 && VALIDATE_RETRY_DELAYS_MS[delayIdx] != null)
+      ? VALIDATE_RETRY_DELAYS_MS[delayIdx] : 0;
+    if (delayMs > 0) {
+      await new Promise((r) => setTimeout(r, delayMs));
+    }
+    try {
+      return await _postJson(targetUrl, body, headers);
+    } catch (err) {
+      lastErr = err;
+      const isLast = attempt === VALIDATE_MAX_RETRIES;
+      logger.warn({
+        attempt,
+        maxAttempts: VALIDATE_MAX_RETRIES,
+        delayMs,
+        isLast,
+        err: err.message,
+        status: err.status,
+      }, 'license-gate: validate HTTP failed' + (isLast ? ' (final)' : ' — retrying'));
+    }
+  }
+  throw lastErr;
+}
+
+/**
  * One-shot validation. Throws on failure.
  * Returns license + machine info on success.
  */
@@ -94,7 +141,8 @@ async function validate({ throwOnFail = true } = {}) {
 
   const machineId = getMachineId();
   try {
-    const res = await _postJson(
+    // FIX-2026-10-01: use retry wrapper to ride out one-off admin blips
+    const res = await _postJsonWithRetry(
       `${config.url}/api/instances/validate`,
       { machineId },
       { 'X-License-Key': config.licenseKey }
