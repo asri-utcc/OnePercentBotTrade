@@ -181,3 +181,24 @@ body {
 .tm-warn-mid  { border-left: 3px solid #f59e0b !important; }
 .tm-warn-ok   { border-left: 3px solid #10b981 !important; }
 .tm-warn-zero { opacity: 0.5; }
+.tm-task-purpose {
+  font-size: 11px;
+  color: rgba(255,255,255,0.5);
+  margin-top: 2px;
+  line-height: 1.3;
+}
+.tm-heavy-badge {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-size: 10px;
+  font-weight: 700;
+  background: rgba(245,158,11,0.18);
+  color: #f59e0b;
+  margin-left: 4px;
+  vertical-align: middle;
+}
+.tm-heavy-1k {
+  background: rgba(239,68,68,0.18);
+  color: #ef4444;
+}

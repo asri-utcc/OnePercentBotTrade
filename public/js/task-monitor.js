@@ -292,16 +292,62 @@
   }
 
   // ── render weight attribution table with expandable per-endpoint rows ──
+  // Purpose map: tells the user WHAT each task does + HOW (interval/frequency)
+  // so they can identify "this task is the culprit" without grep'ing source.
+  const _TASK_PURPOSE = {
+    'untracked':                'API calls outside any task context — boot / WS events / ad-hoc admin. Investigate.',
+    'autoAddBot':               'Auto-add bot service — scans /ticker/24hr to discover tradable symbols. Runs periodically.',
+    'positionWatchdog':         'Position watchdog — reconciles stale positions vs Binance open orders. Runs every 5 min.',
+    'healthMonitor:binance-ping':  'Binance connection health ping (every 30s). Low cost.',
+    'healthMonitor:binance-time':  'Binance server-time sync (every 5 min). Low cost.',
+    'reconcileBalance':         'Periodic balance reconcile — pulls /account to sync internal balance model. Every ~15 min.',
+    'reconcileKlines':          'Kline cache reconcile — pulls fresh klines for all tracked symbols. Every ~5 min.',
+    'botManager:reconcile':     'Bot manager reconcile — cross-checks bot state with Binance.',
+    'trader:sweep':             'Per-symbol sweep — pulls klines + checks open orders. Every ~5 min per symbol.',
+    'trader:startupSweep':      'Bot startup sweep — initial kline pull after bot start.',
+    'trader:startupBalance':    'Bot startup balance — initial /account call after bot start.',
+    'trader:buyCooldown':       'BUY cooldown retry — re-evaluates placeBuy with fresh kline after signal cooldown.',
+    'trader:retryCheck':        'BUY retry check — re-evaluates unfilled LIMIT_BUY orders after retryTimeMin.',
+    'trader:holdingRetry':      'Holding retry — attempts SELL for stranded positions every 30s (up to 10 retries).',
+    'trader:partialFill':       'BUY partial-fill watch — polls BUY order status every 30s for partial fills.',
+    'trader:sellPartialFill':   'SELL partial-fill watch — polls SELL order status every 30s for partial fills.',
+  };
+
+  function _taskPurpose(taskName) {
+    if (!taskName) return '';
+    // exact match first
+    if (_TASK_PURPOSE[taskName]) return _TASK_PURPOSE[taskName];
+    // prefix match for parameterized names (trader:sweep:XYZ, trader:<botId>:startupSweep, etc.)
+    for (const k of Object.keys(_TASK_PURPOSE)) {
+      if (taskName.indexOf(k + ':') === 0 || taskName.indexOf(k + '@') === 0) {
+        const sub = taskName.slice(k.length + 1);
+        return _TASK_PURPOSE[k] + ` [${sub}]`;
+      }
+    }
+    // owner-prefix fallbacks
+    if (taskName.startsWith('trader:') && taskName.length === 26 + 7) {
+      return 'Per-bot timer for bot ' + taskName.slice(7, 19) + '…';
+    }
+    if (taskName.indexOf('reconcile') >= 0) return 'Periodic reconcile task.';
+    if (taskName.indexOf('sweep') >= 0) return 'Periodic sweep — pulls klines + status.';
+    return 'Task';
+  }
+
   function _filterAttribution() {
     const q = ((document.getElementById('attrSearch') || {}).value || '').toLowerCase();
     const data = state.attribution;
     if (!data || !Array.isArray(data.tasks)) return [];
-    if (!q) return data.tasks;
-    return data.tasks.filter((row) => {
-      // match task name + endpoint labels
+    // ALWAYS include rows that have used weight before (weightTotal > 0)
+    // so user sees EVERY consumer, not just currently-active ones.
+    let rows = data.tasks.filter((row) => (row.weightTotal || 0) > 0);
+    // Sort: weightPerMin desc, then weightTotal desc (so heavy historical tasks still rank high)
+    rows.sort((a, b) => (b.weightPerMin - a.weightPerMin) || (b.weightTotal - a.weightTotal));
+    if (!q) return rows;
+    return rows.filter((row) => {
       const hay = [
         row.taskName,
         row.owner,
+        _taskPurpose(row.taskName),
         ...((row.endpoints || []).map((e) => e.endpoint)),
       ].join(' ').toLowerCase();
       return hay.indexOf(q) >= 0;
@@ -315,15 +361,22 @@
     return 'tm-warn-zero';
   }
 
+  function _heavyBadge(weightTotal) {
+    if (weightTotal >= 5000) return ' <span class="tm-heavy-badge tm-heavy-1k">🔥 heavy</span>';
+    if (weightTotal >= 1000) return ' <span class="tm-heavy-badge">⚠️ notable</span>';
+    return '';
+  }
+
   function _renderAttributionTable() {
     const body = document.getElementById('attributionBody');
     if (!body) return;
     const filtered = _filterAttribution();
     const total = (state.attribution && state.attribution.tasks) || [];
+    const liveCount = total.filter((t) => (t.weightPerMin || 0) > 0).length;
     const lbl = document.getElementById('attrCountLabel');
-    if (lbl) lbl.textContent = `${filtered.length} / ${total.length} task groups (current minute)`;
+    if (lbl) lbl.textContent = `${filtered.length} weight consumers · ${liveCount} active this minute · ${total.length} total tracked`;
     if (!filtered.length) {
-      body.innerHTML = '<tr class="tm-empty"><td colspan="7" class="text-center py-3 text-muted-3">ยังไม่มี weight attribution — รอ task ทำงานสัก 1 นาที</td></tr>';
+      body.innerHTML = '<tr class="tm-empty"><td colspan="8" class="text-center py-3 text-muted-3">ยังไม่มี weight attribution — รอ task ทำงานสัก 1 นาที</td></tr>';
       return;
     }
     const html = [];
@@ -337,26 +390,33 @@
       const trackedBadge = row.tracked
         ? ''
         : ' <span class="tm-type-pill" style="background:#666;">untracked</span>';
+      const heavyBadge = _heavyBadge(row.weightTotal || 0);
+      const purpose = _taskPurpose(row.taskName);
       html.push(`<tr class="tm-attr-row ${statusCls}" data-task="${_escapeHtml(row.taskName)}">
         <td>${caret}</td>
-        <td class="tm-task-name">${_escapeHtml(row.taskName)}${trackedBadge}</td>
+        <td>
+          <div class="tm-task-name">${_escapeHtml(row.taskName)}${trackedBadge}${heavyBadge}</div>
+          <div class="tm-task-purpose">${_escapeHtml(purpose)}</div>
+        </td>
         <td class="tm-mono">${_escapeHtml(row.owner || '—')}</td>
         <td class="tm-num"><b>${row.weightPerMin || 0}</b></td>
         <td class="tm-num">${row.weightPrevMin || 0}</td>
         <td class="tm-num">${row.weightTotal || 0}</td>
         <td class="tm-num">${epCount}</td>
+        <td class="tm-num">${_fmtAgo(row.lastFireAt)}</td>
       </tr>`);
       if (isExpanded && epCount > 0) {
-        // header sub-row
-        html.push(`<tr class="tm-attr-subheader"><td colspan="7">↳ Binance endpoints called by this task</td></tr>`);
+        html.push(`<tr class="tm-attr-subheader"><td colspan="8">↳ Binance endpoints called by this task (in this minute)</td></tr>`);
         for (const ep of row.endpoints) {
           const epCls = _attributionStatus(ep.weightPerMin);
+          const epHeavyBadge = _heavyBadge(ep.weightTotal || 0);
           html.push(`<tr class="tm-attr-endpoint ${epCls}">
             <td></td>
-            <td colspan="2" class="tm-mono ps-4">${_escapeHtml(ep.endpoint)}</td>
+            <td colspan="2" class="tm-mono ps-4">${_escapeHtml(ep.endpoint)}${epHeavyBadge}</td>
             <td class="tm-num"><b>${ep.weightPerMin || 0}</b></td>
             <td class="tm-num">${ep.weightPrevMin || 0}</td>
             <td class="tm-num">${ep.weightTotal || 0}</td>
+            <td class="tm-num"></td>
             <td class="tm-num"></td>
           </tr>`);
         }

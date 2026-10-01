@@ -129,21 +129,23 @@
           <thead>
             <tr>
               <th style="width: 36px;"></th>
-              <th>Task</th>
+              <th>Task · Purpose</th>
               <th>Owner</th>
               <th class="tm-num">Weight / min (now)</th>
               <th class="tm-num">Weight / min (prev)</th>
               <th class="tm-num">Total</th>
               <th class="tm-num">Endpoints</th>
+              <th class="tm-num">Last seen</th>
             </tr>
           </thead>
           <tbody id="attributionBody">
-            <tr class="tm-empty"><td colspan="7" class="text-center py-3 text-muted-3">⏳ กำลังโหลด...</td></tr>
+            <tr class="tm-empty"><td colspan="8" class="text-center py-3 text-muted-3">⏳ กำลังโหลด...</td></tr>
           </tbody>
         </table>
       </div>
       <div class="text-muted-3 small mt-2">
-        💡 คลิก ⌄ เพื่อดูว่า task นี้เรียก Binance endpoint ไหนบ้าง — ช่วยระบุว่าฟังก์ชันไหนเผามากที่สุด
+        💡 ทุก task ที่เคยใช้ Binance API weight จะแสดงที่นี่ทันที (active this minute = มี border สี, หยุดไปแล้ว = dimmed)
+        <br/>คลิก ⌄ เพื่อดูว่า task นี้เรียก Binance endpoint ไหนบ้าง — ช่วยระบุว่าฟังก์ชันไหนเผามากที่สุด
         <br/>แล้วแก้ได้ด้วย: cache นานขึ้น, batch calls, dedupe, หรือ pause task นั้น
       </div>
     </div>
@@ -208,6 +210,6 @@
   <script src="/js/ws-client.js?v=2026-09-06-object-coerce"></script>
   <script>window.NAV_ACTIVE = 'task-monitor';</script>
   <script src="/js/partials/nav.js?v=2026-10-02"></script>
-  <script src="/js/task-monitor.js?v=2026-10-02-attribution"></script>
+  <script src="/js/task-monitor.js?v=2026-10-02-purpose"></script>
 </body>
 </html>

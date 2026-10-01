@@ -213,6 +213,7 @@ class TaskRegistry {
         weightPerMin: isCurrentMin ? b.minCount : 0,
         weightPrevMin: b.prevMinCount || 0,
         weightTotal: b.totalCount,
+        lastFireAt: t ? (t.lastFireAt || 0) : 0,
         endpoints,
         tracked: !!t,
       });
