@@ -178,6 +178,7 @@ function _extractTarball(tarballPath, extractDir) {
   // Uses system `tar`. Verified compatible with publish-release.js.
   // Output dir must not exist (we're extracting into a fresh staging dir).
   fs.mkdirSync(extractDir, { recursive: true });
+  // FIX-2026-10-01: bumped to 2.7.8 (verify orchestrator download-flush fix end-to-end)
   // FIX-2026-09-30: bumped to 2.7.5 (verify orchestrator.extractTarball fix end-to-end)
   // FIX-2026-09-30: on Windows, tar interprets `D:` in absolute paths as a
   //   remote host ("Cannot connect to D: resolve failed"). Pass the tarball
