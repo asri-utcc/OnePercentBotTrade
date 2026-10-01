@@ -168,6 +168,9 @@ class Trader {
       name: this._taskName(name),
       type: intervalMs > 0 ? 'scheduled' : 'oneshot',
       owner: `bot:${this.bot._id}`,
+      // FIX-2026-10-02: Task Monitor depth — include symbol so per-bot rows show
+      //   "trader:<botId>:startupSweep (Bot MEGAUSDT)" instead of opaque hex
+      symbol: this.bot.symbol || null,
       intervalMs: intervalMs > 0 ? intervalMs : null,
       source: 'trader',
       fireCount: 0,

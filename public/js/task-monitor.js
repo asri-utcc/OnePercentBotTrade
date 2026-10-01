@@ -313,8 +313,10 @@
     'trader:sellPartialFill':   'SELL partial-fill watch — polls SELL order status every 30s for partial fills.',
   };
 
-  function _taskPurpose(taskName) {
-    if (!taskName) return '';
+  function _taskPurpose(row) {
+    if (!row || !row.taskName) return '';
+    const taskName = row.taskName;
+    const symbol = row.symbol;
     // exact match first
     if (_TASK_PURPOSE[taskName]) return _TASK_PURPOSE[taskName];
     // prefix match for parameterized names (trader:sweep:XYZ, trader:<botId>:startupSweep, etc.)
@@ -324,9 +326,15 @@
         return _TASK_PURPOSE[k] + ` [${sub}]`;
       }
     }
-    // owner-prefix fallbacks
-    if (taskName.startsWith('trader:') && taskName.length === 26 + 7) {
-      return 'Per-bot timer for bot ' + taskName.slice(7, 19) + '…';
+    // owner-prefix fallbacks — for per-bot tasks like "trader:<botId>:startupSweep"
+    // Use the symbol metadata so user sees "Bot MEGAUSDT" instead of opaque hex
+    if (taskName.startsWith('trader:')) {
+      const colon1 = taskName.indexOf(':', 7);
+      const sub = colon1 > 0 ? taskName.slice(colon1 + 1) : '';
+      const desc = _TASK_PURPOSE['trader:' + sub] || ('Per-bot task: ' + sub);
+      const idPart = taskName.slice(7, colon1);
+      const idLabel = symbol ? `Bot ${symbol}` : `bot ${idPart.slice(0, 8)}…`;
+      return `${desc} · ${idLabel}`;
     }
     if (taskName.indexOf('reconcile') >= 0) return 'Periodic reconcile task.';
     if (taskName.indexOf('sweep') >= 0) return 'Periodic sweep — pulls klines + status.';
@@ -347,7 +355,8 @@
       const hay = [
         row.taskName,
         row.owner,
-        _taskPurpose(row.taskName),
+        row.symbol || '',
+        _taskPurpose(row),
         ...((row.endpoints || []).map((e) => e.endpoint)),
       ].join(' ').toLowerCase();
       return hay.indexOf(q) >= 0;
@@ -391,7 +400,7 @@
         ? ''
         : ' <span class="tm-type-pill" style="background:#666;">untracked</span>';
       const heavyBadge = _heavyBadge(row.weightTotal || 0);
-      const purpose = _taskPurpose(row.taskName);
+      const purpose = _taskPurpose(row);
       html.push(`<tr class="tm-attr-row ${statusCls}" data-task="${_escapeHtml(row.taskName)}">
         <td>${caret}</td>
         <td>

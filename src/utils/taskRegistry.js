@@ -48,6 +48,11 @@ class TaskRegistry {
   /**
    * Register or update a task. Idempotent on `name`.
    * Existing record keeps its fireCount/lastFireAt/lastError unless explicitly overwritten.
+   *
+   * Optional meta fields:
+   *   - symbol: trader bot's trading symbol (e.g. "MEGAUSDT") — surfaces in Task Monitor
+   *     so per-bot rows like "trader:<botId>:startupSweep" can show as "Bot MEGAUSDT"
+   *     instead of opaque hex IDs.
    */
   registerTask(meta) {
     if (!meta || !meta.name) {
@@ -60,6 +65,7 @@ class TaskRegistry {
       name: meta.name,
       type: meta.type || prev.type || 'manual',
       owner: meta.owner || prev.owner || 'unknown',
+      symbol: meta.symbol || prev.symbol || null,
       intervalMs: meta.intervalMs != null ? meta.intervalMs : prev.intervalMs || null,
       source: meta.source || prev.source || 'manual',
       nextFireAt: meta.nextFireAt != null ? meta.nextFireAt : prev.nextFireAt || null,
@@ -210,6 +216,7 @@ class TaskRegistry {
         taskName,
         owner: t ? (t.owner || 'untracked') : 'untracked',
         type: t ? (t.type || 'manual') : 'manual',
+        symbol: t ? (t.symbol || null) : null,
         weightPerMin: isCurrentMin ? b.minCount : 0,
         weightPrevMin: b.prevMinCount || 0,
         weightTotal: b.totalCount,
