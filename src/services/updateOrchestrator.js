@@ -151,13 +151,18 @@ function _downloadAndVerify({ url, expectedSha256, destPath }) {
         bytes += chunk.length;
       });
       res.on('end', () => {
-        s.end();
+        // FIX-2026-10-01: wait for the write stream to flush before resolving.
+        //   `s.end()` signals end-of-write but doesn't block until the OS finishes
+        //   flushing on Windows. Resolving immediately leads to a race where the
+        //   orchestrator's extract phase reads a truncated tarball → gzip EOF.
         const got = h.digest('hex');
-        if (got !== expectedSha256) {
-          try { fs.unlinkSync(destPath); } catch (_) {}
-          return reject(new Error(`SHA-256 mismatch: expected ${expectedSha256.slice(0,12)}…, got ${got.slice(0,12)}…`));
-        }
-        resolve({ bytes, sha256: got });
+        s.end(() => {
+          if (got !== expectedSha256) {
+            try { fs.unlinkSync(destPath); } catch (_) {}
+            return reject(new Error(`SHA-256 mismatch: expected ${expectedSha256.slice(0,12)}…, got ${got.slice(0,12)}…`));
+          }
+          resolve({ bytes, sha256: got });
+        });
       });
       res.on('error', (err) => { try { fs.unlinkSync(destPath); } catch (_) {} reject(err); });
       s.on('error', (err) => { try { fs.unlinkSync(destPath); } catch (_) {} reject(err); });
