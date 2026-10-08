@@ -157,6 +157,11 @@ async function getConfig() {
  * 2026-10-08: Set botFirstStartAt manually (for UI Settings modal).
  * Validates: must be a valid Date, must be <= now, must be >= 2017-01-01 (Binance launch).
  * Persists to AppConfig.botFirstStartAt.
+ *
+ * 2026-10-08: Also purges stale CapitalFlow rows when the new start is later than
+ * the old one. Without this, narrowing the date range (e.g. from 2026-01-01 to
+ * 2026-09-01) leaves old rows in DB → totals stay the same after sync (the user
+ * reported "data didn't change" because txId-upsert is a no-op for existing rows).
  */
 async function setBotFirstStartAt(input) {
   if (!input) throw new Error('botFirstStartAt is required');
@@ -167,14 +172,47 @@ async function setBotFirstStartAt(input) {
   const ms = d.getTime();
   if (ms < 1483228800000) throw new Error('botFirstStartAt must be >= 2017-01-01 (Binance launch)');
   if (ms > Date.now()) throw new Error('botFirstStartAt must be <= now');
+
+  // 2026-10-08: Read old start BEFORE overwriting — to know whether to purge
+  const oldCfg = await AppConfig.findOne({ key: 'singleton' }).lean();
+  const oldStart = oldCfg && oldCfg.botFirstStartAt ? new Date(oldCfg.botFirstStartAt) : null;
+
   await AppConfig.findOneAndUpdate(
     { key: 'singleton' },
     { $set: { botFirstStartAt: d } },
     { new: true, upsert: true }
   );
+
+  // 2026-10-08: Purge stale rows when narrowing the range.
+  // Effective start = botFirstStartAt - 3 days backfill buffer.
+  // If new effective start is LATER than old, delete rows before the new effective start
+  // (they're now outside the counting window).
+  // If new effective start is EARLIER, do NOT purge — sync will pull new rows.
+  let purgedCount = 0;
+  if (oldStart && d.getTime() > oldStart.getTime()) {
+    const newEffectiveStart = new Date(
+      d.getTime() - DEFAULT_BACKFILL_OFFSET_DAYS_BEFORE_START * 86_400_000
+    );
+    const result = await CapitalFlow.deleteMany({
+      insertTime: { $lt: newEffectiveStart },
+    });
+    purgedCount = result.deletedCount || 0;
+    if (purgedCount > 0) {
+      logger.info({
+        oldStart: oldStart.toISOString(),
+        newStart: d.toISOString(),
+        newEffectiveStart: newEffectiveStart.toISOString(),
+        purged: purgedCount,
+      }, 'capitalFlow: purged stale rows after botFirstStartAt update (range narrowed)');
+    }
+  }
+
   // Invalidate any in-memory price cache that used the old range (rare — but safe)
   clearPriceCache();
-  logger.info({ botFirstStartAt: d.toISOString() }, 'capitalFlow: botFirstStartAt updated by user');
+  logger.info({
+    botFirstStartAt: d.toISOString(),
+    purged: purgedCount,
+  }, 'capitalFlow: botFirstStartAt updated by user');
   return getConfig();
 }
 
