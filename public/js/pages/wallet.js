@@ -78,9 +78,13 @@
     cfNet: document.getElementById('capital-flow-net'),
     cfDeposit: document.getElementById('capital-flow-deposit'),
     cfWithdraw: document.getElementById('capital-flow-withdraw'),
-    cfPortfolio: document.getElementById('capital-flow-portfolio'),
-    cfProfit: document.getElementById('capital-flow-profit'),
     cfCounts: document.getElementById('capital-flow-counts'),
+    // 2026-10-08: Net Profit big card (Total Portfolio - Net Deposited)
+    cfProfitBig: document.getElementById('capital-flow-profit-big'),
+    cfProfitPct: document.getElementById('capital-flow-profit-pct'),
+    cfPortfolioBig: document.getElementById('capital-flow-portfolio-big'),
+    cfNetdepBig: document.getElementById('capital-flow-netdep-big'),
+    cfProfitError: document.getElementById('capital-flow-profit-error'),
     cfMetaSync: document.getElementById('capital-flow-meta-sync'),
     cfMetaRange: document.getElementById('capital-flow-meta-range'),
     cfMetaFx: document.getElementById('capital-flow-meta-fx'),
@@ -949,8 +953,6 @@
     const net = isThb ? Number(summary.netDepositedUsdtThb) : Number(summary.netDepositedUsdt);
     const dep = isThb ? Number(summary.totalDepositUsdtThb) : Number(summary.totalDepositUsdt);
     const wd = isThb ? Number(summary.totalWithdrawUsdtThb) : Number(summary.totalWithdrawUsdt);
-    const portfolio = isThb ? Number(summary.totalPortfolioThb) : Number(summary.totalPortfolioUsdt);
-    const profit = isThb ? Number(summary.netProfitUsdtThb) : Number(summary.netProfitUsdt);
     const unit = isThb ? '฿' : 'USDT';
     if (els.cfNet) {
       const n = isFinite(net) ? net : 0;
@@ -963,24 +965,59 @@
     if (els.cfWithdraw) {
       els.cfWithdraw.textContent = `−${isFinite(wd) ? (isThb ? wd.toFixed(0) : wd.toFixed(2)) : '—'} ${unit}`;
     }
-    // 2026-10-08: Total Portfolio (Binance Spot realtime value) + Net Profit = Portfolio - Net Deposited
-    if (els.cfPortfolio) {
-      els.cfPortfolio.textContent = isFinite(portfolio)
-        ? `${(isThb ? portfolio.toFixed(0) : portfolio.toFixed(2))} ${unit}`
-        : '—';
-    }
-    if (els.cfProfit) {
-      if (isFinite(profit)) {
-        const sign = profit >= 0 ? '+' : '−';
-        els.cfProfit.textContent = `${sign}${isThb ? Math.abs(profit).toFixed(0) : Math.abs(profit).toFixed(2)} ${unit}`;
-        els.cfProfit.style.color = profit >= 0 ? 'var(--bull-1)' : 'var(--bear-1)';
-      } else {
-        els.cfProfit.textContent = '—';
-        els.cfProfit.style.color = 'var(--text-1)';
-      }
-    }
     if (els.cfCounts) {
       els.cfCounts.textContent = `${summary.depositCount || 0} in / ${summary.withdrawCount || 0} out`;
+    }
+    // 2026-10-08: Render Net Profit big card (own prominent section)
+    renderCapitalFlowProfit(summary, isThb);
+  }
+
+  // 2026-10-08: Net Profit big card — Total Portfolio - Net Deposited
+  function renderCapitalFlowProfit(summary, isThb) {
+    const unit = isThb ? '฿' : 'USDT';
+    const profit = isThb ? Number(summary.netProfitUsdtThb) : Number(summary.netProfitUsdt);
+    const portfolio = isThb ? Number(summary.totalPortfolioThb) : Number(summary.totalPortfolioUsdt);
+    const netDep = isThb ? Number(summary.netDepositedUsdtThb) : Number(summary.netDepositedUsdt);
+
+    // Profit % vs Net Deposited (ROI)
+    let pct = null;
+    if (isFinite(profit) && isFinite(netDep) && Math.abs(netDep) > 0.0001) {
+      pct = (profit / netDep) * 100;
+    }
+
+    if (els.cfProfitBig) {
+      if (isFinite(profit)) {
+        const sign = profit >= 0 ? '+' : '−';
+        const abs = Math.abs(profit);
+        els.cfProfitBig.textContent = `${sign}${abs.toLocaleString('en-US', { maximumFractionDigits: isThb ? 0 : 2 })} ${unit}`;
+        els.cfProfitBig.style.color = profit >= 0 ? 'var(--bull-1)' : 'var(--bear-1)';
+      } else {
+        els.cfProfitBig.textContent = '—';
+        els.cfProfitBig.style.color = 'var(--text-1)';
+      }
+    }
+    if (els.cfProfitPct) {
+      if (isFinite(profit) && pct != null) {
+        const pctSign = pct >= 0 ? '+' : '';
+        els.cfProfitPct.textContent = `ROI ${pctSign}${pct.toFixed(2)}%  •  vs Net Deposited`;
+        els.cfProfitPct.style.color = pct >= 0 ? 'var(--bull-1)' : 'var(--bear-1)';
+      } else {
+        els.cfProfitPct.textContent = isFinite(profit) ? '' : '—';
+        els.cfProfitPct.style.color = 'var(--text-2)';
+      }
+    }
+    if (els.cfPortfolioBig) {
+      els.cfPortfolioBig.textContent = isFinite(portfolio)
+        ? `${portfolio.toLocaleString('en-US', { maximumFractionDigits: isThb ? 0 : 2 })} ${unit}`
+        : '—';
+    }
+    if (els.cfNetdepBig) {
+      els.cfNetdepBig.textContent = isFinite(netDep)
+        ? `${netDep.toLocaleString('en-US', { maximumFractionDigits: isThb ? 0 : 2 })} ${unit}`
+        : '—';
+    }
+    if (els.cfProfitError) {
+      els.cfProfitError.style.display = (summary.portfolioError || !isFinite(portfolio)) ? 'block' : 'none';
     }
   }
 
