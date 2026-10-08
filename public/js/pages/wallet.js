@@ -73,6 +73,16 @@
     pnlMetaUpdated: document.getElementById('pnl-meta-updated'),
     pnlRangeChips: document.querySelectorAll('#pnl-range-chips .wallet-range-chip'),
     pnlCurrencyBtns: document.querySelectorAll('#pnl-currency-toggle button'),
+    // 2026-10-08: Capital Flow (Net Deposited tracker)
+    cfContainer: document.getElementById('capital-flow-chart-container'),
+    cfNet: document.getElementById('capital-flow-net'),
+    cfDeposit: document.getElementById('capital-flow-deposit'),
+    cfWithdraw: document.getElementById('capital-flow-withdraw'),
+    cfCounts: document.getElementById('capital-flow-counts'),
+    cfMetaSync: document.getElementById('capital-flow-meta-sync'),
+    cfMetaRange: document.getElementById('capital-flow-meta-range'),
+    cfTbody: document.getElementById('capital-flow-tbody'),
+    cfSyncBtn: document.getElementById('capital-flow-sync-btn'),
   };
   const chips = Array.from(document.querySelectorAll('.wallet-chip, .wallet-quick-btn'));
 
@@ -101,6 +111,12 @@
   let _pnlBaselineSeries = null;
   let _lastPortfolioData = null;
   let _lastPnlData = null;
+
+  // 2026-10-08: Capital Flow state
+  let _capitalFlowChart = null;
+  let _capitalFlowSeries = null;
+  let _lastCapitalFlowAt = 0;
+  const CAPITAL_FLOW_MIN_INTERVAL_MS = 60 * 1000;
 
   // ─── helpers ──────────────────────────────────────────────────────────────
   function fmtUsdt(n) {
@@ -676,6 +692,42 @@
     });
   }
 
+  // 2026-10-08: Capital Flow chart — cumulative Net Deposited over time
+  function setupCapitalFlowChart() {
+    if (!els.cfContainer) return;
+    _capitalFlowChart = LightweightCharts.createChart(els.cfContainer, sharedChartOptions(els.cfContainer));
+    _capitalFlowSeries = _capitalFlowChart.addAreaSeries({
+      topColor: 'rgba(0,229,184,0.55)',
+      bottomColor: 'rgba(0,229,184,0.04)',
+      lineColor: '#00e5b8',
+      lineWidth: 2,
+      priceLineVisible: false,
+      lastValueVisible: true,
+    });
+    _capitalFlowSeries.applyOptions({ baseValue: { type: 'price', price: 0 } });
+    // baseline at 0
+    _capitalFlowSeries.createPriceLine({
+      price: 0,
+      color: 'rgba(255,255,255,0.35)',
+      lineWidth: 1,
+      lineStyle: 2,
+      title: 'break-even',
+    });
+
+    const ro = new ResizeObserver(() => {
+      const w = els.cfContainer.clientWidth || 600;
+      _capitalFlowChart && _capitalFlowChart.applyOptions({ width: w });
+    });
+    ro.observe(els.cfContainer);
+
+    _capitalFlowChart.timeScale().applyOptions({
+      tickMarkFormatter: (timeSec) => {
+        try { return fmtTimeShort(new Date(timeSec * 1000)); }
+        catch (_) { return ''; }
+      },
+    });
+  }
+
   function valueForPortfolioPoint(p) {
     if (_portfolioCurrency === 'THB') return p.totalThb != null ? p.totalThb : (p.totalUsdt * (p.fxRate || 0));
     return p.totalUsdt;
@@ -828,6 +880,133 @@
     } catch (err) {
       console.warn('[wallet] pnl-series failed:', err && err.message);
       return null;
+    }
+  }
+
+  // 2026-10-08: Capital Flow loader — fetch summary + list, render chart + table
+  async function loadCapitalFlow(force = false) {
+    const now = Date.now();
+    if (!force && (now - _lastCapitalFlowAt) < CAPITAL_FLOW_MIN_INTERVAL_MS) {
+      return null; // throttle
+    }
+    _lastCapitalFlowAt = now;
+    try {
+      // Fetch in parallel — summary + recent 50 transactions
+      const [summary, list] = await Promise.all([
+        API.get('/api/wallet/capital-flow/summary'),
+        API.get('/api/wallet/capital-flow?limit=50'),
+      ]);
+      renderCapitalFlowSummary(summary);
+      renderCapitalFlowChart(list);
+      renderCapitalFlowTable(list);
+      // update last-sync meta
+      if (els.cfMetaSync) {
+        els.cfMetaSync.textContent = new Date().toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' });
+      }
+      if (els.cfMetaRange && list && list.rows && list.rows.length > 0) {
+        const first = new Date(list.rows[list.rows.length - 1].insertTime);
+        const last = new Date(list.rows[0].insertTime);
+        els.cfMetaRange.textContent = `${first.toLocaleDateString('th-TH', { day: '2-digit', month: 'short' })} → ${last.toLocaleDateString('th-TH', { day: '2-digit', month: 'short' })}`;
+      } else if (els.cfMetaRange) {
+        els.cfMetaRange.textContent = '—';
+      }
+      return { summary, list };
+    } catch (err) {
+      console.warn('[wallet] capital-flow load failed:', err && err.message);
+      if (els.cfNet) els.cfNet.textContent = '—';
+      return null;
+    }
+  }
+
+  function renderCapitalFlowSummary(summary) {
+    if (!summary) return;
+    if (els.cfNet) {
+      const net = Number(summary.netDepositedUsdt) || 0;
+      els.cfNet.textContent = `${net >= 0 ? '+' : ''}${net.toFixed(2)} USDT`;
+      els.cfNet.style.color = net >= 0 ? 'var(--bull-1)' : 'var(--bear-1)';
+    }
+    if (els.cfDeposit) {
+      els.cfDeposit.textContent = `+${(Number(summary.totalDepositUsdt) || 0).toFixed(2)} USDT`;
+    }
+    if (els.cfWithdraw) {
+      els.cfWithdraw.textContent = `−${(Number(summary.totalWithdrawUsdt) || 0).toFixed(2)} USDT`;
+    }
+    if (els.cfCounts) {
+      els.cfCounts.textContent = `${summary.depositCount || 0} in / ${summary.withdrawCount || 0} out`;
+    }
+  }
+
+  // Render cumulative Net Deposited time-series (ascending order)
+  function renderCapitalFlowChart(list) {
+    if (!_capitalFlowSeries || !list || !Array.isArray(list.rows)) return;
+    // rows sorted desc by insertTime — reverse to ascending for cumulative build
+    const rows = [...list.rows].reverse();
+    let cum = 0;
+    const points = [];
+    for (const r of rows) {
+      cum += Number(r.usdtValue) || 0;
+      // use seconds (lightweight-charts expects unix seconds)
+      const time = Math.floor(new Date(r.insertTime).getTime() / 1000);
+      points.push({ time, value: Number(cum.toFixed(6)) });
+    }
+    // dedupe (lightweight-charts requires strictly increasing time)
+    const seen = new Set();
+    const dedup = [];
+    for (const p of points) {
+      if (seen.has(p.time)) continue;
+      seen.add(p.time);
+      dedup.push(p);
+    }
+    _capitalFlowSeries.setData(dedup);
+  }
+
+  function renderCapitalFlowTable(list) {
+    if (!els.cfTbody) return;
+    if (!list || !Array.isArray(list.rows) || list.rows.length === 0) {
+      els.cfTbody.innerHTML = '<tr><td class="empty" colspan="8">ยังไม่มีข้อมูล — กด Sync เพื่อดึงจาก Binance</td></tr>';
+      return;
+    }
+    const html = list.rows.slice(0, 50).map((r) => {
+      const isDeposit = r.type === 'deposit';
+      const sign = isDeposit ? '+' : '−';
+      const usdtClass = isDeposit ? 'is-pos' : 'is-neg';
+      const dt = new Date(r.insertTime);
+      const dtStr = dt.toLocaleString('th-TH', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' });
+      const txShort = (r.txId || '').slice(0, 10) + (r.txId && r.txId.length > 10 ? '…' : '');
+      return `<tr>
+        <td>${escapeHtml(dtStr)}</td>
+        <td><span style="color: ${isDeposit ? 'var(--bull-1)' : 'var(--bear-1)'}; font-weight: 600;">${isDeposit ? '⬇️ ฝาก' : '⬆️ ถอน'}</span></td>
+        <td>${escapeHtml(r.asset)}</td>
+        <td class="num">${escapeHtml(fmtQty(r.amount))}</td>
+        <td class="num ${usdtClass}">${sign}${escapeHtml(Math.abs(r.usdtValue || 0).toFixed(2))}</td>
+        <td class="num">${r.priceSource === 'stablecoin' ? '1.00' : (r.priceUsdt || 0).toFixed(4)}</td>
+        <td>${escapeHtml(r.network || '—')}</td>
+        <td title="${escapeHtml(r.txId || '')}" style="font-family: monospace; font-size: 0.75rem; color: var(--text-3);">${escapeHtml(txShort)}</td>
+      </tr>`;
+    }).join('');
+    els.cfTbody.innerHTML = html;
+  }
+
+  // Manual sync handler
+  async function onCapitalFlowSync() {
+    if (!els.cfSyncBtn) return;
+    const btn = els.cfSyncBtn;
+    const orig = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = '⏳ Syncing…';
+    try {
+      const result = await API.post('/api/wallet/capital-flow/sync', {});
+      const dep = result && result.deposits ? result.deposits : {};
+      const wd = result && result.withdraws ? result.withdraws : {};
+      console.log('[wallet] capital-flow sync done:', { deposits: dep, withdraws: wd });
+      // Force-reload after sync
+      await loadCapitalFlow(true);
+    } catch (err) {
+      console.warn('[wallet] capital-flow sync failed:', err && err.message);
+      alert('Sync failed: ' + (err && err.message ? err.message : 'unknown'));
+    } finally {
+      btn.disabled = false;
+      btn.textContent = orig;
     }
   }
 
@@ -1005,6 +1184,7 @@
       loadPortfolioChart();
       loadPnlChart();
       loadAutoReserveStatus();
+      loadCapitalFlow();
     }, 60 * 1000);
 
     // initial state
@@ -1014,6 +1194,12 @@
     // Setup charts (must happen AFTER DOM has #portfolio-chart-container + #pnl-chart-container)
     setupPortfolioChart();
     setupPnlChart();
+    setupCapitalFlowChart();
+
+    // 2026-10-08: Capital Flow sync button
+    if (els.cfSyncBtn) {
+      els.cfSyncBtn.addEventListener('click', onCapitalFlowSync);
+    }
 
     // Re-render PnL chart when FX rate updates (THB mode only — re-render avoids stale FX)
     document.addEventListener('fx:updated', () => {
@@ -1031,6 +1217,7 @@
       loadPortfolioChart(true),
       loadPnlChart(true),
       loadAutoReserveStatus(true),
+      loadCapitalFlow(true),
     ]);
   });
 })();
