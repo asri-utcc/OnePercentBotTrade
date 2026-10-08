@@ -1069,6 +1069,12 @@
       els.cfSettingsError.hidden = true;
       els.cfSettingsError.textContent = '';
     }
+    // Show modal first (so user sees loading state immediately)
+    if (window.bootstrap) {
+      let m = window.bootstrap.Modal.getInstance(els.cfSettingsModal);
+      if (!m) m = new window.bootstrap.Modal(els.cfSettingsModal);
+      m.show();
+    }
     try {
       const cfg = await API.get('/api/wallet/capital-flow/config');
       if (els.cfBotFirstStartInput && cfg.botFirstStartAt) {
