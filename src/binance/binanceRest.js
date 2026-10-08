@@ -843,17 +843,21 @@ async function cancelAllOpenOrders({ symbol }) {
 //
 async function getDepositHistory(params = {}) {
   // Validate: limit ≤ 1000 (Binance hard cap). Default = 1000 for one-shot backfill.
+  // 2026-10-08: critical=true — manual/scheduler sync must work even when CB is open.
+  // Weight is 1 per call, so bypass is safe. Faiz instance was blocked by CIRCUIT_OPEN
+  // when owner bot pushed IP weight over 95%, leaving 0 rows after sync.
   const q = { ...params };
   if (q.limit == null) q.limit = 1000;
   if (q.limit > 1000) q.limit = 1000;
-  return signedRequest('GET', '/sapi/v1/capital/deposit/hisrec', q, 1, { critical: false });
+  return signedRequest('GET', '/sapi/v1/capital/deposit/hisrec', q, 1, { critical: true });
 }
 
 async function getWithdrawHistory(params = {}) {
+  // 2026-10-08: critical=true (see getDepositHistory)
   const q = { ...params };
   if (q.limit == null) q.limit = 1000;
   if (q.limit > 1000) q.limit = 1000;
-  return signedRequest('GET', '/sapi/v1/capital/withdraw/history', q, 1, { critical: false });
+  return signedRequest('GET', '/sapi/v1/capital/withdraw/history', q, 1, { critical: true });
 }
 
 // ─── User Data Stream via WebSocket API (new, post Feb 2026) ─────
