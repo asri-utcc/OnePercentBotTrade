@@ -85,6 +85,7 @@
     cfPortfolioBig: document.getElementById('capital-flow-portfolio-big'),
     cfNetdepBig: document.getElementById('capital-flow-netdep-big'),
     cfProfitError: document.getElementById('capital-flow-profit-error'),
+    cfProfitChartContainer: document.getElementById('capital-flow-profit-chart-container'),
     cfMetaSync: document.getElementById('capital-flow-meta-sync'),
     cfMetaRange: document.getElementById('capital-flow-meta-range'),
     cfMetaFx: document.getElementById('capital-flow-meta-fx'),
@@ -130,6 +131,10 @@
   // 2026-10-08: Capital Flow state
   let _capitalFlowChart = null;
   let _capitalFlowSeries = null;
+  // 2026-10-08: Net Profit time-series chart
+  let _profitChart = null;
+  let _profitSeries = null;
+  let _profitHistory = null;
   let _lastCapitalFlowAt = 0;
   let _cfCurrency = 'USDT';      // 'USDT' | 'THB'
   let _cfSummary = null;          // last summary data (for currency re-render)
@@ -909,16 +914,21 @@
     }
     _lastCapitalFlowAt = now;
     try {
-      // Fetch in parallel — summary + recent 50 transactions
-      const [summary, list] = await Promise.all([
+      // Fetch in parallel — summary + recent 50 transactions + profit history
+      const [summary, list, profitHistory] = await Promise.all([
         API.get('/api/wallet/capital-flow/summary'),
         API.get('/api/wallet/capital-flow?limit=50'),
+        API.get('/api/wallet/capital-flow/profit-history'),
       ]);
       _cfSummary = summary;
       _cfList = list;
+      _profitHistory = profitHistory;
       renderCapitalFlowSummary(summary);
       renderCapitalFlowChart(list);
       renderCapitalFlowTable(list);
+      if (typeof renderCapitalFlowProfitChart === 'function' && _profitSeries) {
+        renderCapitalFlowProfitChart(profitHistory);
+      }
       // update last-sync meta
       if (els.cfMetaSync) {
         els.cfMetaSync.textContent = new Date().toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' });
@@ -1018,6 +1028,77 @@
     }
     if (els.cfProfitError) {
       els.cfProfitError.style.display = (summary.portfolioError || !isFinite(portfolio)) ? 'block' : 'none';
+    }
+    // Re-render profit chart (currency may have changed)
+    if (_profitHistory) renderCapitalFlowProfitChart(_profitHistory);
+  }
+
+  // 2026-10-08: Net Profit time-series chart (daily + live now)
+  function setupCapitalFlowProfitChart() {
+    if (!els.cfProfitChartContainer) return;
+    if (_profitChart) return; // already set up
+    _profitChart = LightweightCharts.createChart(els.cfProfitChartContainer, sharedChartOptions(els.cfProfitChartContainer));
+    _profitSeries = _profitChart.addAreaSeries({
+      topColor: 'rgba(0,229,184,0.55)',
+      bottomColor: 'rgba(0,229,184,0.04)',
+      lineColor: '#00e5b8',
+      lineWidth: 2,
+      priceLineVisible: false,
+      lastValueVisible: true,
+    });
+    _profitSeries.applyOptions({ baseValue: { type: 'price', price: 0 } });
+    _profitSeries.createPriceLine({
+      price: 0,
+      color: 'rgba(255,255,255,0.35)',
+      lineWidth: 1,
+      lineStyle: 2,
+      title: 'break-even',
+    });
+
+    const ro = new ResizeObserver(() => {
+      const w = els.cfProfitChartContainer.clientWidth || 600;
+      _profitChart && _profitChart.applyOptions({ width: w });
+    });
+    ro.observe(els.cfProfitChartContainer);
+
+    _profitChart.timeScale().applyOptions({
+      tickMarkFormatter: (timeSec) => {
+        try { return fmtTimeShort(new Date(timeSec * 1000)); }
+        catch (_) { return ''; }
+      },
+    });
+  }
+
+  function renderCapitalFlowProfitChart(history) {
+    if (!_profitSeries || !history || !Array.isArray(history.history)) return;
+    const isThb = _cfCurrency === 'THB';
+    const points = history.history
+      .map((h) => {
+        const v = isThb
+          ? (h.netProfitThb != null ? Number(h.netProfitThb) : (h.netProfitUsdt != null ? Number(h.netProfitUsdt) * (history.fxRate || 0) : null))
+          : (h.netProfitUsdt != null ? Number(h.netProfitUsdt) : null);
+        if (v == null || !isFinite(v)) return null;
+        // parse YYYY-MM-DD as BKK midnight (00:00 +07:00 = 17:00 UTC previous day)
+        const parts = String(h.date || '').split('-').map(Number);
+        if (parts.length !== 3) return null;
+        const [y, m, d] = parts;
+        if (!y || !m || !d) return null;
+        const ms = Date.UTC(y, m - 1, d, -7, 0, 0);
+        return { time: Math.floor(ms / 1000), value: Number(v.toFixed(isThb ? 2 : 4)) };
+      })
+      .filter(Boolean);
+    // Dedupe by time (lightweight-charts requires strictly increasing)
+    const seen = new Set();
+    const dedup = [];
+    for (const p of points) {
+      if (seen.has(p.time)) continue;
+      seen.add(p.time);
+      dedup.push(p);
+    }
+    dedup.sort((a, b) => a.time - b.time);
+    if (dedup.length > 0) {
+      _profitSeries.setData(dedup);
+      _profitChart.timeScale().fitContent();
     }
   }
 
@@ -1381,6 +1462,7 @@
     setupPortfolioChart();
     setupPnlChart();
     setupCapitalFlowChart();
+    setupCapitalFlowProfitChart();
 
     // 2026-10-08: Capital Flow sync button
     if (els.cfSyncBtn) {

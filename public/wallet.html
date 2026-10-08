@@ -368,6 +368,37 @@
       <div class="wallet-row-meta text-end mt-1" id="wallet-reserve-pct" style="display:none;"></div>
     </div>
 
+    <!-- 2026-10-08: Net Profit (Total Portfolio - Net Deposited) — own prominent card with daily chart -->
+    <div class="lux-card wallet-chart-card mb-3" id="capital-flow-profit-card">
+      <div class="lux-header">
+        <div>
+          <h5>📈 Net Profit (กำไร/ขาดทุนสะสม)</h5>
+          <div class="text-muted-3" style="font-size: 0.78rem;">
+            Portfolio รายวัน − Net Deposited สะสม (อัปเดต 00:01 BKK + live now)
+          </div>
+        </div>
+      </div>
+      <div class="lux-body" style="padding: 1.25rem 1.5rem 1.5rem;">
+        <div class="d-flex flex-wrap align-items-baseline gap-4 mb-3">
+          <div style="flex: 1 1 auto; min-width: 220px;">
+            <div class="text-muted-3" style="font-size: 0.85rem;">Net Profit (now)</div>
+            <div id="capital-flow-profit-big" style="font-size: 3.2rem; font-weight: 800; line-height: 1.1; letter-spacing: -0.02em; color: var(--text-1);">—</div>
+            <div id="capital-flow-profit-pct" class="text-muted-3" style="font-size: 0.95rem; margin-top: 0.25rem;">—</div>
+          </div>
+          <div style="border-left: 1px solid var(--border-2, #2a3142); padding-left: 1.25rem;">
+            <div class="text-muted-3" style="font-size: 0.78rem;">Total Portfolio</div>
+            <div id="capital-flow-portfolio-big" style="font-size: 1.4rem; font-weight: 600; color: var(--text-1);">—</div>
+            <div class="text-muted-3 mt-2" style="font-size: 0.78rem;">Net Deposited</div>
+            <div id="capital-flow-netdep-big" style="font-size: 1.1rem; font-weight: 500; color: var(--text-2);">—</div>
+          </div>
+        </div>
+        <div id="capital-flow-profit-chart-container" class="wallet-chart-container" style="height: 220px;"></div>
+        <div id="capital-flow-profit-error" class="text-muted-3 mt-2" style="font-size: 0.78rem; display: none;">
+          ⚠️ ไม่สามารถคำนวณ Portfolio ได้ตอนนี้ (Binance error)
+        </div>
+      </div>
+    </div>
+
     <!-- Chart 1: Account Estimate Value (daily snapshot @ 00:01 BKK) -->
     <div class="lux-card wallet-chart-card mb-3">
       <div class="lux-header">
@@ -508,36 +539,6 @@
               <tr><td class="empty" colspan="9">กำลังโหลด…</td></tr>
             </tbody>
           </table>
-        </div>
-      </div>
-    </div>
-
-    <!-- 2026-10-08: Net Profit (Total Portfolio - Net Deposited) — own prominent card -->
-    <div class="lux-card wallet-chart-card mb-3" id="capital-flow-profit-card">
-      <div class="lux-header">
-        <div>
-          <h5>📈 Net Profit (กำไร/ขาดทุนสะสม)</h5>
-          <div class="text-muted-3" style="font-size: 0.78rem;">
-            มูลค่า Portfolio ปัจจุบัน − เงินทุนที่เติมสะสม (Net Deposited)
-          </div>
-        </div>
-      </div>
-      <div class="lux-body" style="padding: 1.5rem 1.75rem;">
-        <div class="d-flex flex-wrap align-items-baseline gap-4">
-          <div style="flex: 1 1 auto; min-width: 220px;">
-            <div class="text-muted-3" style="font-size: 0.85rem;">Net Profit</div>
-            <div id="capital-flow-profit-big" style="font-size: 3.2rem; font-weight: 800; line-height: 1.1; letter-spacing: -0.02em; color: var(--text-1);">—</div>
-            <div id="capital-flow-profit-pct" class="text-muted-3" style="font-size: 0.95rem; margin-top: 0.25rem;">—</div>
-          </div>
-          <div style="border-left: 1px solid var(--border-2, #2a3142); padding-left: 1.25rem;">
-            <div class="text-muted-3" style="font-size: 0.78rem;">Total Portfolio</div>
-            <div id="capital-flow-portfolio-big" style="font-size: 1.4rem; font-weight: 600; color: var(--text-1);">—</div>
-            <div class="text-muted-3 mt-2" style="font-size: 0.78rem;">Net Deposited</div>
-            <div id="capital-flow-netdep-big" style="font-size: 1.1rem; font-weight: 500; color: var(--text-2);">—</div>
-          </div>
-        </div>
-        <div id="capital-flow-profit-error" class="text-muted-3 mt-2" style="font-size: 0.78rem; display: none;">
-          ⚠️ ไม่สามารถคำนวณ Portfolio ได้ตอนนี้ (Binance error)
         </div>
       </div>
     </div>
@@ -715,6 +716,6 @@
   <script>window.NAV_ACTIVE = 'wallet';</script>
   <script src="/js/partials/nav.js?v=2026-09-04-dlc-everywhere"></script>
   <script src="/js/partials/rateLimitGauge.js?v=2026-09-04-dlc-everywhere"></script>
-  <script src="/js/pages/wallet.js?v=2026-10-08-net-profit-card"></script>
+  <script src="/js/pages/wallet.js?v=2026-10-08-net-profit-chart"></script>
 </body>
 </html>

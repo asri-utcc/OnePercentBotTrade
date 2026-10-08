@@ -712,6 +712,18 @@ router.get('/capital-flow/summary', requireAuth, async (req, res) => {
   }
 });
 
+// ─── GET /api/wallet/capital-flow/profit-history ────────────────────────────
+// 2026-10-08: Daily Net Profit time-series (for /wallet.html Net Profit chart)
+router.get('/capital-flow/profit-history', requireAuth, async (_req, res) => {
+  try {
+    const data = await capitalFlowService.getProfitHistory();
+    res.json(data);
+  } catch (err) {
+    logger.error({ err: err.message, stack: err.stack }, 'wallet: capital-flow profit-history failed');
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ─── GET /api/wallet/capital-flow ───────────────────────────────────────────
 router.get('/capital-flow', requireAuth, async (req, res) => {
   try {

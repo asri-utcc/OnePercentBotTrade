@@ -36,6 +36,7 @@
 const binanceRest = require('../binance/binanceRest');
 const CapitalFlow = require('../db/models/CapitalFlow');
 const AppConfig = require('../db/models/AppConfig');
+const WalletSnapshot = require('../db/models/WalletSnapshot'); // 2026-10-08: daily portfolio for Net Profit history
 const fxService = require('./fxService'); // 2026-10-08: USDT→THB conversion for THB value display
 const walletSnapshot = require('./walletSnapshot'); // 2026-10-08: total portfolio for net profit calc
 const logger = require('../utils/logger');
@@ -98,6 +99,16 @@ function startOfTodayBkk() {
     -7, 0, 0
   );
   return new Date(startUtcMs);
+}
+
+/** BKK date key 'YYYY-MM-DD' (same convention as walletSnapshot). */
+function bkkDateKey(input = new Date()) {
+  const bkkMs = input.getTime() + 7 * 60 * 60_000;
+  const b = new Date(bkkMs);
+  const y = b.getUTCFullYear();
+  const m = String(b.getUTCMonth() + 1).padStart(2, '0');
+  const d = String(b.getUTCDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
 }
 
 function nextCapitalFlowDelayMs(now = new Date()) {
@@ -766,6 +777,120 @@ async function getList({ from, to, type, asset, limit = 100, skip = 0 } = {}) {
 }
 
 // ─── Scheduler ──────────────────────────────────────────────────────────────
+/**
+ * 2026-10-08: Daily Net Profit time-series for the chart on /wallet.html.
+ * Combines daily WalletSnapshot (00:01 BKK) with cumulative Net Deposited
+ * (from CapitalFlow) to produce per-day Net Profit. Appends today's "live"
+ * point using the realtime portfolio from walletSnapshot.snapshotWallet().
+ *
+ * @returns {Promise<{history:Array<{date,totalPortfolioUsdt,netDepositedUsdt,netProfitUsdt,...thb,isLive}>,fxRate:number|null,ts:number,range:{from,to}}>}
+ */
+async function getProfitHistory() {
+  const { from: rangeFrom, to: rangeTo } = await getDefaultRange();
+  const now = new Date();
+
+  // FX rate (best-effort)
+  let fxRate = null;
+  try {
+    const fx = await fxService.getUsdtToThb();
+    if (fx && Number(fx.rate) > 0) fxRate = Number(fx.rate);
+  } catch (err) {
+    logger.warn({ err: err.message }, 'capitalFlow: fxService failed in getProfitHistory — USDT only');
+  }
+
+  // WalletSnapshot (daily portfolio @ 00:01 BKK)
+  const snapshots = await WalletSnapshot.find({
+    snapshotAt: { $gte: rangeFrom, $lte: now },
+  }).sort({ snapshotAt: 1 }).lean();
+
+  // CapitalFlow (all flows in range, asc by insertTime)
+  const flows = await CapitalFlow.find({
+    insertTime: { $gte: rangeFrom, $lte: now },
+  }).sort({ insertTime: 1 }).lean();
+
+  const toMs = (v) => (v instanceof Date ? v.getTime() : new Date(v).getTime());
+
+  const history = [];
+  let flowIdx = 0;
+  let cumNetDeposited = 0;
+
+  for (const snap of snapshots) {
+    const snapMs = toMs(snap.snapshotAt);
+    // Advance cumNetDeposited through all flows up to (and including) snapMs
+    while (flowIdx < flows.length && toMs(flows[flowIdx].insertTime) <= snapMs) {
+      cumNetDeposited += Number(flows[flowIdx].usdtValue) || 0;
+      flowIdx++;
+    }
+    const totalUsdt = Number(snap.totalUsdt) || 0;
+    const netProfit = totalUsdt - cumNetDeposited;
+    history.push({
+      date: snap.dateKey,
+      totalPortfolioUsdt: Number(totalUsdt.toFixed(4)),
+      netDepositedUsdt: Number(cumNetDeposited.toFixed(6)),
+      netProfitUsdt: Number(netProfit.toFixed(6)),
+      totalPortfolioThb: fxRate ? Number((totalUsdt * fxRate).toFixed(2)) : null,
+      netDepositedThb: fxRate ? Number((cumNetDeposited * fxRate).toFixed(2)) : null,
+      netProfitThb: fxRate ? Number((netProfit * fxRate).toFixed(2)) : null,
+      isLive: false,
+    });
+  }
+
+  // Today's live point
+  const nowMs = now.getTime();
+  while (flowIdx < flows.length && toMs(flows[flowIdx].insertTime) <= nowMs) {
+    cumNetDeposited += Number(flows[flowIdx].usdtValue) || 0;
+    flowIdx++;
+  }
+
+  let livePortfolio = null;
+  let liveError = null;
+  try {
+    const live = await walletSnapshot.snapshotWallet();
+    if (live && Number(live.totalUsdt) >= 0) {
+      livePortfolio = Number(live.totalUsdt);
+    }
+  } catch (err) {
+    liveError = err.message;
+    logger.warn({ err: err.message }, 'capitalFlow: live portfolio in getProfitHistory failed');
+  }
+
+  if (livePortfolio != null) {
+    const netProfit = livePortfolio - cumNetDeposited;
+    const todayKey = bkkDateKey(now);
+    // Avoid duplicate today entry if today's snapshot was already added
+    const last = history[history.length - 1];
+    if (!last || last.date !== todayKey) {
+      history.push({
+        date: todayKey,
+        totalPortfolioUsdt: Number(livePortfolio.toFixed(4)),
+        netDepositedUsdt: Number(cumNetDeposited.toFixed(6)),
+        netProfitUsdt: Number(netProfit.toFixed(6)),
+        totalPortfolioThb: fxRate ? Number((livePortfolio * fxRate).toFixed(2)) : null,
+        netDepositedThb: fxRate ? Number((cumNetDeposited * fxRate).toFixed(2)) : null,
+        netProfitThb: fxRate ? Number((netProfit * fxRate).toFixed(2)) : null,
+        isLive: true,
+      });
+    } else {
+      // Replace last entry with live values
+      last.totalPortfolioUsdt = Number(livePortfolio.toFixed(4));
+      last.netDepositedUsdt = Number(cumNetDeposited.toFixed(6));
+      last.netProfitUsdt = Number(netProfit.toFixed(6));
+      last.totalPortfolioThb = fxRate ? Number((livePortfolio * fxRate).toFixed(2)) : null;
+      last.netDepositedThb = fxRate ? Number((cumNetDeposited * fxRate).toFixed(2)) : null;
+      last.netProfitThb = fxRate ? Number((netProfit * fxRate).toFixed(2)) : null;
+      last.isLive = true;
+    }
+  }
+
+  return {
+    history,
+    fxRate,
+    liveError,
+    range: { from: rangeFrom, to: now },
+    ts: Date.now(),
+  };
+}
+
 async function runOnce(opts = {}) {
   return syncFromBinance(opts);
 }
@@ -835,6 +960,7 @@ module.exports = {
   ensureBotFirstStartAt,
   getConfig,            // 2026-10-08: read config for UI
   setBotFirstStartAt,   // 2026-10-08: update botFirstStartAt from UI
+  getProfitHistory,     // 2026-10-08: daily Net Profit time-series for chart
   nextCapitalFlowDelayMs,
   clearPriceCache,
   // exported for tests
