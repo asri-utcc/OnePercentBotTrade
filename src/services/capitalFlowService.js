@@ -37,6 +37,7 @@ const binanceRest = require('../binance/binanceRest');
 const CapitalFlow = require('../db/models/CapitalFlow');
 const AppConfig = require('../db/models/AppConfig');
 const fxService = require('./fxService'); // 2026-10-08: USDT→THB conversion for THB value display
+const walletSnapshot = require('./walletSnapshot'); // 2026-10-08: total portfolio for net profit calc
 const logger = require('../utils/logger');
 
 const STABLECOINS = new Set([
@@ -655,6 +656,32 @@ async function getSummary({ from, to } = {}) {
     logger.warn({ err: err.message }, 'capitalFlow: fxService failed — USDT only');
   }
 
+  // 2026-10-08: Total portfolio (current Binance Spot value) for Net Profit calc.
+  // Reuses walletSnapshot.snapshotWallet() which aggregates balance × USDT price.
+  // Best-effort: if snapshot fails (Binance error / CB open), leave as null.
+  let totalPortfolioUsdt = null;
+  let totalPortfolioThb = null;
+  let portfolioError = null;
+  try {
+    const snap = await walletSnapshot.snapshotWallet();
+    if (snap && Number(snap.totalUsdt) >= 0) {
+      totalPortfolioUsdt = Number(snap.totalUsdt);
+      totalPortfolioThb = snap.totalThb != null ? Number(snap.totalThb) : (fxRate ? Number((totalPortfolioUsdt * fxRate).toFixed(2)) : null);
+    }
+  } catch (err) {
+    portfolioError = err.message;
+    logger.warn({ err: err.message }, 'capitalFlow: walletSnapshot.snapshotWallet failed — net profit unavailable');
+  }
+
+  // 2026-10-08: Net Profit = Total Portfolio − Net Deposited.
+  // Positive = profit, negative = loss. Null if portfolio unavailable.
+  const netProfitUsdt = totalPortfolioUsdt != null
+    ? Number((totalPortfolioUsdt - netDepositedUsdt).toFixed(6))
+    : null;
+  const netProfitUsdtThb = (netProfitUsdt != null && fxRate)
+    ? Number((netProfitUsdt * fxRate).toFixed(2))
+    : null;
+
   const totalDepositUsdtThb = fxRate ? totalDepositUsdt * fxRate : null;
   const totalWithdrawUsdtThb = fxRate ? totalWithdrawUsdt * fxRate : null;
   const netDepositedUsdtThb = fxRate ? netDepositedUsdt * fxRate : null;
@@ -663,9 +690,13 @@ async function getSummary({ from, to } = {}) {
     totalDepositUsdt: Number(totalDepositUsdt.toFixed(6)),
     totalWithdrawUsdt: Number(totalWithdrawUsdt.toFixed(6)),
     netDepositedUsdt: Number(netDepositedUsdt.toFixed(6)),
+    totalPortfolioUsdt: totalPortfolioUsdt != null ? Number(totalPortfolioUsdt.toFixed(4)) : null,
+    netProfitUsdt,
     totalDepositUsdtThb: totalDepositUsdtThb != null ? Number(totalDepositUsdtThb.toFixed(2)) : null,
     totalWithdrawUsdtThb: totalWithdrawUsdtThb != null ? Number(totalWithdrawUsdtThb.toFixed(2)) : null,
     netDepositedUsdtThb: netDepositedUsdtThb != null ? Number(netDepositedUsdtThb.toFixed(2)) : null,
+    totalPortfolioThb: totalPortfolioThb != null ? Number(totalPortfolioThb.toFixed(2)) : null,
+    netProfitUsdtThb,
     depositCount,
     withdrawCount,
     byCoin: byCoin.map((c) => ({
@@ -678,6 +709,7 @@ async function getSummary({ from, to } = {}) {
     fxRate,
     fxSource,
     fxStale,
+    portfolioError,
     range: { from, to },
     ts: Date.now(),
   };

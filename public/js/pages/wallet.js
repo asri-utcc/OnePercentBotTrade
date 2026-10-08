@@ -78,6 +78,8 @@
     cfNet: document.getElementById('capital-flow-net'),
     cfDeposit: document.getElementById('capital-flow-deposit'),
     cfWithdraw: document.getElementById('capital-flow-withdraw'),
+    cfPortfolio: document.getElementById('capital-flow-portfolio'),
+    cfProfit: document.getElementById('capital-flow-profit'),
     cfCounts: document.getElementById('capital-flow-counts'),
     cfMetaSync: document.getElementById('capital-flow-meta-sync'),
     cfMetaRange: document.getElementById('capital-flow-meta-range'),
@@ -947,6 +949,8 @@
     const net = isThb ? Number(summary.netDepositedUsdtThb) : Number(summary.netDepositedUsdt);
     const dep = isThb ? Number(summary.totalDepositUsdtThb) : Number(summary.totalDepositUsdt);
     const wd = isThb ? Number(summary.totalWithdrawUsdtThb) : Number(summary.totalWithdrawUsdt);
+    const portfolio = isThb ? Number(summary.totalPortfolioThb) : Number(summary.totalPortfolioUsdt);
+    const profit = isThb ? Number(summary.netProfitUsdtThb) : Number(summary.netProfitUsdt);
     const unit = isThb ? '฿' : 'USDT';
     if (els.cfNet) {
       const n = isFinite(net) ? net : 0;
@@ -958,6 +962,22 @@
     }
     if (els.cfWithdraw) {
       els.cfWithdraw.textContent = `−${isFinite(wd) ? (isThb ? wd.toFixed(0) : wd.toFixed(2)) : '—'} ${unit}`;
+    }
+    // 2026-10-08: Total Portfolio (Binance Spot realtime value) + Net Profit = Portfolio - Net Deposited
+    if (els.cfPortfolio) {
+      els.cfPortfolio.textContent = isFinite(portfolio)
+        ? `${(isThb ? portfolio.toFixed(0) : portfolio.toFixed(2))} ${unit}`
+        : '—';
+    }
+    if (els.cfProfit) {
+      if (isFinite(profit)) {
+        const sign = profit >= 0 ? '+' : '−';
+        els.cfProfit.textContent = `${sign}${isThb ? Math.abs(profit).toFixed(0) : Math.abs(profit).toFixed(2)} ${unit}`;
+        els.cfProfit.style.color = profit >= 0 ? 'var(--bull-1)' : 'var(--bear-1)';
+      } else {
+        els.cfProfit.textContent = '—';
+        els.cfProfit.style.color = 'var(--text-1)';
+      }
     }
     if (els.cfCounts) {
       els.cfCounts.textContent = `${summary.depositCount || 0} in / ${summary.withdrawCount || 0} out`;
