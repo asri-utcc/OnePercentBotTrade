@@ -42,6 +42,79 @@ const trendlineForBot = require('./trendlineForBot');
 //   ยังเร็วพอที่จะจับ SELL filled ที่หลุด และช้าพอที่จะลด Binance weight
 const RECONCILE_INTERVAL_MS = 5 * 60 * 1000;
 
+// FIX-2026-10-08: reconcile weight reduction (A + B)
+// ════════════════════════════════════════════════════════════════════════════
+// Goal: ลด Binance weight ของ botManager:reconcile จาก ~2184/min → ~200-400/min
+//       โดยไม่กระทบ orphan detection safety net
+//
+// A) SKIP "HAPPY PATH" TRADES — trades ที่จบไปแล้วและไม่ต้องตรวจซ้ำ
+//    - state='sold' + sellStatus='FILLED' + sellFilledAt > 1h ago → skip ทั้ง BUY+SELL check
+//    - state='cancelled' + updated > 5min ago → skip
+//    - ใน steady state trades เหล่านี้มี 60-80% ของ pending collection
+//    - safety: ถ้า orphan เกิดกับ trade ที่จบไปแล้ว ก็ไม่มีอะไรให้แก้อยู่แล้ว
+//      (reconcile มีหน้าที่เฉพาะ trades ที่ยัง active อยู่ — placed/filled/holding/selling)
+//
+// B) CACHE order status 60s — re-use getOrder result ระหว่าง reconcile cycles
+//    - in-process Map: "SYMBOL:orderId" → { status, fetchedAt }
+//    - ถ้า fetchedAt < 60s ago → ใช้ cached, ไม่ call Binance
+//    - ลด round-trips เมื่อ startup reconcile + first periodic reconcile ทับกัน
+//    - 60s = safe window (Binance order status เปลี่ยนช้ากว่านี้ใน 99% ของเคส;
+//      ถ้า status เปลี่ยนใน 60s window รอบ sweep ถัดไปจะจับได้)
+//
+// ROLLBACK — ถ้ามีบางอย่างผิดปกติ (orphan สะสม / state mismatch / bot crash):
+//   1. Set RECONCILE_OPTIMIZE_ENABLED = false (ด้านล่าง) — 1 line change
+//   2. npm run pm2:reload
+//   3. ตรวจ logs: grep "reconcile: skip-happy\|cache-hit" จะหายไป
+//   หรือ revert commit: git log --oneline | head -3  → git revert <hash>
+// ════════════════════════════════════════════════════════════════════════════
+const RECONCILE_OPTIMIZE_ENABLED = true;   // ← ROLLBACK: set to false
+const RECONCILE_ORDER_CACHE_TTL_MS = 60 * 1000;
+const RECONCILE_HAPPY_SKIP_HOURS = 1;       // sold+FILLED > 1h ago → skip
+const _reconcileOrderCache = new Map();     // "SYMBOL:orderId" → { status, fetchedAt }
+const _reconcileStats = { happySkip: 0, cacheHits: 0, fetched: 0 };
+
+async function _getCachedOrder(symbol, orderId, opts) {
+  if (!RECONCILE_OPTIMIZE_ENABLED) {
+    _reconcileStats.fetched++;
+    return binanceRest.getOrder({ symbol, orderId }, opts);
+  }
+  const key = `${symbol}:${orderId}`;
+  const now = Date.now();
+  const cached = _reconcileOrderCache.get(key);
+  if (cached && (now - cached.fetchedAt) < RECONCILE_ORDER_CACHE_TTL_MS) {
+    _reconcileStats.cacheHits++;
+    // return clone so caller cannot mutate the cached object
+    return cached.status ? Promise.resolve({ ...cached.status }) : null;
+  }
+  const order = await binanceRest.getOrder({ symbol, orderId }, opts).catch(() => null);
+  _reconcileOrderCache.set(key, { status: order, fetchedAt: now });
+  _reconcileStats.fetched++;
+  return order;
+}
+
+function _shouldSkipHappyTrade(trade) {
+  if (!RECONCILE_OPTIMIZE_ENABLED) return false;
+  // A1: state='sold' + FILLED + filled > 1h ago → terminal, nothing to reconcile
+  if (trade.state === 'sold' && trade.sellStatus === 'FILLED' && trade.sellFilledAt) {
+    const filledMs = trade.sellFilledAt instanceof Date
+      ? trade.sellFilledAt.getTime()
+      : new Date(trade.sellFilledAt).getTime();
+    if (Number.isFinite(filledMs) && (Date.now() - filledMs) > RECONCILE_HAPPY_SKIP_HOURS * 3600 * 1000) {
+      return 'sold_filled_old';
+    }
+  }
+  // A2: state='cancelled' + updated > 5min ago → terminal
+  if (trade.state === 'cancelled' && trade.updatedAt) {
+    const updMs = trade.updatedAt instanceof Date
+      ? trade.updatedAt.getTime()
+      : new Date(trade.updatedAt).getTime();
+    if (Number.isFinite(updMs) && (Date.now() - updMs) > 5 * 60 * 1000) {
+      return 'cancelled_old';
+    }
+  }
+  return false;
+}
+
 // FIX-2026-08-01: auto-pause on low Min-%KC (default ON per bot)
 //   - ทุก 5 นาที: scan Min-%KC(30 bars) — ถ้า < autoPauseMinKcPct → set enabled=false
 //   - ถ้า ≥ threshold (และเคยถูก auto-pause) → auto-resume (vol_recovered)
@@ -554,6 +627,13 @@ class BotManager {
         const bot = botMap.get(String(trade.botId));
         if (!bot) continue;
 
+        // FIX-2026-10-08: skip happy-path trades (A) — terminal states don't need reconcile
+        const happyReason = _shouldSkipHappyTrade(trade);
+        if (happyReason) {
+          _reconcileStats.happySkip++;
+          continue;
+        }
+
         // ตรวจ BUY order (กรณี state=placed หรือ cancelled ที่ BUY อาจ fill จริง)
         if (trade.buyOrderId) {
           // FIX-2026-09-17: critical=true to bypass CB (safety-net reconcile path)
@@ -561,10 +641,8 @@ class BotManager {
           //   - without critical=true, CB opens frequently on rate-spike and EVERY
           //     orphan BUY detection silently skipped -> orphan BUY accumulates
           //     (e.g. 1000CATUSDT stuck 265h with no SELL on book)
-          const order = await binanceRest.getOrder({
-            symbol: trade.symbol,
-            orderId: trade.buyOrderId,
-          }, { critical: true }).catch(() => null);
+          // FIX-2026-10-08: use cached getOrder (B) — re-use 60s window between sweeps
+          const order = await _getCachedOrder(trade.symbol, trade.buyOrderId, { critical: true });
           if (order) {
             // BUY filled จริง — ไม่ว่า trade.state จะเป็นอะไร ต้อง proceed SELL
             // FIX-2026-07-31 (BUG-22): don't call handleBuyFilled for PARTIALLY_FILLED — the BUY
@@ -926,10 +1004,8 @@ class BotManager {
           //   - reconcile has its own throttle (5 min interval) so bypassing circuit is safe.
           //   - critical=true does NOT bypass Binance errors (-2010, -2011 etc.) — those still
           //     throw and get caught → return null → skip (correct behavior).
-          const order = await binanceRest.getOrder({
-            symbol: trade.symbol,
-            orderId: trade.sellOrderId,
-          }, { critical: true }).catch((err) => {
+          // FIX-2026-10-08: use cached getOrder (B) — re-use 60s window between sweeps
+          const order = await _getCachedOrder(trade.symbol, trade.sellOrderId, { critical: true }).catch((err) => {
             if (!/CIRCUIT_OPEN/i.test(err.message)) {
               logger.warn({
                 err: err.message, tradeId: trade._id.toString(),
@@ -1251,6 +1327,26 @@ class BotManager {
       } catch (err) {
         logger.warn({ err: err.message }, 'reconcile: telemetry persist failed (non-fatal)');
       }
+    }
+
+    // FIX-2026-10-08: log weight-reduction stats every sweep (so we can measure A+B impact)
+    //   - happySkip: trades skipped because they're already terminal (A)
+    //   - cacheHits: getOrder calls served from cache (B)
+    //   - fetched: actual Binance getOrder calls (these are the ones costing weight)
+    //   - เก่า: pending × 2 calls = all fetched. ใหม่: (pending - happySkip) × 2 - cacheHits = fetched
+    if (_reconcileStats.fetched > 0 || _reconcileStats.happySkip > 0 || _reconcileStats.cacheHits > 0) {
+      logger.info({
+        pending: pending.length,
+        happySkip: _reconcileStats.happySkip,
+        cacheHits: _reconcileStats.cacheHits,
+        fetched: _reconcileStats.fetched,
+        // estimated weight saved: 2-4 weight per getOrder × (happySkip*2 + cacheHits)
+        estWeightSaved: (_reconcileStats.happySkip * 2 + _reconcileStats.cacheHits) * 3,
+      }, 'reconcile: sweep stats (A=skip-happy, B=cache-hit)');
+      // reset per-sweep counters (keep cache map — TTL handles its own expiry)
+      _reconcileStats.happySkip = 0;
+      _reconcileStats.cacheHits = 0;
+      _reconcileStats.fetched = 0;
     }
   }
 
