@@ -36,6 +36,7 @@
 const binanceRest = require('../binance/binanceRest');
 const CapitalFlow = require('../db/models/CapitalFlow');
 const AppConfig = require('../db/models/AppConfig');
+const fxService = require('./fxService'); // 2026-10-08: USDT→THB conversion for THB value display
 const logger = require('../utils/logger');
 
 const STABLECOINS = new Set([
@@ -134,6 +135,47 @@ async function ensureBotFirstStartAt() {
     logger.warn({ err: err.message }, 'capitalFlow: ensureBotFirstStartAt failed — fallback now()');
     return new Date();
   }
+}
+
+/**
+ * 2026-10-08: Read capital-flow config (for UI Settings modal).
+ * Returns: { botFirstStartAt, defaultRange: { from, to } }
+ */
+async function getConfig() {
+  const start = await ensureBotFirstStartAt();
+  const from = new Date(start.getTime() - DEFAULT_BACKFILL_OFFSET_DAYS_BEFORE_START * 86_400_000);
+  const to = new Date();
+  return {
+    botFirstStartAt: start.toISOString(),
+    defaultRange: { from: from.toISOString(), to: to.toISOString() },
+    backfillOffsetDaysBeforeStart: DEFAULT_BACKFILL_OFFSET_DAYS_BEFORE_START,
+    ts: Date.now(),
+  };
+}
+
+/**
+ * 2026-10-08: Set botFirstStartAt manually (for UI Settings modal).
+ * Validates: must be a valid Date, must be <= now, must be >= 2017-01-01 (Binance launch).
+ * Persists to AppConfig.botFirstStartAt.
+ */
+async function setBotFirstStartAt(input) {
+  if (!input) throw new Error('botFirstStartAt is required');
+  let d;
+  if (input instanceof Date) d = input;
+  else d = new Date(input);
+  if (isNaN(d.getTime())) throw new Error('botFirstStartAt is unparseable');
+  const ms = d.getTime();
+  if (ms < 1483228800000) throw new Error('botFirstStartAt must be >= 2017-01-01 (Binance launch)');
+  if (ms > Date.now()) throw new Error('botFirstStartAt must be <= now');
+  await AppConfig.findOneAndUpdate(
+    { key: 'singleton' },
+    { $set: { botFirstStartAt: d } },
+    { new: true, upsert: true }
+  );
+  // Invalidate any in-memory price cache that used the old range (rare — but safe)
+  clearPriceCache();
+  logger.info({ botFirstStartAt: d.toISOString() }, 'capitalFlow: botFirstStartAt updated by user');
+  return getConfig();
 }
 
 async function getDefaultRange() {
@@ -560,18 +602,44 @@ async function getSummary({ from, to } = {}) {
     { $sort: { totalUsdt: -1 } },
   ]);
 
+  // FX rate for THB conversion (best-effort; null if fxService unavailable)
+  let fxRate = null;
+  let fxSource = null;
+  let fxStale = false;
+  try {
+    const fx = await fxService.getUsdtToThb();
+    if (fx && Number(fx.rate) > 0) {
+      fxRate = Number(fx.rate);
+      fxSource = fx.source || null;
+      fxStale = fx.stale === true;
+    }
+  } catch (err) {
+    logger.warn({ err: err.message }, 'capitalFlow: fxService failed — USDT only');
+  }
+
+  const totalDepositUsdtThb = fxRate ? totalDepositUsdt * fxRate : null;
+  const totalWithdrawUsdtThb = fxRate ? totalWithdrawUsdt * fxRate : null;
+  const netDepositedUsdtThb = fxRate ? netDepositedUsdt * fxRate : null;
+
   return {
     totalDepositUsdt: Number(totalDepositUsdt.toFixed(6)),
     totalWithdrawUsdt: Number(totalWithdrawUsdt.toFixed(6)),
     netDepositedUsdt: Number(netDepositedUsdt.toFixed(6)),
+    totalDepositUsdtThb: totalDepositUsdtThb != null ? Number(totalDepositUsdtThb.toFixed(2)) : null,
+    totalWithdrawUsdtThb: totalWithdrawUsdtThb != null ? Number(totalWithdrawUsdtThb.toFixed(2)) : null,
+    netDepositedUsdtThb: netDepositedUsdtThb != null ? Number(netDepositedUsdtThb.toFixed(2)) : null,
     depositCount,
     withdrawCount,
     byCoin: byCoin.map((c) => ({
       asset: c._id,
       totalAmount: Number(c.totalAmount.toFixed(8)),
       totalUsdt: Number(c.totalUsdt.toFixed(6)),
+      totalUsdtThb: fxRate ? Number((c.totalUsdt * fxRate).toFixed(2)) : null,
       count: c.count,
     })),
+    fxRate,
+    fxSource,
+    fxStale,
     range: { from, to },
     ts: Date.now(),
   };
@@ -592,6 +660,16 @@ async function getList({ from, to, type, asset, limit = 100, skip = 0 } = {}) {
     .skip(Math.max(0, skip))
     .limit(Math.min(500, Math.max(1, limit)))
     .lean();
+
+  // FX rate for THB conversion (best-effort; null if unavailable)
+  let fxRate = null;
+  try {
+    const fx = await fxService.getUsdtToThb();
+    if (fx && Number(fx.rate) > 0) fxRate = Number(fx.rate);
+  } catch (err) {
+    // silent — list still works without THB
+  }
+
   return {
     rows: rows.map((r) => ({
       key: r.key,
@@ -600,7 +678,9 @@ async function getList({ from, to, type, asset, limit = 100, skip = 0 } = {}) {
       amount: r.amount,
       transactionFee: r.transactionFee,
       usdtValue: r.usdtValue,
+      usdtValueThb: fxRate ? Number((r.usdtValue * fxRate).toFixed(2)) : null,
       priceUsdt: r.priceUsdt,
+      priceUsdtThb: fxRate ? Number((r.priceUsdt * fxRate).toFixed(2)) : null,
       priceSource: r.priceSource,
       insertTime: r.insertTime,
       txId: r.txId,
@@ -610,6 +690,7 @@ async function getList({ from, to, type, asset, limit = 100, skip = 0 } = {}) {
     total,
     limit: Math.min(500, Math.max(1, limit)),
     skip: Math.max(0, skip),
+    fxRate,
     ts: Date.now(),
   };
 }
@@ -682,6 +763,8 @@ module.exports = {
   getStatus,
   getDefaultRange,
   ensureBotFirstStartAt,
+  getConfig,            // 2026-10-08: read config for UI
+  setBotFirstStartAt,   // 2026-10-08: update botFirstStartAt from UI
   nextCapitalFlowDelayMs,
   clearPriceCache,
   // exported for tests

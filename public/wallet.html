@@ -455,6 +455,11 @@
           </div>
         </div>
         <div class="d-flex flex-wrap gap-2 align-items-center">
+          <div class="wallet-chart-currency-toggle" id="capital-flow-currency-toggle">
+            <button type="button" data-currency="USDT" class="is-active">USDT</button>
+            <button type="button" data-currency="THB">THB</button>
+          </div>
+          <button id="capital-flow-settings-btn" type="button" class="btn-lux btn-sm" title="ตั้งค่า botFirstStartAt">⚙️</button>
           <button id="capital-flow-sync-btn" type="button" class="btn-lux btn-sm" title="Sync จาก Binance ตอนนี้">🔄 Sync</button>
         </div>
       </div>
@@ -481,6 +486,7 @@
         <div class="wallet-chart-meta" id="capital-flow-meta">
           <span class="stat"><span class="lbl">last sync</span><span class="val" id="capital-flow-meta-sync">—</span></span>
           <span class="stat"><span class="lbl">range</span><span class="val" id="capital-flow-meta-range">—</span></span>
+          <span class="stat"><span class="lbl">fx</span><span class="val" id="capital-flow-meta-fx">—</span></span>
         </div>
         <!-- Recent transactions table -->
         <div class="mt-3" style="max-height: 40vh; overflow-y: auto;">
@@ -492,15 +498,55 @@
                 <th>เหรียญ</th>
                 <th class="num">จำนวน</th>
                 <th class="num">USDT Value</th>
+                <th class="num">THB Value</th>
                 <th class="num">Price (USDT)</th>
                 <th>Network</th>
                 <th>txId</th>
               </tr>
             </thead>
             <tbody id="capital-flow-tbody">
-              <tr><td class="empty" colspan="8">กำลังโหลด…</td></tr>
+              <tr><td class="empty" colspan="9">กำลังโหลด…</td></tr>
             </tbody>
           </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- 2026-10-08: Capital Flow Settings modal (botFirstStartAt) -->
+    <div class="modal fade" id="capital-flow-settings-modal" tabindex="-1" aria-hidden="true">
+      <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content lux-modal">
+          <div class="modal-header lux-modal-header">
+            <h5 class="modal-title">⚙️ ตั้งค่า Capital Flow</h5>
+            <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+          </div>
+          <div class="modal-body">
+            <div class="mb-3">
+              <label for="cf-botfirststart" class="form-label fw-semibold">วันแรกที่เริ่มนับ (botFirstStartAt)</label>
+              <input type="date" id="cf-botfirststart" class="form-control" />
+              <div class="form-text text-muted-3" style="font-size: 0.78rem;">
+                Default range = วันนี้ − 3 วัน ก่อนวันนี้ → วันนี้<br/>
+                Sync ตามกำหนดเวลา 00:05 BKK จะใช้ range นี้
+              </div>
+            </div>
+            <div class="alert alert-info" style="font-size: 0.85rem;">
+              <strong>Default range ปัจจุบัน:</strong>
+              <div id="cf-default-range" class="mt-1">—</div>
+            </div>
+            <div class="alert alert-warning" style="font-size: 0.85rem;">
+              ⚠️ การเปลี่ยนวันนี้จะมีผลกับ sync ครั้งถัดไป (manual + scheduled 00:05 BKK)<br/>
+              ข้อมูลเก่าที่ sync แล้วจะไม่ถูกลบ — เปลี่ยนเฉพาะ "ขอบเขตล่าง" ของการ sync ใหม่
+            </div>
+            <div class="text-danger small mt-2" id="cf-settings-error" hidden></div>
+          </div>
+          <div class="modal-footer lux-modal-footer">
+            <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">ยกเลิก</button>
+            <button type="button" class="btn" id="cf-settings-save">
+              <span class="btn-glyph">✓</span>
+              <span class="btn-label">บันทึก</span>
+              <span class="btn-spinner" aria-hidden="true"></span>
+            </button>
+          </div>
         </div>
       </div>
     </div>
@@ -639,6 +685,6 @@
   <script>window.NAV_ACTIVE = 'wallet';</script>
   <script src="/js/partials/nav.js?v=2026-09-04-dlc-everywhere"></script>
   <script src="/js/partials/rateLimitGauge.js?v=2026-09-04-dlc-everywhere"></script>
-  <script src="/js/pages/wallet.js?v=2026-10-08-capital-flow"></script>
+  <script src="/js/pages/wallet.js?v=2026-10-08-capital-flow-thb"></script>
 </body>
 </html>

@@ -81,8 +81,17 @@
     cfCounts: document.getElementById('capital-flow-counts'),
     cfMetaSync: document.getElementById('capital-flow-meta-sync'),
     cfMetaRange: document.getElementById('capital-flow-meta-range'),
+    cfMetaFx: document.getElementById('capital-flow-meta-fx'),
     cfTbody: document.getElementById('capital-flow-tbody'),
     cfSyncBtn: document.getElementById('capital-flow-sync-btn'),
+    cfSettingsBtn: document.getElementById('capital-flow-settings-btn'),
+    cfCurrencyBtns: document.querySelectorAll('#capital-flow-currency-toggle button'),
+    // Settings modal
+    cfSettingsModal: document.getElementById('capital-flow-settings-modal'),
+    cfBotFirstStartInput: document.getElementById('cf-botfirststart'),
+    cfDefaultRange: document.getElementById('cf-default-range'),
+    cfSettingsError: document.getElementById('cf-settings-error'),
+    cfSettingsSave: document.getElementById('cf-settings-save'),
   };
   const chips = Array.from(document.querySelectorAll('.wallet-chip, .wallet-quick-btn'));
 
@@ -116,6 +125,9 @@
   let _capitalFlowChart = null;
   let _capitalFlowSeries = null;
   let _lastCapitalFlowAt = 0;
+  let _cfCurrency = 'USDT';      // 'USDT' | 'THB'
+  let _cfSummary = null;          // last summary data (for currency re-render)
+  let _cfList = null;             // last list data (for currency re-render)
   const CAPITAL_FLOW_MIN_INTERVAL_MS = 60 * 1000;
 
   // ─── helpers ──────────────────────────────────────────────────────────────
@@ -896,6 +908,8 @@
         API.get('/api/wallet/capital-flow/summary'),
         API.get('/api/wallet/capital-flow?limit=50'),
       ]);
+      _cfSummary = summary;
+      _cfList = list;
       renderCapitalFlowSummary(summary);
       renderCapitalFlowChart(list);
       renderCapitalFlowTable(list);
@@ -910,6 +924,13 @@
       } else if (els.cfMetaRange) {
         els.cfMetaRange.textContent = '—';
       }
+      if (els.cfMetaFx && summary && summary.fxRate) {
+        const src = summary.fxSource ? ` (${summary.fxSource})` : '';
+        const stale = summary.fxStale ? ' [stale]' : '';
+        els.cfMetaFx.textContent = `1 USDT = ${summary.fxRate.toFixed(2)} THB${src}${stale}`;
+      } else if (els.cfMetaFx) {
+        els.cfMetaFx.textContent = '—';
+      }
       return { summary, list };
     } catch (err) {
       console.warn('[wallet] capital-flow load failed:', err && err.message);
@@ -920,16 +941,23 @@
 
   function renderCapitalFlowSummary(summary) {
     if (!summary) return;
+    const cur = _cfCurrency;
+    const isThb = cur === 'THB';
+    // Pick fields by currency
+    const net = isThb ? Number(summary.netDepositedUsdtThb) : Number(summary.netDepositedUsdt);
+    const dep = isThb ? Number(summary.totalDepositUsdtThb) : Number(summary.totalDepositUsdt);
+    const wd = isThb ? Number(summary.totalWithdrawUsdtThb) : Number(summary.totalWithdrawUsdt);
+    const unit = isThb ? '฿' : 'USDT';
     if (els.cfNet) {
-      const net = Number(summary.netDepositedUsdt) || 0;
-      els.cfNet.textContent = `${net >= 0 ? '+' : ''}${net.toFixed(2)} USDT`;
-      els.cfNet.style.color = net >= 0 ? 'var(--bull-1)' : 'var(--bear-1)';
+      const n = isFinite(net) ? net : 0;
+      els.cfNet.textContent = `${n >= 0 ? '+' : ''}${isFinite(n) ? (isThb ? n.toFixed(0) : n.toFixed(2)) : '—'} ${unit}`;
+      els.cfNet.style.color = n >= 0 ? 'var(--bull-1)' : 'var(--bear-1)';
     }
     if (els.cfDeposit) {
-      els.cfDeposit.textContent = `+${(Number(summary.totalDepositUsdt) || 0).toFixed(2)} USDT`;
+      els.cfDeposit.textContent = `+${isFinite(dep) ? (isThb ? dep.toFixed(0) : dep.toFixed(2)) : '—'} ${unit}`;
     }
     if (els.cfWithdraw) {
-      els.cfWithdraw.textContent = `−${(Number(summary.totalWithdrawUsdt) || 0).toFixed(2)} USDT`;
+      els.cfWithdraw.textContent = `−${isFinite(wd) ? (isThb ? wd.toFixed(0) : wd.toFixed(2)) : '—'} ${unit}`;
     }
     if (els.cfCounts) {
       els.cfCounts.textContent = `${summary.depositCount || 0} in / ${summary.withdrawCount || 0} out`;
@@ -941,13 +969,17 @@
     if (!_capitalFlowSeries || !list || !Array.isArray(list.rows)) return;
     // rows sorted desc by insertTime — reverse to ascending for cumulative build
     const rows = [...list.rows].reverse();
+    const isThb = _cfCurrency === 'THB';
+    const fxRate = list && list.fxRate ? Number(list.fxRate) : null;
     let cum = 0;
     const points = [];
     for (const r of rows) {
-      cum += Number(r.usdtValue) || 0;
+      const usdtV = Number(r.usdtValue) || 0;
+      cum += usdtV;
+      const value = isThb && fxRate ? cum * fxRate : cum;
       // use seconds (lightweight-charts expects unix seconds)
       const time = Math.floor(new Date(r.insertTime).getTime() / 1000);
-      points.push({ time, value: Number(cum.toFixed(6)) });
+      points.push({ time, value: Number(value.toFixed(isThb ? 2 : 6)) });
     }
     // dedupe (lightweight-charts requires strictly increasing time)
     const seen = new Set();
@@ -963,7 +995,7 @@
   function renderCapitalFlowTable(list) {
     if (!els.cfTbody) return;
     if (!list || !Array.isArray(list.rows) || list.rows.length === 0) {
-      els.cfTbody.innerHTML = '<tr><td class="empty" colspan="8">ยังไม่มีข้อมูล — กด Sync เพื่อดึงจาก Binance</td></tr>';
+      els.cfTbody.innerHTML = '<tr><td class="empty" colspan="9">ยังไม่มีข้อมูล — กด Sync เพื่อดึงจาก Binance</td></tr>';
       return;
     }
     const html = list.rows.slice(0, 50).map((r) => {
@@ -973,12 +1005,17 @@
       const dt = new Date(r.insertTime);
       const dtStr = dt.toLocaleString('th-TH', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' });
       const txShort = (r.txId || '').slice(0, 10) + (r.txId && r.txId.length > 10 ? '…' : '');
+      const usdtAbs = Math.abs(r.usdtValue || 0).toFixed(2);
+      const thbCell = r.usdtValueThb != null
+        ? `${sign}${Math.abs(r.usdtValueThb).toFixed(0)}`
+        : '<span style="color: var(--text-3);">—</span>';
       return `<tr>
         <td>${escapeHtml(dtStr)}</td>
         <td><span style="color: ${isDeposit ? 'var(--bull-1)' : 'var(--bear-1)'}; font-weight: 600;">${isDeposit ? '⬇️ ฝาก' : '⬆️ ถอน'}</span></td>
         <td>${escapeHtml(r.asset)}</td>
         <td class="num">${escapeHtml(fmtQty(r.amount))}</td>
-        <td class="num ${usdtClass}">${sign}${escapeHtml(Math.abs(r.usdtValue || 0).toFixed(2))}</td>
+        <td class="num ${usdtClass}">${sign}${escapeHtml(usdtAbs)}</td>
+        <td class="num ${usdtClass}">${thbCell}</td>
         <td class="num">${r.priceSource === 'stablecoin' ? '1.00' : (r.priceUsdt || 0).toFixed(4)}</td>
         <td>${escapeHtml(r.network || '—')}</td>
         <td title="${escapeHtml(r.txId || '')}" style="font-family: monospace; font-size: 0.75rem; color: var(--text-3);">${escapeHtml(txShort)}</td>
@@ -1007,6 +1044,92 @@
     } finally {
       btn.disabled = false;
       btn.textContent = orig;
+    }
+  }
+
+  // Currency toggle handler (USDT ↔ THB)
+  function onCapitalFlowCurrencyToggle(currency) {
+    if (!currency || currency === _cfCurrency) return;
+    _cfCurrency = currency;
+    if (els.cfCurrencyBtns) {
+      els.cfCurrencyBtns.forEach((b) => b.classList.toggle('is-active', b.dataset.currency === currency));
+    }
+    // Re-render from cache (no refetch needed — fxRate already in summary)
+    if (_cfSummary) renderCapitalFlowSummary(_cfSummary);
+    if (_cfList) {
+      renderCapitalFlowChart(_cfList);
+      renderCapitalFlowTable(_cfList);
+    }
+  }
+
+  // Settings modal: open + load config
+  async function onCapitalFlowSettingsOpen() {
+    if (!els.cfSettingsModal) return;
+    if (els.cfSettingsError) {
+      els.cfSettingsError.hidden = true;
+      els.cfSettingsError.textContent = '';
+    }
+    try {
+      const cfg = await API.get('/api/wallet/capital-flow/config');
+      if (els.cfBotFirstStartInput && cfg.botFirstStartAt) {
+        // Set to YYYY-MM-DD for <input type="date">
+        const d = new Date(cfg.botFirstStartAt);
+        const yyyy = d.getFullYear();
+        const mm = String(d.getMonth() + 1).padStart(2, '0');
+        const dd = String(d.getDate()).padStart(2, '0');
+        els.cfBotFirstStartInput.value = `${yyyy}-${mm}-${dd}`;
+      }
+      if (els.cfDefaultRange && cfg.defaultRange) {
+        const from = new Date(cfg.defaultRange.from);
+        const to = new Date(cfg.defaultRange.to);
+        els.cfDefaultRange.innerHTML = `from <strong>${from.toLocaleString('th-TH', { day: '2-digit', month: 'short', year: 'numeric' })}</strong><br/>to <strong>${to.toLocaleString('th-TH', { day: '2-digit', month: 'short', year: 'numeric' })}</strong>`;
+      }
+    } catch (err) {
+      if (els.cfSettingsError) {
+        els.cfSettingsError.textContent = 'โหลด config ไม่สำเร็จ: ' + (err && err.message ? err.message : 'unknown');
+        els.cfSettingsError.hidden = false;
+      }
+    }
+  }
+
+  // Settings modal: save
+  async function onCapitalFlowSettingsSave() {
+    if (!els.cfSettingsSave || !els.cfBotFirstStartInput) return;
+    const btn = els.cfSettingsSave;
+    const dateStr = els.cfBotFirstStartInput.value;
+    if (!dateStr) {
+      if (els.cfSettingsError) {
+        els.cfSettingsError.textContent = 'กรุณาเลือกวันที่';
+        els.cfSettingsError.hidden = false;
+      }
+      return;
+    }
+    btn.disabled = true;
+    btn.classList.add('is-loading');
+    try {
+      // Convert YYYY-MM-DD to ISO with BKK timezone midnight
+      // (interpret as 00:00:00 +07:00 of that date)
+      const [y, m, d] = dateStr.split('-').map(Number);
+      // Construct Date in BKK (UTC+7) → use Date.UTC then shift
+      const isoBkk = new Date(Date.UTC(y, m - 1, d, -7, 0, 0)).toISOString();
+      const result = await API.put('/api/wallet/capital-flow/config', { botFirstStartAt: isoBkk });
+      console.log('[wallet] capital-flow config updated:', result);
+      // Hide modal
+      if (window.bootstrap && els.cfSettingsModal) {
+        const m = window.bootstrap.Modal.getInstance(els.cfSettingsModal);
+        if (m) m.hide();
+      }
+      // After update: clear cache + force-reload
+      _lastCapitalFlowAt = 0;
+      await loadCapitalFlow(true);
+    } catch (err) {
+      if (els.cfSettingsError) {
+        els.cfSettingsError.textContent = err && err.message ? err.message : 'บันทึกไม่สำเร็จ';
+        els.cfSettingsError.hidden = false;
+      }
+    } finally {
+      btn.disabled = false;
+      btn.classList.remove('is-loading');
     }
   }
 
@@ -1199,6 +1322,19 @@
     // 2026-10-08: Capital Flow sync button
     if (els.cfSyncBtn) {
       els.cfSyncBtn.addEventListener('click', onCapitalFlowSync);
+    }
+    // 2026-10-08: Capital Flow settings button
+    if (els.cfSettingsBtn) {
+      els.cfSettingsBtn.addEventListener('click', onCapitalFlowSettingsOpen);
+    }
+    if (els.cfSettingsSave) {
+      els.cfSettingsSave.addEventListener('click', onCapitalFlowSettingsSave);
+    }
+    // 2026-10-08: Capital Flow currency toggle
+    if (els.cfCurrencyBtns) {
+      els.cfCurrencyBtns.forEach((btn) => {
+        btn.addEventListener('click', () => onCapitalFlowCurrencyToggle(btn.dataset.currency));
+      });
     }
 
     // Re-render PnL chart when FX rate updates (THB mode only — re-render avoids stale FX)

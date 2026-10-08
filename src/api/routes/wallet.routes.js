@@ -764,4 +764,37 @@ router.get('/capital-flow/status', requireAuth, (_req, res) => {
   }
 });
 
+// ─── GET /api/wallet/capital-flow/config ─────────────────────────────────────
+//   2026-10-08: Read capital-flow config (for UI Settings modal).
+//   Returns: { botFirstStartAt, defaultRange: { from, to } }
+router.get('/capital-flow/config', requireAuth, async (_req, res) => {
+  try {
+    const config = await capitalFlowService.getConfig();
+    res.json(config);
+  } catch (err) {
+    logger.error({ err: err.message }, 'wallet: capital-flow config GET failed');
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── PUT /api/wallet/capital-flow/config ─────────────────────────────────────
+//   2026-10-08: Update botFirstStartAt (default backfill lower-bound).
+//   Body: { botFirstStartAt: ISO string | ms epoch }
+//   Validation: must be valid Date, must be >= 2017-01-01, must be <= now.
+router.put('/capital-flow/config', requireAuth, async (req, res) => {
+  try {
+    const body = req.body || {};
+    const input = body.botFirstStartAt;
+    if (input == null || input === '') {
+      return res.status(400).json({ error: 'botFirstStartAt is required' });
+    }
+    const result = await capitalFlowService.setBotFirstStartAt(input);
+    logger.info({ botFirstStartAt: result.botFirstStartAt }, 'wallet: capital-flow config updated');
+    res.json({ ok: true, ...result });
+  } catch (err) {
+    logger.warn({ err: err.message }, 'wallet: capital-flow config PUT failed');
+    res.status(400).json({ error: err.message });
+  }
+});
+
 module.exports = router;
