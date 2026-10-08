@@ -318,6 +318,8 @@ const _ENDPOINT_LABELS = {
   '/api/v3/ping':              'ping',
   '/sapi/v1/asset/wallet/':    'walletBalance',
   '/sapi/v3/asset/wallet/balance': 'walletBalanceV3',
+  '/sapi/v1/capital/deposit/hisrec': 'capitalDepositHisrec',
+  '/sapi/v1/capital/withdraw/history': 'capitalWithdrawHistory',
 };
 function _labelForPath(path) {
   if (!path) return 'unknown';
@@ -813,6 +815,47 @@ async function cancelAllOpenOrders({ symbol }) {
   return signedRequest('DELETE', '/api/v3/openOrders', { symbol }, 1, { critical: true });
 }
 
+// ─── Capital Flow (deposit/withdraw history) — 2026-10-08 ────────────────
+//
+// ใช้คำนวณ "งบประมาณที่เติมสะสม" สำหรับบอท:
+//   - getDepositHistory:    GET /sapi/v1/capital/deposit/hisrec
+//   - getWithdrawHistory:   GET /sapi/v1/capital/withdraw/history
+//
+// Reference: https://developers.binance.com/docs/wallet/capital
+//
+// Endpoints จำเป็นต้อง:
+//   - Signed (HMAC-SHA256)  — ใช้ signedRequest() ของ module นี้
+//   - API key permission: "Enable Reading" + "Enable Withdrawals/Deposits"
+//     (ถ้า API key ไม่มีสิทธิ์ deposit/withdraw read → Binance ตอบ -2015)
+//
+// Weight: 1 (signed) — ต่ำมาก เรียกได้บ่อย
+//
+// Params (ทั้ง 2 endpoint รับชุด params ใกล้กัน):
+//   - startTime, endTime: ms epoch (window range)
+//   - limit: 1..1000 (default Binance = 1000)
+//   - offset: int (default 0) — pagination
+//   - coin (optional): filter by single asset
+//   - status (deposit): 0=pending,1=success,2=failed (default success)
+//   - status (withdraw): 0=email-sent,1=cancelled,2=awaiting approval,3=rejected,
+//                        4=processing,5=failure,6=completed (default completed)
+//
+// Idempotency: caller ต้อง upsert by txId (composite: txId + type)
+//
+async function getDepositHistory(params = {}) {
+  // Validate: limit ≤ 1000 (Binance hard cap). Default = 1000 for one-shot backfill.
+  const q = { ...params };
+  if (q.limit == null) q.limit = 1000;
+  if (q.limit > 1000) q.limit = 1000;
+  return signedRequest('GET', '/sapi/v1/capital/deposit/hisrec', q, 1, { critical: false });
+}
+
+async function getWithdrawHistory(params = {}) {
+  const q = { ...params };
+  if (q.limit == null) q.limit = 1000;
+  if (q.limit > 1000) q.limit = 1000;
+  return signedRequest('GET', '/sapi/v1/capital/withdraw/history', q, 1, { critical: false });
+}
+
 // ─── User Data Stream via WebSocket API (new, post Feb 2026) ─────
 // Replaces the legacy listenKey flow (POST/PUT/DELETE /api/v3/userDataStream)
 // which was discontinued by Binance in February 2026.
@@ -903,6 +946,8 @@ module.exports = {
   getOrder,
   getOpenOrders,
   cancelAllOpenOrders,
+  getDepositHistory,    // 2026-10-08: capital flow — deposit history
+  getWithdrawHistory,   // 2026-10-08: capital flow — withdraw history
   createListenKey,
   keepaliveListenKey,
   closeListenKey,

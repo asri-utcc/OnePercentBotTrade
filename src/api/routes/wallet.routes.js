@@ -30,6 +30,7 @@ const walletReserve = require('../../services/walletReserve');
 const autoReserve = require('../../services/autoReserve');
 const autoReserveBtcDriven = require('../../services/autoReserveBtcDriven'); // FIX-2026-09-21: BTC trend driven adjust
 const btcTrendMonitor = require('../../services/btcTrendMonitor');           // FIX-2026-09-21: read current BTC mode
+const capitalFlowService = require('../../services/capitalFlowService');      // 2026-10-08: deposit/withdraw tracker
 const AppConfig = require('../../db/models/AppConfig');
 const Trade = require('../../db/models/Trade');
 const WalletSnapshot = require('../../db/models/WalletSnapshot');
@@ -648,6 +649,117 @@ router.get('/pnl-series', requireAuth, async (req, res) => {
     });
   } catch (err) {
     logger.error({ err: err.message }, 'wallet: pnl-series failed');
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 2026-10-08: Capital Flow — deposit/withdraw history tracker
+//
+//   GET  /api/wallet/capital-flow/summary?from=&to=
+//     → { totalDepositUsdt, totalWithdrawUsdt, netDepositedUsdt, byCoin, range, ... }
+//   GET  /api/wallet/capital-flow?from=&to=&type=&asset=&limit=&skip=
+//     → { rows, total, limit, skip }   (rows sorted by insertTime desc)
+//   POST /api/wallet/capital-flow/sync
+//     → manual sync (optional body: { from, to })
+//   GET  /api/wallet/capital-flow/status
+//     → service status (last run, next run, in-flight)
+//
+// Auth: requireAuth (no bot-action password — read-only except sync which is
+//       just a refresh, not a destructive action).
+//
+// Range handling:
+//   - from/to: ISO string or ms epoch. If absent → use defaultRange
+//     (botFirstStartAt - 3 days → now).
+//   - Validation: from <= to. Bad input → 400.
+// ═══════════════════════════════════════════════════════════════════════════
+
+function _parseRangeParam(raw) {
+  if (raw == null || raw === '') return null;
+  // ms epoch (number) or ISO string
+  if (typeof raw === 'number' || /^\d+$/.test(String(raw))) {
+    const ms = Number(raw);
+    if (!Number.isFinite(ms) || ms < 0) return null;
+    return new Date(ms);
+  }
+  const d = new Date(raw);
+  if (isNaN(d.getTime())) return null;
+  return d;
+}
+
+function _validateRange(from, to) {
+  if (from && to && from.getTime() > to.getTime()) {
+    return 'from must be <= to';
+  }
+  if (from && from.getTime() > Date.now() + 86_400_000) {
+    return 'from is in the future';
+  }
+  return null;
+}
+
+// ─── GET /api/wallet/capital-flow/summary ───────────────────────────────────
+router.get('/capital-flow/summary', requireAuth, async (req, res) => {
+  try {
+    const from = _parseRangeParam(req.query.from);
+    const to = _parseRangeParam(req.query.to);
+    const err = _validateRange(from, to);
+    if (err) return res.status(400).json({ error: err });
+    const summary = await capitalFlowService.getSummary({ from, to });
+    res.json(summary);
+  } catch (err) {
+    logger.error({ err: err.message }, 'wallet: capital-flow summary failed');
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── GET /api/wallet/capital-flow ───────────────────────────────────────────
+router.get('/capital-flow', requireAuth, async (req, res) => {
+  try {
+    const from = _parseRangeParam(req.query.from);
+    const to = _parseRangeParam(req.query.to);
+    const rangeErr = _validateRange(from, to);
+    if (rangeErr) return res.status(400).json({ error: rangeErr });
+    const type = req.query.type ? String(req.query.type) : null;
+    if (type && !['deposit', 'withdraw'].includes(type)) {
+      return res.status(400).json({ error: 'type must be deposit|withdraw' });
+    }
+    const asset = req.query.asset ? String(req.query.asset) : null;
+    const limit = Math.min(500, Math.max(1, Number(req.query.limit) || 100));
+    const skip = Math.max(0, Number(req.query.skip) || 0);
+    const list = await capitalFlowService.getList({ from, to, type, asset, limit, skip });
+    res.json(list);
+  } catch (err) {
+    logger.error({ err: err.message }, 'wallet: capital-flow list failed');
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── POST /api/wallet/capital-flow/sync ─────────────────────────────────────
+//   Body (optional): { from: ISO|ms, to: ISO|ms }
+//   - default: botFirstStartAt - 3 days → now
+//   - returns: { ok, ...stats, error? }
+router.post('/capital-flow/sync', requireAuth, async (req, res) => {
+  try {
+    const body = req.body || {};
+    const from = _parseRangeParam(body.from);
+    const to = _parseRangeParam(body.to);
+    const rangeErr = _validateRange(from, to);
+    if (rangeErr) return res.status(400).json({ error: rangeErr });
+    const result = await capitalFlowService.syncFromBinance({ from, to, source: 'manual' });
+    res.json(result);
+  } catch (err) {
+    logger.error({ err: err.message, stack: err.stack }, 'wallet: capital-flow sync failed');
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── GET /api/wallet/capital-flow/status ────────────────────────────────────
+router.get('/capital-flow/status', requireAuth, (_req, res) => {
+  try {
+    const status = capitalFlowService.getStatus();
+    res.json({ ...status, ts: Date.now() });
+  } catch (err) {
+    logger.error({ err: err.message }, 'wallet: capital-flow status failed');
     res.status(500).json({ error: err.message });
   }
 });

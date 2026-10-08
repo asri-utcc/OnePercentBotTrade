@@ -46,6 +46,11 @@ const appConfigSchema = new mongoose.Schema(
     setupCompleted: { type: Boolean, default: false },
     setupAt: { type: Date, default: null },
 
+    // 2026-10-08: botFirstStartAt — set on first-ever boot, used by
+    //   capitalFlowService.getDefaultRange() as backfill lower-bound
+    //   (botFirstStartAt - 3 days). Persists across restarts.
+    botFirstStartAt: { type: Date, default: null },
+
     // FIX-2026-07-24: Telegram bot (encrypted token + plain chatId + per-event toggles + thresholds)
     //   - Token encrypted AES-256-GCM (mirror binanceApi*Enc pattern)
     //   - Chat ID is plain (ไม่ใช่ secret)

@@ -19,6 +19,7 @@ const { syncBotActionPasswordFromAppConfig } = require('./utils/botActionPasswor
 const binanceRateLimitConfig = require('./services/binanceRateLimitConfig'); // FIX-2026-08-21: dynamic Binance rate-limit capacity
 const binanceRest = require('./binance/binanceRest'); // FIX-2026-08-21: apply capacity to live token-bucket
 const walletSnapshot = require('./services/walletSnapshot'); // FIX-2026-08-22: daily portfolio-value snapshot scheduler
+const capitalFlowService = require('./services/capitalFlowService'); // 2026-10-08: deposit/withdraw tracker scheduler
 const autoReserve = require('./services/autoReserve'); // FIX-2026-08-24: auto reserve/release USDT scheduler
 const autoTiming = require('./services/autoTiming'); // FIX-2026-08-30 Phase 4: Auto-Timing (heatmap-driven entry gate)
 const btcTrendMonitor = require('./services/btcTrendMonitor'); // FIX-2026-09-21: BTC Trend Pattern global monitor (BTCUSDT 1h)
@@ -358,6 +359,14 @@ async function main() {
   walletSnapshot.start();
   await sleep(SUBSYSTEM_STAGGER_MS);
 
+  // 2026-10-08: CapitalFlow — deposit/withdraw history tracker
+  //   - On startup: ensures botFirstStartAt is set (used for default backfill range)
+  //   - Daily sync at 00:05 BKK (4 minutes after walletSnapshot 00:01)
+  //   - Default range: botFirstStartAt - 3 days → now (กันเติมเงินล่วงหน้าก่อนรันบอท)
+  //   - Manual sync available via POST /api/wallet/capital-flow/sync
+  capitalFlowService.start();
+  await sleep(SUBSYSTEM_STAGGER_MS);
+
   // FIX-2026-08-24: Auto Reserve / Release USDT — periodic adjuster
   //   - Reads AppConfig.autoReserve* every 60s, fires on BKK-aligned HH:00 (where HH % checkHours === 0)
   //   - Default OFF — start() handles dormant mode (no interval if disabled)
@@ -473,6 +482,7 @@ async function main() {
     try { delistMonitor.stop(); } catch (e) { /* ignore */ }
     try { autoDeleteBot.stop(); } catch (e) { /* ignore */ }
     try { walletSnapshot.stop(); } catch (e) { /* ignore */ }
+    try { capitalFlowService.stop(); } catch (e) { /* ignore */ }
     try { autoReserve.stop(); } catch (e) { /* ignore */ }
     try { btcTrendMonitor.stop(); } catch (e) { /* ignore */ }
     try { autoReserveBtcDriven.stop(); } catch (e) { /* ignore */ }
