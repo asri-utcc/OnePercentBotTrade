@@ -81,9 +81,12 @@
     cfCounts: document.getElementById('capital-flow-counts'),
     // 2026-10-08: Net Profit big card (Total Portfolio - Net Deposited)
     cfProfitBig: document.getElementById('capital-flow-profit-big'),
+    cfProfitThb: document.getElementById('capital-flow-profit-thb'),
     cfProfitPct: document.getElementById('capital-flow-profit-pct'),
     cfPortfolioBig: document.getElementById('capital-flow-portfolio-big'),
+    cfPortfolioThb: document.getElementById('capital-flow-portfolio-thb'),
     cfNetdepBig: document.getElementById('capital-flow-netdep-big'),
+    cfNetdepThb: document.getElementById('capital-flow-netdep-thb'),
     cfProfitError: document.getElementById('capital-flow-profit-error'),
     cfProfitChartContainer: document.getElementById('capital-flow-profit-chart-container'),
     cfMetaSync: document.getElementById('capital-flow-meta-sync'),
@@ -984,50 +987,72 @@
 
   // 2026-10-08: Net Profit big card — Total Portfolio - Net Deposited
   function renderCapitalFlowProfit(summary, isThb) {
-    const unit = isThb ? '฿' : 'USDT';
     const profit = isThb ? Number(summary.netProfitUsdtThb) : Number(summary.netProfitUsdt);
     const portfolio = isThb ? Number(summary.totalPortfolioThb) : Number(summary.totalPortfolioUsdt);
     const netDep = isThb ? Number(summary.netDepositedUsdtThb) : Number(summary.netDepositedUsdt);
+    // Always keep USDT as the big primary, plus THB as a secondary line below
+    const profitUsdt = Number(summary.netProfitUsdt);
+    const profitThb = Number(summary.netProfitUsdtThb);
+    const portfolioUsdt = Number(summary.totalPortfolioUsdt);
+    const portfolioThb = Number(summary.totalPortfolioThb);
+    const netDepUsdt = Number(summary.netDepositedUsdt);
+    const netDepThb = Number(summary.netDepositedUsdtThb);
 
     // Profit % vs Net Deposited (ROI)
     let pct = null;
-    if (isFinite(profit) && isFinite(netDep) && Math.abs(netDep) > 0.0001) {
-      pct = (profit / netDep) * 100;
+    if (isFinite(profitUsdt) && isFinite(netDepUsdt) && Math.abs(netDepUsdt) > 0.0001) {
+      pct = (profitUsdt / netDepUsdt) * 100;
     }
 
     if (els.cfProfitBig) {
-      if (isFinite(profit)) {
-        const sign = profit >= 0 ? '+' : '−';
-        const abs = Math.abs(profit);
-        els.cfProfitBig.textContent = `${sign}${abs.toLocaleString('en-US', { maximumFractionDigits: isThb ? 0 : 2 })} ${unit}`;
-        els.cfProfitBig.style.color = profit >= 0 ? 'var(--bull-1)' : 'var(--bear-1)';
+      if (isFinite(profitUsdt)) {
+        const sign = profitUsdt >= 0 ? '+' : '−';
+        const abs = Math.abs(profitUsdt);
+        els.cfProfitBig.textContent = `${sign}${abs.toLocaleString('en-US', { maximumFractionDigits: 2 })} USDT`;
+        els.cfProfitBig.style.color = profitUsdt >= 0 ? 'var(--bull-1)' : 'var(--bear-1)';
       } else {
         els.cfProfitBig.textContent = '—';
         els.cfProfitBig.style.color = 'var(--text-1)';
       }
     }
+    if (els.cfProfitThb) {
+      els.cfProfitThb.textContent = isFinite(profitThb)
+        ? `≈ ${(profitThb >= 0 ? '+' : '−')}${Math.abs(profitThb).toLocaleString('en-US', { maximumFractionDigits: 0 })} ฿`
+        : '';
+      els.cfProfitThb.style.color = isFinite(profitThb) ? (profitThb >= 0 ? 'var(--bull-1)' : 'var(--bear-1)') : 'var(--text-2)';
+    }
     if (els.cfProfitPct) {
-      if (isFinite(profit) && pct != null) {
+      if (isFinite(profitUsdt) && pct != null) {
         const pctSign = pct >= 0 ? '+' : '';
         els.cfProfitPct.textContent = `ROI ${pctSign}${pct.toFixed(2)}%  •  vs Net Deposited`;
         els.cfProfitPct.style.color = pct >= 0 ? 'var(--bull-1)' : 'var(--bear-1)';
       } else {
-        els.cfProfitPct.textContent = isFinite(profit) ? '' : '—';
+        els.cfProfitPct.textContent = isFinite(profitUsdt) ? '' : '—';
         els.cfProfitPct.style.color = 'var(--text-2)';
       }
     }
     if (els.cfPortfolioBig) {
-      els.cfPortfolioBig.textContent = isFinite(portfolio)
-        ? `${portfolio.toLocaleString('en-US', { maximumFractionDigits: isThb ? 0 : 2 })} ${unit}`
+      els.cfPortfolioBig.textContent = isFinite(portfolioUsdt)
+        ? `${portfolioUsdt.toLocaleString('en-US', { maximumFractionDigits: 2 })} USDT`
         : '—';
+    }
+    if (els.cfPortfolioThb) {
+      els.cfPortfolioThb.textContent = isFinite(portfolioThb)
+        ? `≈ ${portfolioThb.toLocaleString('en-US', { maximumFractionDigits: 0 })} ฿`
+        : '';
     }
     if (els.cfNetdepBig) {
-      els.cfNetdepBig.textContent = isFinite(netDep)
-        ? `${netDep.toLocaleString('en-US', { maximumFractionDigits: isThb ? 0 : 2 })} ${unit}`
+      els.cfNetdepBig.textContent = isFinite(netDepUsdt)
+        ? `${netDepUsdt.toLocaleString('en-US', { maximumFractionDigits: 2 })} USDT`
         : '—';
     }
+    if (els.cfNetdepThb) {
+      els.cfNetdepThb.textContent = isFinite(netDepThb)
+        ? `≈ ${netDepThb.toLocaleString('en-US', { maximumFractionDigits: 0 })} ฿`
+        : '';
+    }
     if (els.cfProfitError) {
-      els.cfProfitError.style.display = (summary.portfolioError || !isFinite(portfolio)) ? 'block' : 'none';
+      els.cfProfitError.style.display = (summary.portfolioError || !isFinite(portfolioUsdt)) ? 'block' : 'none';
     }
     // Re-render profit chart (currency may have changed)
     if (_profitHistory) renderCapitalFlowProfitChart(_profitHistory);
