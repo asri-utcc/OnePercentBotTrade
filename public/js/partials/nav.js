@@ -62,6 +62,9 @@
         ${links.map((l) => `<a class="nav-pill ${active === l.key ? 'active' : ''}" href="${l.href}">${l.label}</a>`).join('')}
       </nav>
       <div class="ms-auto d-flex align-items-center gap-2">
+        <button type="button" class="btn btn-sm btn-outline-warning pwa-install-btn" id="btn-pwa-install" style="display:none; align-items:center; gap:5px; font-weight:600; font-size:12px; padding:3px 9px; border-radius:6px;" title="ติดตั้งแอป OnePercentBot ลงในเครื่อง">
+          <span>📲 ติดตั้งแอป</span>
+        </button>
         <span class="balance-pill" id="nav-balance" title="ยอด USDT จาก Binance + �่าเงิน THB">
           <span class="balance-icon">💰</span>
           <span class="balance-text" id="nav-balance-text">
@@ -94,13 +97,17 @@
     </div>
     <div class="mobile-menu d-md-none" id="mobile-menu" style="display:none;">
       <div class="d-flex flex-column gap-1">
+        <button type="button" class="nav-pill pwa-install-btn" id="btn-pwa-install-mobile" style="display:none; text-align:left; border:1px solid #ffd76a; color:#ffd76a; background:rgba(255,215,106,0.1); font-weight:600;">📲 ติดตั้งแอป (Install App)</button>
         ${links.map((l) => `<a class="nav-pill ${active === l.key ? 'active' : ''}" href="${l.href}">${l.label}</a>`).join('')}
         ${active !== 'login' ? `<button class="nav-pill nav-pill-logout" id="logout-btn-mobile" type="button">🚪 Logout</button>` : ''}
       </div>
     </div>`;
 
   const target = document.getElementById('app-nav');
-  if (target) target.innerHTML = desktopHtml;
+  if (target) {
+    target.innerHTML = desktopHtml;
+    window.dispatchEvent(new Event('pwa:check-buttons'));
+  }
 
   // hamburger toggle
   const toggle = document.getElementById('nav-toggle');

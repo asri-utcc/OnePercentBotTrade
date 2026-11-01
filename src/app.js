@@ -352,8 +352,8 @@ app.post('/api/release/push-update', requireAuthOrLicenseKey, (req, res) => {
   //   - ไฟล์ HTML ที่ต้อง auth → Cache-Control: no-store (กัน back-button cache leak หลัง logout)
   //   - Public (whitelist): /login.html, /favicon.svg, /css/*, /js/api.js, /js/botConfigIO.js
   //   - ทุก path อื่น → ต้อง session.authenticated === true ถึงจะเห็นเนื้อหา
-  const PUBLIC_EXACT = new Set(['/login.html', '/favicon.svg', '/consent']); // FIX-2026-08-26 Phase 2c-v2: /consent reachable pre-login (top-level handler also registers it, belt-and-braces)
-  const PUBLIC_PREFIXES = ['/css/', '/js/api.js', '/js/botConfigIO.js'];
+  const PUBLIC_EXACT = new Set(['/login.html', '/favicon.svg', '/consent', '/manifest.json', '/sw.js']); // FIX-2026-08-26 Phase 2c-v2: /consent reachable pre-login (top-level handler also registers it, belt-and-braces)
+  const PUBLIC_PREFIXES = ['/css/', '/js/api.js', '/js/botConfigIO.js', '/js/pwa.js', '/icons/'];
 
   function isPublicStaticPath(p) {
     if (PUBLIC_EXACT.has(p)) return true;
@@ -365,7 +365,9 @@ app.post('/api/release/push-update', requireAuthOrLicenseKey, (req, res) => {
     setHeaders: (res, filePath) => {
       // HTML ที่ต้อง auth → ห้าม cache (กัน back-button cache leak หลัง logout)
       // Public HTML (login.html) → browser cache ได้ตามปกติ (Etag + 304)
-      if (filePath.endsWith('.html') && !filePath.endsWith('login.html')) {
+      if (filePath.endsWith('sw.js')) {
+        res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+      } else if (filePath.endsWith('.html') && !filePath.endsWith('login.html')) {
         res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
         res.setHeader('Pragma', 'no-cache');
       }

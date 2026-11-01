@@ -35,3 +35,4 @@ scripts/_*.js
 .cookie
 data/configbackup-pre-restore-*.json
 data/update-checker-state.json
+data/update-*
