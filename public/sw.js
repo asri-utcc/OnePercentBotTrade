@@ -1,10 +1,12 @@
 // OnePercent Bot Trade - Service Worker
-const CACHE_NAME = 'onepercent-pwa-v1';
+const CACHE_NAME = 'onepercent-pwa-v2';
 const PRECACHE_URLS = [
   '/manifest.json',
   '/favicon.svg',
   '/icons/icon-192.png',
-  '/icons/icon-512.png'
+  '/icons/icon-512.png',
+  '/icons/icon-maskable-192.png',
+  '/icons/icon-maskable-512.png'
 ];
 
 self.addEventListener('install', (event) => {
