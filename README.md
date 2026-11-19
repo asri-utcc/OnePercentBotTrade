@@ -2,6 +2,8 @@
 
 Node.js Binance Spot Trading Bot ที่ใช้ **S1 signal** จาก Pine Script indicator "BOD Signal Overlay" (Keltner Channel + bg zones) เพื่อ trigger **maker-only BUY → TP SELL** (ไม่มี SL) พร้อม web dashboard
 
+**เวอร์ชันปัจจุบัน: v2.9.1** — ดู [Changelog](#changelog) และรายงานตรวจระบบ [AUDIT-2026-11-19.md](./AUDIT-2026-11-19.md)
+
 ## Features
 
 - 🎯 **S1 Signal Detection**: แปลง Pine Script v5 indicator เป็น JavaScript pure functions (RMA-based ATR, EMA)
@@ -14,6 +16,8 @@ Node.js Binance Spot Trading Bot ที่ใช้ **S1 signal** จาก Pine
 - 🔐 **Session Auth**: password-based login พร้อม bcrypt + AES-256-GCM encrypted API keys
 - 🔁 **Auto-reconnect**: Binance WebSocket ตัด → reconnect + resubscribe + backfill
 - 📚 **DCA + BEP Stack Mode** (opt-in per bot): เปิด DCA → S1 signal ตัวแรกเปิด stack, ตัวถัดไปเพิ่ม layer (สูงสุด `dcaMaxLayers`, default 3) → BEP = weighted avg → aggregate SELL ที่ BEP+TP. **CB panic-sell ปิดใน DCA mode** (no cut loss). Spot only, no leverage. ดู [DCA Stack Mode](#dca--bep-stack-mode)
+- 🔎 **Reconcile Audit** (v2.9.0): ตรวจ DB ↔ Binance แบบ read-only ทุก 6 ชม. แจ้ง Telegram เมื่อข้อมูลไม่ตรง
+- 🧯 **Stranded-position safety** (v2.8.x): holding-retry 1 chain/trade + park เมื่อต่ำกว่า MIN_NOTIONAL, force-close ขายเฉพาะ qty ของ trade ตัวเอง
 - 🎲 **DCA + Martingale sizing** (opt-in per bot, DCA-only): เปิด Martingale ใน DCA mode → layer N notional = `capitalPerTrade × multiplier^(N-1)`, capped by per-layer cap (default 100 USDT). ทำให้ BEP recover เร็วขึ้น แต่ max loss สูงขึ้นเมื่อถึง max layers. ดู [DCA Stack Mode](#dca--bep-stack-mode)
 
 ## Quick Start
@@ -89,7 +93,7 @@ npm run pm2:logs | grep -E "admin-monitor|license-gate"
 ## ⚠️ Binance API Key Best Practices
 
 1. ตั้ง permission: **"Enable Spot & Margin Trading" เท่านั้น, ปิด Withdraw**
-2. ผูก **IP whitelist** กับ IP เครื่องที่รันบอท
+2. ผูก **IP whitelist** กับ IP เครื่องที่รันบอท (audit 2026-11-19: key ปัจจุบันยัง `ipRestrict=false` — ควรตั้ง)
 3. ทดสอบกับ **ทุนน้อย** ก่อน (เช่น $10/trade 10 ไม้ = $100)
 4. ทำ Backtest ก่อนเสมอ
 
@@ -101,12 +105,17 @@ src/
 ├── app.js             # Express app
 ├── db/                # Mongoose models + connection
 ├── binance/           # REST, WS, symbolInfo, fees
-├── core/              # signalEngine, trader, botManager, backtester
-├── services/          # eventBus, klineCache, crypto, botDefaults
+├── core/              # signalEngine, trader, botManager, backtester, forceClose,
+│                      #   tradeCloseFields (shared sold-transition resets)
+├── services/          # eventBus, klineCache, crypto, botDefaults, positionWatchdog,
+│                      #   waitingSellRecovery, reconcileAudit, telegramNotifier
 ├── api/routes/        # auth, bots, trades, signals, chart, backtest, account
 ├── admin-monitor/     # phone-home (heartbeat) + command executor
 ├── realtime/          # dashboardWs (WebSocket server)
 └── utils/             # logger, rateLimiter
+
+scripts/               # ops/maintenance — reconcile-audit.js, audit-fix-2026-11-19.js, migrations
+tests/                 # jest (133 suites) — `npm test` ไม่แตะ DB จริง
 
 public/                # Frontend dashboard (plain HTML/JS)
 ├── login.html, bots.html, bot-edit.html, chart.html, chart-monitor.html, backtest.html
@@ -252,6 +261,23 @@ curl -b cookie https://<host>/api/health/reconcile-audit
 - Default `dcaEnabled: false` keeps existing code 100% unchanged
 - Migration is idempotent (re-running shows 0 modified)
 - Existing CB / SL-UKC / partial-fill / force-close code paths work for non-DCA trades
+
+## Changelog
+
+### v2.9.1 — 2026-11-19
+- refactor: reset fields ตอนเปลี่ยนเป็น `sold` (F1 arm + SELL partial latch) รวมไว้ที่ `src/core/tradeCloseFields.js` แทน copy-paste 7 จุด — พิสูจน์ด้วย AST ทั้งไฟล์ว่าพฤติกรรมไม่เปลี่ยน
+
+### v2.9.0 — 2026-11-19
+- feat: `reconcileAudit` service + `scripts/reconcile-audit.js` + `GET/POST /api/health/reconcile-audit`
+- fix: reconcile ไม่ส่ง trade `holding` เข้า orphan-BUY path อีก (เดิมยิง SELL + EMERGENCY MARKET ซ้ำทุก 5 นาที)
+- ops: `uncaughtException` → graceful shutdown + exit(1); cookie `secure: 'auto'`; pm2-logrotate
+
+### v2.8.1 — 2026-11-19
+- fix(critical): positionWatchdog/forceClose ขายเหรียญของ trade อื่นทั้งก้อน (projection ไม่มี `buyQty`) — ซ่อมข้อมูล PnL +112.61 USDT
+- fix: waitingSellRecovery cancel เฉพาะ order ของตัวเอง + เช็ค wallet ก่อนวาง SELL
+- fix: holding-retry dedupe ต่อ trade, park เมื่อ exhausted / NOTIONAL, Telegram latch 6 ชม.
+- perf: reconcile query กรอง cancelled ที่ DB + index `{state, updatedAt}`
+- chore: url.parse → URL, shared process exit listener, PM2 `kill_timeout` 15s, test fixes
 
 ## License
 
