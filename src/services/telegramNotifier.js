@@ -24,6 +24,8 @@ const alertConfig = require('./alertConfig'); // FIX-2026-08-27 Phase 3b-2: cust
 // ─── Defaults (mirror AppConfig schema) ───────────────
 const DEFAULT_EVENTS = {
   buyFilled: true, sellFilled: true, insufficientBalance: true,
+  // FIX-2026-11-19: reconcileAudit — DB ↔ Binance mismatch (read-only periodic check)
+  reconcileAudit: true,
   botEnabled: true, botDisabled: true, botDeleted: true,
   positionLoss: true, positionProfit: true, positionStuck: true,
   // FIX-2026-07-26: สรุปการเทรดรายวัน/สัปดาห์/เดือน (3 messages — ส่งพร้อมกันตอน HH:00:00)
@@ -459,6 +461,12 @@ function renderMessage(eventKey, p, cfg) {
           }
         }
         return `${emoji} SELL filled\nBot: ${p.botName}\nSymbol: ${p.symbol}\nQty: ${formatQty(p.qty)} @${formatPrice(p.price, p.symbol)}\nP&L: ${sign}${pnl.toFixed(4)} USDT${pctInline}${reasonLine}${thbLine}${todayPnlLine}${balLine}`;
+      }
+      // FIX-2026-11-19: DB ↔ Binance reconcile audit
+      case 'reconcileAudit': {
+        const list = (p.issues || []).slice(0, 15).map((i) => `• [${i.type}] ${i.detail}`).join('\n');
+        const more = (p.issues || []).length > 15 ? `\n… และอีก ${(p.issues || []).length - 15} รายการ` : '';
+        return `🔎 Reconcile audit: DB ไม่ตรงกับ Binance ${(p.issues || []).length} รายการ\n${list}${more}\n\nตรวจ/ซ่อม: node scripts/audit-fix-2026-11-19.js (dry-run)`;
       }
       case 'insufficientBalance':
         return `💸 Insufficient USDT\nBot: ${p.botName}\nSymbol: ${p.symbol}\n${p.note || ''}`.trim();

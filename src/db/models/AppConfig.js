@@ -64,6 +64,7 @@ const appConfigSchema = new mongoose.Schema(
       type: Object,
       default: () => ({
         buyFilled: true, sellFilled: true, insufficientBalance: true,
+        reconcileAudit: true, // FIX-2026-11-19
         botEnabled: true, botDisabled: true, botDeleted: true,
         positionLoss: true, positionProfit: true, positionStuck: true,
         // FIX-2026-07-26: สรุปการเทรด (ส่งที่ HH:00:00 ของวันใหม่/สัปดาห์ใหม่/เดือนใหม่)

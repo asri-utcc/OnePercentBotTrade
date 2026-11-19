@@ -360,7 +360,7 @@ router.post('/login-telegram/request', authTgRequestLimiter, async (req, res) =>
       httpOnly: true,
       sameSite: 'lax',
       maxAge: 5 * 60 * 1000, // 5 min
-      secure: false, // dev (http) — production should set up TLS termination
+      secure: req.secure, // FIX-2026-11-19: Secure on HTTPS (trust proxy → req.secure honours X-Forwarded-Proto)
     });
     logger.info({ ip }, 'login-telegram: OTP sent');
     res.json({ ok: true, expiresInSec: result.expiresInSec });

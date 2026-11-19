@@ -104,8 +104,9 @@ function createApp() {
       httpOnly: true,
       maxAge: 7 * 24 * 60 * 60 * 1000, // 7 วัน
       sameSite: 'lax',
-      // secure: true ถ้าใช้ HTTPS (ต้อง trust proxy ก่อน)
-      secure: false, // เปลี่ยนเป็น 'auto' ถ้ามี HTTPS reverse proxy
+      // FIX-2026-11-19: 'auto' — Secure flag when the request is HTTPS (direct or via Caddy
+      //   X-Forwarded-Proto; trust proxy=1 above), plain cookie for LAN http:// access
+      secure: 'auto',
     },
     store: MongoStore.create({
       mongoUrl: config.mongoUri,

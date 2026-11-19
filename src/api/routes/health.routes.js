@@ -46,6 +46,20 @@ router.post('/watchdog/run', requireAuth, async (req, res) => {
   }
 });
 
+// FIX-2026-11-19: Reconcile Audit (read-only DB ↔ Binance) status + manual run
+router.get('/reconcile-audit', requireAuth, (req, res) => {
+  res.json(require('../../services/reconcileAudit').getStatus());
+});
+
+router.post('/reconcile-audit/run', requireAuth, async (req, res) => {
+  try {
+    const issues = await require('../../services/reconcileAudit').runOnce({ notify: false });
+    res.json({ ok: true, issueCount: issues.length, issues });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 // FIX-2026-08-06: Delist Monitor status + scheduled symbols (admin)
 router.get('/delist', requireAuth, (req, res) => {
   const status = delistMonitor.getStatus();

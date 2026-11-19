@@ -664,6 +664,11 @@ class BotManager {
               // skip ถ้า trade เป็น selling/sold อยู่แล้ว (normal path)
               if (['selling', 'sold'].includes(trade.state)) {
                 logger.debug({ tradeId: trade._id.toString(), dbState: trade.state }, 'reconcile: BUY filled, trade already in selling/sold — skip');
+              } else if (trade.state === 'holding') {
+                // FIX-2026-11-19: 'holding' = BUY already processed + SELL failed → owned by scheduleHoldingRetry
+                //   (re-armed below with park cooldown). เดิมเข้า orphan branch → handleBuyFilled ซ้ำทุก sweep
+                //   → SELL + EMERGENCY MARKET ยิงใหม่ทุก 5 นาที ข้าม parking (ทั้งที่ trade ต่ำกว่า MIN_NOTIONAL)
+                logger.debug({ tradeId: trade._id.toString() }, 'reconcile: BUY filled, trade holding — managed by holding retry');
               } else {
                 // FIX-2026-09-09 (ETCUSDT orphan bug): pre-check Binance ก่อนบอกว่า orphan
                 //   เคส: state='filled' + sellOrderId ค้างใน DB แต่ SELL ยังมีชีวิตบนกระดานจริง

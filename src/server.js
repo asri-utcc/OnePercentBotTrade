@@ -331,6 +331,10 @@ async function main() {
   waitingSellRecovery.start();
   await sleep(SUBSYSTEM_STAGGER_MS);
 
+  // FIX-2026-11-19: Reconcile Audit — read-only DB ↔ Binance consistency check every 6h (Telegram on mismatch)
+  const reconcileAudit = require('./services/reconcileAudit');
+  reconcileAudit.start();
+
   // FIX-2026-08-05: Auto-Buy BNB — periodic scan + MARKET BUY BNB/USDT when value < threshold
   //   user-configurable via /api/bnb-auto-buy/config (default OFF — must opt-in)
   autoBnbBuyer.start();
@@ -471,7 +475,7 @@ async function main() {
 
   // Graceful shutdown
   let shuttingDown = false;
-  const shutdown = async (signal) => {
+  const shutdown = async (signal, exitCode = 0) => {
     if (shuttingDown) return;
     shuttingDown = true;
     logger.info({ signal }, 'shutting down');
@@ -489,12 +493,13 @@ async function main() {
     try { autoTiming.stop(); } catch (e) { /* ignore */ }
     try { autoUnderwaterV2.stop(); } catch (e) { /* ignore */ }
     try { waitingSellRecovery.stop(); } catch (e) { /* ignore */ }
+    try { require('./services/reconcileAudit').stop(); } catch (e) { /* ignore */ }
     try { adminMonitor.stop(); } catch (e) { /* ignore */ }
     try { await botManager.flushActiveTimeOnShutdown(); } catch (e) { /* ignore */ }
     try { await botManager.stop(); } catch (e) { /* ignore */ }
     server.close(() => {
       db.disconnect().finally(() => {
-        process.exit(0);
+        process.exit(exitCode);
       });
     });
     setTimeout(() => {
@@ -505,8 +510,12 @@ async function main() {
   process.on('SIGINT', () => shutdown('SIGINT'));
   process.on('SIGTERM', () => shutdown('SIGTERM'));
 
+  // FIX-2026-11-19: uncaughtException = process state is undefined (half-applied DB/order updates in
+  //   memory) → log, graceful shutdown (stops traders, flushes), exit(1) so PM2 restarts with backoff.
+  //   Startup reconcile re-syncs open trades from Binance. (0 occurrences in logs since 2026-10-30.)
   process.on('uncaughtException', (err) => {
-    logger.error({ err: err.message, stack: err.stack }, 'uncaughtException');
+    logger.fatal({ err: err.message, stack: err.stack }, 'uncaughtException — shutting down for a clean restart');
+    shutdown('uncaughtException', 1);
   });
   process.on('unhandledRejection', (err) => {
     logger.error({ err: err && err.message ? err.message : err }, 'unhandledRejection');
