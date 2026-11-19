@@ -293,7 +293,7 @@ describe('FIX 2 — orphan alert latch uses a dedicated field, not updatedAt', (
     // rewrote the trade every 5 min, updatedAt was always ~5 min old → alert never fired
     // (FFUSDT: telegramAlerted:false, staleMsSinceLastUpdate≈280000, 98× in a row).
     const ffLikeTrade = { updatedAt: new Date(NOW - 280000), orphanBuyAlertedAt: null };
-    const oldRule = (Date.now() - new Date(ffLikeTrade.updatedAt).getTime()) > 60 * 60 * 1000;
+    const oldRule = (NOW - new Date(ffLikeTrade.updatedAt).getTime()) > 60 * 60 * 1000;
     expect(oldRule).toBe(false);                                                   // old: silent
     expect(shouldAlert({ trade: ffLikeTrade, recovered: false, now: NOW })).toBe(true); // new: alerts
   });

@@ -41,6 +41,10 @@ const callContext = require('../utils/callContext');
 //   - default 5 minutes (300_000 ms) — ให้เวลา panic-sell dust settle + กัน FOMO re-entry
 const CB_SUPPRESS_MS = 5 * 60 * 1000;
 
+// FIX-2026-11-19: shared process-exit cleanup registry (see Trader#start)
+const _exitCleanups = new Set();
+let _exitHookInstalled = false;
+
 // FIX-2026-08-07: CBv2 cooldown duration (HYBRID mode — replaces short CBV2_SUPPRESS_MS)
 //   - ใช้ bot.cbv2LockHours (user-configurable, default 8) แปลงเป็น ms แบบ dynamic ใน placeBuy
 //   - เดิม: short 30s suppression + bot.enabled=false (lock) → HYBRID: long window + bot ยัง enabled
@@ -72,7 +76,10 @@ class Trader {
     this.running = false;
     this.currentTrade = null;
     this.retryCheckTimer = null;
-    this.holdingRetryTimer = null;
+    // FIX-2026-11-19: per-trade holding-retry chains (tradeId → timeout | null while in-flight)
+    //   เดิมใช้ this.holdingRetryTimer ตัวเดียว → trade ที่ 2 ล้าง timer ของ trade แรก (multi-trade bots)
+    //   และ reconcile re-arm ซ้อน chain เดิมทุก 5 นาที → 2+ chains ต่อ trade ยิง getAccount/SELL ซ้ำ
+    this.holdingRetryTimers = new Map();
     this.currentBookTicker = null;
     this.lastSignalIndex = -1; // index ของแท่งที่ S1 ล่าสุดที่เคย trigger แล้ว (กันยิงซ้ำ)
 
@@ -666,7 +673,13 @@ class Trader {
         if (this._marketReconnectHandler) eventBus.off('market:reconnected', this._marketReconnectHandler);
         if (this._botUpdatedHandler) eventBus.off('bot:updated', this._botUpdatedHandler);
       };
-      process.on('exit', this._processExitCleanup);
+      // FIX-2026-11-19: one shared process 'exit' listener for all traders (เดิม 1 listener/trader
+      //   → MaxListenersExceededWarning ทุก startup เมื่อมีบอท > 10 ตัว)
+      _exitCleanups.add(this._processExitCleanup);
+      if (!_exitHookInstalled) {
+        _exitHookInstalled = true;
+        process.on('exit', () => { for (const fn of _exitCleanups) { try { fn(); } catch (_) { /* exiting */ } } });
+      }
     }
   }
 
@@ -676,9 +689,9 @@ class Trader {
       clearTimeout(this.retryCheckTimer);
       this.retryCheckTimer = null;
     }
-    if (this.holdingRetryTimer) {
-      clearTimeout(this.holdingRetryTimer);
-      this.holdingRetryTimer = null;
+    if (this.holdingRetryTimers) {
+      for (const t of this.holdingRetryTimers.values()) if (t) clearTimeout(t);
+      this.holdingRetryTimers.clear();
     }
     // FIX-2026-07-15: clear sweep timer + reconnect debounce
     if (this.sweepTimer) {
@@ -734,7 +747,7 @@ class Trader {
     if (this._botUpdatedHandler) eventBus.off('bot:updated', this._botUpdatedHandler);
     // FIX-2026-08-22: remove process exit handler (normal stop path ลบ listeners เองแล้ว)
     if (this._processExitCleanup) {
-      process.removeListener('exit', this._processExitCleanup);
+      _exitCleanups.delete(this._processExitCleanup);
       this._processExitCleanup = null;
     }
     this._cbKlineHandler = null;
@@ -6296,52 +6309,64 @@ class Trader {
   // FIX-2026-07-31 (BUG-12): per-trade persisted counter (trade.holdingRetryCount) — แต่ละ stranded
   //   position มี budget แยก 10 retries แทนที่จะแชร์ global this.holdingRetryCount เดียว
   //   กัน multi-trade bots ที่ trade แรกหมด budget แล้ว trade อื่นถูกปล่อยทิ้ง
-  async scheduleHoldingRetry(trade, qty, buyPrice, targetSellPrice) {
+  //
+  // FIX-2026-11-19: one chain per trade + parking
+  //   - external callers (reconcile, fill handlers) are deduped while a chain is active for the trade
+  //   - internal reschedules pass { internal: true } to replace the chain's own timer
+  //   - exhausted budget / sub-MIN_NOTIONAL → park (holdingRetryParkedAt) instead of resetting the
+  //     counter; reconcile re-arms only after HOLDING_RETRY_PARK_COOLDOWN_MS. Alerts are latched.
+  async scheduleHoldingRetry(trade, qty, buyPrice, targetSellPrice, opts = {}) {
+    const key = String(trade._id);
+    if (!opts.internal && this.holdingRetryTimers.has(key)) {
+      logger.debug({ tradeId: key }, 'trader: holding retry — chain already active for trade, skip duplicate');
+      return;
+    }
+    const prevTimer = this.holdingRetryTimers.get(key);
+    if (prevTimer) clearTimeout(prevTimer);
+    this.holdingRetryTimers.delete(key);
+    if (!this.running) return;
+    // reserve the slot synchronously (before any await) so concurrent callers see the chain
+    this.holdingRetryTimers.set(key, null);
+
     // FIX-2026-10-01: Task Monitor — register + record fire for recurring holdingRetry
     this._trackTimer('holdingRetry', 30 * 1000);
     this._recordTimerFire('holdingRetry');
-    if (this.holdingRetryTimer) clearTimeout(this.holdingRetryTimer);
-    if (!this.running) return;
 
     // FIX P1.5: counter ป้องกัน retry loop infinite — max 10 ครั้ง (~10 นาที)
-    //   เดิม: schedule 60s เรื่อยๆ ไม่จำกัด → ถ้า MARKET SELL fail ตลอด (เช่น API key หมดสิทธิ์) → ค้างเป็นชั่วโมง
-    //   fix: นับ counter, ถ้าเกิน 10 ครั้ง → mark stuck + alert telegram แทนการ retry
     const MAX_HOLDING_RETRIES = 10;
     // FIX-2026-07-31 (BUG-12): atomic $inc on per-trade counter (returns updated doc)
     const incRes = await Trade.findOneAndUpdate(
       { _id: trade._id, state: 'holding' },
       { $inc: { holdingRetryCount: 1 } },
       { new: true }
-    );
+    ).catch((err) => {
+      logger.warn({ err: err.message, tradeId: key }, 'trader: holding retry — counter update failed');
+      return null;
+    });
     if (!incRes) {
       // trade ไม่ได้อยู่ใน holding แล้ว — abort
+      this.holdingRetryTimers.delete(key);
       return;
     }
     const retryCount = incRes.holdingRetryCount;
     if (retryCount > MAX_HOLDING_RETRIES) {
+      this.holdingRetryTimers.delete(key);
       logger.error({
-        tradeId: trade._id.toString(),
+        tradeId: key,
         botId: this.bot._id.toString(),
         symbol: this.bot.symbol,
         retryCount: retryCount - 1,
         maxRetries: MAX_HOLDING_RETRIES,
       }, 'trader: holding retry exhausted — MANUAL INTERVENTION REQUIRED');
-      // alert telegram — ใช้ eventBus เพื่อไม่ couple กับ telegramNotifier
-      eventBus.emit('insufficient:balance', {
-        botId: this.bot._id,
-        symbol: this.bot.symbol,
-        note: `⚠️ Holding retry exhausted after ${MAX_HOLDING_RETRIES} attempts — manual intervention required (trade ${trade._id})`,
-      });
-      // mark stuck ใน trade เพื่อให้เห็นใน UI + reset counter
-      await Trade.updateOne(
-        { _id: trade._id, state: 'holding' },
-        { $set: { state: 'holding', error: `stuck: holding_retry_exhausted_${MAX_HOLDING_RETRIES}`, holdingRetryCount: 0 } }
-      ).catch(() => null);
+      await this._parkHoldingRetry(trade, `holding_retry_exhausted_${MAX_HOLDING_RETRIES}`,
+        `⚠️ Holding retry exhausted after ${MAX_HOLDING_RETRIES} attempts — manual intervention required (trade ${trade._id})`);
       return;
     }
 
-    this.holdingRetryTimer = setTimeout(async () => {
+    const timer = setTimeout(async () => {
+      let keepChain = false; // true when this run scheduled the next attempt itself
       // FIX-2026-10-02: Task Monitor depth — attribute any binance API weight to holdingRetry task
+      try {
       await callContext.run(this._taskName('holdingRetry'), async () => {
       if (!this.running) return;
       try {
@@ -6370,8 +6395,9 @@ class Trader {
             tradeId: trade._id.toString(),
             freeQty, lockedQty, totalQty, expected: qty, baseAsset,
             retryCount: fresh.holdingRetryCount,
-          }, 'trader: holding retry — asset balance too low (free+locked < expected), will retry in 60s');
-          this.scheduleHoldingRetry(trade, qty, buyPrice, targetSellPrice);
+          }, 'trader: holding retry — asset balance too low (free+locked < expected), will retry in 30s');
+          keepChain = true;
+          this.scheduleHoldingRetry(trade, qty, buyPrice, targetSellPrice, { internal: true });
           return;
         }
 
@@ -6552,11 +6578,17 @@ class Trader {
             { _id: trade._id, sellInFlight: true },
             { $set: { state: 'holding', sellStatus: 'CANCELED', sellInFlight: false, sellInFlightAt: null }, $unset: { sellOrderId: '', sellClientOrderId: '' } }
           ).catch(() => null);
+          // FIX-2026-11-19: MIN_NOTIONAL / PERCENT_PRICE rejects ไม่หายเองใน 60s (ราคาต้องฟื้นก่อน)
+          //   → park แทนการยิง MARKET ซ้ำทุกนาที (เดิม ~6k failures/วัน + weight เปลือง)
+          if (Trader.isUnsellableAtMarketError(resp.error)) {
+            await this._parkHoldingRetry(trade, 'below_min_notional',
+              `⚠️ ${this.bot.symbol}: MARKET SELL rejected (${resp.error.msg || resp.error.code}) — position value below Binance minimum, parked until price recovers (trade ${trade._id})`);
+            return;
+          }
           // FIX P1.5: counter จะถูก increment ใน scheduleHoldingRetry call ถัดไป
           //   ถ้าเกิน MAX_HOLDING_RETRIES จะ alert + abort
-          if (this.running) {
-            this.holdingRetryTimer = setTimeout(() => this.scheduleHoldingRetry(trade, qty, buyPrice, targetSellPrice), 60 * 1000);
-          }
+          this._deferHoldingRetry(trade, qty, buyPrice, targetSellPrice);
+          keepChain = true;
           return;
         }
 
@@ -6663,12 +6695,58 @@ class Trader {
           { $set: { state: 'holding', sellInFlight: false, sellInFlightAt: null } }
         ).catch(() => null);
         // schedule อีก 60s
-        if (this.running) {
-          this.holdingRetryTimer = setTimeout(() => this.scheduleHoldingRetry(trade, qty, buyPrice, targetSellPrice), 60 * 1000);
-        }
+        this._deferHoldingRetry(trade, qty, buyPrice, targetSellPrice);
+        keepChain = true;
       }
       });
+      } finally {
+        if (!keepChain && this.holdingRetryTimers.get(key) === timer) this.holdingRetryTimers.delete(key);
+      }
     }, 30 * 1000);
+    this.holdingRetryTimers.set(key, timer);
+  }
+
+  // FIX-2026-11-19: delayed re-entry into scheduleHoldingRetry that keeps the chain slot reserved
+  _deferHoldingRetry(trade, qty, buyPrice, targetSellPrice, delayMs = 60 * 1000) {
+    const key = String(trade._id);
+    if (!this.running) {
+      this.holdingRetryTimers.delete(key);
+      return;
+    }
+    const t = setTimeout(() => {
+      this.scheduleHoldingRetry(trade, qty, buyPrice, targetSellPrice, { internal: true })
+        .catch((err) => {
+          this.holdingRetryTimers.delete(key);
+          logger.error({ err: err.message, tradeId: key }, 'trader: holding retry reschedule failed');
+        });
+    }, delayMs);
+    this.holdingRetryTimers.set(key, t);
+  }
+
+  // FIX-2026-11-19: park a stranded trade — stays 'holding', reconcile re-arms after cooldown.
+  //   Telegram alert latched to once per HOLDING_RETRY_ALERT_LATCH_MS per trade.
+  async _parkHoldingRetry(trade, reason, note) {
+    const now = new Date();
+    const prev = await Trade.findOneAndUpdate(
+      { _id: trade._id, state: 'holding' },
+      { $set: { error: `stuck: ${reason}`, holdingRetryCount: 0, holdingRetryParkedAt: now } },
+      { new: false }
+    ).lean().catch(() => null);
+    if (!prev) return;
+    const lastAlert = prev.holdingRetryAlertedAt ? new Date(prev.holdingRetryAlertedAt).getTime() : 0;
+    if (now.getTime() - lastAlert < Trader.HOLDING_RETRY_ALERT_LATCH_MS) {
+      logger.warn({ tradeId: String(trade._id), reason }, 'trader: holding retry parked (alert latched)');
+      return;
+    }
+    await Trade.updateOne({ _id: trade._id }, { $set: { holdingRetryAlertedAt: now } }).catch(() => null);
+    logger.warn({ tradeId: String(trade._id), reason }, 'trader: holding retry parked');
+    eventBus.emit('insufficient:balance', { botId: this.bot._id, symbol: this.bot.symbol, note });
+  }
+
+  // Binance rejects that a MARKET retry cannot fix until the market moves
+  static isUnsellableAtMarketError(err) {
+    const msg = String((err && (err.msg || err.message)) || err || '');
+    return /NOTIONAL|PERCENT_PRICE/i.test(msg);
   }
 
   async handlePartialBuyFill(trade, order, signalDoc, candle) {
@@ -9423,5 +9501,8 @@ function config_recvWindow() {
 //   - sweepTimer เป็น safety net เท่านั้น (กัน WS gap) — 5 min gap ยังยอมรับได้
 //   - bot operations ไม่กระทบ — reconcileKlines() logic เหมือนเดิม
 const SWEEP_INTERVAL_MS = 5 * 60 * 1000;
+
+// FIX-2026-11-19: one Telegram alert per parked trade per 6h (เดิมยิงทุก ~15 นาที)
+Trader.HOLDING_RETRY_ALERT_LATCH_MS = 6 * 60 * 60 * 1000;
 
 module.exports = Trader;

@@ -66,7 +66,7 @@ module.exports = {
       autorestart: true,
       watch: false,
       max_memory_restart: '512M',
-      kill_timeout: 10000,
+      kill_timeout: 15000, // > server.js 10s graceful-shutdown force-exit
       wait_ready: false,
       listen_timeout: 10000,
       // FIX-2026-09-09: Inline .env.faiz into env block (PM2's env_file is

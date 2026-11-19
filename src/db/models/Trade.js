@@ -87,6 +87,11 @@ const tradeSchema = new mongoose.Schema(
     //   แต่ละ stranded position มี budget แยก → multi-trade bots ไม่แย่ง counter กัน
     //   Reset เมื่อ trade ออกจาก holding state (sold/cancelled/failed)
     holdingRetryCount: { type: Number, default: 0 },
+    // FIX-2026-11-19: park stranded positions ที่ retry ต่อไม่มีประโยชน์ (budget หมด / ต่ำกว่า MIN_NOTIONAL)
+    //   - reconcile จะไม่ re-arm จนกว่าจะพ้น cooldown (ดู HOLDING_RETRY_PARK_COOLDOWN_MS ใน botManager)
+    //   - เดิม: exhausted → reset counter → reconcile re-arm ทุก 5 นาที → loop ไม่จบ + Telegram spam
+    holdingRetryParkedAt: { type: Date, default: null },
+    holdingRetryAlertedAt: { type: Date, default: null },
 
     // FIX-2026-07-23: partial-fill deadline decision tracking (optional, default null)
     partialDecisionAt: { type: Date, default: null },
@@ -206,6 +211,8 @@ const tradeSchema = new mongoose.Schema(
 );
 
 tradeSchema.index({ botId: 1, state: 1 });
+// FIX-2026-11-19: reconcilePendingTrades sweep (state $in + cancelled-by-updatedAt)
+tradeSchema.index({ state: 1, updatedAt: -1 });
 tradeSchema.index({ symbol: 1, createdAt: -1 });
 // FIX-2026-08-02: DCA stack indexes — find open stack for bot, find stack by stackId
 tradeSchema.index({ botId: 1, isDcaStack: 1, state: 1 });

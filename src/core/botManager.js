@@ -149,6 +149,9 @@ const AUTO_PAUSE_BUY_IN_FLIGHT_STATES = [
 const ORPHAN_RECOVERABLE_PAUSE_REASONS = ['low_vol', 'low_24h_vol'];
 const MAX_ORPHAN_RECOVERY_ATTEMPTS = 5;
 const ORPHAN_ALERT_LATCH_MS = 60 * 60 * 1000; // re-alert อย่างมาก 1 ครั้ง/ชม. ต่อ trade
+// FIX-2026-11-19: parked holding trades (retry exhausted / below MIN_NOTIONAL) — re-arm at most every 30 min
+//   เดิม reconcile re-arm ทุก sweep (5 นาที) → exhausted → reset → re-arm วนไม่จบ (2k+ exhaust/วัน)
+const HOLDING_RETRY_PARK_COOLDOWN_MS = 30 * 60 * 1000;
 
 // FIX-2026-08-06: delist scheduler — interval + forceCloseDays/blockBuyDays
 const DELIST_SCHEDULE_INTERVAL_MS = 5 * 60 * 1000; // ทุก 5 นาที ตรวจ delist schedule
@@ -582,9 +585,17 @@ class BotManager {
    * - SELL placed + state=selling + order FILLED → handleSellFilled
    */
   async reconcilePendingTrades() {
-    const pending = await Trade.find({
-      state: { $in: ['placed', 'filled', 'holding', 'cancelled', 'selling'] },
-    });
+    // FIX-2026-11-19: push the A2 happy-skip (cancelled > 5 min) into the query — เดิมโหลด cancelled
+    //   ทั้งหมด (~4k docs) ทุก 5 นาทีแล้วทิ้งใน JS. ผลลัพธ์เท่าเดิม (_shouldSkipHappyTrade ยังอยู่)
+    const pendingFilter = RECONCILE_OPTIMIZE_ENABLED
+      ? {
+        $or: [
+          { state: { $in: ['placed', 'filled', 'holding', 'selling'] } },
+          { state: 'cancelled', updatedAt: { $gt: new Date(Date.now() - 5 * 60 * 1000) } },
+        ],
+      }
+      : { state: { $in: ['placed', 'filled', 'holding', 'cancelled', 'selling'] } };
+    const pending = await Trade.find(pendingFilter);
 
     // FIX-2026-08-24 (P1 audit): bulk-load bots + signals to replace per-trade N+1 queries
     //   - เดิม: 100 pending trades × Bot.findById = 100 sequential round-trips × 1-2ms = 100-200ms blocking
@@ -881,7 +892,9 @@ class BotManager {
                     }
                   }
                   if (!recovered) {
-                    logger.error({
+                    // FIX-2026-11-19: error-level only when the alert actually fires (hourly latch);
+                    //   otherwise debug — เดิม log error ทุก sweep ต่อ trade (~7k บรรทัด/วัน)
+                    logger[shouldAlert ? 'error' : 'debug']({
                       tradeId: trade._id.toString(),
                       botId: trade.botId.toString(),
                       botName: bot.name,
@@ -1286,9 +1299,13 @@ class BotManager {
         // FIX-2026-07-31 (BUG-13): orphan holding with no sellOrderId — re-arm scheduleHoldingRetry
         //   เดิม: reconcile path ต้องการ sellOrderId + CANCELED/EXPIRED → trade no sellOrderId ค้างตลอด
         //   ใหม่: ถ้า trade.state='holding' และไม่มี sellOrderId → สั่ง trader ให้ scheduleHoldingRetry
-        if (trade.state === 'holding' && !trade.sellOrderId) {
+        const parkedAtMs = trade.holdingRetryParkedAt ? new Date(trade.holdingRetryParkedAt).getTime() : 0;
+        const parkCooling = parkedAtMs > 0 && (Date.now() - parkedAtMs) < HOLDING_RETRY_PARK_COOLDOWN_MS;
+        if (trade.state === 'holding' && !trade.sellOrderId && !parkCooling) {
           const trader = this.traders.get(bot._id.toString());
-          if (trader && trader.running) {
+          // FIX-2026-11-19: chain already running for this trade → nothing to re-arm
+          const chainActive = trader && trader.holdingRetryTimers && trader.holdingRetryTimers.has(trade._id.toString());
+          if (trader && trader.running && !chainActive) {
             logger.warn({
               tradeId: trade._id.toString(),
               botId: bot._id.toString(),

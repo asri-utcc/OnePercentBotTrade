@@ -119,6 +119,11 @@ For connecting multiple bots/admins, see [SYSTEM-CONNECTION.md](./SYSTEM-CONNECT
 
 ## Verification / Testing
 
+### Unit tests
+```bash
+npm test          # jest — ไม่แตะ DB จริง (dps.live / dps.integration ถูก exclude เพราะต่อ MongoDB production)
+```
+
 ### Backtest ก่อนเสมอ
 1. เปิด Dashboard → เมนู "Backtest"
 2. เลือก BNBUSDT 5m, ย้อนหลัง 30 วัน
@@ -135,6 +140,18 @@ For connecting multiple bots/admins, see [SYSTEM-CONNECTION.md](./SYSTEM-CONNECT
 1. เมนู "Chart" → เลือก BNBUSDT 5m, 200 แท่ง
 2. ดู S1 markers (ลูกศรเขียวใต้แท่งเทียน)
 3. เทียบกับ Binance จริง
+
+## Stranded Positions (holding retry)
+
+เมื่อ SELL ถูก reject / cancel แล้ว trade ตกไป `state='holding'` ระบบจะพยายาม MARKET SELL ใหม่:
+
+- **1 retry chain ต่อ trade** (`Trader#holdingRetryTimers`) — reconcile ทุก 5 นาที re-arm เฉพาะ trade ที่ยังไม่มี chain
+- ลองได้ **10 ครั้ง** (`holdingRetryCount`) → ถ้าไม่สำเร็จ **park**: `error='stuck: holding_retry_exhausted_10'`, `holdingRetryParkedAt=now`
+- MARKET SELL โดน `-1013 NOTIONAL` / `PERCENT_PRICE_BY_SIDE` (มูลค่าต่ำกว่าขั้นต่ำ Binance) → park ทันที `error='stuck: below_min_notional'`
+- trade ที่ park แล้ว reconcile จะลองใหม่ทุก **30 นาที** (`HOLDING_RETRY_PARK_COOLDOWN_MS`) — ขายได้เองเมื่อราคาฟื้น
+- Telegram alert ต่อ trade อย่างมาก 1 ครั้ง / **6 ชม.** (`holdingRetryAlertedAt`)
+
+ดูรายละเอียดการตรวจระบบล่าสุดที่ [AUDIT-2026-11-19.md](./AUDIT-2026-11-19.md)
 
 ## Important Notes
 

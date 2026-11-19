@@ -1,7 +1,6 @@
 'use strict';
 
 const WebSocket = require('ws');
-const url = require('url');
 const eventBus = require('../services/eventBus');
 const logger = require('../utils/logger');
 // FIX-2026-09-09: hoisted to top so the per-instance session cookie name
@@ -50,7 +49,9 @@ class DashboardWs {
     this.wss = wss;
 
     server.on('upgrade', (req, socket, head) => {
-      const { pathname } = url.parse(req.url);
+      // FIX-2026-11-19: WHATWG URL (url.parse is deprecated — DEP0169)
+      let pathname = '';
+      try { ({ pathname } = new URL(req.url || '/', 'http://localhost')); } catch (_) { /* malformed */ }
       if (pathname !== '/ws/dashboard') {
         return; // ไม่ใช่ของเรา ปล่อย
       }

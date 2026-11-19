@@ -22,9 +22,10 @@ module.exports = {
       instances: 1,
       exec_mode: 'fork',
       autorestart: true,
+      exp_backoff_restart_delay: 200,
       watch: false,
       max_memory_restart: '512M',
-      kill_timeout: 10000,
+      kill_timeout: 15000, // > server.js 10s graceful-shutdown force-exit, so PM2 never SIGKILLs mid-shutdown
       wait_ready: false,
       listen_timeout: 10000,
       env: {

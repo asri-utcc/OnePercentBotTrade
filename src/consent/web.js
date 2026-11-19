@@ -19,7 +19,6 @@
  */
 
 const http = require('http');
-const url = require('url');
 const { spawn } = require('child_process');
 const { EventEmitter } = require('events');
 
@@ -132,7 +131,8 @@ class ConsentServer extends EventEmitter {
    * POST handler — also used by the GET page when posting back via form
    */
   async handle(req, res, ctx) {
-    const parsed = url.parse(req.url, true);
+    // FIX-2026-11-19: WHATWG URL (url.parse is deprecated — DEP0169)
+    const parsed = new URL(req.url || '/', 'http://localhost');
     const path = parsed.pathname;
 
     try {
