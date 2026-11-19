@@ -157,6 +157,21 @@ npm test          # jest — ไม่แตะ DB จริง (dps.live / dps.
 - `waitingSellRecovery` เช็ค wallet ก่อนวาง SELL และ cancel เฉพาะ `wsr-sell-*` ที่ไม่มี trade เป็นเจ้าของ
 - ตรวจ DB ↔ Binance / ซ่อมข้อมูล: `node scripts/audit-fix-2026-11-19.js` (dry-run) → `--apply`
 
+## Reconcile Audit (v2.9.0)
+
+ตรวจ DB ↔ Binance แบบ read-only ทุก 6 ชม. แจ้ง Telegram (`reconcileAudit`) เมื่อเจอ: เหรียญใน wallet น้อยกว่า DB (SHORTFALL), `selling` ไม่มี order, SELL หายจาก order book, order บน Binance ที่ไม่มี trade, ขายเกิน qty ของตัวเอง (OVERSELL)
+
+```bash
+node scripts/reconcile-audit.js            # รันมือ (พิมพ์ผล)
+curl -b cookie https://<host>/api/health/reconcile-audit
+```
+
+## Ops
+
+- Logs: `pm2-logrotate` (20MB × 10 ไฟล์, gzip) — ตั้งระดับเครื่อง ไม่อยู่ใน repo
+- `uncaughtException` → graceful shutdown + `exit(1)` ให้ PM2 restart (startup reconcile ซ่อม state)
+- Sold-transition reset fields: `src/core/tradeCloseFields.js` (อย่า copy-paste ฟิลด์ชุดนี้อีก)
+
 ดูรายละเอียดการตรวจระบบล่าสุดที่ [AUDIT-2026-11-19.md](./AUDIT-2026-11-19.md)
 
 ## Important Notes

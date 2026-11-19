@@ -26,6 +26,7 @@ const logger = require('../utils/logger');
 const { scheduledInterval, clearScheduledInterval } = require('../utils/scheduledInterval');
 const Bot = require('../db/models/Bot');
 const Trade = require('../db/models/Trade');
+const { slArmPartialResetFields } = require('./tradeCloseFields'); // FIX-2026-11-19 refactor
 const AppConfig = require('../db/models/AppConfig'); // FIX-2026-09-17: orphan-SELL sweeper reads threshold
 const forceClose = require('./forceClose'); // FIX-2026-09-17: orphan-SELL sweeper uses forceCloseTrade atomic claim
 const Trader = require('./trader');
@@ -1080,14 +1081,7 @@ class BotManager {
                     realizedPnl: inlinePnl.net,
                     pnlPercent: inlinePnl.pnlPercent,
                     // FIX-2026-07-31 (F1): reset SL-on-UKC auto-arm flag
-                    useStopLossOnUKC: false,
-                    autoArmedAt: null,
-                    autoArmLossPct: null,
-                    autoArmAgeHours: null,
-                    // FIX-2026-08-01: reset SELL partial-fill latch
-                    sellPartialDetectedAt: null,
-                    sellPartialLatchedAt: null,
-                    sellPartialLatchedReason: null,
+                    ...slArmPartialResetFields(), // FIX-2026-11-19 refactor: F1 arm + SELL partial latch reset (tradeCloseFields)
                     // FIX-2026-08-01: structured sellReason for orphan recovery
                     sellReason: 'manual_api_market', // closest enum for "force close via reconcile"
                     sellReasonDetail: `orphan reconcile: SELL ${order.orderId} filled but DB state='${trade.state}' — inline mark-sold`,

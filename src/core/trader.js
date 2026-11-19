@@ -25,6 +25,7 @@ const phoneHomeMonitor = require('../admin-monitor/phoneHomeMonitor'); // FIX-20
 const licenseService = require('../services/licenseService'); // FIX-2026-08-27 Phase 3a C2: license features + max-capital gate
 const autoTiming = require('../services/autoTiming'); // FIX-2026-08-30 Phase 4: Auto-Timing (heatmap-driven entry gate)
 const roundDownCapital = require('../services/roundDownCapital'); // FIX-2026-09-02: Round-down Capital math (single source of truth)
+const { slArmPartialResetFields } = require('./tradeCloseFields'); // FIX-2026-11-19 refactor: shared sold-transition resets
 const logger = require('../utils/logger');
 // FIX-2026-09-17: per-instance first-fire stagger for periodic timers
 const { scheduledInterval, clearScheduledInterval } = require('../utils/scheduledInterval');
@@ -2848,15 +2849,7 @@ class Trader {
                   pnlPercent: pnl.pnlPercent,
                   error: `${reason}: SELL already FILLED at TP, recorded (no MARKET placed)`,
                   // FIX-2026-07-31 (F1): reset SL-on-UKC auto-arm flag (trade ออกจาก selling แล้ว)
-                  useStopLossOnUKC: false,
-                  autoArmedAt: null,
-                  // FIX-2026-08-03: clear F1 threshold snapshots เมื่อ trade ออกจาก selling
-                  autoArmLossPct: null,
-                  autoArmAgeHours: null,
-                  // FIX-2026-08-01: reset SELL partial-fill latch on state-out-of-selling
-                  sellPartialDetectedAt: null,
-                  sellPartialLatchedAt: null,
-                  sellPartialLatchedReason: null,
+                  ...slArmPartialResetFields(), // FIX-2026-11-19 refactor: F1 arm + SELL partial latch reset (tradeCloseFields)
                   // FIX-2026-08-01: race recovery (cancel returned -2011 because SELL already filled at TP)
                   sellReason: 'race_recovery_filled',
                   sellReasonDetail: `${reason}: SELL already FILLED at TP before force-close cancelled`,
@@ -3117,15 +3110,7 @@ class Trader {
                   pnlPercent: pnl.pnlPercent,
                   error: `stop_loss_upper_kc — SELL already filled at TP before stop-loss cancelled (close=${ctx.closePrice} > upperKC=${ctx.upperKC.toFixed(6)})`,
                   // FIX-2026-07-31 (F1): reset SL-on-UKC auto-arm flag
-                  useStopLossOnUKC: false,
-                  autoArmedAt: null,
-                  // FIX-2026-08-03: clear F1 threshold snapshots เมื่อ trade ออกจาก selling
-                  autoArmLossPct: null,
-                  autoArmAgeHours: null,
-                  // FIX-2026-08-01: reset SELL partial-fill latch on state-out-of-selling
-                  sellPartialDetectedAt: null,
-                  sellPartialLatchedAt: null,
-                  sellPartialLatchedReason: null,
+                  ...slArmPartialResetFields(), // FIX-2026-11-19 refactor: F1 arm + SELL partial latch reset (tradeCloseFields)
                 }
               );
               if (upd.modifiedCount === 1) {
@@ -6181,15 +6166,7 @@ class Trader {
             ? `${reasonNote} → MARKET fallback used (partial-fill: ${alreadyFilledQty}@${alreadyAvgSellPrice} + ${executed}@${avgSell})`
             : `${reasonNote} → MARKET fallback used`,
           // FIX-2026-07-31 (F1): reset SL-on-UKC auto-arm flag
-          useStopLossOnUKC: false,
-          autoArmedAt: null,
-          // FIX-2026-08-03: clear F1 threshold snapshots เมื่อ trade ออกจาก selling
-          autoArmLossPct: null,
-          autoArmAgeHours: null,
-          // FIX-2026-08-01: reset SELL partial-fill latch
-          sellPartialDetectedAt: null,
-          sellPartialLatchedAt: null,
-          sellPartialLatchedReason: null,
+          ...slArmPartialResetFields(), // FIX-2026-11-19 refactor: F1 arm + SELL partial latch reset (tradeCloseFields)
           // FIX-2026-08-05: clear SELL placement in-flight flag (success path)
           sellInFlight: false,
           sellInFlightAt: null,
@@ -6630,15 +6607,7 @@ class Trader {
               sellReasonSource: 'scheduleHoldingRetry',
               holdingRetryCount: 0, // FIX-2026-07-31 (BUG-12): reset on success
               // FIX-2026-07-31 (F1): reset SL-on-UKC auto-arm flag
-              useStopLossOnUKC: false,
-              autoArmedAt: null,
-              // FIX-2026-08-03: clear F1 threshold snapshots เมื่อ trade ออกจาก selling
-              autoArmLossPct: null,
-              autoArmAgeHours: null,
-              // FIX-2026-08-01: reset SELL partial-fill latch
-              sellPartialDetectedAt: null,
-              sellPartialLatchedAt: null,
-              sellPartialLatchedReason: null,
+              ...slArmPartialResetFields(), // FIX-2026-11-19 refactor: F1 arm + SELL partial latch reset (tradeCloseFields)
               // FIX-2026-08-05: clear SELL placement in-flight flag
               sellInFlight: false,
               sellInFlightAt: null,
@@ -8394,15 +8363,7 @@ class Trader {
             sellReasonAt: new Date(),
             sellReasonSource: '_handleDcaSellFilled',
             // FIX-2026-07-31 (F1): reset SL-on-UKC auto-arm flag
-            useStopLossOnUKC: false,
-            autoArmedAt: null,
-            // FIX-2026-08-03: clear F1 threshold snapshots เมื่อ trade ออกจาก selling
-            autoArmLossPct: null,
-            autoArmAgeHours: null,
-            // FIX-2026-08-01: reset SELL partial-fill latch
-            sellPartialDetectedAt: null,
-            sellPartialLatchedAt: null,
-            sellPartialLatchedReason: null,
+            ...slArmPartialResetFields(), // FIX-2026-11-19 refactor: F1 arm + SELL partial latch reset (tradeCloseFields)
           },
         }
       );
@@ -8605,15 +8566,7 @@ class Trader {
           realizedPnl: pnl.net,
           pnlPercent: pnl.pnlPercent,
           // FIX-2026-07-31 (F1): reset SL-on-UKC auto-arm flag
-          useStopLossOnUKC: false,
-          autoArmedAt: null,
-          // FIX-2026-08-03: clear F1 threshold snapshots เมื่อ trade ออกจาก selling
-          autoArmLossPct: null,
-          autoArmAgeHours: null,
-          // FIX-2026-08-01: reset SELL partial-fill latch
-          sellPartialDetectedAt: null,
-          sellPartialLatchedAt: null,
-          sellPartialLatchedReason: null,
+          ...slArmPartialResetFields(), // FIX-2026-11-19 refactor: F1 arm + SELL partial latch reset (tradeCloseFields)
         }
       );
       if (upd.modifiedCount === 0) {
