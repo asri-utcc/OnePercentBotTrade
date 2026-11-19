@@ -405,7 +405,7 @@ class PositionWatchdog {
       const tradeIds = trades.map((t) => t._id);
       const freshTrades = await Trade.find(
         { _id: { $in: tradeIds } },
-        'state useStopLossOnUKC sellOrderId isDcaStack stackBep buyPrice symbol'
+        'state useStopLossOnUKC sellOrderId isDcaStack stackBep buyPrice symbol botId buyQty buyFilledQty buyLayers stackId stackTotalQty stackTotalSpent dcaLayerCount targetSellPrice' // FIX-2026-11-19: forceClose needs qty fields (oversell bug)
       ).lean();
       const freshMap = new Map(freshTrades.map((t) => [String(t._id), t]));
 
@@ -799,7 +799,7 @@ class PositionWatchdog {
       try {
         freshTrades = await Trade.find(
           { _id: { $in: tradeIds } },
-          'state useStopLossOnUKC sellOrderId isDcaStack stackBep buyPrice symbol botId'
+          'state useStopLossOnUKC sellOrderId isDcaStack stackBep buyPrice symbol botId buyQty buyFilledQty buyLayers stackId stackTotalQty stackTotalSpent dcaLayerCount targetSellPrice' // FIX-2026-11-19: forceClose needs qty fields (oversell bug)
         ).lean();
       } catch (err) {
         stats.cbv2Errors += trades.length;
@@ -1218,7 +1218,7 @@ class PositionWatchdog {
       try {
         freshTrades = await Trade.find(
           { _id: { $in: tradeIds } },
-          'state useStopLossOnUKC sellOrderId isDcaStack stackBep buyPrice symbol botId'
+          'state useStopLossOnUKC sellOrderId isDcaStack stackBep buyPrice symbol botId buyQty buyFilledQty buyLayers stackId stackTotalQty stackTotalSpent dcaLayerCount targetSellPrice' // FIX-2026-11-19: forceClose needs qty fields (oversell bug)
         ).lean();
       } catch (err) {
         stats.cbv3Errors += trades.length;
@@ -1599,7 +1599,7 @@ class PositionWatchdog {
       try {
         freshTrades = await Trade.find(
           { _id: { $in: tradeIds } },
-          'state useStopLossOnUKC sellOrderId isDcaStack stackBep buyPrice symbol botId'
+          'state useStopLossOnUKC sellOrderId isDcaStack stackBep buyPrice symbol botId buyQty buyFilledQty buyLayers stackId stackTotalQty stackTotalSpent dcaLayerCount targetSellPrice' // FIX-2026-11-19: forceClose needs qty fields (oversell bug)
         ).lean();
       } catch (err) {
         stats.cbv5Errors += trades.length;

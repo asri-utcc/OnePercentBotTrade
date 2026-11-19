@@ -40,3 +40,4 @@ data/update-*
 # FIX-2026-11-19: node core dumps (core.<pid>, ~800MB) — never commit
 core
 core.[0-9]*
+data/audit-backup-*.json

@@ -217,7 +217,16 @@ async function markTradeSold({ trade, sold, errorNote, reason, sellReason, sellR
  * @returns {Promise<{ok: boolean, mode: string, executedQty: number, avgSellPrice: number|null, pnl: number, error?: string}>}
  */
 async function forceCloseTrade({ trade, bot = null, allowMarketSell = true, source = 'api' }) {
-  const logCtx = { tradeId: trade._id && trade._id.toString(), symbol: trade.symbol };
+  const logCtx = { tradeId: trade && trade._id && trade._id.toString(), symbol: trade && trade.symbol };
+  // FIX-2026-11-19 (HEMI/SAGA oversell): callers (positionWatchdog SL-UKC/CBv2/v3/v5) passed a
+  //   projected trade without buyQty → qty cap fell back to the WHOLE free balance → one MARKET SELL
+  //   dumped every other trade's coins on the symbol (HEMI: buyQty 444 → sold 6461.1, PnL -89.59).
+  //   Always work from the full document.
+  if (trade && trade._id && !(parseFloat(trade.buyQty) > 0 || parseFloat(trade.buyFilledQty) > 0
+      || Array.isArray(trade.buyLayers))) {
+    const full = await Trade.findById(trade._id).lean().catch(() => null);
+    if (full) trade = full;
+  }
   // FIX-2026-08-02: DCA stack branch — derive qty/buyPrice from stack fields
   const isDcaStack = trade.isDcaStack === true;
   let stackBep = null;
@@ -319,7 +328,13 @@ async function forceCloseTrade({ trade, bot = null, allowMarketSell = true, sour
       //   - pattern เดียวกับ scripts/fix-stuck-fee-deduct-positions.js (FIX-2026-08-05) แต่ apply ที่ runtime
       //   - cap = min(freeQty, buyQty × 0.998) — กัน over-sell orphan ของบอทอื่น (multi-bot same symbol)
       //   - round down to stepSize + enforce minQty (skip if rounding → 0)
-      const buyQtyCap = parseFloat(trade.buyQty) > 0 ? parseFloat(trade.buyQty) * 0.998 : resolved.freeQty;
+      // FIX-2026-11-19: never fall back to the whole free balance — it belongs to every trade on the symbol
+      const ownQty = isDcaStack ? stackTotalQty : (parseFloat(trade.buyFilledQty) || parseFloat(trade.buyQty) || 0);
+      if (!(ownQty > 0)) {
+        logger.error({ ...logCtx, freeQty: resolved.freeQty }, 'forceClose: trade has no buy qty — refusing MARKET SELL (would sell other trades\' coins)');
+        return { ok: false, mode: 'none', executedQty: 0, avgSellPrice: null, pnl: 0, error: 'trade has no buyQty — refusing to sell whole balance' };
+      }
+      const buyQtyCap = ownQty * 0.998;
       const candidateRaw = Math.min(resolved.freeQty, buyQtyCap);
       let marketSellQty = candidateRaw;
       try {

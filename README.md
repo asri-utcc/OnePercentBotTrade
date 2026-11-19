@@ -151,6 +151,12 @@ npm test          # jest — ไม่แตะ DB จริง (dps.live / dps.
 - trade ที่ park แล้ว reconcile จะลองใหม่ทุก **30 นาที** (`HOLDING_RETRY_PARK_COOLDOWN_MS`) — ขายได้เองเมื่อราคาฟื้น
 - Telegram alert ต่อ trade อย่างมาก 1 ครั้ง / **6 ชม.** (`holdingRetryAlertedAt`)
 
+## Force-close & recovery safety (v2.8.1)
+
+- `forceCloseTrade` ขาย **เฉพาะ qty ของ trade นั้น** (`buyFilledQty`/`buyQty`, DCA = `stackTotalQty`) — ถ้า caller ส่ง projected doc จะ reload full doc เอง, ไม่มี qty = ปฏิเสธ (ไม่ขายทั้ง balance)
+- `waitingSellRecovery` เช็ค wallet ก่อนวาง SELL และ cancel เฉพาะ `wsr-sell-*` ที่ไม่มี trade เป็นเจ้าของ
+- ตรวจ DB ↔ Binance / ซ่อมข้อมูล: `node scripts/audit-fix-2026-11-19.js` (dry-run) → `--apply`
+
 ดูรายละเอียดการตรวจระบบล่าสุดที่ [AUDIT-2026-11-19.md](./AUDIT-2026-11-19.md)
 
 ## Important Notes

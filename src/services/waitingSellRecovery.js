@@ -266,12 +266,23 @@ class WaitingSellRecovery {
       return;
     }
 
+    // 3b'. FIX-2026-11-19: wallet free balance of the base asset (null = unknown → don't block)
+    let freeBase = null;
+    try {
+      const acct = await binanceRest.getAccount();
+      const b = (acct.balances || []).find((x) => x.asset === lot.base);
+      freeBase = b ? parseFloat(b.free) : 0;
+    } catch (err) {
+      logger.warn({ symbol, err: err.message }, 'waitingSellRecovery: getAccount failed — balance check skipped');
+    }
+
     // 3c. Process each trade
     for (const t of trades) {
       stats.scanned++;
       const target = parseFloat(t.waitingTargetPrice || 0);
       // sellQty = buyFilledQty (the coin we already hold)
-      const sellQtyRaw = parseFloat(t.buyFilledQty || 0);
+      // FIX-2026-11-19: fall back to buyQty (trades never topped-up have no buyFilledQty → was dust_skip'd)
+      const sellQtyRaw = parseFloat(t.buyFilledQty || t.buyQty || 0);
       const sellQty = floorQty(sellQtyRaw, lot.stepSize);
 
       const ctx = {
@@ -325,10 +336,27 @@ class WaitingSellRecovery {
       const sellPx = roundPrice(target, lot.tickSize);
       const clientOrderId = `wsr-sell-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
 
-      // Defensive: cancel any stale open SELL for this symbol first
+      // FIX-2026-11-19: verify the coins actually exist before placing — audit found 5/7 waiting trades
+      //   whose coins were already sold by the 2026-09-17 force-close (wallet ≈ 0) → SELL would -2010 forever
+      if (freeBase !== null && freeBase < sellQty * 0.99) {
+        stats.skippedNoBalance = (stats.skippedNoBalance || 0) + 1;
+        logger.warn({ symbol, tradeId: String(t._id), freeBase, sellQty }, 'waitingSellRecovery: wallet balance below sellQty — skip (coins not held)');
+        continue;
+      }
+
+      // Defensive: cancel any stale open SELL that THIS service placed earlier
+      // FIX-2026-11-19: เดิม cancel SELL ทุกตัวบน symbol → ยิง TP SELL ของ trade อื่นทิ้ง (เช่น MARSCOIN มี
+      //   trade selling + waiting_sell_recovery พร้อมกัน). จำกัดเฉพาะ wsr-sell-* ที่ไม่มี trade ไหนถือ sellOrderId
       try {
         const openOrders = await binanceRest.getOpenOrders({ symbol }, { critical: false }).catch(() => []);
-        for (const o of (openOrders || []).filter((x) => x.side === 'SELL')) {
+        const ownedIds = new Set((await Trade.find(
+          { symbol, sellOrderId: { $ne: null }, state: { $nin: ['sold', 'cancelled', 'failed', 'dust_skipped'] } },
+          'sellOrderId'
+        ).lean()).map((x) => String(x.sellOrderId)));
+        const stale = (openOrders || []).filter((x) => x.side === 'SELL'
+          && String(x.clientOrderId || '').startsWith('wsr-sell-')
+          && !ownedIds.has(String(x.orderId)));
+        for (const o of stale) {
           await binanceRest.cancelOrder({ symbol, orderId: o.orderId }, { critical: true }).catch(() => {});
           await sleep(200);
         }
@@ -393,6 +421,7 @@ class WaitingSellRecovery {
       }
 
       stats.placed++;
+      if (freeBase !== null) freeBase -= sellQty;
       logger.info({
         symbol, tradeId: String(t._id),
         sellOrderId: sellResult.orderId,
